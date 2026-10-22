@@ -274,6 +274,9 @@ pub static MEETINGS: Slot = Slot::new();
 /// A flow's «Transcribir audio» — loaded for the node and freed when it is done, so a flow never
 /// swaps out the model dictation or a meeting is holding.
 pub static FLOWS: Slot = Slot::new();
+/// «Codi» listening with a whisper model (`crate::codi::listen`) — loaded while its microphone is
+/// open, freed when it closes.
+pub static CODI: Slot = Slot::new();
 
 /// How a run is set up, beyond the samples.
 #[derive(Debug, Clone, Default)]

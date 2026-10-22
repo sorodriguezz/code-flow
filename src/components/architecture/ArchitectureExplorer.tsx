@@ -89,11 +89,25 @@ export function ArchitectureExplorer() {
       // The click that follows a drag is not a click on the row.
       window.setTimeout(() => { dragged.current = false; }, 0);
     };
+    // A drag the window never saw end — let go outside it, or taken by the system — would leave the
+    // closed hand on every element of the app (`body.cf-dragging`), so it ends here too.
+    const onCancel = () => {
+      pressed.current = null;
+      if (!dragged.current) return;
+      dragged.current = false;
+      setDragCursor(false);
+      setDrag(null);
+    };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    window.addEventListener("blur", onCancel);
     return () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      window.removeEventListener("blur", onCancel);
+      onCancel();
     };
   }, []);
 

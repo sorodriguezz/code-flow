@@ -151,7 +151,8 @@ impl AiEngine for ClaudeEngine {
         }
         // A text-only run replaces Claude Code's system prompt rather than adding to it: that prompt
         // is written for an agent with tools, and this run has none. The subscription accepts it.
-        if inv.text_only {
+        // A lean run (the app's tools only) likewise: Claude Code's prompt is about its own tools.
+        if inv.text_only || inv.lean {
             let sp = inv.system_prompt.filter(|sp| !sp.trim().is_empty()).unwrap_or(TEXT_ONLY_SYSTEM_PROMPT);
             match write_system_prompt_file(inv, sp) {
                 Some(path) => cmd.arg("--system-prompt-file").arg(path),
@@ -188,7 +189,9 @@ impl AiEngine for ClaudeEngine {
         // A text-only run gets nothing at all: no built-in tools, no MCP server, and no skills or
         // commands, whose listing alone is thousands of tokens. `--json-schema` still works, since
         // its answer tool is the CLI's own and not one of the built-in set.
-        if inv.text_only {
+        if inv.text_only || inv.lean {
+            // A lean run keeps the app's servers, passed below with `--mcp-config`: strict keeps the
+            // user's own out.
             cmd.arg("--tools").arg("");
             cmd.arg("--strict-mcp-config");
             cmd.arg("--disable-slash-commands");
@@ -1368,6 +1371,32 @@ mod tests {
 
     /// A text-only run carries nothing of the agent: no tools, no servers (not even the ones the app
     /// would hand it), no skills, no hooks, and its own system prompt in place of Claude Code's.
+    /// «Codi»'s shape: none of Claude Code's tools, the app's server alone (strict), its prompt in
+    /// place of Claude Code's — and the server's tools allowed, since nobody is there to approve.
+    #[test]
+    fn a_lean_run_keeps_only_the_apps_server() {
+        let server = crate::mcp_registry::LiveServer {
+            name: crate::codemap::mcp::SERVER_NAME.to_string(),
+            transport: "http".into(),
+            command: String::new(),
+            args: Vec::new(),
+            env: Vec::new(),
+            url: "http://127.0.0.1:47811/mcp/code".into(),
+            headers: Vec::new(),
+        };
+        let mut inv = AiInvocation::new("abre flujos", "");
+        inv.lean = true;
+        inv.app_mcp = vec![server];
+        inv.system_prompt = Some("Eres Codi.");
+        let args = command_args(&ClaudeEngine.build_command("claude", &inv));
+        assert!(args.windows(2).any(|pair| pair == ["--tools", ""]), "{args:?}");
+        for flag in ["--strict-mcp-config", "--disable-slash-commands", "--mcp-config", "--allowedTools"] {
+            assert!(args.iter().any(|a| a == flag), "{flag}: {args:?}");
+        }
+        assert!(args.iter().any(|a| a == "--system-prompt-file" || a == "--system-prompt"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "--append-system-prompt-file" || a == "--append-system-prompt"), "{args:?}");
+    }
+
     #[test]
     fn a_text_only_run_loads_nothing_but_its_own_prompt() {
         let server = crate::mcp_registry::LiveServer {

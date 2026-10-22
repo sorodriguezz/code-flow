@@ -1,5 +1,7 @@
 import { ended, type ThinkingActivity } from "./activity";
-import { blink, INK, lookFor, sleepZ, strokeEye, WHITE, type Gaze } from "./face";
+import { askBeat, askBlink, cueClock, hop, startle } from "./cue";
+import { blink, INK, lookFor, sleepZ, soundIn, strokeEye, WHITE, type Gaze } from "./face";
+import { listenLevel } from "./listen";
 import { clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
@@ -9,7 +11,14 @@ import { prepareCanvas, type Painter } from "./ticker";
  *
  * It bobs and sways while it thinks, its eyes wandering; reading, its eyes run along the lines;
  * working, it darts from side to side, its hem rippling fast; writing, it says "boo" — a round mouth
- * opening and closing. Quiet, it fades to see-through and dozes.
+ * opening and closing. Quiet, it fades to see-through and dozes. Listening (Codi), it floats up and
+ * holds still, drawn up tall with its hem barely stirring, its eyes wide on whoever speaks and no
+ * "boo"; what it hears comes in as arcs closing on it from both sides, and it glows a little with
+ * every syllable.
+ *
+ * Codi's cues: woken, it jumps — stretched tall for an instant, eyes wide on the viewer, a flash of
+ * light; asking, it leans its head to one side, swaying slowly, looking at the viewer and blinking
+ * twice now and then.
  *
  * Finish: a twirl, landing green with happy eyes in a ring of sparkles. Failed: it turns red, its
  * eyes go X X, and it sinks a little and fades — a ghost giving up.
@@ -18,9 +27,10 @@ import { prepareCanvas, type Painter } from "./ticker";
  * only detail.
  */
 
-export function createGhost(canvas: HTMLCanvasElement, px: number): Painter {
+export function createGhost(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const clock = finishClock();
+  const cue = cueClock();
   const sparks = makeBurst(10, 17);
   const detail = px >= 20;
   const u = (v: number) => v * px;
@@ -36,8 +46,12 @@ export function createGhost(canvas: HTMLCanvasElement, px: number): Painter {
   let mouth = 0;
   let hem = 0;
   let dart = 0;
+  /** Listening: how far into that look it is (0–1), and the microphone's level this frame. */
+  let perk = 0;
+  let hear = 0;
 
   const awake = (act: ThinkingActivity | undefined) => !ended(act) && !act?.quiet && !act?.stopping;
+  const listening = (act: ThinkingActivity | undefined) => awake(act) && act?.phase === "listen";
   const working = (act: ThinkingActivity | undefined) =>
     awake(act) && (act?.phase === "edit" || act?.phase === "run" || act?.phase === "tool");
 
@@ -64,14 +78,23 @@ export function createGhost(canvas: HTMLCanvasElement, px: number): Painter {
     const happy = !failed && !!act?.done && fin >= 0.35;
     const dazed = failed && fin >= 0.1;
 
-    const bob = Math.sin(time * 2.1) * 0.03 * (1 - sleep) + sleep * 0.04;
-    const sway = Math.sin(time * 1.3) * 0.035 + dart;
+    // What it hears, as far as Codi's gain takes it; the wake's start; the ask's lean.
+    const draw = Math.min(1.4, hear * gain) * perk;
+    const start = startle(cue.wake);
+    const tilt = cue.ask * (0.08 + 0.05 * askBeat(time) + 0.03 * Math.sin(time * 1.4));
+    // Listening, it floats up a little and holds still; woken, it jumps.
+    const still = 1 - 0.75 * perk;
+    const bob = Math.sin(time * 2.1) * 0.03 * (1 - sleep) * still + sleep * 0.04 - 0.02 * perk - 0.04 * hop(cue.wake);
+    const sway = Math.sin(time * 1.3) * 0.035 * still + dart;
     const a = alpha * fade * (1 - sleep * 0.4);
     const g = 0.4 + 0.6 * easeOut(grow);
+    // Drawn up tall to listen; stretched for an instant by the start.
+    const tall = 1 + 0.03 * perk + 0.08 * start;
 
     ctx.save();
     ctx.translate(u(0.5 + sway), u(0.5 + bob + sink));
-    ctx.scale(Math.max(0.08, Math.abs(twirl)) * g, g);
+    ctx.rotate(tilt);
+    ctx.scale(Math.max(0.08, Math.abs(twirl)) * g * (1 - 0.03 * start), g * tall);
     ctx.translate(-u(0.5), -u(0.5));
 
     // The body: a dome over a rippling three-scallop hem.
@@ -99,13 +122,15 @@ export function createGhost(canvas: HTMLCanvasElement, px: number): Painter {
     grad.addColorStop(1, rgba(mix(rim, p.warning, warn * 0.3), 0.9 * a));
     ctx.save();
     ctx.shadowColor = rgba(mix(p.a, end, tint), (p.dark ? 0.6 : 0.4) * a);
-    ctx.shadowBlur = u(0.16);
+    // Glowing a little with each syllable it hears, and in the flash of a wake.
+    ctx.shadowBlur = u(0.16 + 0.07 * Math.min(1, draw) + 0.1 * start);
     ctx.fillStyle = grad;
     ctx.fill();
     ctx.restore();
 
-    // The eyes, and a "boo".
-    const open = act?.stopping ? 0.45 : blink(time, 3.8);
+    // The eyes — wide while it listens, wider for a moment when woken — and a "boo".
+    const open = act?.stopping ? 0.45 : cue.ask > 0.5 ? askBlink(time) : blink(time, 3.8);
+    const wide = 1 + 0.15 * perk + 0.2 * start;
     for (const ex of [0.41, 0.59]) {
       const ey = 0.47;
       if (dazed) {
@@ -117,7 +142,7 @@ export function createGhost(canvas: HTMLCanvasElement, px: number): Painter {
       } else {
         ctx.fillStyle = rgba(INK, 0.9 * a);
         ctx.beginPath();
-        ctx.ellipse(u(ex + lookX * 0.02), u(ey + lookY * 0.02), u(0.042), u(0.062 * open), 0, 0, TAU);
+        ctx.ellipse(u(ex + lookX * 0.02), u(ey + lookY * 0.02), u(0.042 * wide), u(0.062 * open * wide), 0, 0, TAU);
         ctx.fill();
       }
     }
@@ -128,6 +153,14 @@ export function createGhost(canvas: HTMLCanvasElement, px: number): Painter {
       ctx.fill();
     }
     ctx.restore();
+
+    // Listening: what it hears, arcs closing in on it from both sides, fading as they land.
+    if (draw > 0.01) {
+      const color = mix(mix(p.c, WHITE, p.dark ? 0.35 : 0), p.warning, warn * 0.3);
+      for (const side of [-1, 1]) {
+        soundIn(ctx, u(0.5 + sway), u(0.55 + bob), u(0.45), u(0.33), side < 0 ? Math.PI : 0, 0.65, time + (side > 0 ? 0.5 : 0), draw * a, color, Math.max(0.8, u(0.028)));
+      }
+    }
 
     // The landing's sparkles: a ring of them, opening out.
     if (!failed && fin > 0.4 && fin < 1.4) {
@@ -146,9 +179,13 @@ export function createGhost(canvas: HTMLCanvasElement, px: number): Painter {
   }
 
   function settle(act: ThinkingActivity | undefined, k: number) {
-    const [tx, ty] = ended(act) || act?.quiet || act?.stopping ? [0, 0] : (gaze ?? lookFor(act?.phase, time));
-    lookX += (tx - lookX) * Math.min(1, k * 10);
-    lookY += (ty - lookY) * Math.min(1, k * 10);
+    // Listening, woken or asking, it looks at whoever it is with — the wake snapping its eyes there.
+    const facing = listening(act) || cue.wake >= 0 || cue.ask > 0.5;
+    const [tx, ty] = ended(act) || act?.quiet || act?.stopping || facing ? [0, 0] : (gaze ?? lookFor(act?.phase, time));
+    const snap = cue.wake >= 0 ? 40 : 10;
+    lookX += (tx - lookX) * Math.min(1, k * snap);
+    lookY += (ty - lookY) * Math.min(1, k * snap);
+    perk += ((listening(act) ? 1 : 0) - perk) * Math.min(1, k * 6);
     const resting = act?.quiet && !ended(act) ? 1 : 0;
     sleep += (resting - sleep) * Math.min(1, k * 3);
     warn += (resting - warn) * Math.min(1, k * 3);
@@ -167,13 +204,17 @@ export function createGhost(canvas: HTMLCanvasElement, px: number): Painter {
     },
     setActivity(activity) {
       clock.set(activity);
+      cue.set(activity);
     },
     tick(dt) {
       clock.step(dt);
+      cue.step(dt);
       const act = clock.act;
       time += dt * (act?.quiet && !ended(act) ? 0.5 : 1);
       grow += (1 - grow) * Math.min(1, dt * 3);
-      hem += dt * (working(act) ? 9 : act?.phase === "write" && awake(act) ? 6 : act?.quiet ? 1.2 : 3.5);
+      // Listening, its hem barely stirs.
+      hem += dt * (working(act) ? 9 : act?.phase === "write" && awake(act) ? 6 : act?.quiet ? 1.2 : listening(act) ? 1.4 : 3.5);
+      hear = listening(act) ? listenLevel() : 0;
       settle(act, dt);
       paint();
     },
@@ -181,6 +222,9 @@ export function createGhost(canvas: HTMLCanvasElement, px: number): Painter {
       const act = clock.act;
       if (time === 0) time = 0.9;
       grow = 1;
+      // A still frame of listening is mid-word: drawn up, arcs on their way in.
+      hear = listening(act) ? 0.7 : 0;
+      cue.settle();
       settle(act, 1);
       clock.settle();
       paint();

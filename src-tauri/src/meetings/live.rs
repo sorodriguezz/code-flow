@@ -1,8 +1,9 @@
 //! The text written while the meeting runs (modes *balanced* and *full*).
 //!
 //! One thread takes the recorder's samples, cuts each channel into utterances as they end
-//! (`vad::Cutter`) and transcribes them one at a time, oldest first, on whisper's meetings context
-//! or the cloud. In *full* mode each utterance of a separated channel also gets an embedding and a
+//! (`vad::Cutter`) and transcribes them one at a time, oldest first, on whisper's meetings context,
+//! sherpa-onnx's (Parakeet or Canary, `crate::asr` — a fraction of whisper's cost on a laptop with no
+//! graphics card) or the cloud. In *full* mode each utterance of a separated channel also gets an embedding and a
 //! provisional speaker (`speaker::Live`).
 //!
 //! **It gives up rather than fall behind.** When the utterance about to be transcribed ended more
@@ -35,6 +36,8 @@ const FINISH_QUEUE_MS: i64 = 60_000;
 
 pub enum Engine {
     Local { model: PathBuf },
+    /// Parakeet or Canary: text without word times, which the live lines do not need.
+    Sherpa { model: &'static crate::asr::AsrModel },
     Cloud { settings: CloudSettings, key: String },
 }
 
@@ -84,6 +87,17 @@ struct Queued {
 }
 
 fn run(rx: Receiver<super::recorder::LiveAudio>, config: Config, stop: Arc<AtomicBool>, on_event: Arc<dyn Fn(LiveEvent) + Send + Sync>) -> Summary {
+    // A laptop does not keep a recognizer resident for a meeting that has ended, whichever way the
+    // loop below leaves.
+    struct FreeSherpa(bool);
+    impl Drop for FreeSherpa {
+        fn drop(&mut self) {
+            if self.0 {
+                crate::asr::recognizer::unload(&crate::asr::MEETINGS);
+            }
+        }
+    }
+    let _free = FreeSherpa(matches!(config.engine, Engine::Sherpa { .. }));
     let mut vad = match vad::load(&config.vad_model, config.threads) {
         Ok(vad) => vad,
         Err(error) => {
@@ -115,6 +129,10 @@ fn run(rx: Receiver<super::recorder::LiveAudio>, config: Config, stop: Arc<Atomi
                     .map(|s| transcript::clean_text(&s.text))
                     .collect::<Vec<_>>()
                     .join(" "))
+            }
+            Engine::Sherpa { model } => {
+                let text = crate::asr::transcribe(&crate::asr::MEETINGS, model, &queued.utterance.samples, &config.language, &config.language, None)?;
+                Ok(transcript::clean_text(&text))
             }
             Engine::Cloud { settings, key } => {
                 let words = tauri::async_runtime::block_on(super::cloud::transcribe(settings, key, &queued.utterance.samples, &config.language, &prompt))?;

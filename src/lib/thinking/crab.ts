@@ -1,5 +1,7 @@
 import { ended, type ThinkingActivity } from "./activity";
-import { blink, INK, lookFor, sleepZ, strokeEye, WHITE, type Gaze } from "./face";
+import { askBeat, askBlink, cueClock, hop, startle } from "./cue";
+import { blink, INK, lookFor, sleepZ, soundIn, strokeEye, WHITE, type Gaze } from "./face";
+import { listenLevel } from "./listen";
 import { clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
@@ -13,6 +15,13 @@ import { prepareCanvas, type Painter } from "./ticker";
  * Crabs walk sideways, so this one does: reading, it scuttles slowly back and forth; working, it
  * scuttles fast and snaps its claws; writing, its claws tap like typing and it chatters; thinking,
  * it waves a claw now and then and looks around. Quiet, its claws come down and it dozes.
+ * Listening (Codi), it stops walking and holds both claws up and open like cupped hands, leaning in
+ * with its eyes wide on whoever speaks, its smile shut; each syllable it hears opens the claws a
+ * little wider, and the sound comes in as arcs closing on them.
+ *
+ * Codi's cues: woken, it hops with its claws snapping up wide open, eyes on the viewer; asking, it
+ * tilts its shell and taps one raised claw slowly, looking at the viewer and blinking twice now and
+ * then.
  *
  * Finish: it hops, claps its claws twice, lands green and happy, and bubbles rise from it. Failed:
  * red, claws dropped, eyes X X, sinking a little.
@@ -20,9 +29,10 @@ import { prepareCanvas, type Painter } from "./ticker";
  * Below 20px the legs and the smile go; the shell, the claws and two eyes stay.
  */
 
-export function createCrab(canvas: HTMLCanvasElement, px: number): Painter {
+export function createCrab(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const clock = finishClock();
+  const cue = cueClock();
   const bubbles = makeBurst(7, 29);
   const detail = px >= 20;
   const u = (v: number) => v * px;
@@ -42,6 +52,9 @@ export function createCrab(canvas: HTMLCanvasElement, px: number): Painter {
   /** How high each claw is held (0 down by the shell, 1 raised) and how open (0 shut). */
   const raise = [0.7, 0.7];
   const open = [0.4, 0.4];
+  /** Listening: how far into that look it is (0–1), and the microphone's level this frame. */
+  let perk = 0;
+  let hear = 0;
 
   const awake = (act: ThinkingActivity | undefined) => !ended(act) && !act?.quiet && !act?.stopping;
   const isFailed = (act: ThinkingActivity | undefined) => !!act?.failed;
@@ -92,13 +105,23 @@ export function createCrab(canvas: HTMLCanvasElement, px: number): Painter {
     const happy = !failed && !!act?.done && fin >= 0.3;
     const dazed = failed && fin >= 0.1;
     const tone = (h: Rgb) => rgba(mix(mix(h, end, tint), p.warning, warn * 0.3), alpha);
-    const bob = Math.sin(time * 2.4) * 0.012 * (1 - sleep);
-    const g = 0.4 + 0.6 * easeOut(grow);
+    const bob = Math.sin(time * 2.4) * 0.012 * (1 - sleep) * (1 - 0.8 * perk);
+    // Listening, it leans in a little; woken, it hops. Asking, it tilts about the height of its
+    // claws — about its middle, one claw would swing out of the square.
+    const g = (0.4 + 0.6 * easeOut(grow)) * (1 + 0.02 * perk);
+    const start = startle(cue.wake);
+    const tilt = cue.ask * (0.07 + 0.04 * askBeat(time));
+    lift += 0.05 * hop(cue.wake);
 
     ctx.save();
     ctx.translate(u(0.5 + walkX), u(0.62 - lift + sink + bob));
     ctx.scale(g, g);
     ctx.translate(-u(0.5), -u(0.62));
+    if (tilt) {
+      ctx.translate(u(0.5), u(0.38));
+      ctx.rotate(tilt);
+      ctx.translate(-u(0.5), -u(0.38));
+    }
 
     // Legs, three a side, stepping with the walk.
     if (detail) {
@@ -140,13 +163,15 @@ export function createCrab(canvas: HTMLCanvasElement, px: number): Painter {
     grad.addColorStop(1, tone(p.b));
     ctx.save();
     ctx.shadowColor = rgba(mix(p.a, end, tint), (p.dark ? 0.55 : 0.35) * alpha);
-    ctx.shadowBlur = u(0.12);
+    // Brighter for each syllable it hears, and in the flash of a wake.
+    ctx.shadowBlur = u(0.12 + 0.06 * Math.min(1, hear * gain) * perk + 0.1 * start);
     ctx.fillStyle = grad;
     ctx.fill();
     ctx.restore();
 
-    // Eyes, and Ferris's smile.
-    const lid = act?.stopping ? 0.45 : blink(time, 3.1);
+    // Eyes — wide while it listens, wider for a moment when woken — and Ferris's smile.
+    const lid = act?.stopping ? 0.45 : cue.ask > 0.5 ? askBlink(time) : blink(time, 3.1);
+    const wide = 1 + 0.18 * perk + 0.25 * start;
     for (const ex of [0.42, 0.58]) {
       const ey = 0.57;
       if (dazed) strokeEye(ctx, u(ex), u(ey), u(0.045), "x", rgba(INK, 0.9 * alpha), Math.max(1, u(0.03)));
@@ -156,7 +181,7 @@ export function createCrab(canvas: HTMLCanvasElement, px: number): Painter {
       } else {
         ctx.fillStyle = rgba(INK, 0.95 * alpha);
         ctx.beginPath();
-        ctx.ellipse(u(ex + lookX * 0.015), u(ey + lookY * 0.015), u(0.042), u(0.045 * lid), 0, 0, TAU);
+        ctx.ellipse(u(ex + lookX * 0.015), u(ey + lookY * 0.015), u(0.042 * wide), u(0.045 * lid * wide), 0, 0, TAU);
         ctx.fill();
         if (detail) {
           ctx.fillStyle = rgba(WHITE, 0.9 * alpha);
@@ -181,6 +206,19 @@ export function createCrab(canvas: HTMLCanvasElement, px: number): Painter {
         ctx.stroke();
       }
     }
+    // Listening: what it hears, arcs closing in on each raised claw from straight above, landing in
+    // its open pincer — from the sides they would leave the square, the claws reaching nearly to
+    // its edges.
+    const draw = Math.min(1.4, hear * gain) * perk;
+    if (draw > 0.01) {
+      const color = mix(mix(p.c, WHITE, p.dark ? 0.35 : 0), p.warning, warn * 0.3);
+      for (const side of [-1, 1] as const) {
+        const i = side < 0 ? 0 : 1;
+        const x = u(0.5 + side * (0.36 + 0.02 * raise[i]));
+        const y = u(0.6 - 0.26 * raise[i]);
+        soundIn(ctx, x, y, u(0.17), u(0.08), -Math.PI / 2, 0.45, time + i * 0.4, draw * (1 - start) * alpha, color, Math.max(0.8, u(0.026)));
+      }
+    }
     ctx.restore();
 
     // Bubbles rising from the landing.
@@ -202,9 +240,21 @@ export function createCrab(canvas: HTMLCanvasElement, px: number): Painter {
   function settle(act: ThinkingActivity | undefined, k: number) {
     const fin = clock.fin;
     const phase = phaseOf(act);
-    const [tx, ty] = gaze && !ended(act) && !act?.quiet && !act?.stopping ? gaze : phase ? lookFor(phase, time) : [0, 0];
-    lookX += (tx - lookX) * Math.min(1, k * 10);
-    lookY += (ty - lookY) * Math.min(1, k * 10);
+    // Listening, woken or asking, it looks at whoever it is with — the wake snapping its eyes there.
+    const listening = phase === "listen";
+    const facing = listening || cue.wake >= 0 || cue.ask > 0.5;
+    const [tx, ty] = facing
+      ? [0, 0]
+      : gaze && !ended(act) && !act?.quiet && !act?.stopping
+        ? gaze
+        : phase
+          ? lookFor(phase, time)
+          : [0, 0];
+    const snap = cue.wake >= 0 ? 40 : 10;
+    lookX += (tx - lookX) * Math.min(1, k * snap);
+    lookY += (ty - lookY) * Math.min(1, k * snap);
+    perk += ((listening ? 1 : 0) - perk) * Math.min(1, k * 6);
+    const hearing = Math.min(1, hear * gain);
     const resting = act?.quiet && !ended(act) ? 1 : 0;
     sleep += (resting - sleep) * Math.min(1, k * 3);
     warn += (resting - warn) * Math.min(1, k * 3);
@@ -233,6 +283,18 @@ export function createCrab(canvas: HTMLCanvasElement, px: number): Painter {
       } else if (resting || act?.stopping) {
         r = 0.05;
         o = 0.1;
+      } else if (cue.wake >= 0) {
+        // Woken: both claws snap up, open.
+        r = 1;
+        o = 0.75;
+      } else if (cue.ask > 0.5 && i === 1) {
+        // Asking: one claw raised high, tapping slowly on the beat — "well?".
+        r = 0.95;
+        o = 0.1 + 0.25 * askBeat(time);
+      } else if (listening) {
+        // Up and open like cupped hands, opening wider with what it hears.
+        r = 0.9;
+        o = 0.3 + 0.25 * hearing;
       } else if (working) {
         r = 0.75;
         o = 0.5 + 0.5 * Math.sin(time * 14 + i * Math.PI);
@@ -257,15 +319,18 @@ export function createCrab(canvas: HTMLCanvasElement, px: number): Painter {
     },
     setActivity(activity) {
       clock.set(activity);
+      cue.set(activity);
     },
     tick(dt) {
       clock.step(dt);
+      cue.step(dt);
       const act = clock.act;
       time += dt * (act?.quiet && !ended(act) ? 0.5 : 1);
       grow += (1 - grow) * Math.min(1, dt * 3);
       const phase = phaseOf(act);
       const walking = phase === "read" || phase === "search" || phase === "edit" || phase === "run" || phase === "tool";
       stride += dt * (walking ? 12 : 2);
+      hear = phase === "listen" ? listenLevel() : 0;
       settle(act, dt);
       paint();
     },
@@ -273,6 +338,9 @@ export function createCrab(canvas: HTMLCanvasElement, px: number): Painter {
       const act = clock.act;
       if (time === 0) time = 1.1;
       grow = 1;
+      // A still frame of listening is mid-word: claws up and open, arcs on their way in.
+      hear = phaseOf(act) === "listen" ? 0.7 : 0;
+      cue.settle();
       settle(act, 1);
       clock.settle();
       paint();

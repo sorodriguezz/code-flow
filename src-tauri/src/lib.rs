@@ -7,6 +7,7 @@
 mod ado;
 mod ai;
 mod applog;
+mod asr;
 mod autostart;
 mod api;
 mod appmenu;
@@ -35,6 +36,7 @@ mod git_exclude;
 mod ci;
 mod boards;
 mod claude;
+mod codi;
 mod cline;
 mod commands;
 mod containers;
@@ -47,6 +49,7 @@ mod evals;
 mod experiences;
 mod meetings;
 mod speech;
+mod voice_fit;
 mod flows;
 mod fsops;
 mod explorer_bridge;
@@ -478,6 +481,10 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, shortcut, event| {
+                    // Codi's push-to-talk chord is the one that wants both edges: held is heard.
+                    if codi::hotkey::handle(app, shortcut, event.state) {
+                        return;
+                    }
                     // Pressed only. Both edges are delivered, and acting on the release as well
                     // would open the ask box and toggle it shut again on a single tap.
                     if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
@@ -2073,6 +2080,7 @@ sharded_invoke_handler! {
         commands::speech_cmd::speech_status,
         commands::speech_cmd::speech_say,
         commands::speech_cmd::speech_stop,
+        commands::speech_cmd::speech_say_voice,
         commands::speech_cmd::audio_outputs,
         commands::speech_cmd::audio_play,
         commands::speech_cmd::speech_set_key,
@@ -2080,6 +2088,33 @@ sharded_invoke_handler! {
         commands::speech_cmd::speech_cancel_install,
         commands::speech_cmd::speech_remove_voice,
         commands::speech_cmd::speech_summarize,
+        commands::voice_cmd::voice_fit,
+        commands::voice_clone_cmd::voice_clone_status,
+        commands::voice_clone_cmd::voice_clone_accept_terms,
+        commands::voice_clone_cmd::voice_clone_prepare,
+        commands::voice_clone_cmd::voice_clone_remove,
+        commands::voice_clone_cmd::voice_clone_record_start,
+        commands::voice_clone_cmd::voice_clone_record_finish,
+        commands::voice_clone_cmd::voice_clone_record_cancel,
+        commands::voice_clone_cmd::voice_clone_save,
+        commands::voice_clone_cmd::voice_clone_delete,
+        commands::codi_cmd::codi_status,
+        commands::codi_cmd::codi_open_window,
+        commands::codi_cmd::codi_set_mic,
+        commands::codi_cmd::codi_set_sound,
+        commands::codi_cmd::codi_talk,
+        commands::codi_cmd::codi_ptt_hotkey,
+        commands::codi_cmd::codi_set_ptt_hotkey,
+        commands::codi_cmd::codi_suspend_ptt_hotkey,
+        commands::codi_cmd::codi_order,
+        commands::codi_cmd::codi_confirm,
+        commands::codi_cmd::codi_hush,
+        commands::codi_cmd::codi_announce,
+        commands::codi_cmd::codi_prepare,
+        commands::codi_cmd::codi_register_actions,
+        commands::codi_cmd::codi_act_result,
+        commands::codi_cmd::codi_act,
+        commands::voice_cmd::voice_measure,
         commands::claude_cmd::default_spoken_summary_template,
         commands::meetings_cmd::meetings_cancel_install,
         commands::meetings_cmd::meetings_remove_voices,

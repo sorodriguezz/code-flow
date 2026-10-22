@@ -61,8 +61,13 @@ describe("the shortcut registry's defaults", () => {
     expect(SHORTCUT_BY_ID.get("editor.formatDocument")?.defaultChord).toBe("Alt+Shift+F");
   });
 
+  it("open Codi's window from anywhere", () => {
+    expect(SHORTCUT_BY_ID.get("codi.open")?.defaultChord).toBe("Mod+Alt+V");
+    expect(SHORTCUT_BY_ID.get("codi.open")?.run).toBeTypeOf("function");
+  });
+
   it("give the new chords to nothing else", () => {
-    for (const chord of ["Mod+Alt+S", "Alt+Shift+F12", "Alt+Shift+F"]) {
+    for (const chord of ["Mod+Alt+S", "Alt+Shift+F12", "Alt+Shift+F", "Mod+Alt+V"]) {
       expect(SHORTCUT_COMMANDS.filter((command) => command.defaultChord === chord)).toHaveLength(1);
     }
   });

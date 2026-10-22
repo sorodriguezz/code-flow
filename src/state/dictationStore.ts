@@ -81,8 +81,8 @@ interface DictationStore {
 }
 
 export function dictationReady(state: Pick<DictationStore, "status" | "model">): boolean {
-  const status = state.status;
-  return !!status?.engineInstalled && status.models.some((model) => model.id === state.model && model.installed);
+  // `usable`: the model and the library that runs it — whisper's or sherpa-onnx's — are both in.
+  return !!state.status?.models.some((model) => model.id === state.model && model.usable);
 }
 
 /** What a field does to send — registered by the composers that have a send button. */

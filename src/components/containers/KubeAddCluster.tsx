@@ -429,7 +429,8 @@ function ManualPane({ state, onPatch, onSubmit }: { state: ManualState; onPatch:
         <input value={state.server} onChange={(e) => onPatch({ server: e.target.value })} onKeyDown={enter} placeholder="https://10.0.0.1:6443" spellCheck={false} className={mono} />
       </Field>
       <Field label={t("containers.kube.add.manual.token")}>
-        <div className="relative">
+        {/* Private to «Codi» even while shown: its "show" toggle makes this a plain text field. */}
+        <div className="relative" data-codi-private>
           <input
             type={state.showToken ? "text" : "password"}
             value={state.token}

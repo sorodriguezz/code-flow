@@ -10,7 +10,6 @@ import {
   dictationMicPermission,
   dictationMicRequest,
   dictationMicSettings,
-  type DictationModel,
   type MicInput,
   type MicPermission,
 } from "../../lib/tauri/dictationCommands";
@@ -24,22 +23,41 @@ import { ensureMeetingEvents, useMeetingsStore } from "../../state/meetingsStore
 import { pushErrorToast } from "../../state/toastStore";
 import { PaneBlock } from "./settingsNav";
 import { SpeakerRow, SpeechVoicesBlock } from "./SpeechSettings";
+import { ListenDetails, MachineCard, MeasureButton, ramGb } from "./voiceFit";
+import { VoiceCloneBlock } from "./VoiceCloneBlock";
+import { useVoiceFitStore } from "../../state/voiceFitStore";
 
 /**
- * «Voz y sonido › Modelos»: what is downloaded to listen and to speak — whisper.cpp's models, which
- * «Dictar» and «Reuniones» each pick from in their own pane, and the voices the reading aloud uses.
- * This pane only downloads and deletes them, and marks which feature uses which.
+ * «Voz y sonido › Modelos»: what is downloaded to listen and to speak — whisper.cpp's models and
+ * sherpa-onnx's (Parakeet, Canary), which «Dictar», «Reuniones» and «Codi» each pick from in their
+ * own pane, and the voices the reading aloud and Codi speak with. This pane only downloads and
+ * deletes them, marks which feature uses which, and says how each suits this machine
+ * (`voiceFit`): its weight, its speed here — estimated, then measured once downloaded — its
+ * accuracy, and what it is recommended for.
  *
- * Nothing ships with the app: the first Whisper model downloaded also brings the engine. The rows are
- * the local models' own (`ModelDownloadRow`), without their «Usar» — there is no single "active"
- * model when two features each choose one.
+ * Nothing ships with the app: the first model downloaded also brings the library that runs it. The
+ * rows are the local models' own (`ModelDownloadRow`), without their «Usar» — there is no single
+ * "active" model when several features each choose one.
  */
 
-const SPEC: Record<DictationModel["id"], { label: string; params: string; ram: number; tier: DownloadableModel["tier"] }> = {
-  tiny: { label: "Whisper tiny", params: "Q5_1", ram: 1, tier: "light" },
-  base: { label: "Whisper base", params: "Q5_1", ram: 1, tier: "light" },
-  small: { label: "Whisper small", params: "Q5_1", ram: 1, tier: "balanced" },
-  turbo: { label: "Whisper large-v3 turbo", params: "Q5_0", ram: 2, tier: "large" },
+/** Quantization and where it runs, for a row's middle column. */
+const PARAMS: Record<string, string> = {
+  tiny: "Q5_1",
+  base: "Q5_1",
+  small: "Q5_1",
+  turbo: "Q5_0",
+  large: "Q5_0",
+  parakeet: "INT8 · CPU",
+  canary: "INT8 · CPU",
+};
+const TIER: Record<string, DownloadableModel["tier"]> = {
+  tiny: "light",
+  base: "light",
+  small: "balanced",
+  turbo: "large",
+  large: "large",
+  parakeet: "balanced",
+  canary: "light",
 };
 
 export function VoiceModelsSettings() {
@@ -48,11 +66,18 @@ export function VoiceModelsSettings() {
   const dictationModel = useDictationStore((s) => s.model);
   const meetings = useMeetingsStore((s) => s.settings);
   const ask = useConfirmStore((store) => store.ask);
+  const fit = useVoiceFitStore((s) => s.fit);
 
   useEffect(() => {
     void load();
     ensureMeetingEvents();
+    void useVoiceFitStore.getState().load();
   }, [load]);
+  // A finished download is measured right after (`voice:fit`); the list re-reads what is on disk.
+  const finished = Object.values(progress).filter((p) => p.phase === "done").length;
+  useEffect(() => {
+    if (finished > 0) void useVoiceFitStore.getState().load();
+  }, [finished]);
 
   if (!status) {
     return (
@@ -67,21 +92,23 @@ export function VoiceModelsSettings() {
   }
 
   const engine = progress.engine;
+  const labelOf = (id: string) => status.models.find((m) => m.id === id)?.label ?? id;
   return (
     <div className="flex flex-col gap-4">
+      {fit && <MachineCard fit={fit} label={labelOf} />}
       <div>
         <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">{t("voice.listenModels")}</h3>
         <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
           {status.models.map((entry) => {
-            const spec = SPEC[entry.id];
+            const rowFit = fit?.listen.find((f) => f.id === entry.id);
             const row: DownloadableModel = {
               id: entry.id,
-              label: spec.label,
-              tier: spec.tier,
-              params: spec.params,
-              licence: "MIT",
+              label: entry.label,
+              tier: TIER[entry.id] ?? "balanced",
+              params: PARAMS[entry.id] ?? entry.family,
+              licence: entry.licence,
               size_bytes: entry.sizeBytes,
-              min_ram_gb: spec.ram,
+              min_ram_gb: ramGb(rowFit?.ramMb, 1),
               installed: entry.installed,
               partial_bytes: null,
             };
@@ -100,6 +127,8 @@ export function VoiceModelsSettings() {
             const users: string[] = [];
             if (entry.installed && entry.id === dictationModel) users.push(t("dictation.title"));
             if (entry.installed && (entry.id === meetings.liveModel || entry.id === meetings.finalModel)) users.push(t("meetings.settings.title"));
+            // A sherpa-onnx model brings its library first, on its own bar.
+            const libraryFirst = entry.family !== "whisper" && installing === entry.id && !status.sherpaInstalled;
             return (
               <ModelDownloadRow
                 key={entry.id}
@@ -115,14 +144,18 @@ export function VoiceModelsSettings() {
                   <span>
                     {engineHere
                       ? t(engineHere.phase === "unpacking" ? "dictation.engineUnpacking" : "dictation.engineDownloading")
-                      : t(`dictation.model.${entry.id}` as TranslationKey)}
+                      : libraryFirst
+                        ? t("voice.sherpaFirst", { size: formatBytes(status.sherpaBytes) })
+                        : t(`dictation.model.${entry.id}` as TranslationKey)}
                   </span>
                 }
+                details={<ListenDetails fit={rowFit} languages={entry.languages} translates={entry.translates} />}
+                actions={entry.usable ? <MeasureButton id={entry.id} /> : undefined}
                 onDownload={() => void install(entry.id)}
                 onCancel={() => void cancelInstall()}
                 onDelete={() => {
                   void ask({
-                    message: t(users.length > 0 ? "voice.deleteUsed" : "dictation.deleteConfirm", { model: spec.label, size: formatBytes(entry.sizeBytes), users: users.join(", ") }),
+                    message: t(users.length > 0 ? "voice.deleteUsed" : "dictation.deleteConfirm", { model: entry.label, size: formatBytes(entry.sizeBytes), users: users.join(", ") }),
                     confirmLabel: t("localai.delete"),
                     danger: true,
                   }).then((ok) => {
@@ -136,9 +169,13 @@ export function VoiceModelsSettings() {
         {!status.engineInstalled && (
           <p className="mt-1.5 text-[11px] text-[var(--cf-text-muted)]">{t("dictation.engineFirst", { size: formatBytes(status.engineBytes) })}</p>
         )}
+        {!status.sherpaInstalled && status.models.some((m) => m.family !== "whisper") && (
+          <p className="mt-1 text-[11px] text-[var(--cf-text-muted)]">{t("voice.sherpaNote", { size: formatBytes(status.sherpaBytes) })}</p>
+        )}
       </div>
 
       <SpeechVoicesBlock />
+      <VoiceCloneBlock />
     </div>
   );
 }

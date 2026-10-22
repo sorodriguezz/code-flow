@@ -497,7 +497,7 @@ function ServiceForm({
           return (
             <div key={row.id} className="grid grid-cols-[200px_1fr_auto] items-center gap-2">
               <input value={row.key} onChange={(e) => set({ key: e.target.value })} placeholder="CLAVE" spellCheck={false} className={mono} />
-              <div className="flex min-w-0 gap-1">
+              <div className="flex min-w-0 gap-1" data-codi-private={secret || undefined}>
                 <input type={secret && !visible ? "password" : "text"} value={row.value} onChange={(e) => set({ value: e.target.value })} placeholder={t("containers.m.run.value")} spellCheck={false} className={mono} />
                 {secret && (
                   <button

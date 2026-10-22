@@ -342,6 +342,7 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("app.open", App, "external-link", 4),
     node("app.terminal", App, "monitor", 4),
     node("app.terminalOutput", App, "logs", 12),
+    node("app.ui", App, "mouse-pointer-click", 12),
     node("app.clipboard", App, "clipboard-list", 4),
     node("app.vault", App, "key-round", 4),
     node("app.apiRequest", App, "send", 7),
@@ -485,8 +486,8 @@ mod tests {
         assert_eq!(count(Files), 14);
         assert_eq!(count(Logic), 13);
         assert_eq!(count(Transform), 20);
-        assert_eq!(count(App), 17);
-        assert_eq!(CATALOG.len(), 178);
+        assert_eq!(count(App), 18);
+        assert_eq!(CATALOG.len(), 179);
     }
 
     #[test]

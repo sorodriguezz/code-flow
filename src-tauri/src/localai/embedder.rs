@@ -154,8 +154,8 @@ impl Drop for Done {
 /// The running embedder for `entry`, starting one when there is none (or another model's).
 pub async fn ensure(entry: &EmbedModelSpec) -> Result<Arc<Embedder>, String> {
     let path = super::models::path_of(&entry.spec);
-    if !path.is_file() {
-        return Err(format!("{} isn't downloaded. Download it in Settings › Local intelligence › Knowledge.", entry.spec.label));
+    if !super::models::complete(&entry.spec, &path) {
+        return Err(format!("{} isn't downloaded, or its download is incomplete. Download it in Settings › Local intelligence › Knowledge.", entry.spec.label));
     }
     let slot = SLOT.get_or_init(|| AsyncMutex::new(None));
     let mut guard = slot.lock().await;

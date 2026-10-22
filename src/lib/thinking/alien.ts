@@ -1,8 +1,10 @@
 import { ended, phaseGroup, type PhaseGroup, type ThinkingActivity } from "./activity";
-import { blink, INK, lipSync, lookFor, sleepZ, strokeEye, WHITE, type Gaze } from "./face";
+import { askBeat, askBlink, cueClock, hop, startle } from "./cue";
+import { blink, INK, lipSync, lookFor, mouthOpen, sleepZ, soundIn, strokeEye, WHITE, type Gaze } from "./face";
 import { clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { listenLevel } from "./listen";
 import { voiceLevel } from "./voice";
 
 /**
@@ -14,7 +16,13 @@ import { voiceLevel } from "./voice";
  * reading, its big eyes run along the lines; working, the antennae wiggle; writing, they beam little
  * signal arcs while it talks. Speaking (the reading aloud), its tips light up with the voice and
  * the arcs round them grow with it, its mouth moving with each syllable. Quiet, the antennae sag,
- * the tips go dim, and it dozes.
+ * the tips go dim, and it dozes. Listening (Codi), its antennae stand straight up like receivers and
+ * it leans in, its big eyes wide on whoever speaks and its mouth shut; what it hears comes in as arcs
+ * closing on each tip — the speaking arcs grow out of them — and the tips light with every syllable.
+ *
+ * Codi's cues: woken, it hops with its antennae springing up and its tips flashing, eyes wide on the
+ * viewer; asking, it tilts its head with one antenna bent over like a question mark, looking at the
+ * viewer and blinking twice now and then.
  *
  * Finish: it crouches and hops, its antennae spring up and their tips light up, happy ^ ^ eyes, and
  * it turns green. Failed: the antennae droop, the tips go dark, its eyes go X X and it turns red,
@@ -24,9 +32,10 @@ import { voiceLevel } from "./voice";
  * antennae and the eyes stay.
  */
 
-export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
+export function createAlien(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const clock = finishClock();
+  const cue = cueClock();
   const pops = makeBurst(6, 83);
   /** Eye shine and mouth — what an alien smaller than this cannot hold. */
   const detail = px >= 20;
@@ -46,6 +55,9 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
   let talk = 0;
   let voice = 0;
   let swell = 0;
+  /** Listening: how far into that look it is (0–1), and the microphone's level this frame. */
+  let perk = 0;
+  let hear = 0;
   /** Per antenna: how far it leans outward (radians), how far it has bent over (0 upright, 1
    *  drooping), and how bright its tip is (0 dark, 1 lit). */
   const lean = [0, 0];
@@ -108,11 +120,22 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
     const warm = (c: Rgb) => mix(c, p.warning, warn * 0.18);
     const tone = (c: Rgb, to: Rgb) => warm(mix(c, to, tint));
     const a = alpha;
+    // Listening, it holds still — leaning in by dipping its head a little, which keeps the antennae
+    // and the arcs closing on them inside the square.
     const g = 0.4 + 0.6 * easeOut(grow);
-    const bob = Math.sin(time * 2.2) * 0.012 * (1 - sleep) + sleep * 0.025;
+    const bob = Math.sin(time * 2.2) * 0.012 * (1 - sleep) * (1 - 0.7 * perk) + sleep * 0.025;
+    // What it hears, as far as Codi's gain takes it; the wake's start; the ask's tilt.
+    const draw = Math.min(1.4, hear * gain) * perk;
+    const start = startle(cue.wake);
+    // Gentler than the other characters': the antennae swing furthest of anything when it tilts.
+    const tilt = cue.ask * (0.05 + 0.03 * askBeat(time));
+    const voicedSwell = Math.min(1, swell * gain);
+    // The wake's hop — low, like the finish's, for the antennae.
+    lift += 0.04 * hop(cue.wake) - 0.02 * perk;
 
     ctx.save();
     ctx.translate(u(0.5), u(0.9 - lift + sink + bob));
+    ctx.rotate(tilt);
     ctx.scale(sx * g, sy * g);
     ctx.translate(-u(0.5), -u(0.9));
 
@@ -172,8 +195,10 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
     ctx.fill();
     ctx.restore();
 
-    // The eyes: big, dark, tilted up at the outer corners, a shine that follows the gaze.
-    const open = act?.stopping ? 0.45 : blink(time, 3.7);
+    // The eyes: big, dark, tilted up at the outer corners, a shine that follows the gaze — wide while
+    // it listens, wider for a moment when woken.
+    const open = act?.stopping ? 0.45 : cue.ask > 0.5 ? askBlink(time) : blink(time, 3.7);
+    const wide = 1 + 0.1 * perk + 0.15 * start;
     for (const side of [-1, 1]) {
       const ex = 0.5 + side * 0.125;
       const ey = 0.625;
@@ -196,7 +221,7 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
       ctx.scale(1, open);
       ctx.fillStyle = rgba(INK, 0.95 * a);
       ctx.beginPath();
-      ctx.ellipse(0, 0, u(0.1), u(0.078), 0, 0, TAU);
+      ctx.ellipse(0, 0, u(0.1 * wide), u(0.078 * wide), 0, 0, TAU);
       ctx.fill();
       ctx.restore();
       if (detail) {
@@ -217,7 +242,7 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
       const w = detail ? 0.034 : 0.05;
       ctx.fillStyle = rgba(INK, 0.85 * a);
       ctx.beginPath();
-      ctx.ellipse(u(0.5), u(0.78), Math.max(0.6, u(w)), Math.max(0.5, u(w * (0.2 + 0.95 * mouth))), 0, 0, TAU);
+      ctx.ellipse(u(0.5), u(0.78), Math.max(0.6, u(w)), Math.max(0.5, u(w * mouthOpen(mouth, gain))), 0, 0, TAU);
       ctx.fill();
     } else if (detail && mouth > 0.05 && !dazed) {
       ctx.fillStyle = rgba(INK, 0.85 * a);
@@ -251,16 +276,27 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
       tips.forEach(([x, y], i) => {
         const dir = -Math.PI / 2 + (i === 0 ? -1 : 1) * 0.95;
         for (let j = 0; j < 2; j++) {
-          const lit = clamp01((swell + 0.1 - j * 0.35) / 0.3);
+          // With Codi's gain they light on quieter syllables; none goes further out.
+          const lit = clamp01((voicedSwell + 0.1 - j * 0.35) / 0.3);
           if (lit <= 0.01) continue;
           ctx.globalAlpha = talk * lit * a;
           ctx.beginPath();
           // At most 0.13 out: further and the outer arc leaves the square at the top.
-          ctx.arc(x, y, u(0.06 + (0.03 + 0.04 * j) * swell), dir - 0.65, dir + 0.65);
+          ctx.arc(x, y, u(0.06 + (0.03 + 0.04 * j) * voicedSwell), dir - 0.65, dir + 0.65);
           ctx.stroke();
         }
       });
       ctx.globalAlpha = 1;
+    }
+
+    // Listening: what it hears, arcs closing in on each tip from up and out, fading as they land —
+    // 0.1 out at most, inside the speaking arcs' reach. Gone for the moment of a wake's hop.
+    if (draw > 0.01) {
+      const color = warm(mix(p.c, WHITE, p.dark ? 0.35 : 0));
+      tips.forEach(([x, y], i) => {
+        const dir = -Math.PI / 2 + (i === 0 ? -1 : 1) * 0.95;
+        soundIn(ctx, x, y, u(0.1), u(0.04), dir, 0.6, time + i * 0.3, draw * (1 - start) * a, color, Math.max(0.8, u(0.024)));
+      });
     }
 
     // The landing: a few sparks popping off each lit tip.
@@ -283,16 +319,22 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
   function settle(act: ThinkingActivity | undefined, k: number) {
     const fin = clock.fin;
     const group = groupOf(act);
-    // Speaking, it looks at whoever it is talking to.
+    // Speaking or listening, it looks at whoever it is talking with, and so it does when woken or
+    // asking — the wake snapping its eyes there.
     // Following the pointer, it looks at it — awake, and not while it is talking to someone.
+    const facing = group === "speak" || group === "listen" || cue.wake >= 0 || cue.ask > 0.5;
     const [tx, ty] =
-      gaze && group !== "speak" && !ended(act) && !act?.quiet && !act?.stopping
+      gaze && !facing && !ended(act) && !act?.quiet && !act?.stopping
         ? gaze
         : group
-          ? lookFor(group === "work" ? "edit" : group === "speak" ? "start" : act?.phase, time)
+          ? lookFor(group === "work" ? "edit" : facing ? "start" : act?.phase, time)
           : [0, 0];
-    lookX += (tx - lookX) * Math.min(1, k * 10);
-    lookY += (ty - lookY) * Math.min(1, k * 10);
+    const snap = cue.wake >= 0 ? 40 : 10;
+    lookX += (tx - lookX) * Math.min(1, k * snap);
+    lookY += (ty - lookY) * Math.min(1, k * snap);
+    perk += ((group === "listen" ? 1 : 0) - perk) * Math.min(1, k * 6);
+    const hearing = Math.min(1.4, hear * gain);
+    const start = startle(cue.wake);
     const resting = act?.quiet && !ended(act) ? 1 : 0;
     sleep += (resting - sleep) * Math.min(1, k * 3);
     warn += (resting - warn) * Math.min(1, k * 3);
@@ -337,9 +379,14 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
         to = -0.05;
         on = 1;
       } else if (group === "speak") {
-        // The tips light with the voice, the antennae lifting a little on the loud syllables.
-        to = -0.06 * lipSync(voice);
-        on = 0.2 + 0.8 * lipSync(voice);
+        // The tips light with the voice, the antennae lifting a little on the loud syllables — on
+        // quieter ones too with Codi's gain, never further: lifted more, the arcs leave the square.
+        to = -0.06 * Math.min(1, lipSync(voice) * gain);
+        on = 0.2 + 0.8 * Math.min(1, lipSync(voice) * gain);
+      } else if (group === "listen") {
+        // Straight up, a little toward each other, like receivers; the tips light with what it hears.
+        to = -0.08;
+        on = 0.25 + 0.75 * Math.min(1, hearing);
       } else if (group === "read") {
         on = 0.6;
       } else {
@@ -347,9 +394,15 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
         to = Math.sin(time * 1.6 + i) * 0.05;
         on = 0.5 + 0.5 * Math.sin(time * 3.2 + i * Math.PI);
       }
+      // Woken, they spring up and flash; asking, one bends over like a question mark.
+      if (start > 0) {
+        to -= 0.12 * start;
+        on = Math.max(on, start);
+      }
+      if (cue.ask > 0.01 && i === 1) bend = Math.max(bend, 0.55 * cue.ask);
       lean[i] += (to - lean[i]) * Math.min(1, k * 14);
       sag[i] += (bend - sag[i]) * Math.min(1, k * 8);
-      light[i] += (on - light[i]) * Math.min(1, k * (group === "speak" ? 18 : 10));
+      light[i] += (on - light[i]) * Math.min(1, k * (group === "speak" || group === "listen" ? 18 : 10));
     }
   }
 
@@ -359,13 +412,16 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
     },
     setActivity(activity) {
       clock.set(activity);
+      cue.set(activity);
     },
     tick(dt) {
       clock.step(dt);
+      cue.step(dt);
       const act = clock.act;
       time += dt * (act?.quiet && !ended(act) ? 0.5 : 1);
       grow += (1 - grow) * Math.min(1, dt * 3.5);
       voice = groupOf(act) === "speak" ? voiceLevel() : 0;
+      hear = groupOf(act) === "listen" ? listenLevel() : 0;
       settle(act, dt);
       paint();
     },
@@ -375,7 +431,10 @@ export function createAlien(canvas: HTMLCanvasElement, px: number): Painter {
       grow = 1;
       // A still frame of speech is mid-syllable: mouth open, tips lit, arcs out.
       voice = groupOf(act) === "speak" ? 0.85 : 0;
+      // And of listening, mid-word: antennae up, tips lit, arcs on their way in.
+      hear = groupOf(act) === "listen" ? 0.7 : 0;
       clock.settle();
+      cue.settle();
       settle(act, 1);
       paint();
     },

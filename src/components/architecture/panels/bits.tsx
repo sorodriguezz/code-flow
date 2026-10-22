@@ -1,5 +1,7 @@
-/** Small pieces every lens panel uses: a section's heading, a component chip that lights the card up. */
-import type { ReactNode } from "react";
+/** Small pieces every lens panel uses: a section's heading, a component chip that lights the card up,
+ *  a field that edits the document as you type. */
+import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
+import { fieldClass } from "../../common/recipes";
 import { useArchitectureViewStore } from "../../../state/architectureViewStore";
 import type { ResolvedComponents } from "../../../lib/architecture/types";
 
@@ -48,3 +50,27 @@ export function Refs({ ids, comps }: { ids: string[]; comps: ResolvedComponents 
 }
 
 export const panelBodyClass = "grid min-h-0 flex-1 content-start gap-3 overflow-y-auto p-3";
+
+/** A text field that commits as you type, but only re-reads its value when the selection changes. */
+export function Field({ label, value, onCommit, mono, multiline, type = "text", placeholder }: { label: string; value: string; onCommit: (v: string) => void; mono?: boolean; multiline?: boolean; type?: string; placeholder?: string }) {
+  const [draft, setDraft] = useState(value);
+  const editing = useRef(false);
+  useEffect(() => { if (!editing.current) setDraft(value); }, [value]);
+  const common = {
+    value: draft,
+    placeholder,
+    onFocus: () => { editing.current = true; },
+    onBlur: () => { editing.current = false; },
+    onChange: (e: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => { setDraft(e.target.value); onCommit(e.target.value); },
+  };
+  return (
+    <label className="grid gap-1 text-[11px] font-medium text-[var(--cf-text-muted)]">
+      {label}
+      {multiline ? (
+        <textarea {...common} rows={3} className="min-h-[54px] resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12.5px] leading-[1.4] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]" />
+      ) : (
+        <input {...common} type={type} className={fieldClass({ size: "sm", className: `w-full ${mono ? "font-mono text-[11.5px]" : ""}` })} />
+      )}
+    </label>
+  );
+}

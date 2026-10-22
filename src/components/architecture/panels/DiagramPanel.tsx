@@ -3,7 +3,7 @@
  * the legend. Every field edits the JSON in place (see `edits.ts`), so what you change here is what
  * you see appear in the text.
  */
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { FileText, Link2, Plus, Trash2 } from "lucide-react";
 import type { TranslationKey } from "../../../lib/i18n/translations";
 import { CATEGORY_COLOR, mix } from "../../../lib/architecture/svg";
@@ -18,7 +18,7 @@ import { confirmAction } from "../../../state/confirmStore";
 import { buttonClass } from "../../common/Button";
 import { fieldClass, popoverClass } from "../../common/recipes";
 import { addComponent, addConnection, removeComponent, removeConnection, setComponentField, setSimField, setValue, zonePathOf } from "../edits";
-import { EntityHead, Ref, SectionTitle, panelBodyClass } from "./bits";
+import { EntityHead, Field, Ref, SectionTitle, panelBodyClass } from "./bits";
 
 const CATEGORIES: Category[] = ["actor", "compute", "data", "messaging", "network", "identity", "security", "observability", "external"];
 const ZONE_STYLES: ZoneStyle[] = ["cloud", "group", "cluster", "tier", "logical", "providers"];
@@ -29,30 +29,6 @@ function findZone(nodes: LayoutNode[] | undefined, id: string): Zone | null {
     else if (typeof n === "object" && n) { const inner = findZone((n as { row?: LayoutNode[]; column?: LayoutNode[] }).row ?? (n as { column?: LayoutNode[] }).column, id); if (inner) return inner; }
   }
   return null;
-}
-
-/** A text field that commits as you type, but only re-reads its value when the selection changes. */
-function Field({ label, value, onCommit, mono, multiline, type = "text", placeholder }: { label: string; value: string; onCommit: (v: string) => void; mono?: boolean; multiline?: boolean; type?: string; placeholder?: string }) {
-  const [draft, setDraft] = useState(value);
-  const editing = useRef(false);
-  useEffect(() => { if (!editing.current) setDraft(value); }, [value]);
-  const common = {
-    value: draft,
-    placeholder,
-    onFocus: () => { editing.current = true; },
-    onBlur: () => { editing.current = false; },
-    onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => { setDraft(e.target.value); onCommit(e.target.value); },
-  };
-  return (
-    <label className="grid gap-1 text-[11px] font-medium text-[var(--cf-text-muted)]">
-      {label}
-      {multiline ? (
-        <textarea {...common} rows={3} className="min-h-[54px] resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12.5px] leading-[1.4] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]" />
-      ) : (
-        <input {...common} type={type} className={fieldClass({ size: "sm", className: `w-full ${mono ? "font-mono text-[11.5px]" : ""}` })} />
-      )}
-    </label>
-  );
 }
 
 function IconPicker({ label, value, onPick }: { label: string; value: string; onPick: (id: string) => void }) {

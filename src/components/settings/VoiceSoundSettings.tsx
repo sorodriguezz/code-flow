@@ -1,3 +1,4 @@
+import { CodiSettings } from "./CodiSettings";
 import { DictationSettings } from "./DictationSettings";
 import { MeetingsSettings } from "./MeetingsSettings";
 import { SpeechSettings } from "./SpeechSettings";
@@ -8,8 +9,8 @@ import { useT } from "../../state/languageStore";
 /**
  * «Voz y sonido»: what CodeFlow listens with and speaks through. Out of the AI section, where Voice,
  * Dictation and Meetings used to sit (2026-10-09): the devices first, then what is downloaded for
- * them, then the three features that use them — dictating, taking a meeting's notes, and the
- * thinking mark reading aloud.
+ * them, then the features that use them — dictating, taking a meeting's notes, the thinking mark
+ * reading aloud, and Codi, the voice assistant.
  */
 export function VoiceSoundSettings() {
   const t = useT();
@@ -22,6 +23,7 @@ export function VoiceSoundSettings() {
           {tab === "dictation" && <DictationSettings />}
           {tab === "meetings" && <MeetingsSettings />}
           {tab === "reading" && <SpeechSettings />}
+          {tab === "codi" && <CodiSettings />}
         </>
       )}
     </RailSection>

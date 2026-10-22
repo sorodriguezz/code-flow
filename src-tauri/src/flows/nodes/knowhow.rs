@@ -17,6 +17,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "app.knowledge" => knowledge(ctx).await,
         "app.memory" => memory(ctx).await,
         "app.terminalOutput" => terminal_output(ctx).await,
+        "app.ui" => interface(ctx).await,
         other => Err(NodeError::failed(format!("No executor for {other}"))),
     }
 }
@@ -123,6 +124,32 @@ async fn memory(ctx: &NodeCtx) -> Result<Ports, NodeError> {
 
 /// «Salida de terminal»: the last lines of a terminal of the agents panel, by title or number — or,
 /// with no name, one item per terminal of the flow's workspace.
+/// «Acción de interfaz»: runs one of the interface's actions for each item, and passes on what the
+/// window answered (`ok`, the action's sentence, its result).
+async fn interface(ctx: &NodeCtx) -> Result<Ports, NodeError> {
+    let resolved = ctx.resolve_each().await?;
+    let mut out = Vec::new();
+    for (index, params) in resolved.iter().enumerate() {
+        let action = text(params, "uiAction").trim().to_string();
+        if action.is_empty() {
+            return Err(NodeError::failed("Choose the action (its id, as `cf ui actions` lists them)"));
+        }
+        let raw = params.get("uiParams").cloned().unwrap_or(Value::Null);
+        let given = match raw {
+            Value::String(text) if text.trim().is_empty() => json!({}),
+            Value::String(text) => serde_json::from_str::<Value>(&text).map_err(|e| NodeError::failed(format!("The params are not JSON: {e}")))?,
+            Value::Null => json!({}),
+            other => other,
+        };
+        if !given.is_object() {
+            return Err(NodeError::failed("The params must be a JSON object"));
+        }
+        let answer = call(ctx, "ui.act", json!({ "action": action, "params": given })).await?;
+        out.push(item(ctx, index, answer));
+    }
+    Ok(vec![out])
+}
+
 async fn terminal_output(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     let resolved = ctx.resolve_each().await?;
     let mut out = Vec::new();

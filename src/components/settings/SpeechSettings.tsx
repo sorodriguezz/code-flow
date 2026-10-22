@@ -9,10 +9,12 @@ import { chipClass, fieldClass } from "../common/recipes";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { formatBytes, ModelDownloadRow, type DownloadableModel } from "./localModelRow";
 import { PaneBlock } from "./settingsNav";
+import { MeasureButton, ramGb, SpeakDetails } from "./voiceFit";
+import { useVoiceFitStore } from "../../state/voiceFitStore";
 import { previewNotificationSound } from "../../lib/notificationSound";
 import { useShortcutChord } from "../../lib/useShortcutHint";
 import type { LocalAiDownloadEvent } from "../../lib/tauri/events";
-import type { DownloadableVoice, VoiceGender } from "../../lib/tauri/speechCommands";
+import { KOKORO_ITEM, type DownloadableVoice, type VoiceGender } from "../../lib/tauri/speechCommands";
 import type { Language } from "../../lib/i18n/translations";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { useConfirmStore } from "../../state/confirmStore";
@@ -247,8 +249,9 @@ function LanguageVoiceRow({ lang, engine }: { lang: Language; engine: "system" |
       ...voices.map((voice) => ({ value: voice.id, label: voice.name })),
     ];
   } else {
-    const installed = (status?.voices ?? []).filter((voice) => voice.installed && voiceLanguage(voice.lang) === lang);
-    const named = (voice: DownloadableVoice) => `${voice.label} · ${t(GENDER_KEY[voice.gender])}`;
+    // A cloned voice reads either language: its models are multilingual.
+    const installed = (status?.voices ?? []).filter((voice) => voice.installed && (voice.engine === "clone" || voiceLanguage(voice.lang) === lang));
+    const named = (voice: DownloadableVoice) => (voice.engine === "clone" ? t("voiceClone.option", { name: voice.label }) : `${voice.label} · ${t(GENDER_KEY[voice.gender])}`);
     none = installed.length === 0;
     options = none
       ? [{ value: "", label: t("speech.noneReadsSystem") }]
@@ -405,10 +408,12 @@ export function SpeakerRow() {
   );
 }
 
-/** «Modelos › Para hablar»: the system's voices, and the natural ones that can be downloaded. */
+/** «Modelos › Para hablar»: the system's voices, and the natural ones that can be downloaded —
+ *  Piper's, a voice a download, and Kokoro's, one download for all of its voices. */
 export function SpeechVoicesBlock() {
   const t = useT();
   const status = useSpeechStore((s) => s.status);
+  const fit = useVoiceFitStore((s) => s.fit);
   const engine = useSpeechStore((s) => s.engine);
   const localVoices = useSpeechStore((s) => s.localVoices);
   const language = useLanguageStore((s) => s.language);
@@ -421,6 +426,7 @@ export function SpeechVoicesBlock() {
     const store = useSpeechStore.getState();
     if (!store.loaded) void store.load();
     void store.refresh();
+    void useVoiceFitStore.getState().load();
   }, []);
 
   if (!status) return null;
@@ -435,9 +441,15 @@ export function SpeechVoicesBlock() {
       if (id) speaksWith.add(id);
     }
   }
-  // The app's language first; the catalogue's own order within each.
+  // The app's language first; the catalogue's own order within each. Kokoro's voices are not
+  // downloads of their own: its one row stands for all of them.
   const order = languagesFrom(language);
-  const voices = [...status.voices].sort((a, b) => order.indexOf(voiceLanguage(a.lang)) - order.indexOf(voiceLanguage(b.lang)));
+  const voices = status.voices
+    .filter((voice) => voice.engine === "piper")
+    .sort((a, b) => order.indexOf(voiceLanguage(a.lang)) - order.indexOf(voiceLanguage(b.lang)));
+  const kokoroSpeaks = status.voices.some((voice) => voice.engine === "kokoro" && speaksWith.has(voice.id));
+  const kokoroProgress = progress[KOKORO_ITEM];
+  const kokoroFit = fit?.speak.find((f) => f.id === KOKORO_ITEM);
 
   return (
     <div>
@@ -455,6 +467,48 @@ export function SpeechVoicesBlock() {
           </div>
           <span className={chipClass("ok")}>{t("speech.included")}</span>
         </div>
+        {status.localSupported && (
+          <ModelDownloadRow
+            model={{
+              id: KOKORO_ITEM,
+              label: t("speech.kokoroLabel", { n: status.kokoro.voices }),
+              tier: "balanced",
+              params: "Kokoro-82M",
+              licence: status.kokoro.licence,
+              size_bytes: status.kokoro.sizeBytes,
+              min_ram_gb: ramGb(kokoroFit?.ramMb, 1),
+              installed: status.kokoro.installed,
+              partial_bytes: null,
+            }}
+            active={false}
+            progress={
+              kokoroProgress && {
+                model_id: KOKORO_ITEM,
+                phase: kokoroProgress.phase === "unpacking" ? "verifying" : kokoroProgress.phase,
+                done: kokoroProgress.done,
+                total: kokoroProgress.total,
+                error: kokoroProgress.error ?? undefined,
+              }
+            }
+            badge={kokoroSpeaks ? <span className={chipClass("accent")}>{t("speech.title")}</span> : undefined}
+            note={
+              <span>
+                {installing === KOKORO_ITEM && !status.libraryInstalled ? t("speech.libraryFirst", { size: formatBytes(status.libraryBytes) }) : t("speech.kokoroNote")}
+              </span>
+            }
+            details={<SpeakDetails fit={kokoroFit} />}
+            actions={status.kokoro.installed && status.libraryInstalled ? <MeasureButton id={KOKORO_ITEM} /> : undefined}
+            onDownload={() => void useSpeechStore.getState().install(KOKORO_ITEM)}
+            onCancel={() => void useSpeechStore.getState().cancelInstall()}
+            onDelete={() => {
+              void ask({
+                message: t("speech.deleteConfirm", { voice: "Kokoro", size: formatBytes(status.kokoro.sizeBytes) }),
+                confirmLabel: t("localai.delete"),
+                danger: true,
+              }).then((ok) => ok && void useSpeechStore.getState().remove(KOKORO_ITEM));
+            }}
+          />
+        )}
         {status.localSupported &&
           voices.map((voice) => {
             const row: DownloadableModel = {
@@ -464,7 +518,7 @@ export function SpeechVoicesBlock() {
               params: "Piper",
               licence: voice.licence,
               size_bytes: voice.sizeBytes,
-              min_ram_gb: 1,
+              min_ram_gb: ramGb(fit?.speak.find((f) => f.id === voice.id)?.ramMb, 1),
               installed: voice.installed,
               partial_bytes: null,
             };
@@ -490,6 +544,8 @@ export function SpeechVoicesBlock() {
                       : t(NATURAL_NOTE_KEY[voice.gender])}
                   </span>
                 }
+                details={<SpeakDetails fit={fit?.speak.find((f) => f.id === voice.id)} />}
+                actions={voice.installed && status.libraryInstalled ? <MeasureButton id={voice.id} /> : undefined}
                 onDownload={() => void useSpeechStore.getState().install(voice.id)}
                 onCancel={() => void useSpeechStore.getState().cancelInstall()}
                 onDelete={() => {

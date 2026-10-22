@@ -172,7 +172,7 @@ export function ArchEditor() {
             <button type="button" className={iconButtonClass({ size: "sm" })} onClick={() => setHistory(true)} aria-label={t("arch.history")}><History size={15} /></button>
           </Tooltip>
           <Tooltip label={panelOpen ? t("arch.panel.hide") : t("arch.panel.show")}>
-            <button type="button" aria-pressed={panelOpen} className={iconButtonClass({ size: "sm", active: panelOpen })} onClick={() => setPanelOpen(!panelOpen)} aria-label={panelOpen ? t("arch.panel.hide") : t("arch.panel.show")} data-tour="arch-panel-toggle">
+            <button type="button" aria-pressed={panelOpen} className={iconButtonClass({ size: "sm", active: panelOpen })} onClick={() => useArchitectureViewStore.getState().togglePanel()} aria-label={panelOpen ? t("arch.panel.hide") : t("arch.panel.show")} data-tour="arch-panel-toggle">
               <PanelRight size={15} />
             </button>
           </Tooltip>

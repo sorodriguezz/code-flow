@@ -80,6 +80,7 @@ pub const ENGINE: Option<EngineSpec> = None;
 pub struct WhisperModel {
     /// Stable: it is what the `dictation_model` setting holds.
     pub id: &'static str,
+    pub label: &'static str,
     pub file: &'static str,
     pub size_bytes: u64,
     #[serde(skip)]
@@ -96,31 +97,45 @@ impl WhisperModel {
 /// `small` is the one recommended: measured here, it wrote "CodeFlow" and "pull request" where
 /// `base` heard "Coldflow" and "pulrico", and still answered a five-second clip in 0.6 s.
 /// `tiny` is there for «Reuniones» on a modest laptop: the one model that keeps up with live text
-/// beside a call on four slow cores, at the cost of more misheard words.
+/// beside a call on four slow cores, at the cost of more misheard words. `large` (v3, 2026-10-21) is
+/// the most accurate one and the only one besides Canary that translates — turbo was trained
+/// without the translation task; on the clips measured it wrote dictation at 0.3 % word errors, at
+/// 1.75 s an order on an M4's GPU and several times that on a CPU.
 pub const MODELS: &[WhisperModel] = &[
     WhisperModel {
         id: "tiny",
+        label: "Whisper tiny",
         file: "ggml-tiny-q5_1.bin",
         size_bytes: 32_152_673,
         sha256: "818710568da3ca15689e31a743197b520007872ff9576237bda97bd1b469c3d7",
     },
     WhisperModel {
         id: "base",
+        label: "Whisper base",
         file: "ggml-base-q5_1.bin",
         size_bytes: 59_707_625,
         sha256: "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898",
     },
     WhisperModel {
         id: "small",
+        label: "Whisper small",
         file: "ggml-small-q5_1.bin",
         size_bytes: 190_085_487,
         sha256: "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
     },
     WhisperModel {
         id: "turbo",
+        label: "Whisper large-v3 turbo",
         file: "ggml-large-v3-turbo-q5_0.bin",
         size_bytes: 574_041_195,
         sha256: "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+    },
+    WhisperModel {
+        id: "large",
+        label: "Whisper large-v3",
+        file: "ggml-large-v3-q5_0.bin",
+        size_bytes: 1_081_140_203,
+        sha256: "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1",
     },
 ];
 
@@ -157,23 +172,115 @@ pub struct Status {
     pub supported: bool,
     pub engine_installed: bool,
     pub engine_bytes: u64,
+    /// sherpa-onnx's library (Parakeet, Canary), shared with meetings' voices and the reading voices.
+    pub sherpa_installed: bool,
+    pub sherpa_bytes: u64,
+    /// Every model that listens: whisper's and sherpa-onnx's, in one list — one setting holds either.
     pub models: Vec<ModelStatus>,
 }
 
+/// One model that listens, whichever engine runs it.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelStatus {
-    #[serde(flatten)]
-    pub model: WhisperModel,
+    pub id: &'static str,
+    /// `whisper` · `parakeet` · `canary`.
+    pub family: &'static str,
+    pub label: &'static str,
+    pub size_bytes: u64,
     pub installed: bool,
+    /// Runnable now: the model and the library that runs it are both in.
+    pub usable: bool,
+    /// The library's download, when this model would bring it (it is not in yet).
+    pub engine_bytes: u64,
+    /// Codes it hears; empty = whisper's own ninety-nine.
+    pub languages: &'static [&'static str],
+    pub translates: bool,
+    pub licence: &'static str,
+    /// What may pick it: `dictation`, `codi`, `meetingsLive`, `meetingsFinal`, `flows`. The final
+    /// pass of a meeting needs per-word times, which only whisper gives.
+    pub features: &'static [&'static str],
 }
 
+const WHISPER_FEATURES: &[&str] = &["dictation", "codi", "meetingsLive", "meetingsFinal", "flows"];
+const SHERPA_FEATURES: &[&str] = &["dictation", "codi", "meetingsLive", "flows"];
+
 pub fn status() -> Status {
+    let engine_installed = engine_library().is_some();
+    let engine_bytes = ENGINE.map_or(0, |spec| spec.size);
+    let sherpa_installed = crate::meetings::sherpa_library().is_some();
+    let sherpa_bytes = crate::meetings::SHERPA.map_or(0, |spec| spec.size);
+    let whisper = MODELS.iter().map(|model| {
+        let installed = model_path(model).is_file();
+        ModelStatus {
+            id: model.id,
+            family: "whisper",
+            label: model.label,
+            size_bytes: model.size_bytes,
+            installed,
+            usable: installed && engine_installed,
+            engine_bytes: if engine_installed { 0 } else { engine_bytes },
+            languages: &[],
+            translates: model.id != "turbo",
+            licence: "MIT",
+            features: WHISPER_FEATURES,
+        }
+    });
+    let sherpa = crate::asr::MODELS.iter().filter(|_| crate::asr::supported()).map(|model| {
+        let installed = crate::asr::installed(model);
+        ModelStatus {
+            id: model.id,
+            family: match model.family {
+                crate::asr::Family::Transducer => "parakeet",
+                crate::asr::Family::Canary => "canary",
+            },
+            label: model.label,
+            size_bytes: model.size,
+            installed,
+            usable: installed && sherpa_installed,
+            engine_bytes: if sherpa_installed { 0 } else { sherpa_bytes },
+            languages: model.languages,
+            translates: model.translates,
+            licence: model.licence,
+            features: SHERPA_FEATURES,
+        }
+    });
     Status {
         supported: ENGINE.is_some(),
-        engine_installed: engine_library().is_some(),
-        engine_bytes: ENGINE.map_or(0, |spec| spec.size),
-        models: MODELS.iter().map(|model| ModelStatus { model: *model, installed: model_path(model).is_file() }).collect(),
+        engine_installed,
+        engine_bytes,
+        sherpa_installed,
+        sherpa_bytes: if sherpa_installed { 0 } else { sherpa_bytes },
+        models: whisper.chain(sherpa).collect(),
+    }
+}
+
+/// A model that listens, whichever engine runs it — what a setting naming one resolves to.
+#[derive(Debug, Clone, Copy)]
+pub enum Listener {
+    Whisper(&'static WhisperModel),
+    Sherpa(&'static crate::asr::AsrModel),
+}
+
+pub fn listener(id: &str) -> Option<Listener> {
+    let id = id.trim();
+    model(id).map(Listener::Whisper).or_else(|| crate::asr::model(id).map(Listener::Sherpa))
+}
+
+impl Listener {
+    pub fn id(&self) -> &'static str {
+        match self {
+            Listener::Whisper(model) => model.id,
+            Listener::Sherpa(model) => model.id,
+        }
+    }
+
+    /// Model and engine are both on disk.
+    pub fn usable(&self) -> bool {
+        match self {
+            Listener::Whisper(model) => model_path(model).is_file() && engine_library().is_some(),
+            Listener::Sherpa(model) => crate::asr::usable(model),
+        }
     }
 }
 
@@ -232,6 +339,9 @@ mod tests {
         }
         assert!(model("small").is_some());
         assert!(model("nope").is_none());
+        assert!(matches!(listener("parakeet"), Some(Listener::Sherpa(_))));
+        assert!(matches!(listener("large"), Some(Listener::Whisper(_))));
+        assert!(listener("nope").is_none());
     }
 
     #[test]

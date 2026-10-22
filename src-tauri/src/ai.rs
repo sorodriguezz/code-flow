@@ -984,6 +984,13 @@ pub struct AiInvocation<'a> {
     /// grok overrides its prompt and keeps one reading tool; agy and Cline get an empty folder and
     /// no permission to write. The in-process engine answers these in text mode. See each engine.
     pub text_only: bool,
+    /// The run's only tools are the app's own MCP servers (`app_mcp`) — none of the CLI's built-in
+    /// ones, none of the user's servers, skills or commands, and the system prompt replaced as in
+    /// [`AiInvocation::text_only`]. «Codi» runs so: measured on Claude Haiku (2026-10-21) a turn with
+    /// one app tool cost 4.2k tokens and acted in 1.2–1.7 s, where the default agent shape read 41.6k.
+    /// Only Claude Code can drop its built-in tools; the other engines run with the app's servers
+    /// beside their own and ignore it (each engine's module says what it does with it).
+    pub lean: bool,
     /// The user's Claude Code plugins this run keeps out (`vercel@claude-plugins-official`): turned
     /// off for the run alone with `--settings`, so their skills, servers and hooks never reach it and
     /// the user's own Claude Code is untouched. Set by the chats from
@@ -1383,6 +1390,8 @@ pub mod task {
     /// A long answer cut to what is worth hearing, before the thinking mark reads it aloud — see
     /// [`super::spoken_summary`].
     pub const SPOKEN_SUMMARY: &str = "spoken-summary";
+    /// «Codi»'s turns that its own router and the local model could not run.
+    pub const CODI: &str = "codi";
     /// The API client's assistant — see [`super::api_assist`].
     pub const API_EXPLAIN: &str = "api-explain";
     pub const API_TESTS: &str = "api-tests";
@@ -1418,6 +1427,7 @@ impl<'a> AiInvocation<'a> {
             json_schema: None,
             extra_dirs: &[],
             text_only: false,
+            lean: false,
             disabled_plugins: Vec::new(),
         }
     }
@@ -5714,6 +5724,30 @@ pub async fn spoken_summary(engine: &dyn AiEngine, binary: &str, model: &str, te
     inv.task = task::SPOKEN_SUMMARY;
     inv.text_only = true;
     inv.read_only = true;
+    let run = run(engine, binary, inv).await?;
+    Ok(strip_wrapper_fence(&run.text))
+}
+
+/// One of «Codi»'s turns on the provider its row names (`crate::codi::brain`): the order and the
+/// screen's state as the ask, Codi's instructions as the system prompt, and the app's interface
+/// (`server`, from `codemap::mcp::for_codi`) as the only tools — a lean run where the engine allows
+/// it. Runs in `folder`, Codi's own working folder, never a repository. The answer is what it says.
+pub async fn codi_turn(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    system: &str,
+    prompt: &str,
+    folder: &str,
+    server: crate::mcp_registry::LiveServer,
+) -> Result<String, String> {
+    let mut inv = AiInvocation::new(prompt, "");
+    inv.system_prompt = Some(system);
+    inv.model = model;
+    inv.task = task::CODI;
+    inv.cwd = Some(folder);
+    inv.lean = true;
+    inv.app_mcp = vec![server];
     let run = run(engine, binary, inv).await?;
     Ok(strip_wrapper_fence(&run.text))
 }

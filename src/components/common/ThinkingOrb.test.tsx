@@ -107,7 +107,50 @@ describe("ThinkingOrb", () => {
       }
     }
     // Every size the component accepts has its square.
-    for (const size of ["sm", "md", "card", "lg"]) expect(css.includes(`.cf-orb-${size} {`), size).toBe(true);
+    for (const size of ["sm", "md", "card", "lg", "hero"]) expect(css.includes(`.cf-orb-${size} {`), size).toBe(true);
+  });
+
+  it("mounts every design listening, with each cue, at Codi's size and gain", () => {
+    const cues = [undefined, { kind: "wake", at: performance.now() }, { kind: "ask", at: 0 }] as const;
+    for (const { id } of THINKING_DESIGNS) {
+      for (const cue of cues) {
+        for (const phase of ["listen", "speak", "think"] as const) {
+          const markup = renderToStaticMarkup(<ThinkingOrb design={id} size="hero" gain={2.2} activity={{ phase, cue }} />);
+          expect(markup, id).toContain("cf-orb-hero");
+          expect(markup, id).toContain("--cf-orb-gain:2.2");
+        }
+      }
+      // An ending wins over a cue: no cue is said on a mark that is finishing.
+      const done = renderToStaticMarkup(<ThinkingOrb design={id} size="hero" activity={{ phase: "listen", done: true, cue: { kind: "ask", at: 0 } }} />);
+      expect(done).toContain('data-state="done"');
+      expect(done).not.toContain("data-cue");
+    }
+    // At gain 1 — everywhere else in the app — nothing is written for it.
+    expect(renderToStaticMarkup(<ThinkingOrb design="bot" gain={1} activity={{ phase: "listen" }} />)).not.toContain("--cf-orb-gain");
+  });
+
+  it("gives listening a look of its own on every CSS design, and Codi's cues too", () => {
+    const phaseOf = (design: "bot" | "sphere") =>
+      renderToStaticMarkup(<ThinkingOrb design={design} activity={{ phase: "listen" }} />).match(/data-phase="(\w+)"/)?.[1];
+    expect(phaseOf("bot")).toBe("listen");
+    expect(phaseOf("sphere")).toBeUndefined();
+    expect(renderToStaticMarkup(<ThinkingOrb design="halo" activity={{ phase: "listen", cue: { kind: "ask", at: 0 } }} />)).toContain(
+      'data-cue="ask"',
+    );
+    // The canvas designs are handed the cue themselves.
+    expect(renderToStaticMarkup(<ThinkingOrb design="cat" activity={{ phase: "listen", cue: { kind: "ask", at: 0 } }} />)).not.toContain(
+      "data-cue",
+    );
+    for (const { id, kind } of THINKING_DESIGNS) {
+      if (kind !== "css") continue;
+      const parts = partClasses(renderToStaticMarkup(<ThinkingOrb design={id} />));
+      for (const rule of ['[data-phase="listen"]', '[data-cue="wake"]', '[data-cue="ask"]']) {
+        expect(
+          parts.some((name) => css.includes(`.cf-orb${rule} .${name}`)),
+          `${id} has no ${rule} rule`,
+        ).toBe(true);
+      }
+    }
   });
 
   it("gives every CSS design a still frame under reduced motion", () => {

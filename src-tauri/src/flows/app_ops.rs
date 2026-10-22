@@ -241,6 +241,7 @@ pub(super) async fn call(host: &AppHost, op: &str, args: Value, cancel: Cancella
         "knowledge.search" => knowledge_search(host, &args).await,
         "memory.recall" | "memory.propose" => memory_op(host, op, &args),
         "terminal.output" => terminal_output(host, &args),
+        "ui.act" => ui_act(host, &args).await,
         "diagram.save" | "diagram.read" => diagram_op(host, op, &args),
         "story.review" | "doc.generate" | "doc.publish" => story_op(host, op, &args, cancel).await,
         "ai.usage" => ai_usage(host, &args),
@@ -634,6 +635,18 @@ fn memory_op(host: &AppHost, op: &str, args: &Value) -> Result<Value, String> {
         },
     )?;
     serde_json::to_value(memory).map_err(|e| e.to_string())
+}
+
+/// «Acción de interfaz»: one interface action (`codi::ui`), confirmed by the user first when it
+/// destroys — a flow is an agent here, never the person who said yes.
+async fn ui_act(host: &AppHost, args: &Value) -> Result<Value, String> {
+    let action = arg(args, "action");
+    let params = args.get("params").cloned().unwrap_or_else(|| json!({}));
+    let result = crate::codi::ui::act(&host.app, action.trim(), params, crate::codi::ui::Asker::Agent, false).await?;
+    if !result.ok {
+        return Err(result.error.unwrap_or_else(|| format!("«{action}» did not run")));
+    }
+    Ok(json!({ "ok": true, "action": action, "say": result.say, "result": result.result }))
 }
 
 /// «Salida de terminal»: a bench terminal's last lines, found by its title (exact, then prefix, then

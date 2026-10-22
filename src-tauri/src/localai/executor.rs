@@ -144,9 +144,9 @@ impl ExecEngine {
 /// Waits for the lock rather than declining it: the only other holder is another task's start,
 /// and a task behind it wants the same answer after the same wait.
 pub async fn ensure_ready(entry: &ExecModelSpec, model_path: PathBuf, launch: Launch) -> Result<Arc<ExecEngine>, String> {
-    if !model_path.is_file() {
+    if !super::models::complete(&entry.spec, &model_path) {
         return Err(format!(
-            "{} isn't downloaded. Download it in Settings › AI engines › Local model.",
+            "{} isn't downloaded, or its download is incomplete. Download it in Settings › AI engines › Local model.",
             entry.spec.label
         ));
     }
@@ -352,11 +352,26 @@ impl ExecEngine {
 
     fn diagnostic_tail(&self) -> String {
         let Ok(lines) = self.diagnostics.lock() else { return String::new() };
-        if lines.is_empty() {
-            return String::new();
-        }
-        format!("It said: {}", lines.join(" / "))
+        said(&lines)
     }
+}
+
+/// What llama-server said before it stopped: its error lines when it printed any — the start-up chatter
+/// around them (verbosity, CORS warnings) buried the one that mattered in Codi's window — or all of it.
+fn said(lines: &[String]) -> String {
+    let errors: Vec<&str> = lines.iter().map(String::as_str).filter(|line| is_error_line(line)).collect();
+    if !errors.is_empty() {
+        return format!("It said: {}", errors.join(" / "));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!("It said: {}", lines.join(" / "))
+}
+
+/// `0.00.077.594 E llama_model_load: …` — llama.cpp's level letter — or an `error:` without one.
+fn is_error_line(line: &str) -> bool {
+    line.split_whitespace().nth(1) == Some("E") || line.to_ascii_lowercase().contains("error:")
 }
 
 /// Retires the executor after [`IDLE_TIMEOUT`] with nothing in flight.
@@ -406,6 +421,24 @@ pub fn sweep_stale() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_start_says_its_error_lines_only() {
+        let lines: Vec<String> = [
+            "0.00.044.154 I cmn common_param: common_params_print_info: verbosity = 3",
+            "0.00.044.466 W srv llama_server: CORS is set to allow all origins ('*')",
+            "0.00.045.863 I srv load_model: loading model '/models/m.gguf'",
+            "0.00.077.594 E llama_model_load: error loading model: tensor 'output.weight' data is not within the file bounds, model is corrupted or incomplete",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            said(&lines),
+            "It said: 0.00.077.594 E llama_model_load: error loading model: tensor 'output.weight' data is not within the file bounds, model is corrupted or incomplete"
+        );
+        assert_eq!(said(&lines[..2]), format!("It said: {} / {}", lines[0], lines[1]), "no error line: all of it");
+        assert_eq!(said(&[]), "");
+    }
 
     #[test]
     fn launches_compare_by_every_field_that_needs_a_new_process() {

@@ -1,8 +1,10 @@
 import { ended, phaseGroup, type PhaseGroup, type ThinkingActivity } from "./activity";
-import { blink, INK, lipSync, lookFor, sleepZ, strokeEye, WHITE, type Gaze } from "./face";
+import { askBeat, askBlink, cueClock, hop, startle } from "./cue";
+import { blink, INK, lipSync, lookFor, mouthOpen, sleepZ, soundIn, strokeEye, WHITE, type Gaze } from "./face";
 import { clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { listenLevel } from "./listen";
 import { voiceLevel } from "./voice";
 
 /**
@@ -12,7 +14,13 @@ import { voiceLevel } from "./voice";
  * lines; working, it rains — a few drops falling from under it; writing, a little bolt of lightning
  * (cyan, the assistant's) flickers beneath it while it talks. Speaking (the reading aloud), it
  * puffs gently with the voice, its mouth moving with it, and sound arcs ripple out at its side —
- * more of them the louder it gets. Quiet, it dozes.
+ * more of them the louder it gets. Quiet, it dozes. Listening (Codi), it stops drifting and sits up,
+ * its top puff raised, leaning in with its eyes wide on whoever speaks and its mouth shut; what it
+ * hears comes in as arcs closing on its *left* side — the speaking arcs go out of its right — and
+ * its puffs draw in a little with every syllable.
+ *
+ * Codi's cues: woken, it puffs up with a little hop and a flash of light, eyes wide on the viewer;
+ * asking, it tilts to one side and looks at the viewer, blinking twice now and then.
  *
  * Finish: it puffs up, wobbles like a jelly, beams with happy ^ ^ eyes, a few sparkles round it, and
  * turns green. Failed: it darkens into a red storm cloud and sags, its eyes X X — no puff, no
@@ -52,9 +60,10 @@ const BOLT: readonly (readonly [number, number])[] = [
   [0.58, 0.72],
 ];
 
-export function createCloud(canvas: HTMLCanvasElement, px: number): Painter {
+export function createCloud(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const clock = finishClock();
+  const cue = cueClock();
   const sparkles = makeBurst(8, 71);
   /** Mouth and shaped drops — what a cloud smaller than this cannot hold. */
   const detail = px >= 20;
@@ -77,6 +86,9 @@ export function createCloud(canvas: HTMLCanvasElement, px: number): Painter {
   let talk = 0;
   let voice = 0;
   let swell = 0;
+  /** Listening: how far into that look it is (0–1), and the microphone's level this frame. */
+  let perk = 0;
+  let hear = 0;
 
   const awake = (act: ThinkingActivity | undefined) => !ended(act) && !act?.quiet && !act?.stopping;
   // Speaking is its own look here, not writing's: `ThinkingOrb` hands this mark the phase as is.
@@ -107,11 +119,17 @@ export function createCloud(canvas: HTMLCanvasElement, px: number): Painter {
     const warm = (c: Rgb) => mix(c, p.warning, warn * 0.3);
     const a = alpha;
     const g = 0.4 + 0.6 * easeOut(grow);
+    // What it hears, as far as Codi's gain takes it; the wake's start; the ask's tilt.
+    const draw = Math.min(1.4, hear * gain) * perk;
+    const start = startle(cue.wake);
+    const tilt = cue.ask * (0.08 + 0.05 * askBeat(time));
+    const voicedSwell = Math.min(1, swell * gain);
 
-    const still = 1 - sleep * 0.6 - sag * 0.7;
-    // Speaking, it makes room at its right for the sound arcs.
-    const sway = Math.sin(time * 0.9) * 0.025 * still - 0.05 * talk;
-    const bob = Math.sin(time * 1.7) * 0.015 * still + sleep * 0.02 + sag * 0.04;
+    // Listening, it holds still to hear.
+    const still = (1 - sleep * 0.6 - sag * 0.7) * (1 - 0.7 * perk);
+    // Speaking, it makes room at its right for the sound arcs; listening, at its left for theirs.
+    const sway = Math.sin(time * 0.9) * 0.025 * still - 0.05 * talk + 0.04 * perk;
+    const bob = Math.sin(time * 1.7) * 0.015 * still + sleep * 0.02 + sag * 0.04 - 0.045 * hop(cue.wake);
 
     // The bolt's flicker: a double flash, then dark.
     const beat = time % 1.1;
@@ -158,7 +176,9 @@ export function createCloud(canvas: HTMLCanvasElement, px: number): Painter {
 
     ctx.save();
     ctx.translate(u(0.5 + sway), u(0.75 + bob));
-    const voiced = 1 + 0.05 * swell;
+    ctx.rotate(-tilt);
+    // The voice puffs it out; hearing draws it in; woken, it puffs up at once.
+    const voiced = (1 + 0.05 * Math.min(1.6, swell * gain)) * (1 + 0.025 * perk - 0.03 * draw + 0.07 * start);
     ctx.scale(g * puff * voiced * (1 + sag * 0.03), g * puff * voiced * (1 - sag * 0.07));
     ctx.translate(-u(0.5), -u(0.75));
 
@@ -166,13 +186,15 @@ export function createCloud(canvas: HTMLCanvasElement, px: number): Painter {
     ctx.beginPath();
     PUFFS.forEach(([x, y, r], i) => {
       const breathe = 1 + Math.sin(time * 1.8 + i * 1.3) * 0.022 * still + Math.sin(fin * 18 + i * 2.1) * 0.07 * jelly;
-      ctx.moveTo(u(x + r * breathe), u(y));
-      ctx.arc(u(x), u(y), u(r * breathe), 0, TAU);
+      // Sitting up to listen: the top puff rises.
+      const up = i === 0 ? 0.025 * perk : 0;
+      ctx.moveTo(u(x + r * breathe), u(y - up));
+      ctx.arc(u(x), u(y - up), u(r * breathe), 0, TAU);
     });
     ctx.rect(u(BASE[0]), u(BASE[1]), u(BASE[2] - BASE[0]), u(BASE[3] - BASE[1]));
     const top: Rgb = mix(mix(WHITE, p.c, 0.3), failed ? mix(end, INK, 0.15) : mix(end, WHITE, 0.3), tint);
     const bottom: Rgb = mix(mix(p.a, WHITE, 0.3), failed ? mix(end, INK, 0.5) : end, tint);
-    const lit = flash * 0.3;
+    const lit = Math.max(flash * 0.3, start * 0.35);
     const grad = ctx.createLinearGradient(0, u(0.24), 0, u(0.76));
     grad.addColorStop(0, rgba(warm(mix(top, WHITE, lit)), a));
     grad.addColorStop(1, rgba(warm(mix(bottom, WHITE, lit)), a));
@@ -185,9 +207,11 @@ export function createCloud(canvas: HTMLCanvasElement, px: number): Painter {
 
     // The face.
     const ink = rgba(mix(INK, WHITE, failed ? tint * 0.9 : 0), 0.9 * a);
-    const open = act?.stopping ? 0.45 : blink(time, 3.9);
+    const open = act?.stopping ? 0.45 : cue.ask > 0.5 ? askBlink(time) : blink(time, 3.9);
     const ey = 0.585;
     const eyeR = detail ? 0.042 : 0.052;
+    // Wide while it listens, wider for a moment when woken.
+    const wide = 1 + 0.15 * perk + 0.2 * start;
     for (const ex of [0.415, 0.585]) {
       if (dazed) strokeEye(ctx, u(ex), u(ey), u(eyeR), "x", ink, Math.max(1, u(0.03)));
       else if (happy) strokeEye(ctx, u(ex), u(ey), u(eyeR * 1.1), "happy", ink, Math.max(1, u(0.032)));
@@ -196,7 +220,7 @@ export function createCloud(canvas: HTMLCanvasElement, px: number): Painter {
       } else {
         ctx.fillStyle = ink;
         ctx.beginPath();
-        ctx.ellipse(u(ex + lookX * 0.02), u(ey + lookY * 0.018), u(eyeR * 0.9), u(eyeR * 1.35 * open), 0, 0, TAU);
+        ctx.ellipse(u(ex + lookX * 0.02), u(ey + lookY * 0.018), u(eyeR * 0.9 * wide), u(eyeR * 1.35 * open * wide), 0, 0, TAU);
         ctx.fill();
       }
     }
@@ -210,7 +234,7 @@ export function createCloud(canvas: HTMLCanvasElement, px: number): Painter {
       if (speaking) {
         // Lip-sync: the mouth opens with the voice.
         const w = detail ? 0.032 : 0.048;
-        ctx.ellipse(u(0.5), u(0.67), Math.max(0.6, u(w)), Math.max(0.5, u(w * (0.2 + 0.95 * mouth))), 0, 0, TAU);
+        ctx.ellipse(u(0.5), u(0.67), Math.max(0.6, u(w)), Math.max(0.5, u(w * mouthOpen(mouth, gain))), 0, 0, TAU);
         ctx.fill();
       } else if (mouth > 0.05 && !dazed) {
         ctx.ellipse(u(0.5), u(0.665), u(0.025), u(0.032 * mouth + 0.005), 0, 0, TAU);
@@ -237,15 +261,22 @@ export function createCloud(canvas: HTMLCanvasElement, px: number): Painter {
       const ox = u(0.83 + sway + 0.05 * talk);
       const oy = u(0.6 + bob);
       for (let j = 0; j < arcs; j++) {
-        const lit = clamp01((swell + 0.15 - j * 0.28) / 0.25);
+        // With Codi's gain more of them light on a quieter syllable; none goes further out.
+        const lit = clamp01((voicedSwell + 0.15 - j * 0.28) / 0.25);
         if (lit <= 0.01) continue;
         ctx.globalAlpha = talk * lit * a;
         ctx.beginPath();
         // At most 0.14 out from beside its edge: the outer arc stays inside the square.
-        ctx.arc(ox, oy, u((0.055 + j * (detail ? 0.042 : 0.06)) * (0.85 + 0.15 * swell)), -0.65, 0.65);
+        ctx.arc(ox, oy, u((0.055 + j * (detail ? 0.042 : 0.06)) * (0.85 + 0.15 * voicedSwell)), -0.65, 0.65);
         ctx.stroke();
       }
       ctx.globalAlpha = 1;
+    }
+
+    // Listening: what it hears, arcs closing in on its left side and fading as they land.
+    if (draw > 0.01) {
+      const color = warm(mix(p.c, WHITE, p.dark ? 0.3 : 0));
+      soundIn(ctx, u(0.17 + sway), u(0.6 + bob), u(0.15), u(0.035), Math.PI, 0.6, time, draw * a, color, Math.max(1, u(0.032)), detail ? 3 : 2);
     }
 
     // The landing's sparkles: little four-point stars round it, popping and fading.
@@ -271,16 +302,20 @@ export function createCloud(canvas: HTMLCanvasElement, px: number): Painter {
 
   function settle(act: ThinkingActivity | undefined, k: number) {
     const group = groupOf(act);
-    // Speaking, it looks at whoever it is talking to.
+    // Speaking or listening, it looks at whoever it is talking with, and so it does when woken or
+    // asking — the wake snapping its eyes there.
     // Following the pointer, it looks at it — awake, and not while it is talking to someone.
+    const facing = group === "speak" || group === "listen" || cue.wake >= 0 || cue.ask > 0.5;
     const [tx, ty] =
-      gaze && group !== "speak" && !ended(act) && !act?.quiet && !act?.stopping
+      gaze && !facing && !ended(act) && !act?.quiet && !act?.stopping
         ? gaze
         : group
-          ? lookFor(group === "work" ? "edit" : group === "speak" ? "start" : act?.phase, time)
+          ? lookFor(group === "work" ? "edit" : facing ? "start" : act?.phase, time)
           : [0, 0];
-    lookX += (tx - lookX) * Math.min(1, k * 10);
-    lookY += (ty - lookY) * Math.min(1, k * 10);
+    const snap = cue.wake >= 0 ? 40 : 10;
+    lookX += (tx - lookX) * Math.min(1, k * snap);
+    lookY += (ty - lookY) * Math.min(1, k * snap);
+    perk += ((group === "listen" ? 1 : 0) - perk) * Math.min(1, k * 6);
     const resting = act?.quiet && !ended(act) ? 1 : 0;
     sleep += (resting - sleep) * Math.min(1, k * 3);
     warn += (resting - warn) * Math.min(1, k * 3);
@@ -304,14 +339,17 @@ export function createCloud(canvas: HTMLCanvasElement, px: number): Painter {
     },
     setActivity(activity) {
       clock.set(activity);
+      cue.set(activity);
     },
     tick(dt) {
       frozen = false;
       clock.step(dt);
+      cue.step(dt);
       const act = clock.act;
       time += dt * (act?.quiet && !ended(act) ? 0.5 : 1);
       grow += (1 - grow) * Math.min(1, dt * 3.5);
       voice = groupOf(act) === "speak" ? voiceLevel() : 0;
+      hear = groupOf(act) === "listen" ? listenLevel() : 0;
       settle(act, dt);
       paint();
     },
@@ -320,8 +358,11 @@ export function createCloud(canvas: HTMLCanvasElement, px: number): Painter {
       if (time === 0) time = 1.25;
       grow = 1;
       frozen = true;
-      // A still frame of speech is mid-syllable: mouth open, arcs out.
+      // A still frame of speech is mid-syllable: mouth open, arcs out — and of listening, mid-word:
+      // sat up, arcs on their way in.
       voice = groupOf(act) === "speak" ? 0.85 : 0;
+      hear = groupOf(act) === "listen" ? 0.7 : 0;
+      cue.settle();
       settle(act, 1);
       clock.settle();
       paint();

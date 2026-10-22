@@ -1,6 +1,8 @@
 import { ended, type ThinkingActivity } from "./activity";
+import { askBreath, cueClock, softHalo, startle } from "./cue";
 import { INK, WHITE, type Gaze } from "./face";
 import { clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
+import { listenLevel } from "./listen";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 import { easeToward, toward } from "./pointer";
@@ -23,6 +25,11 @@ import { easeToward, toward } from "./pointer";
  * Following the pointer (`ThinkingOrb follow`), it turns toward it: the disc drifts its way, the
  * craters roll round to face it, its light gathers on that side and the stars slip the other way,
  * behind it. The shadow never moves for it — how much of the moon is lit is the run's phase.
+ *
+ * Listening (Codi), it holds a steady gibbous, three quarters lit, and draws everything in with each
+ * syllable it hears: rings of light close on its rim from outside and the stars are pulled toward
+ * it. Codi's cues: woken, it flares bright, the stars all flashing, and pops for an instant; asking,
+ * it glows softly in and out inside a halo, turning hardly at all.
  */
 
 /** Craters: [x, y, r] on a moon of radius 1, drifting across it as it turns. */
@@ -45,9 +52,12 @@ const STARS: readonly [number, number][] = [
   [0.1, 0.84],
 ];
 
-export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
+export function createMoon(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const clock = finishClock();
+  const cue = cueClock();
+  /** The microphone's level this frame while it listens, as far as Codi's gain takes it. */
+  let pull = 0;
   const burst = makeBurst(10, 61);
   const detail = px >= 20;
   const u = (v: number) => v * px;
@@ -77,6 +87,8 @@ export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
         return 0.35 + 0.3 * Math.sin(time * 2.6);
       case "write":
         return 0.55;
+      case "listen":
+        return 0.72;
       default:
         return 0.35 + 0.3 * Math.sin(time * 0.9);
     }
@@ -103,8 +115,12 @@ export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
     const throb = writing ? 0.5 + 0.5 * Math.abs(Math.sin(time * 6)) : 0;
     const flare = !failed && fin > 0.3 && fin < 1 ? Math.sin(((fin - 0.3) / 0.7) * Math.PI) : 0;
 
+    // Listening, drawn in by what it hears; woken, a flare and a pop; asking, a slow glow.
+    const drawn = Math.min(1.4, pull);
+    const start = startle(cue.wake);
+    const breath = askBreath(time);
     // Bigger where there are no stars to leave room for.
-    const R = u(detail ? 0.34 : 0.42);
+    const R = u(detail ? 0.34 : 0.42) * (1 + 0.05 * start) * (1 + 0.03 * cue.ask * (breath - 0.5));
     // Turned toward the pointer: `tx`, `ty` -1..1, nothing at rest.
     const tx = look.x * look.on;
     const ty = look.y * look.on;
@@ -112,13 +128,18 @@ export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
     const cy = u(0.5 + (1 - easeOut(rise)) * 0.18) + ty * R * 0.12;
     const a = alpha * (0.3 + 0.7 * easeOut(rise));
 
-    // Stars, twinkling round it.
+    if (cue.ask > 0.01) softHalo(ctx, cx, cy, R, mix(p.a, p.c, 0.4), 0.25 * cue.ask * (0.55 + 0.45 * breath) * a);
+
+    // Stars, twinkling round it — pulled toward it by what it hears, all flashing when it wakes.
     if (detail) {
+      const toward = 0.3 * Math.min(1, drawn);
       STARS.forEach(([x, y], i) => {
-        const tw = 0.5 + 0.5 * Math.sin(twinkle + i * 1.9);
+        const tw = Math.max(0.5 + 0.5 * Math.sin(twinkle + i * 1.9), start);
         ctx.fillStyle = rgba(warmed(mix(mix(p.c, WHITE, 0.4), end, tint)), (0.25 + 0.6 * tw) * a);
         ctx.beginPath();
-        ctx.arc(u(x - tx * 0.035), u(y - ty * 0.035), Math.max(0.6, u(0.016 + 0.014 * tw)), 0, TAU);
+        const sx = x - tx * 0.035;
+        const sy = y - ty * 0.035;
+        ctx.arc(u(sx + (0.5 - sx) * toward), u(sy + (0.5 - sy) * toward), Math.max(0.6, u(0.016 + 0.014 * tw)), 0, TAU);
         ctx.fill();
       });
     }
@@ -134,7 +155,7 @@ export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
     grad.addColorStop(1, rgba(rim, a));
     ctx.save();
     ctx.shadowColor = rgba(mix(p.a, end, tint), (p.dark ? 0.6 : 0.4) * a);
-    ctx.shadowBlur = u(0.12 + 0.08 * throb + 0.12 * flare);
+    ctx.shadowBlur = u(0.12 + 0.08 * throb + 0.12 * Math.max(flare, start) + 0.08 * cue.ask * breath);
     ctx.fillStyle = grad;
     ctx.beginPath();
     ctx.arc(cx, cy, R, 0, TAU);
@@ -171,6 +192,21 @@ export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
     }
     ctx.restore();
 
+    // Listening: rings of light closing on its rim from outside, fading as they land.
+    if (drawn > 0.01) {
+      ctx.strokeStyle = rgba(warmed(mix(mix(p.c, WHITE, 0.4), p.a, 0.15)), 1);
+      ctx.lineWidth = Math.max(0.8, u(0.02));
+      const out = Math.min(R * 1.42, u(0.47) - Math.hypot(cx - u(0.5), cy - u(0.5)));
+      for (const offset of [0, 0.5]) {
+        const k = (time * 0.9 + offset) % 1;
+        ctx.globalAlpha = Math.sin(k * Math.PI) * 0.6 * Math.min(1, drawn) * a;
+        ctx.beginPath();
+        ctx.arc(cx, cy, out - (out - R * 1.04) * k, 0, TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+
     // A blood moon keeps a red rim of light round the eclipse.
     if (failed && tint > 0) {
       ctx.strokeStyle = rgba(end, 0.7 * tint * a);
@@ -198,19 +234,22 @@ export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
   return {
     setActivity(activity) {
       clock.set(activity);
+      cue.set(activity);
     },
     setGaze(next) {
       gaze = next;
     },
     tick(dt) {
       clock.step(dt);
+      cue.step(dt);
       const act = clock.act;
+      pull = awake(act) && act?.phase === "listen" ? listenLevel() * gain : 0;
       easeToward(look, awake(act) ? gaze : null, dt, 4);
       time += dt * (act?.quiet && !ended(act) ? 0.4 : 1);
       rise = Math.min(1, rise + dt * 1.4);
       if (!ended(act)) lit += (litGoal(act) - lit) * Math.min(1, dt * 3);
       const reading = awake(act) && (act?.phase === "read" || act?.phase === "search");
-      turn += dt * (reading ? 0.35 : 0.05);
+      turn += dt * (reading ? 0.35 : 0.05) * (1 - 0.7 * cue.ask);
       const working = awake(act) && (act?.phase === "edit" || act?.phase === "run" || act?.phase === "tool");
       twinkle += dt * (working ? 9 : 2.5);
       const resting = act?.quiet && !ended(act) ? 1 : 0;
@@ -221,6 +260,9 @@ export function createMoon(canvas: HTMLCanvasElement, px: number): Painter {
     still() {
       const act = clock.act;
       if (time === 0) time = 1.4;
+      cue.settle();
+      // A still frame of listening is mid-word: a ring on its way in, the stars drawn close.
+      pull = awake(act) && act?.phase === "listen" ? 0.7 * gain : 0;
       rise = 1;
       if (!ended(act)) lit = litGoal(act);
       const resting = act?.quiet && !ended(act) ? 1 : 0;

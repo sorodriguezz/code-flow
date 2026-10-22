@@ -34,6 +34,7 @@ import { getProject, startWatching, stopWatching } from "./lib/tauri/commands";
 import { followRepoChanges } from "./lib/repoRefresh";
 import { pipelinesAvailable, useVcsConnectionsStore } from "./state/vcsConnectionsStore";
 import { WINDOW } from "./lib/windowIdentity";
+import { startCodiBus } from "./lib/codi/bus";
 import { startWindowBoundsTracking } from "./lib/windowControls";
 import { useFloatingEditorShortcuts, useRemoteActionShortcuts } from "./lib/useGlobalShortcuts";
 import { parseFileIslandRef } from "./lib/editorIslands";
@@ -87,6 +88,8 @@ const ChatView = lazy(() => import("./components/chat/ChatView").then((m) => ({ 
 const QuickAskWindow = lazy(() =>
   import("./components/chat/QuickAskWindow").then((m) => ({ default: m.QuickAskWindow })),
 );
+// Its own chunk, and small: the voice assistant's window draws a face, two switches and a log.
+const CodiWindow = lazy(() => import("./components/codi/CodiWindow").then((m) => ({ default: m.CodiWindow })));
 const GraphView = lazy(() => import("./components/git/GraphView").then((m) => ({ default: m.GraphView })));
 const ChangesPanel = lazy(() => import("./components/git/ChangesPanel").then((m) => ({ default: m.ChangesPanel })));
 const EditorView = lazy(() => import("./components/editor/EditorView").then((m) => ({ default: m.EditorView })));
@@ -172,6 +175,10 @@ function useSatelliteBoot(): boolean {
       }
       useAccentStore.getState().apply(useThemeStore.getState().resolved);
       setReady(true);
+      // «Codi»'s actions for what this window holds — see `lib/codi/actions`. Not the ask box, which
+      // holds a question rather than a screen of the app, nor Codi's own window, which holds Codi.
+      const kind = WINDOW.satellite?.kind;
+      if (kind && kind !== "quick" && kind !== "codi") startCodiBus();
     })();
   }, []);
 
@@ -588,6 +595,26 @@ export default function SatelliteApp() {
       // One sheet and no frame, so see-through it is a single layer — see `.cf-glass-solo`.
       <div className="cf-glass-solo flex h-screen flex-col overflow-hidden">
         <QuickWindow refId={spec.refId} />
+        <TitleTooltips />
+      </div>
+    );
+  }
+
+  // Codi's window: frameless like the ask box, its own strip to drag and close by — see
+  // `CodiWindow`. Toasts and the confirm dialog stay: a microphone the system refused is offered its
+  // privacy page through the same dialog dictation uses (`reportMicError`). Mounted before the boot
+  // is done too, so the strip and its close button are there from the first frame — a frameless
+  // window has no other way out — and the body waits for `ready`.
+  if (spec && kind === "codi") {
+    return (
+      <div className="cf-glass-solo flex h-screen flex-col overflow-hidden">
+        <ErrorBoundary resetKey={spec.refId}>
+          <Suspense fallback={<ViewSkeleton />}>
+            <CodiWindow ready={ready} />
+          </Suspense>
+        </ErrorBoundary>
+        <ToastContainer />
+        <ConfirmModal />
         <TitleTooltips />
       </div>
     );

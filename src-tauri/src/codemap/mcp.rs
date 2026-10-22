@@ -60,13 +60,19 @@ struct Access {
     /// the repository (another terminal's output, the services' logs) into what a run like that has
     /// no business quoting back. Fewer tool definitions on every such run, too.
     grounding: bool,
+    /// «Codi»'s turn: the interface's three tools ([`CODI_TOOLS`]) and nothing else — its run is
+    /// lean (`AiInvocation::lean`), so every definition is tokens it pays on every order.
+    codi: bool,
 }
 
 impl Access {
     fn new(root: &str, acts: bool, token: &str) -> Self {
-        Access { root: root.to_string(), acts, session: format!("mcp:{}", &token[..token.len().min(16)]), workspace: false, grounding: false }
+        Access { root: root.to_string(), acts, session: format!("mcp:{}", &token[..token.len().min(16)]), workspace: false, grounding: false, codi: false }
     }
 }
+
+/// The tools «Codi»'s token opens — see [`Access::codi`].
+const CODI_TOOLS: &[&str] = &["ui_state", "ui_actions", "ui_act"];
 
 /// The tools a workspace chat's token opens — see [`Access::workspace`].
 const WORKSPACE_TOOLS: &[&str] = &["search_knowledge", "recall", "read_note"];
@@ -92,6 +98,12 @@ impl Drop for Grant {
 /// `acts`: the run may act, so it gets the app's action tools as well as the queries.
 pub fn for_run(root: &str, acts: bool) -> Option<(LiveServer, Grant)> {
     serve(|token| Access::new(root, acts, token))
+}
+
+/// The server for one of «Codi»'s turns, in its working folder `root`: the interface's tools only, and
+/// its approvals asked in Codi's own window (the session says whose they are).
+pub fn for_codi(root: &str) -> Option<(LiveServer, Grant)> {
+    serve(|token| Access { codi: true, session: format!("codi:{}", &token[..token.len().min(16)]), ..Access::new(root, true, token) })
 }
 
 /// [`for_run`] for a run over someone else's material — see [`Access::grounding`]. Never acts.
@@ -636,7 +648,30 @@ pub fn tools_for(acts: bool) -> Vec<Value> {
     if acts {
         all.extend(app_action_tools());
     }
+    // The interface itself, once a window has said what it can do (`codi::ui`): what is on screen
+    // for anyone, driving it for a run that may act.
+    if crate::codi::ui::ready() {
+        all.extend(interface_tools(acts));
+    }
     all
+}
+
+/// `ui_state` and `ui_actions` (looking), `ui_act` (acting) — the app's interface as tools.
+fn interface_tools(acts: bool) -> Vec<Value> {
+    crate::codi::ui::generic_tools()
+        .into_iter()
+        .filter(|(name, _, _)| acts || *name != "ui_act")
+        .map(|(name, description, schema)| {
+            let tool = json!({ "name": name, "description": description, "inputSchema": schema });
+            if name == "ui_act" {
+                let mut tool = tool;
+                tool["annotations"] = json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false });
+                tool
+            } else {
+                read_only(tool)
+            }
+        })
+        .collect()
 }
 
 /// The app's tools that only look — the `cf` verbs that change nothing.
@@ -753,6 +788,27 @@ fn app_action_tools() -> Vec<Value> {
 /// (`agentcli::run_verb`). `None` for a name that is not one of these.
 async fn app_tool(access: &Access, name: &str, args: &Value) -> Option<Result<String, String>> {
     let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    // The interface: the `cf ui` verb, in-process.
+    if CODI_TOOLS.contains(&name) {
+        let list: Vec<String> = match name {
+            "ui_state" => vec!["state".into()],
+            "ui_actions" => vec!["actions".into(), text("area")],
+            _ => {
+                if !access.acts {
+                    return Some(Err("ui_act is not available to a read-only run".into()));
+                }
+                let action = text("action");
+                if action.is_empty() {
+                    return Some(Err("action is required — ui_actions lists them".into()));
+                }
+                let params = args.get("params").cloned().unwrap_or_else(|| json!({}));
+                let params = if let Value::String(raw) = &params { raw.clone() } else { params.to_string() };
+                vec![action, params]
+            }
+        };
+        let Some(app) = crate::ai_usage::app() else { return Some(Err("CodeFlow is not ready yet".to_string())) };
+        return Some(crate::agentcli::run_verb(app, "ui", list, String::new(), &access.root, &access.session).await);
+    }
     let number = |key: &str| args.get(key).and_then(Value::as_u64).map(|n| n.to_string());
     let need = |key: &str| {
         let value = text(key);
@@ -871,12 +927,16 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
             )
         }
         "ping" => result_reply(id, json!({})),
+        "tools/list" if access.codi => result_reply(id, json!({"tools": interface_tools(true)})),
         "tools/list" if access.workspace => result_reply(id, json!({"tools": workspace_tools()})),
         "tools/list" if access.grounding => result_reply(id, json!({"tools": grounding_tools()})),
         "tools/list" => result_reply(id, json!({"tools": tools_for(access.acts)})),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or_default();
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+            if access.codi && !CODI_TOOLS.contains(&name) {
+                return Some(text_result(id, format!("{name} is not available to Codi: it drives the interface with ui_state, ui_actions and ui_act"), true));
+            }
             if access.workspace && !WORKSPACE_TOOLS.contains(&name) {
                 return Some(text_result(id, format!("{name} is not available in the workspace chat: there is no single repository here"), true));
             }

@@ -1,6 +1,8 @@
 import { ended, type ThinkingActivity } from "./activity";
+import { askBeat, askBlink, cueClock, hop, startle } from "./cue";
 import { aiCycle, clamp01, easeOut, easeOutBack, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
-import { blink, fillHeart, INK, lookFor, sleepZ, strokeEye, WHITE, type Gaze } from "./face";
+import { blink, fillHeart, INK, lookFor, sleepZ, soundIn, strokeEye, WHITE, type Gaze } from "./face";
+import { listenLevel } from "./listen";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 
@@ -12,7 +14,13 @@ import { prepareCanvas, type Painter } from "./ticker";
  * What it does is the phase: thinking, it looks around, blinks and twitches an ear; reading, its eyes
  * sweep along line after line; editing, it crouches with its pupils gone round, tracking a dot the
  * way a cat tracks a laser; writing, it meows; starting, it pops up with its eyes wide. A quiet run
- * sends it to sleep, a "z" drifting up out of the corner.
+ * sends it to sleep, a "z" drifting up out of the corner. Listening (Codi), its ears prick up and
+ * forward and it leans in, its pupils gone round and wide on whoever speaks, its mouth shut; each
+ * syllable it hears swivels its ears a little further toward the sound, which comes in as arcs
+ * closing on them from either side.
+ *
+ * Codi's cues: woken, it hops with a start — ears straight up, eyes wide and on the viewer; asking,
+ * it tilts its head with one ear turned back and looks at the viewer, blinking twice now and then.
  *
  * Finish: it crouches, jumps, lands green with happy ^ ^ eyes, and throws a burst of hearts.
  * Failed: no jump — it slumps, its ears droop, its eyes go X X, and it turns red.
@@ -29,9 +37,10 @@ function twitch(time: number, side: number): number {
   return k < 0.18 ? Math.sin((k / 0.18) * Math.PI) * 0.35 : 0;
 }
 
-export function createCat(canvas: HTMLCanvasElement, px: number): Painter {
+export function createCat(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const clock = finishClock();
+  const cue = cueClock();
   const hearts = makeBurst(12, 41);
   /** Pupils, nose and mouth — what a cat smaller than this cannot hold. */
   const detail = px >= 20;
@@ -48,12 +57,18 @@ export function createCat(canvas: HTMLCanvasElement, px: number): Painter {
   let warn = 0;
   let alpha = 1;
   let mouth = 0;
+  /** Listening: how far into that look it is (0–1), and the microphone's level this frame. */
+  let perk = 0;
+  let hear = 0;
 
   const awake = (act: ThinkingActivity | undefined) => !ended(act) && !act?.quiet && !act?.stopping;
   const hunting = (act: ThinkingActivity | undefined) => awake(act) && (act?.phase === "edit" || act?.phase === "run");
+  const listening = (act: ThinkingActivity | undefined) => awake(act) && act?.phase === "listen";
 
   function lookTarget(act: ThinkingActivity | undefined): readonly [number, number] {
     if (ended(act) || act?.quiet || act?.stopping) return [0, 0];
+    // Listening, woken or asking, it looks at whoever it is with.
+    if (listening(act) || cue.wake >= 0 || cue.ask > 0.5) return [0, 0];
     // Following the pointer, that is what it watches — the way a cat does. Working, the point it
     // darts after is the dot it is about to pounce on.
     return gaze ?? lookFor(act?.phase, time);
@@ -145,22 +160,36 @@ export function createCat(canvas: HTMLCanvasElement, px: number): Painter {
     const end = endColor(p, failed);
     sx *= 1 + crouch * 0.03;
     sy *= 1 - crouch * 0.04;
+    // What it hears, as far as Codi's gain takes it; the wake's start; the ask's tilt.
+    const draw = Math.min(1.4, hear * gain) * perk;
+    const start = startle(cue.wake);
+    const tilt = cue.ask * (0.09 + 0.05 * askBeat(time));
+    // Listening, it leans in; the wake's hop is low, like the finish's jump, for the ears.
+    sx *= 1 + 0.03 * perk;
+    sy *= 1 + 0.03 * perk;
+    lift += 0.035 * hop(cue.wake);
 
     const tone = (h: Rgb, g: Rgb) => rgba(mix(mix(h, g, green), p.warning, warn * 0.3), alpha);
     const fur = [tone(p.a, mix(end, WHITE, 0.3)), tone(p.b, end), tone(p.c, mix(end, INK, 0.25))];
     const innerEar = tone(mix(p.a, WHITE, 0.5), mix(end, WHITE, 0.55));
     const grow01 = 0.35 + 0.65 * easeOutBack(grow);
-    const bob = Math.sin(time * 2.2) * 0.012 * (1 - sleep) + sleep * 0.03 + crouch * 0.03;
+    // Listening, it holds still to hear.
+    const bob = Math.sin(time * 2.2) * 0.012 * (1 - sleep) * (1 - 0.8 * perk) + sleep * 0.03 + crouch * 0.03;
 
     ctx.save();
     ctx.translate(u(0.5), u(0.88 - lift + bob));
+    ctx.rotate(-tilt);
     ctx.scale(sx * grow01, sy * grow01);
     ctx.translate(-u(0.5), -u(0.88));
 
-    // Ears: a twitch while it thinks, back while it sleeps, flattened for the jump, forward to hunt.
-    const thinking = awake(act) && !hunting(act);
+    // Ears: a twitch while it thinks, back while it sleeps, flattened for the jump, forward to hunt —
+    // pricked up and in to listen, swivelling further in with each syllable; straight up when woken;
+    // one turned back when it asks.
+    const thinking = awake(act) && !hunting(act) && perk < 0.5;
     for (const side of [-1, 1] as const) {
-      const angle = (thinking ? twitch(time, side) : 0) + sleep * 0.25 + flat - crouch * 0.12;
+      const prick = -0.08 * perk - 0.06 * Math.min(1, draw) - 0.1 * start;
+      const quizzical = side > 0 ? 0.3 * cue.ask : 0;
+      const angle = (thinking ? twitch(time, side) : 0) + sleep * 0.25 + flat - crouch * 0.12 + prick + quizzical;
       ear(side, angle, fur[side < 0 ? 0 : 1], innerEar);
     }
 
@@ -171,15 +200,17 @@ export function createCat(canvas: HTMLCanvasElement, px: number): Painter {
     grad.addColorStop(1, fur[2]);
     ctx.save();
     ctx.shadowColor = rgba(mix(mix(p.a, end, green), p.warning, warn * 0.3), (p.dark ? 0.55 : 0.35) * alpha);
-    ctx.shadowBlur = u(0.14);
+    // Brighter for each syllable it hears, and in the flash of a wake.
+    ctx.shadowBlur = u(0.14 + 0.06 * Math.min(1, draw) + 0.1 * start);
     ctx.beginPath();
     ctx.ellipse(u(0.5), u(0.61), u(0.345), u(0.265), 0, 0, TAU);
     ctx.fillStyle = grad;
     ctx.fill();
     ctx.restore();
 
-    // The eyes.
-    const open = act?.stopping ? 0.45 : blink(time);
+    // The eyes: wide while it listens, wider for a moment when woken.
+    const open = act?.stopping ? 0.45 : cue.ask > 0.5 ? askBlink(time) : blink(time);
+    const wide = 1 + 0.1 * perk + 0.15 * start;
     const eyeLight = mix(mix(p.c, WHITE, 0.55), p.warning, warn * 0.3);
     for (const ex of [0.385, 0.615]) {
       const ey = 0.6;
@@ -203,7 +234,7 @@ export function createCat(canvas: HTMLCanvasElement, px: number): Painter {
       ctx.shadowBlur = u(0.08);
       ctx.fillStyle = rgba(eyeLight, alpha);
       ctx.beginPath();
-      ctx.ellipse(0, 0, u(0.085), u(0.1), 0, 0, TAU);
+      ctx.ellipse(0, 0, u(0.085 * wide), u(0.1 * wide), 0, 0, TAU);
       ctx.fill();
       ctx.shadowBlur = 0;
       if (detail) {
@@ -233,6 +264,16 @@ export function createCat(canvas: HTMLCanvasElement, px: number): Painter {
     }
     ctx.restore();
 
+    // Listening: what it hears, arcs closing in on each ear from its side, fading as they land.
+    if (draw > 0.01) {
+      const color = mix(mix(p.c, WHITE, p.dark ? 0.35 : 0), p.warning, warn * 0.3);
+      for (const side of [-1, 1]) {
+        const x = u(0.5 + side * 0.3);
+        const y = u(0.36 - lift + bob);
+        soundIn(ctx, x, y, u(0.16), u(0.05), side < 0 ? Math.PI : 0, 0.55, time + (side > 0 ? 0.3 : 0), draw * alpha, color, Math.max(0.8, u(0.028)));
+      }
+    }
+
     // Hearts, thrown up and out by the landing.
     if (!failed && fin > 0.35 && fin < 1.45) {
       const s = fin - 0.35;
@@ -261,9 +302,14 @@ export function createCat(canvas: HTMLCanvasElement, px: number): Painter {
 
   function settleTowards(act: ThinkingActivity | undefined, k: number) {
     const [tx, ty] = lookTarget(act);
-    lookX += (tx - lookX) * Math.min(1, k * 10);
-    lookY += (ty - lookY) * Math.min(1, k * 10);
-    const dilateGoal = hunting(act) || act?.done ? 1 : act?.phase === "start" ? 0.6 : 0;
+    // The wake snaps its eyes to the viewer.
+    const snap = cue.wake >= 0 ? 40 : 10;
+    lookX += (tx - lookX) * Math.min(1, k * snap);
+    lookY += (ty - lookY) * Math.min(1, k * snap);
+    perk += ((listening(act) ? 1 : 0) - perk) * Math.min(1, k * 6);
+    // Round pupils to listen, rounder still when woken.
+    const dilateGoal =
+      hunting(act) || act?.done ? 1 : cue.wake >= 0 ? 0.9 : listening(act) ? 0.7 : act?.phase === "start" ? 0.6 : 0;
     dilate += (dilateGoal - dilate) * Math.min(1, k * 6);
     crouch += ((hunting(act) ? 1 : 0) - crouch) * Math.min(1, k * 5);
     const resting = act?.quiet && !ended(act) ? 1 : 0;
@@ -282,12 +328,15 @@ export function createCat(canvas: HTMLCanvasElement, px: number): Painter {
     },
     setActivity(activity) {
       clock.set(activity);
+      cue.set(activity);
     },
     tick(dt) {
       clock.step(dt);
+      cue.step(dt);
       const act = clock.act;
       time += dt * (act?.quiet && !ended(act) ? 0.5 : 1);
       grow += (1 - grow) * Math.min(1, dt * 4);
+      hear = listening(act) ? listenLevel() : 0;
       settleTowards(act, dt);
       paint();
     },
@@ -295,6 +344,9 @@ export function createCat(canvas: HTMLCanvasElement, px: number): Painter {
       const act = clock.act;
       if (time === 0) time = 1.3;
       grow = 1;
+      // A still frame of listening is mid-word: ears pricked, arcs on their way in.
+      hear = listening(act) ? 0.7 : 0;
+      cue.settle();
       // Straight to where every value is heading: a still frame has no frames to ease across.
       settleTowards(act, 1);
       clock.settle();

@@ -520,7 +520,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "net.connector" => connector::execute(ctx).await,
         "code.container" | "code.k8s" => containers::execute(ctx).await,
         "files.version" | "app.search" | "app.audit" | "app.process" => devtools::execute(ctx).await,
-        "app.codemap" | "app.knowledge" | "app.memory" | "app.terminalOutput" => knowhow::execute(ctx).await,
+        "app.codemap" | "app.knowledge" | "app.memory" | "app.terminalOutput" | "app.ui" => knowhow::execute(ctx).await,
         "files.media" | "files.docx" | "files.ics" | "files.markdown" => docs::execute(ctx).await,
         "net.search" | "net.soap" | "net.aws" | "net.wol" => web::execute(ctx).await,
         "net.browser" => browser::execute(ctx).await,

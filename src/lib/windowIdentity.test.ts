@@ -95,4 +95,15 @@ describe("window identity", () => {
       expect(identity.satellite, `search=${search}`).toBeNull();
     }
   });
+
+  /**
+   * Codi's window — the voice assistant — is the other kind built by a command of its own
+   * (`codi_open_window`, `window.html?kind=codi&ref=codi`). Missing from this guard it would paint a
+   * skeleton forever, the failure the quick-ask case above describes.
+   */
+  it("reads Codi's window", () => {
+    const identity = parseIdentity("sat-codi-codi", "?kind=codi&ref=codi");
+    expect(identity.main).toBe(false);
+    expect(identity.satellite).toEqual({ kind: "codi", refId: "codi" });
+  });
 });

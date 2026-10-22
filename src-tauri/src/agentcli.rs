@@ -243,6 +243,58 @@ async fn approve(app: &AppHandle, request: &Request, target: &str, event: AskEve
     }
 }
 
+/// `cf ui` — CodeFlow's interface as actions (`codi::ui`): `state` (what every window shows),
+/// `actions [area]` (what can be done), or `<action> [params as JSON]` (doing it). A destructive one
+/// is confirmed by the user first: in Codi's window when Codi asked (its MCP session is `codi:…`),
+/// in the app's approval dialog otherwise.
+async fn interface(request: &Request, app: &AppHandle) -> Reply {
+    use crate::codi::ui::{self, Asker};
+    let lang = crate::codi::lang(app);
+    let asker = if request.session.starts_with("codi:") { Asker::Codi } else { Asker::Agent };
+    let mut args = request.args.iter().map(String::as_str);
+    match args.next() {
+        None | Some("state") => Reply::ok(ui::state(app).await.to_string()),
+        Some("actions") | Some("list") => {
+            if !ui::ready() {
+                return Reply::no("the interface has not registered its actions yet");
+            }
+            Reply::ok(ui::actions_text(lang, args.next().unwrap_or("")))
+        }
+        Some(action) => {
+            let raw: String = args.collect::<Vec<_>>().join(" ");
+            let raw = if raw.trim().is_empty() { request.stdin.trim().to_string() } else { raw };
+            let params = if raw.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                match serde_json::from_str::<serde_json::Value>(&raw) {
+                    Ok(value) if value.is_object() => value,
+                    _ => return Reply::no(format!("the params must be a JSON object, not {raw}")),
+                }
+            };
+            match ui::act(app, action, params.clone(), asker, false).await {
+                Ok(result) => {
+                    if asker == Asker::Codi {
+                        crate::codi::brain::noted(crate::codi::Acted {
+                            action: action.to_string(),
+                            params,
+                            ok: result.ok,
+                            say: result.say.clone(),
+                            error: result.error.clone(),
+                        });
+                    }
+                    let text = ui::result_text(&result);
+                    if result.ok {
+                        Reply::ok(text)
+                    } else {
+                        Reply::no(text)
+                    }
+                }
+                Err(error) => Reply::no(error),
+            }
+        }
+    }
+}
+
 /// What `cf status` prints — whatever the window has in focus. Filled by the UI, which is the only
 /// side that knows; the endpoint keeps the last copy so a status asked a millisecond after a view
 /// change is at worst one change stale.
@@ -513,6 +565,7 @@ async fn dispatch(request: Request, app: &AppHandle) -> Reply {
         "secret" => vault::secret(&request, app).await,
         "db" => vault::db(&request, app).await,
         "http" => vault::http(&request, app).await,
+        "ui" => interface(&request, app).await,
         "status" => {
             let snapshot = focus().lock().ok().map(|held| held.clone()).unwrap_or_default();
             Reply::ok(serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".into()))

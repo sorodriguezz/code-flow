@@ -76,6 +76,10 @@ pub enum SatelliteKind {
     Repo,
     Quick,
     File,
+    /// «Codi»'s window (`crate::codi`): its face, its two switches and what it heard and did. One
+    /// window, not counted against the ceilings (like `Quick`), but put away with the desk — and
+    /// closing it closes the microphone: nothing listens unseen.
+    Codi,
 }
 
 impl SatelliteKind {
@@ -85,6 +89,7 @@ impl SatelliteKind {
             SatelliteKind::Repo => "repo",
             SatelliteKind::Quick => "quick",
             SatelliteKind::File => "file",
+            SatelliteKind::Codi => "codi",
         }
     }
 }
@@ -163,7 +168,7 @@ impl SatelliteRegistry {
     /// The satellites that count against the ceilings — every one but the ask box. See
     /// [`SatelliteKind::Quick`].
     fn counted(held: &HashMap<String, SatelliteInfo>) -> usize {
-        held.values().filter(|info| info.kind != SatelliteKind::Quick).count()
+        held.values().filter(|info| !matches!(info.kind, SatelliteKind::Quick | SatelliteKind::Codi)).count()
     }
 
     /// Parks the desk and says what to do with each window: the half of [`close_all`] that needs no
@@ -240,6 +245,22 @@ fn fnv1a64(text: &str) -> u64 {
 /// is.
 pub fn is_satellite(label: &str) -> bool {
     label.starts_with(LABEL_PREFIX)
+}
+
+/// The island holding rail app `key` (`notes`, `api:requests`…), when one is open — where an action
+/// on that app has to run (`crate::codi::ui`).
+pub fn satellite_for_app(registry: &SatelliteRegistry, key: &str) -> Option<String> {
+    let held = registry.open.lock().ok()?;
+    held.values().find(|info| info.kind == SatelliteKind::App && info.ref_id == key).map(|info| info.label.clone())
+}
+
+/// The labels of every island open — `ui.state` asks each of them.
+pub fn satellite_labels(registry: &SatelliteRegistry) -> Vec<String> {
+    registry
+        .open
+        .lock()
+        .map(|held| held.values().filter(|info| !matches!(info.kind, SatelliteKind::Quick | SatelliteKind::Codi)).map(|info| info.label.clone()).collect())
+        .unwrap_or_default()
 }
 
 /// Every satellite currently open.
@@ -529,6 +550,11 @@ pub fn forget(app: &AppHandle, label: &str) {
     if !is_satellite(label) {
         return;
     }
+    // Whatever it could run goes with it; and Codi's own window takes the microphone with it.
+    crate::codi::ui::forget(label);
+    if label == label_for(SatelliteKind::Codi, CODI_REF_ID) {
+        crate::codi::window_closed(app);
+    }
     let registry = app.state::<SatelliteRegistry>();
     let removed = registry
         .open
@@ -679,6 +705,7 @@ pub fn unregister_quick_ask_shortcut(app: AppHandle) -> Result<(), String> {
     app.global_shortcut().unregister_all().map_err(|e| e.to_string())?;
     // `unregister_all` takes the chords active flows listen for too; they go straight back.
     crate::flows::triggers::rebind_hotkeys(&app);
+    crate::codi::hotkey::rebind(&app);
     crate::applog::info("window: quick-ask shortcut switched off");
     Ok(())
 }
@@ -793,6 +820,60 @@ pub async fn open_quick_ask(app: AppHandle) -> Result<String, String> {
     Ok(label)
 }
 
+/// The one «Codi» window's id.
+pub const CODI_REF_ID: &str = "codi";
+
+/// Opens Codi's window, or brings it forward: small, on top of whatever the user is working in, on
+/// every desktop. Built like the ask box ([`open_quick_ask`]), claimed before it is built for the
+/// same reason; unlike it, it goes with the desk (`close_all`), and closing it stops Codi.
+pub async fn open_codi(app: AppHandle) -> Result<String, String> {
+    let label = label_for(SatelliteKind::Codi, CODI_REF_ID);
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(label);
+    }
+    let registry = app.state::<SatelliteRegistry>();
+    {
+        let mut held = registry.open.lock().map_err(|e| e.to_string())?;
+        if held.contains_key(&label) {
+            return Ok(label);
+        }
+        held.insert(label.clone(), SatelliteInfo { label: label.clone(), kind: SatelliteKind::Codi, ref_id: CODI_REF_ID.to_string(), title: "Codi".to_string() });
+    }
+    let url = format!("window.html?kind={}&ref={}", SatelliteKind::Codi.slug(), CODI_REF_ID);
+    let look = crate::glass::stored(&app);
+    let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        .enable_clipboard_access()
+        .transparent(true)
+        .title("Codi")
+        .inner_size(380.0, 560.0)
+        .min_inner_size(300.0, 300.0)
+        .center()
+        .always_on_top(true)
+        .decorations(false)
+        .resizable(true);
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.visible_on_all_workspaces(true);
+    }
+    if let Some(script) = crate::glass::init_script(&look) {
+        builder = builder.initialization_script(script);
+    }
+    match builder.build() {
+        Ok(window) => crate::glass::on_create(&window, &look),
+        Err(e) => {
+            if let Ok(mut held) = registry.open.lock() {
+                held.remove(&label);
+            }
+            return Err(e.to_string());
+        }
+    }
+    announce(&app);
+    Ok(label)
+}
+
 /// What the hotkey, the tray item and the frontend all call. See [`open_quick_ask`].
 #[tauri::command]
 pub async fn quick_ask_open(app: AppHandle) -> Result<String, String> {
@@ -878,8 +959,9 @@ pub fn register_quick_ask_shortcut(app: AppHandle, accelerator: String) -> Resul
     // session that failed halfway.
     manager.unregister_all().map_err(|e| e.to_string())?;
     // The chords active flows listen for went with them; bound again before the new quick-ask one,
-    // so a clash between the two is reported on the setting being typed.
+    // so a clash between the two is reported on the setting being typed. Codi's too.
     crate::flows::triggers::rebind_hotkeys(&app);
+    crate::codi::hotkey::rebind(&app);
 
     // `register`, and **not** `on_shortcut`. The difference is one call per press.
     //

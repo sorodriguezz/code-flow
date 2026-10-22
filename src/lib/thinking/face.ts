@@ -61,6 +61,48 @@ export function lipSync(level: number): number {
   return Math.max(0, Math.min(1, (level - 0.28) / 0.6));
 }
 
+/** How far a speaking mouth opens, as a multiple of its half-width, for `mouth` 0–1 (the lip-synced
+ *  opening): nearly shut at 0, 1.15 at full voice. `gain` (Codi's window, `ThinkingOrb gain`) opens
+ *  it further, up to 1.72 — past that the mouth reaches the eyes or the edge of the face. */
+export function mouthOpen(mouth: number, gain = 1): number {
+  return 0.2 + 0.95 * Math.min(1.6, mouth * gain);
+}
+
+/**
+ * Sound arriving, for a character listening (`RunPhase` `listen`): `count` arcs closing in on (x, y)
+ * from `from` px out to `to`, each fading in far out and out again as it lands — the opposite of a
+ * voice's arcs, which go out. `dir` is the side they come from (radians), `spread` each arc's
+ * half-angle, `time` their clock and `level` how loud (0 draws nothing).
+ */
+export function soundIn(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  from: number,
+  to: number,
+  dir: number,
+  spread: number,
+  time: number,
+  level: number,
+  color: Rgb,
+  width: number,
+  count = 2,
+) {
+  if (level <= 0.01) return;
+  ctx.save();
+  ctx.strokeStyle = rgba(color, 1);
+  ctx.lineWidth = width;
+  ctx.lineCap = "round";
+  for (let j = 0; j < count; j++) {
+    const k = (time * 1.6 + j / count) % 1;
+    ctx.globalAlpha = Math.min(1, level) * Math.sin(k * Math.PI);
+    ctx.beginPath();
+    ctx.arc(x, y, from + (to - from) * k, dir - spread * (1 - 0.3 * k), dir + spread * (1 - 0.3 * k));
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 /** A filled heart centred near (x, y), `r` about its half-width. */
 export function fillHeart(ctx: CanvasRenderingContext2D, x: number, y: number, r: number) {
   ctx.beginPath();

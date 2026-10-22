@@ -11,6 +11,16 @@ export function startVoice(envelope: number[], stepMs: number): void {
   voice = { envelope, stepMs: Math.max(1, stepMs), startedAt: performance.now() };
 }
 
+/**
+ * The next sentence of the same utterance: a downloaded voice speaks a sentence at a time and sends
+ * each one's loudness as it starts. It plays right after the last, so it goes on the end of the
+ * envelope — the clock the marks read it by keeps running.
+ */
+export function appendVoice(envelope: number[]): void {
+  if (!voice) return;
+  voice = { ...voice, envelope: [...voice.envelope, ...envelope] };
+}
+
 export function endVoice(): void {
   voice = null;
 }

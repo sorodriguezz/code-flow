@@ -1,6 +1,8 @@
 import { ended } from "./activity";
+import { askBlink, cueClock, startle } from "./cue";
 import type { Gaze } from "./face";
 import { aiCycle, clamp01, finishClock, rgba, TAU } from "./finish";
+import { listenLevel } from "./listen";
 import { mix, palette } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 
@@ -10,7 +12,13 @@ import { prepareCanvas, type Painter } from "./ticker";
  * While the model thinks the face looks around and blinks, its mouth pulled to one side; reading,
  * a column sweeps across like an eye down a page; editing, ripples spread from the middle;
  * writing, a wave runs through it; starting, light spreads out from the centre. Quiet, the face
- * falls asleep and a "z" floats up out of the corner.
+ * falls asleep and a "z" floats up out of the corner. Listening (Codi), the face looks straight out
+ * with its eyes a row taller and its mouth shut in a level line, and what it hears comes in from
+ * the edges: rings of light closing from the border toward the face, as bright as the voice is
+ * loud and fading as they land — editing's ripples, the other way.
+ *
+ * Codi's cues: woken, the display flashes, its border lit, the eyes wide and straight out; asking,
+ * one eye raised like a brow over a mouth pulled the other way, blinking twice now and then.
  *
  * Finish: a big ^‿^ smile, a wink, and the face itself turns green along a diagonal wipe. The face
  * stays: it used to be wiped away into a green tick, dropped at the user's ask (2026-10-08) for the
@@ -21,7 +29,7 @@ type Cell = readonly [col: number, row: number];
 
 const LOOK = [0, 0, -1, -1, 0, 1, 1, 0, 0, 1, -1, 0];
 
-export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
+export function createPixels(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const G = px < 18 ? 5 : 7;
   const mid = (G - 1) / 2;
@@ -30,6 +38,7 @@ export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
   /** Per LED: 0 the AI hues, 1 green (the finish), 2 the sleepy warning tint, 3 red (a failure). */
   const tone = new Uint8Array(G * G);
   const clock = finishClock();
+  const cue = cueClock();
   const HAPPY: { left: Cell[]; right: Cell[]; wink: Cell[]; mouth: Cell[] } =
     G === 7
       ? {
@@ -55,6 +64,8 @@ export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
       : [[1, 1], [3, 1], [0, 4], [1, 3], [2, 3], [3, 3], [4, 4]];
   let time = 0;
   let alpha = 1;
+  /** The microphone's level this frame while it listens, 0–1. */
+  let hear = 0;
   /** The pointer, when this mark follows it (`setGaze`). An LED face can only look a column to
    *  either side, so only its side reads. */
   let gaze: Gaze = null;
@@ -98,6 +109,44 @@ export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
     }
   }
 
+  /** The listening face — or, while a question waits, the asking one — and the wake's wide eyes:
+   *  always looking straight out, the mouth shut. */
+  function attentive(asking: boolean, woken: boolean) {
+    const eyeRow = G === 7 ? 2 : 1;
+    const open = asking ? askBlink(time) > 0.3 : true;
+    const eyes = G === 7 ? [2, 4] : [1, 3];
+    eyes.forEach((eye, i) => {
+      if (!open) {
+        set(eye, eyeRow + 1);
+        return;
+      }
+      // Asking, the right eye is raised like a brow; listening or woken, both stand a row taller.
+      const top = asking ? (i === 1 ? eyeRow - 1 : eyeRow) : eyeRow - 1;
+      const bottom = asking ? (i === 1 ? eyeRow : eyeRow + 1) : eyeRow + 1;
+      for (let r = Math.max(0, top); r <= bottom; r++) set(eye, r);
+    });
+    const mouthRow = G - 2;
+    // Asking, the mouth is pulled the other way from thinking's; listening, shut in a level line.
+    const mouth = asking ? (G === 7 ? [2, 3] : [1, 2]) : G === 7 ? [2, 3, 4] : [1, 2, 3];
+    for (const col of mouth) set(col, mouthRow, woken ? 0.6 : 0.45);
+  }
+
+  /** What it hears, as rings closing from the border toward the face, fading as they land. */
+  function rings(level: number) {
+    if (level <= 0.01) return;
+    for (let r = 0; r < G; r++) {
+      for (let c = 0; c < G; c++) {
+        const d = Math.max(Math.abs(c - mid), Math.abs(r - mid));
+        let v = 0;
+        for (const offset of [0, 0.5]) {
+          const at = mid * (1 - ((time * 0.9 + offset) % 1));
+          v = Math.max(v, Math.max(0, 1 - Math.abs(d - at) / 0.8) * (at / mid));
+        }
+        set(c, r, 0.6 * v * level);
+      }
+    }
+  }
+
   function happy(fin: number) {
     const winking = fin > 0.6 && fin < 0.85;
     for (const [c, r] of winking ? HAPPY.wink : HAPPY.left) set(c, r);
@@ -134,6 +183,22 @@ export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
     }
     if (act?.quiet) {
       face(true);
+      return;
+    }
+    const listening = act?.phase === "listen";
+    if (cue.wake >= 0 || cue.ask > 0.5 || listening) {
+      const flash = startle(cue.wake);
+      attentive(cue.ask > 0.5 && cue.wake < 0, cue.wake >= 0);
+      if (listening) rings(Math.min(1, hear * gain));
+      // The wake's flash: the whole display, and its border brightest.
+      if (flash > 0.01) {
+        for (let r = 0; r < G; r++) {
+          for (let c = 0; c < G; c++) {
+            const border = Math.max(Math.abs(c - mid), Math.abs(r - mid)) === mid;
+            set(c, r, flash * (border ? 0.9 : 0.3));
+          }
+        }
+      }
       return;
     }
     switch (act?.phase) {
@@ -211,11 +276,14 @@ export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
     },
     setActivity(activity) {
       clock.set(activity);
+      cue.set(activity);
     },
     tick(dt) {
       clock.step(dt);
+      cue.step(dt);
       const act = clock.act;
       time += dt * (act?.quiet ? 0.5 : 1);
+      hear = act?.phase === "listen" ? listenLevel() : 0;
       scene();
       const k = Math.min(1, dt * 14);
       for (let i = 0; i < level.length; i++) level[i] += (want[i] - level[i]) * k;
@@ -225,7 +293,10 @@ export function createPixels(canvas: HTMLCanvasElement, px: number): Painter {
     still() {
       if (time === 0) time = 1.1;
       alpha = clock.act?.stopping ? 0.3 : 1;
+      // A still frame of listening is mid-word, a ring on its way in.
+      hear = clock.act?.phase === "listen" ? 0.7 : 0;
       clock.settle();
+      cue.settle();
       scene();
       level.set(want);
       paint();

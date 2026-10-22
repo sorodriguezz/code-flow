@@ -19,7 +19,22 @@ export type RunPhase =
   | "write"
   | "work"
   /** Reading aloud (`speechStore`): the mark moves with the voice's loudness (`lib/thinking/voice`). */
-  | "speak";
+  | "speak"
+  /** Codi, the voice assistant, hearing the user: the mark moves with the microphone's level
+   *  (`lib/thinking/listen`) — drawing the sound in, where speaking pushes it out. */
+  | "listen";
+
+/**
+ * A moment Codi's window plays on top of what the mark is doing. `wake` is "you called me" — the
+ * wake word was heard: a short startle, the eyes snapping to whoever said it, then back to the
+ * phase. `ask` is a question waiting on the user (a confirmation): a held, waiting pose for as long
+ * as the cue stays set. `at` is `performance.now()` when it started, so a new object — a new `at` —
+ * plays a wake again, and a mark mounted long after one does not replay it.
+ */
+export interface ThinkingCue {
+  kind: "wake" | "ask";
+  at: number;
+}
 
 export interface ThinkingActivity {
   phase?: RunPhase;
@@ -32,6 +47,9 @@ export interface ThinkingActivity {
   failed?: boolean;
   /** Stop was pressed and the process is being killed. */
   stopping?: boolean;
+  /** Played only while the mark runs: an ending, a stop or a quiet spell is its own look, and a
+   *  finish always wins over a cue. */
+  cue?: ThinkingCue;
 }
 
 /** The one-word state a mark is drawn in; `run` covers every phase of a live run. */
@@ -52,10 +70,11 @@ export function ended(activity: ThinkingActivity | undefined): boolean {
 }
 
 /**
- * The phases in the four kinds the CSS marks can draw differently — they cannot afford one look per
- * phase, but thinking, reading, working and writing do look different on all of them.
+ * The phases in the kinds the CSS marks can draw differently — they cannot afford one look per
+ * phase, but thinking, reading, working and writing do look different on all of them, and so does
+ * listening: every design has a listening look of its own, never another phase's.
  */
-export type PhaseGroup = "think" | "read" | "work" | "write";
+export type PhaseGroup = "think" | "read" | "work" | "write" | "listen";
 
 export function phaseGroup(phase: RunPhase | undefined): PhaseGroup {
   switch (phase) {
@@ -68,11 +87,14 @@ export function phaseGroup(phase: RunPhase | undefined): PhaseGroup {
     case "delegate":
     case "work":
       return "work";
-    // Speaking is drawn as writing by the CSS marks — the closest of their four — and pulses with
+    // Speaking is drawn as writing by the CSS marks — the closest of their looks — and pulses with
     // the voice on top (`.cf-orb--speaking`).
     case "write":
     case "speak":
       return "write";
+    // Listening is a look of its own on every CSS mark (`index.css`), not one borrowed from a phase.
+    case "listen":
+      return "listen";
     default:
       return "think";
   }

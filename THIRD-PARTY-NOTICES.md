@@ -1683,7 +1683,8 @@ can point at, and a test there fails the build for any other. The conversions ar
 
 Downloaded only when dictation, meetings or a natural voice are installed from Settings, into your
 own data directory, each pinned by its digest in [`src-tauri/src/dictation/mod.rs`](src-tauri/src/dictation/mod.rs),
-[`src-tauri/src/meetings/mod.rs`](src-tauri/src/meetings/mod.rs) and [`src-tauri/src/speech/piper.rs`](src-tauri/src/speech/piper.rs).
+[`src-tauri/src/asr/mod.rs`](src-tauri/src/asr/mod.rs), [`src-tauri/src/meetings/mod.rs`](src-tauri/src/meetings/mod.rs), [`src-tauri/src/meetings/turns.rs`](src-tauri/src/meetings/turns.rs),
+[`src-tauri/src/codi/vad.rs`](src-tauri/src/codi/vad.rs), [`src-tauri/src/speech/piper.rs`](src-tauri/src/speech/piper.rs) and [`src-tauri/src/speech/kokoro.rs`](src-tauri/src/speech/kokoro.rs).
 
 | Component | Licence (SPDX) | Published at |
 |---|---|---|
@@ -1702,6 +1703,25 @@ own data directory, each pinned by its digest in [`src-tauri/src/dictation/mod.r
 | Piper voice en_US «sam» | Apache-2.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
 | Piper voice en_GB «cori» (LibriVox recordings) | LicenseRef-PublicDomain | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
 | Piper voice en_GB «northern_english_male» | CC-BY-SA-4.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
+| Kokoro-82M (model and voices, ONNX export) | Apache-2.0 | <https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models> |
+| NVIDIA Parakeet TDT 0.6B v3 (ONNX export) | CC-BY-4.0 | <https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3> |
+| NVIDIA Canary 180M Flash (ONNX export) | CC-BY-4.0 | <https://huggingface.co/nvidia/canary-180m-flash> |
+| Silero VAD (ONNX, for Codi) | MIT | <https://github.com/snakers4/silero-vad> |
+| pyannote segmentation 3.0 (ONNX export) | MIT | <https://huggingface.co/pyannote/segmentation-3.0> |
+
+### Cloned voices: Python and the cloning engines
+
+Downloaded only when a cloning engine is installed from Settings › Voice & sound › Models, into a folder of
+the app's own data directory; the CPython is the one above (or the machine's own), and pip installs the
+engine — and whatever it requires — from the Python Package Index. XTTS v2 is installed only after the user
+accepts its licence, which allows non-commercial use only.
+
+| Component | Licence (SPDX) | Published at |
+|---|---|---|
+| Chatterbox Multilingual (chatterbox-tts, and its weights) | MIT | <https://github.com/resemble-ai/chatterbox> |
+| coqui-tts (the library) | MPL-2.0 | <https://github.com/idiap/coqui-ai-TTS> |
+| XTTS v2 (the weights, only after the user accepts) | LicenseRef-CPML | <https://coqui.ai/cpml> |
+| PyTorch | BSD-3-Clause | <https://github.com/pytorch/pytorch> |
 
 ### Fine-tuning: Python and the trainers
 

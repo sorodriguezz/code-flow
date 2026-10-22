@@ -1,8 +1,10 @@
 import { ended, phaseGroup, type PhaseGroup, type ThinkingActivity } from "./activity";
-import { blink, INK, lipSync, lookFor, sleepZ, strokeEye, WHITE, type Gaze } from "./face";
+import { askBeat, askBlink, cueClock, hop, startle } from "./cue";
+import { blink, INK, lipSync, lookFor, mouthOpen, sleepZ, strokeEye, WHITE, type Gaze } from "./face";
 import { clamp01, easeOut, easeOutBack, endColor, finishClock, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { listenLevel } from "./listen";
 import { voiceLevel } from "./voice";
 
 /**
@@ -14,7 +16,13 @@ import { voiceLevel } from "./voice";
  * pulses brighter; writing, it shines with soft rays round it. Speaking (the reading aloud), its
  * light speaks: glass and filament brighten and dim with the voice, its mouth moving with it, and
  * the rays flash out only on the loudest syllables. Quiet, it dims right down, its eyes shut, and
- * dozes.
+ * dozes. Listening (Codi), it leans in with its eyes wide on whoever speaks and its mouth shut, its
+ * glass at a soft glow; what it hears comes in as rays the other way — short strokes running in
+ * from round it to the glass — and its filament glows up with every syllable, the light taking the
+ * sound in.
+ *
+ * Codi's cues: woken, it flashes on with a little hop, eyes wide on the viewer; asking, it tilts to
+ * one side and looks at the viewer, blinking twice now and then.
  *
  * Finish: a flicker, then it lights up fully — the idea — rays bursting out, happy ^ ^ eyes, and it
  * settles glowing green. Failed: it flickers, goes dark, its glass cracks, and it turns red with
@@ -44,9 +52,10 @@ const CRACK: readonly (readonly [number, number])[] = [
   [0.41, 0.35],
 ];
 
-export function createBulb(canvas: HTMLCanvasElement, px: number): Painter {
+export function createBulb(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const clock = finishClock();
+  const cue = cueClock();
   /** Filament, mouth and threads — what a bulb smaller than this cannot hold. */
   const detail = px >= 20;
   const u = (v: number) => v * px;
@@ -65,6 +74,9 @@ export function createBulb(canvas: HTMLCanvasElement, px: number): Painter {
   let shine = 0;
   /** The voice this frame while it speaks, 0–1. */
   let voice = 0;
+  /** Listening: how far into that look it is (0–1), and the microphone's level this frame. */
+  let perk = 0;
+  let hear = 0;
 
   const awake = (act: ThinkingActivity | undefined) => !ended(act) && !act?.quiet && !act?.stopping;
   // Speaking is its own look here, not writing's: `ThinkingOrb` hands this mark the phase as is.
@@ -82,7 +94,10 @@ export function createBulb(canvas: HTMLCanvasElement, px: number): Painter {
       case "write":
         return 0.95;
       case "speak":
-        return 0.45 + 0.55 * lipSync(voice);
+        // Codi's gain takes it past full on the loud syllables: the glass whitens.
+        return 0.45 + 0.55 * Math.min(1.3, lipSync(voice) * gain);
+      case "listen":
+        return 0.5;
       default:
         return 0.55;
     }
@@ -141,12 +156,19 @@ export function createBulb(canvas: HTMLCanvasElement, px: number): Painter {
     const dazed = failed && fin >= 0.1;
     const warm = (c: Rgb) => mix(c, p.warning, warn * 0.3);
     const a = alpha;
+    // What it hears, as far as Codi's gain takes it; the wake's flash; the ask's tilt.
+    const draw = Math.min(1.4, hear * gain) * perk;
+    const start = startle(cue.wake);
+    const tilt = cue.ask * (0.07 + 0.05 * askBeat(time));
+    if (start > 0) g = Math.max(g, glow + 0.5 * start);
     const lit = clamp01(g);
     const over = Math.max(0, g - 1);
-    const s = 0.4 + 0.6 * easeOut(grow);
+    // Listening, it leans in a little.
+    const s = (0.4 + 0.6 * easeOut(grow)) * (1 + 0.02 * perk);
 
     ctx.save();
-    ctx.translate(u(0.5), u(0.9));
+    ctx.translate(u(0.5), u(0.9 - 0.025 * hop(cue.wake)));
+    ctx.rotate(tilt);
     ctx.scale(s, s);
     ctx.translate(-u(0.5), -u(0.9));
 
@@ -164,6 +186,26 @@ export function createBulb(canvas: HTMLCanvasElement, px: number): Painter {
         ctx.lineTo(u(CX + Math.cos(angle) * to), u(CY + Math.sin(angle) * to));
       }
       ctx.stroke();
+    }
+
+    // Listening: rays the other way — strokes running in from round the glass to it, each fading in
+    // far out and gone as it lands, as bright as what it hears is loud.
+    if (draw > 0.01) {
+      ctx.strokeStyle = rgba(warm(mix(p.c, WHITE, 0.35)), 1);
+      ctx.lineWidth = Math.max(1, u(0.03));
+      ctx.lineCap = "round";
+      RAYS.forEach((angle, i) => {
+        const k = (time * 1.4 + i * 0.37) % 1;
+        // Starting no further out than the speaking rays end, so a hop leaves them in the square.
+        const from = R + 0.065 - 0.045 * k;
+        // The wake's flash takes their place for a moment.
+        ctx.globalAlpha = Math.sin(k * Math.PI) * Math.min(1, draw) * (1 - start) * a;
+        ctx.beginPath();
+        ctx.moveTo(u(CX + Math.cos(angle) * from), u(CY + Math.sin(angle) * from));
+        ctx.lineTo(u(CX + Math.cos(angle) * (from - 0.03)), u(CY + Math.sin(angle) * (from - 0.03)));
+        ctx.stroke();
+      });
+      ctx.globalAlpha = 1;
     }
 
     // The screw base: threads, and the contact at the bottom.
@@ -211,7 +253,8 @@ export function createBulb(canvas: HTMLCanvasElement, px: number): Painter {
 
     // The filament: a little coil of wire that glows with the bulb.
     if (detail) {
-      const hot = Math.min(1, g + 0.15);
+      // Listening, it glows up with what it hears.
+      const hot = Math.min(1, Math.max(g + 0.15, draw > 0 ? 0.45 + 0.55 * draw : 0));
       ctx.save();
       ctx.strokeStyle = rgba(warm(mix(mix(p.a, INK, 0.2), mix(mix(WHITE, p.c, 0.2), mix(end, WHITE, 0.4), tint), hot)), a);
       ctx.shadowColor = rgba(mix(p.c, end, tint), hot * 0.9 * a);
@@ -247,9 +290,11 @@ export function createBulb(canvas: HTMLCanvasElement, px: number): Painter {
 
     // The face: dark ink on a lit glass, its eyes lighting up on a dark one.
     const ink = rgba(mix(mix(WHITE, p.c, 0.25), INK, clamp01((g - 0.22) * 3.3)), 0.92 * a);
-    const open = act?.stopping ? 0.45 : blink(time, 3.5);
+    const open = act?.stopping ? 0.45 : cue.ask > 0.5 ? askBlink(time) : blink(time, 3.5);
     const ey = 0.435;
     const eyeR = detail ? 0.042 : 0.052;
+    // Wide while it listens, wider for a moment when woken.
+    const wide = 1 + 0.15 * perk + 0.2 * start;
     for (const ex of [0.42, 0.58]) {
       if (dazed) strokeEye(ctx, u(ex), u(ey), u(eyeR), "x", ink, Math.max(1, u(0.03)));
       else if (happy) strokeEye(ctx, u(ex), u(ey), u(eyeR * 1.1), "happy", ink, Math.max(1, u(0.032)));
@@ -257,7 +302,7 @@ export function createBulb(canvas: HTMLCanvasElement, px: number): Painter {
       else {
         ctx.fillStyle = ink;
         ctx.beginPath();
-        ctx.ellipse(u(ex + lookX * 0.02), u(ey + lookY * 0.018), u(eyeR * 0.9), u(eyeR * 1.35 * open), 0, 0, TAU);
+        ctx.ellipse(u(ex + lookX * 0.02), u(ey + lookY * 0.018), u(eyeR * 0.9 * wide), u(eyeR * 1.35 * open * wide), 0, 0, TAU);
         ctx.fill();
       }
     }
@@ -271,7 +316,7 @@ export function createBulb(canvas: HTMLCanvasElement, px: number): Painter {
       if (speaking) {
         // Lip-sync: the mouth opens with the voice.
         const w = detail ? 0.03 : 0.046;
-        ctx.ellipse(u(0.5), u(0.522), Math.max(0.6, u(w)), Math.max(0.5, u(w * (0.2 + 0.95 * mouth))), 0, 0, TAU);
+        ctx.ellipse(u(0.5), u(0.522), Math.max(0.6, u(w)), Math.max(0.5, u(w * mouthOpen(mouth, gain))), 0, 0, TAU);
         ctx.fill();
       } else if (mouth > 0.05) {
         ctx.ellipse(u(0.5), u(0.515), u(0.024), u(0.03 * mouth + 0.005), 0, 0, TAU);
@@ -289,16 +334,20 @@ export function createBulb(canvas: HTMLCanvasElement, px: number): Painter {
 
   function settle(act: ThinkingActivity | undefined, k: number) {
     const group = groupOf(act);
-    // Speaking, it looks at whoever it is talking to.
+    // Speaking or listening, it looks at whoever it is talking with, and so it does when woken or
+    // asking — the wake snapping its eyes there.
     // Following the pointer, it looks at it — awake, and not while it is talking to someone.
+    const facing = group === "speak" || group === "listen" || cue.wake >= 0 || cue.ask > 0.5;
     const [tx, ty] =
-      gaze && group !== "speak" && !ended(act) && !act?.quiet && !act?.stopping
+      gaze && !facing && !ended(act) && !act?.quiet && !act?.stopping
         ? gaze
         : group
-          ? lookFor(group === "work" ? "edit" : group === "speak" ? "start" : act?.phase, time)
+          ? lookFor(group === "work" ? "edit" : facing ? "start" : act?.phase, time)
           : [0, 0];
-    lookX += (tx - lookX) * Math.min(1, k * 10);
-    lookY += (ty - lookY) * Math.min(1, k * 10);
+    const snap = cue.wake >= 0 ? 40 : 10;
+    lookX += (tx - lookX) * Math.min(1, k * snap);
+    lookY += (ty - lookY) * Math.min(1, k * snap);
+    perk += ((group === "listen" ? 1 : 0) - perk) * Math.min(1, k * 6);
     const resting = act?.quiet && !ended(act) ? 1 : 0;
     sleep += (resting - sleep) * Math.min(1, k * 3);
     warn += (resting - warn) * Math.min(1, k * 3);
@@ -307,7 +356,7 @@ export function createBulb(canvas: HTMLCanvasElement, px: number): Painter {
     const speaking = group === "speak";
     if (!ended(act)) glow += (glowGoal(act) - glow) * Math.min(1, k * (speaking ? 16 : 6));
     // Rays: steady while writing; speaking, only on the loudest syllables.
-    const shineGoal = group === "write" ? 1 : speaking ? clamp01((lipSync(voice) - 0.7) / 0.2) : 0;
+    const shineGoal = group === "write" ? 1 : speaking ? clamp01((Math.min(1, lipSync(voice) * gain) - 0.7) / 0.2) : 0;
     shine += (shineGoal - shine) * Math.min(1, k * (speaking ? 14 : 4));
     const say = speaking
       ? Math.sqrt(lipSync(voice))
@@ -330,13 +379,16 @@ export function createBulb(canvas: HTMLCanvasElement, px: number): Painter {
     },
     setActivity(activity) {
       clock.set(activity);
+      cue.set(activity);
     },
     tick(dt) {
       clock.step(dt);
+      cue.step(dt);
       const act = clock.act;
       time += dt * (act?.quiet && !ended(act) ? 0.5 : 1);
       grow += (1 - grow) * Math.min(1, dt * 3.5);
       voice = groupOf(act) === "speak" ? voiceLevel() : 0;
+      hear = groupOf(act) === "listen" ? listenLevel() : 0;
       settle(act, dt);
       const base = glow;
       glow = Math.min(1, glow + stutter(act));
@@ -350,6 +402,9 @@ export function createBulb(canvas: HTMLCanvasElement, px: number): Painter {
       // A still frame of speech is mid-syllable: mouth open and the glass bright, but not loud
       // enough for rays — a still with rays is writing's.
       voice = groupOf(act) === "speak" ? 0.7 : 0;
+      // And of listening, mid-word: the filament up, strokes on their way in.
+      hear = groupOf(act) === "listen" ? 0.7 : 0;
+      cue.settle();
       settle(act, 1);
       clock.settle();
       paint();

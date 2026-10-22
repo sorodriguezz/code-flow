@@ -1,5 +1,7 @@
 import { ended, type RunPhase, type ThinkingActivity } from "./activity";
+import { askBreath, cueClock, softHalo, startle } from "./cue";
 import { aiCycle, clamp01, easeIn, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
+import { listenLevel } from "./listen";
 import { mix, palette } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 import type { Gaze } from "./face";
@@ -17,6 +19,13 @@ import { easeToward, facing, lean, toward } from "./pointer";
  *
  * Following the pointer (`ThinkingOrb follow`), it leans toward it — the near side larger, the core
  * drifting its way — and the corners and edges facing it catch more light.
+ *
+ * Listening (Codi), it turns slowly and draws in: every syllable it hears shrinks it a little and
+ * sends light running from its corners down into the core, which glows up with it — the energy
+ * flows in, not along. Codi's cues: woken, its corners glint and the core flashes as it pops for an
+ * instant; asking, it hardly turns and breathes slowly in a soft halo.
+ *
+ * Big (Codi's window), its edges and corners stay fine instead of thickening with the square.
  */
 
 const GOAL: Partial<Record<RunPhase, [spin: number, energy: number]>> = {
@@ -28,6 +37,7 @@ const GOAL: Partial<Record<RunPhase, [spin: number, energy: number]>> = {
   edit: [1.5, 1],
   run: [1.5, 1],
   write: [1.2, 0.8],
+  listen: [0.4, 0.3],
 };
 
 const PHI = (1 + Math.sqrt(5)) / 2;
@@ -56,9 +66,12 @@ for (let i = 0; i < 12; i++) {
   }
 }
 
-export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
+export function createCrystal(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const clock = finishClock();
+  const cue = cueClock();
+  /** The microphone's level this frame while it listens, as far as Codi's gain takes it. */
+  let pull = 0;
   const sparks = makeBurst(14, 5);
   const pulses: { edge: number; at: number; hue: number }[] = [];
   let time = 0;
@@ -70,6 +83,9 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
   let alpha = 1;
   let gaze: Gaze = null;
   const look = toward();
+
+  const listening = (act: ThinkingActivity | undefined) =>
+    !ended(act) && !act?.quiet && !act?.stopping && act?.phase === "listen";
 
   function goal(activity: ThinkingActivity | undefined): [number, number] {
     if (activity?.failed) return [0, 0];
@@ -91,7 +107,13 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
     const end = endColor(p, failed);
     // A failure cracks it: a third of its edges go dark.
     const crack = failed && fin >= 0 ? clamp01((fin - 0.2) / 0.3) : 0;
-    const R = px * 0.4 * (1 + burst * 0.5) * (fin >= 0 ? 0.92 : 1);
+    // Listening, drawn in by what it hears; woken, a pop; asking, a slow breath.
+    const drawn = Math.min(1.4, pull);
+    const start = startle(cue.wake);
+    const breath = askBreath(time);
+    const cued = (1 - 0.1 * Math.min(1, drawn)) * (1 + 0.05 * start) * (1 + 0.04 * cue.ask * (breath - 0.5));
+    const R = px * 0.4 * (1 + burst * 0.5) * (fin >= 0 ? 0.92 : 1) * cued;
+    if (cue.ask > 0.01) softHalo(ctx, c, c, px * 0.36, aiCycle(p, 0.45), 0.2 * cue.ask * (0.6 + 0.4 * breath) * alpha);
     const cx = Math.cos(tiltX);
     const sx = Math.sin(tiltX);
     const cy = Math.cos(turnY);
@@ -109,14 +131,15 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
     const [kx, ky] = lean(look, 0, 0, R);
     const core = ctx.createRadialGradient(c + kx, c + ky, 0, c + kx, c + ky, px * 0.36);
     const coreHue = mix(aiCycle(p, 0.35 + Math.sin(time * 0.7) * 0.2), end, green);
-    core.addColorStop(0, rgba(coreHue, (0.35 + energy * 0.25 + burst * 0.5) * alpha));
+    core.addColorStop(0, rgba(coreHue, (0.35 + energy * 0.25 + burst * 0.5 + 0.35 * Math.min(1, drawn) + 0.4 * start) * alpha));
     core.addColorStop(1, rgba(coreHue, 0));
     ctx.fillStyle = core;
     ctx.beginPath();
     ctx.arc(c, c, px * 0.36, 0, TAU);
     ctx.fill();
     ctx.lineCap = "round";
-    const lw = Math.max(0.7, px / 36);
+    // In proportion up to the gutter sizes; past them a wireframe drawn at px / 36 reads as a cage.
+    const lw = Math.max(0.7, Math.min(px / 36, 1.2 + px / 90));
     const edgeAlpha = 1 - burst * 0.85;
     const sorted = EDGES.map(([i, j], n) => [i, j, n, (pts[i][2] + pts[j][2]) / 2] as const).sort((a, b) => a[3] - b[3]);
     for (const [i, j, n, depth] of sorted) {
@@ -143,6 +166,18 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
       ctx.arc(x, y, lw * 1.6, 0, TAU);
       ctx.fill();
     }
+    // Listening: light running in from the front corners down into the core, as bright as what it
+    // hears is loud.
+    if (drawn > 0.01) {
+      pts.forEach(([x, y, depth], i) => {
+        if (depth < 0.45) return;
+        const k = (time * 1.1 + i * 0.29) % 1;
+        ctx.fillStyle = rgba(mix(aiCycle(p, i / 12), [255, 255, 255], 0.35), Math.sin(k * Math.PI) * Math.min(1, drawn) * depth * alpha);
+        ctx.beginPath();
+        ctx.arc(x + (c + kx - x) * k, y + (c + ky - y) * k, lw * (1.5 - 0.6 * k), 0, TAU);
+        ctx.fill();
+      });
+    }
     // The glint once it is whole again: its corners catch the light one after another.
     const white: readonly [number, number, number] = [255, 255, 255];
     pts.forEach(([x, y, depth, lit], i) => {
@@ -150,11 +185,15 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
       let col = mix(p.text, aiCycle(p, i / 12 + time * 0.08), 0.5 + 0.5 * glow * energy);
       col = mix(col, end, green);
       col = mix(col, p.warning, warn * 0.3);
-      const shine = !failed && fin > 1.0 && fin < 1.7 ? Math.max(0, Math.sin(((fin - 1.0) / 0.7) * Math.PI * 1.5 - i * 0.35)) : 0;
+      // The finish's glint, and the wake's — every corner at once.
+      const shine = Math.max(
+        !failed && fin > 1.0 && fin < 1.7 ? Math.max(0, Math.sin(((fin - 1.0) / 0.7) * Math.PI * 1.5 - i * 0.35)) : 0,
+        start,
+      );
       col = mix(col, white, Math.max(shine, lit * 0.6));
       ctx.fillStyle = rgba(col, (0.25 + 0.75 * depth) * alpha);
       ctx.beginPath();
-      ctx.arc(x, y, Math.max(0.7, px / 30) * (0.6 + 0.7 * depth) * (1 + shine * 0.8), 0, TAU);
+      ctx.arc(x, y, Math.max(0.7, Math.min(px / 30, 1.5 + px / 80)) * (0.6 + 0.7 * depth) * (1 + shine * 0.8), 0, TAU);
       ctx.fill();
     });
     if (!failed && fin > 0.35 && fin < 1.4) {
@@ -174,14 +213,17 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
   return {
     setActivity(activity) {
       clock.set(activity);
+      cue.set(activity);
     },
     setGaze(next) {
       gaze = next;
     },
     tick(dt) {
       clock.step(dt);
+      cue.step(dt);
       const act = clock.act;
       const fin = clock.fin;
+      pull = listening(act) ? listenLevel() * gain : 0;
       easeToward(look, ended(act) || act?.quiet || act?.stopping ? null : gaze, dt);
       const [s, e] = goal(act);
       const k = Math.min(1, dt * 2.5);
@@ -192,7 +234,8 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
       // The wind-up before the burst: the spin races, then lets go.
       const boost = fin >= 0 && !clock.failed ? (fin < 0.35 ? easeIn(fin / 0.35) * 9 : Math.max(0, 9 * (1 - (fin - 0.35) / 0.6))) : 0;
       time += dt;
-      turnY += dt * (0.7 * spin + boost);
+      // Asking, it hardly turns.
+      turnY += dt * (0.7 * spin + boost) * (1 - 0.7 * cue.ask);
       tiltX = 0.4 + Math.sin(time * 0.35) * 0.35;
       for (let i = pulses.length - 1; i >= 0; i--) {
         pulses[i].at += dt * 1.8 * spin;
@@ -206,6 +249,9 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number): Painter {
     still() {
       const act = clock.act;
       energy = goal(act)[1];
+      cue.settle();
+      // A still frame of listening is mid-word: drawn in, light on its way to the core.
+      pull = listening(act) ? 0.7 * gain : 0;
       warn = act?.quiet ? 1 : 0;
       alpha = act?.stopping ? 0.35 : act?.quiet ? 0.6 : 1;
       clock.settle();

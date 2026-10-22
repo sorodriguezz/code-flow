@@ -1,5 +1,7 @@
 import { ended, type ThinkingActivity } from "./activity";
+import { askBreath, cueClock, softHalo, startle } from "./cue";
 import { clamp01, easeIn, easeOut, easeOutBack, endColor, finishClock, rgba, TAU } from "./finish";
+import { listenLevel } from "./listen";
 import { mix, palette, rgb, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 import { voiceLevel } from "./voice";
@@ -28,6 +30,11 @@ import { easeToward, leanOf, toward } from "./pointer";
  * Following the pointer (`ThinkingOrb follow`), the bright point that runs round the ring stops
  * running and swings round to the pointer's side — the pointer becomes the light — and goes back
  * to circling when the pointer leaves.
+ *
+ * Listening (Codi), the ring calms and turns slowly, and with every syllable it hears it pulls in —
+ * the whole ring contracting while rings of light close on it from outside; speaking, the voice
+ * ripples and spins it and the mark swells out. Codi's cues: woken, it flares bright and pops for an
+ * instant; asking, it breathes slowly in a soft halo.
  */
 
 const VERTEX = `
@@ -201,10 +208,13 @@ function sharedGl(): Shared | null {
 const RELEASE = 0.3;
 const GREEN_IN = 0.45;
 
-export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
+export function createOrb(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const buffer = canvas.width;
   const clock = finishClock();
+  const cue = cueClock();
+  /** The microphone's level this frame while it listens, as far as Codi's gain takes it. */
+  let pull = 0;
   let time = 0;
   let turn = 0;
   let voice = 0;
@@ -229,6 +239,8 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
     return Math.max(0, 8 * (1 - (fin - RELEASE) / 0.6));
   }
 
+  const listening = () => !ended(activity) && !activity?.quiet && !activity?.stopping && activity?.phase === "listen";
+
   /** How loud the "voice" is right now — what the shader's wobble is driven by. */
   function target(): number {
     if (ended(activity) || activity?.stopping) return 0;
@@ -242,6 +254,9 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
       case "speak":
         // The voice's own loudness (a speech-like shape while it is being prepared).
         return 0.15 + 0.85 * voiceLevel();
+      case "listen":
+        // Calm: what it hears pulls the ring in instead (`paint`).
+        return 0.2 + 0.08 * Math.sin(time * 1.1);
       case "think":
       case "plan":
         return 0.45 + 0.2 * Math.sin(time * 1.3);
@@ -270,8 +285,15 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
     );
     // The failure's flicker: the ring stutters off and on while it dies down.
     if (failed && fin >= 0 && fin < 0.6) ctx.globalAlpha = alpha * (1 - 0.55 * Math.abs(Math.sin(fin * 38)) * (1 - fin / 0.6));
-    const size = px * scale(fin);
+    // Listening, drawn in by what it hears; woken, a pop back out; asking, a slow breath — never past
+    // its full size, whose glow already reaches the square's edge.
+    const drawn = Math.min(1.4, pull);
+    const start = startle(cue.wake);
+    const breath = askBreath(time);
+    const cued = Math.min(1, (1 - 0.09 * drawn) * (1 + 0.06 * start) * (1 - 0.05 * cue.ask * (1 - breath)));
+    const size = px * scale(fin) * cued;
     const at = (px - size) / 2;
+    if (cue.ask > 0.01) softHalo(ctx, px / 2, px / 2, px * 0.36, mix(p.b, p.c, 0.4), 0.25 * cue.ask * (0.6 + 0.4 * breath));
     const gl = sharedGl();
     if (gl) {
       const g = gl.gl;
@@ -287,7 +309,9 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
       // The wobble is a sine across the disc: past a whisper it folds the ring into a polygon at
       // the sizes this lives at, so only a loud "voice" (the answer streaming) ripples it at all.
       // What the voice mostly drives is the turn — as in the original.
-      g.uniform1f(gl.u.hover, voice * voice * 0.12);
+      // Codi's gain brings the ripple on quieter syllables, never past this: a deeper one folds the
+      // ring into a heptagon — and big, in Codi's window, so does a much shallower one.
+      g.uniform1f(gl.u.hover, Math.min(px > 64 ? 0.05 : 0.12, voice * voice * 0.12 * gain));
       g.uniform1f(gl.u.rot, turn);
       g.uniform3f(gl.u.c1, ...unit(hue1));
       g.uniform3f(gl.u.c2, ...unit(hue2));
@@ -299,6 +323,15 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
       g.uniform3f(gl.u.focus, look.x, -look.y, Math.min(1, look.on * Math.min(1, leanOf(look) * 4)));
       g.drawArrays(g.TRIANGLES, 0, 3);
       ctx.drawImage(gl.canvas, at, at, size, size);
+      // The wake's flare: the same frame laid over itself, adding light on a dark page.
+      if (start > 0.01) {
+        const was = ctx.globalAlpha;
+        ctx.globalAlpha = was * 0.6 * start;
+        if (p.dark) ctx.globalCompositeOperation = "lighter";
+        ctx.drawImage(gl.canvas, at, at, size, size);
+        ctx.globalCompositeOperation = "source-over";
+        ctx.globalAlpha = was;
+      }
     } else {
       // No WebGL: a ring in the same hues, its brightest point travelling round.
       const r = px * 0.36;
@@ -308,11 +341,24 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
         grad.addColorStop(0.5, rgb(hue2));
         grad.addColorStop(1, rgb(hue1));
       }
-      ctx.lineWidth = px * (0.1 + voice * 0.06);
+      ctx.lineWidth = px * (0.1 + voice * 0.06 + 0.04 * start);
       ctx.strokeStyle = grad ?? rgb(mix(p.b, p.success, green));
       ctx.beginPath();
-      ctx.arc(px / 2, px / 2, r * scale(fin), 0, TAU);
+      ctx.arc(px / 2, px / 2, r * scale(fin) * cued, 0, TAU);
       ctx.stroke();
+    }
+    // Listening: rings of light closing on the ring from outside, as bright as what it hears.
+    if (drawn > 0.01) {
+      ctx.strokeStyle = rgba(mix(mix(p.c, [255, 255, 255], 0.35), p.a, 0.15), 1);
+      ctx.lineWidth = Math.max(0.75, px * 0.025);
+      for (const offset of [0, 0.5]) {
+        const k = (time * 0.9 + offset) % 1;
+        ctx.globalAlpha = alpha * Math.sin(k * Math.PI) * 0.6 * Math.min(1, drawn);
+        ctx.beginPath();
+        ctx.arc(px / 2, px / 2, px * (0.47 - 0.15 * k), 0, TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = alpha;
     }
     // The release's ripple: one green ring running out from the orb's rim and fading as it goes.
     if (!failed && fin > RELEASE && fin < RELEASE + 0.65) {
@@ -330,12 +376,15 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
     setActivity(next) {
       activity = next;
       clock.set(next);
+      cue.set(next);
     },
     setGaze(next) {
       gaze = next;
     },
     tick(dt) {
       clock.step(dt);
+      cue.step(dt);
+      pull = listening() ? listenLevel() * gain : 0;
       easeToward(look, ended(activity) || activity?.quiet || activity?.stopping ? null : gaze, dt, 4);
       time += dt * (activity?.quiet ? 0.3 : 1);
       voice += (target() - voice) * Math.min(1, dt * 6);
@@ -349,6 +398,9 @@ export function createOrb(canvas: HTMLCanvasElement, px: number): Painter {
     still() {
       if (time === 0) time = 2.2;
       clock.settle();
+      cue.settle();
+      // A still frame of listening is mid-word: drawn in, a ring on its way.
+      pull = listening() ? 0.7 * gain : 0;
       voice = target();
       alpha = activity?.stopping ? 0.3 : 1;
       paint();

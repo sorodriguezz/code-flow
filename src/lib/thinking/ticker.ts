@@ -19,8 +19,10 @@ export interface Painter {
   destroy?(): void;
 }
 
-/** The px size each `ThinkingOrb` size paints at — the CSS square it fills (`.cf-orb-*`). */
-export const ORB_PX = { sm: 14, md: 22, card: 32, lg: 44 } as const;
+/** The px size each `ThinkingOrb` size paints at — the CSS square it fills (`.cf-orb-*`). `hero` is
+ *  Codi's own window, the one place a mark is met big: the designs keep their line widths and detail
+ *  in proportion there rather than scaling up what was tuned for a gutter. */
+export const ORB_PX = { sm: 14, md: 22, card: 32, lg: 44, hero: 180 } as const;
 export type OrbSize = keyof typeof ORB_PX;
 
 /**

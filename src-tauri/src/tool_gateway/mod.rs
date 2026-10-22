@@ -70,6 +70,18 @@ pub fn scrub_env(cmd: &mut tokio::process::Command) {
     }
 }
 
+/// [`scrub_env`] for a `std::process::Command` — the voice-cloning server, run from a blocking
+/// thread (`speech::clone`).
+pub fn scrub_env_std(cmd: &mut std::process::Command) {
+    for (name, _) in std::env::vars_os() {
+        if let Some(name) = name.to_str() {
+            if is_secret_name(name) {
+                cmd.env_remove(name);
+            }
+        }
+    }
+}
+
 /// Whether L4 can be sandboxed on this machine.
 pub fn sandbox_available() -> bool {
     cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").is_file()

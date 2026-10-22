@@ -29,7 +29,6 @@ const PRESETS = [
   { id: "groq", url: "https://api.groq.com/openai/v1", model: "whisper-large-v3-turbo" },
 ] as const;
 
-const MODEL_LABEL: Record<string, string> = { tiny: "Whisper tiny", base: "Whisper base", small: "Whisper small", turbo: "Whisper large-v3 turbo" };
 
 /**
  * «Reuniones»: where meetings are transcribed (this computer or a cloud Whisper), with which model,
@@ -56,9 +55,10 @@ export function MeetingsSettings() {
   if (!status.supported) return <p className="text-[12px] text-[var(--cf-text-muted)]">{t("meetings.settings.unsupported")}</p>;
 
   const installed = status.models.filter((m) => m.installed);
-  const modelOptions = (auto: string) => [
+  // Parakeet and Canary write the live text; the final pass needs whisper's per-word times.
+  const modelOptions = (auto: string, feature: "meetingsLive" | "meetingsFinal") => [
     { value: "", label: auto },
-    ...installed.map((m) => ({ value: m.id, label: MODEL_LABEL[m.id] ?? m.id })),
+    ...installed.filter((m) => m.features.includes(feature)).map((m) => ({ value: m.id, label: m.label })),
   ];
 
   return (
@@ -90,12 +90,12 @@ export function MeetingsSettings() {
                 <>
                   <Row label={t("meetings.settings.liveModel")}>
                     <div className="w-[260px]">
-                      <Select size="sm" value={settings.liveModel} onChange={(v) => void save("liveModel", v)} options={modelOptions(t("meetings.settings.autoFast"))} />
+                      <Select size="sm" value={settings.liveModel} onChange={(v) => void save("liveModel", v)} options={modelOptions(t("meetings.settings.autoFast"), "meetingsLive")} />
                     </div>
                   </Row>
                   <Row label={t("meetings.settings.finalModel")}>
                     <div className="w-[260px]">
-                      <Select size="sm" value={settings.finalModel} onChange={(v) => void save("finalModel", v)} options={modelOptions(t("meetings.settings.autoBest"))} />
+                      <Select size="sm" value={settings.finalModel} onChange={(v) => void save("finalModel", v)} options={modelOptions(t("meetings.settings.autoBest"), "meetingsFinal")} />
                     </div>
                   </Row>
                   <p className="text-[11.5px] text-[var(--cf-text-muted)]">

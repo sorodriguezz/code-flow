@@ -59,7 +59,7 @@ export const HOLD_MS = 1000;
  * The wait itself is unchanged at [`HOLD_MS`]: this only moves when the drawing starts, so the
  * indicator sweeps [`HOLD_PROGRESS_MS`] and still finishes exactly as the item lifts.
  */
-const HOLD_REVEAL_MS = 250;
+export const HOLD_REVEAL_MS = 250;
 
 /**
  * How long the indicator has to sweep — the hold minus the silence before it.
@@ -70,7 +70,7 @@ const HOLD_REVEAL_MS = 250;
 export const HOLD_PROGRESS_MS = HOLD_MS - HOLD_REVEAL_MS;
 
 /** How far the pointer may drift during the hold and still count as a press on one item. */
-const HOLD_SLOP = 6;
+export const HOLD_SLOP = 6;
 
 export interface HoldDrag {
   /** The item being held, by the same key the caller passed to `beginHold`. */
@@ -349,15 +349,16 @@ export function useHoldReorder(
  * holding rather than flickering on every click — see the note there. It sweeps
  * [`HOLD_PROGRESS_MS`], the remainder, and so still fills exactly as the item lifts.
  *
- * The host element needs `relative` and, for `bar`, its own rounded clipping.
+ * The host element needs `relative` and, for `bar`, its own rounded clipping. `ms` is for a hold of
+ * another length — the rail's «Codi», two seconds — and is that hold minus [`HOLD_REVEAL_MS`].
  */
-export function HoldProgress({ shape }: { shape: "ring" | "bar" }) {
+export function HoldProgress({ shape, ms = HOLD_PROGRESS_MS }: { shape: "ring" | "bar"; ms?: number }) {
   if (shape === "bar") {
     return (
       <span
         aria-hidden
         className="cf-hold-bar pointer-events-none absolute inset-y-0 left-0 w-full origin-left rounded-[inherit] bg-[var(--cf-accent-fill)] opacity-[0.14]"
-        style={{ animationDuration: `${HOLD_PROGRESS_MS}ms` }}
+        style={{ animationDuration: `${ms}ms` }}
       />
     );
   }
@@ -378,7 +379,7 @@ export function HoldProgress({ shape }: { shape: "ring" | "bar" }) {
         strokeWidth="2"
         strokeLinecap="round"
         className="cf-hold-ring"
-        style={{ animationDuration: `${HOLD_PROGRESS_MS}ms` }}
+        style={{ animationDuration: `${ms}ms` }}
       />
     </svg>
   );

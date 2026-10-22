@@ -113,6 +113,11 @@ Asking the user
   cf progress <text>                your status line on this terminal's agent card (3/7 tests)
   cf done [text]                    your work is finished: marks the card and tells the user
 
+Driving the app's interface
+  cf ui state                       what every window shows, as JSON
+  cf ui actions [area]              what it can do: `id {params} — what it does`
+  cf ui <action> ['{json}']         do one (cf ui app.open '{\"app\":\"flows\"}'); destructive ones ask first
+
 Showing things to the user
   cf review                         open the diff of the task this folder belongs to
   cf open <file>[:line]             open a file of the project in the app's editor

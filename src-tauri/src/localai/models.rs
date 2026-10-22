@@ -47,7 +47,15 @@ pub fn path_of(spec: &ModelSpec) -> PathBuf {
 
 /// Whether `spec`'s weights are present and verified.
 pub fn is_installed(spec: &ModelSpec) -> bool {
-    path_of(spec).is_file()
+    complete(spec, &path_of(spec))
+}
+
+/// `path` holds all of `spec`'s bytes. The download only renames a file into place after its digest
+/// matched, so the size is a cheap stand-in for it — and it catches a file that reached the final name
+/// some other way cut short (found 2026-10-21: 72 MB of a 2.8 GB model, which llama-server then
+/// refused as «corrupted or incomplete» on every start while the pane called it downloaded).
+pub fn complete(spec: &ModelSpec, path: &std::path::Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() == spec.size_bytes)
 }
 
 /// Bytes of a download that was interrupted, or `None` when there is no partial file.
@@ -157,6 +165,21 @@ mod tests {
         assert!(!root.join(spec.file).is_file());
         assert!(part.is_file());
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_short_file_under_the_final_name_is_not_complete() {
+        let spec = super::super::catalogue::find("qwen2.5-coder-0.5b").expect("catalogue entry");
+        let root = std::env::temp_dir().join("codeflow-localai-models-short-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let path = root.join(spec.file);
+        assert!(!complete(spec, &path), "missing");
+        std::fs::write(&path, b"72 MB of 2.8 GB").expect("write");
+        assert!(!complete(spec, &path), "cut short");
+        std::fs::File::options().write(true).open(&path).expect("open").set_len(spec.size_bytes).expect("grow");
+        assert!(complete(spec, &path), "every byte");
         let _ = std::fs::remove_dir_all(&root);
     }
 

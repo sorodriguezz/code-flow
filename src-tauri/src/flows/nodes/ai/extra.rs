@@ -789,29 +789,27 @@ pub(super) async fn speech(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     Ok(super::super::with_failures(ctx, vec![out], failed, 0))
 }
 
-/// A natural voice downloaded in Settings › Voz y sonido (Piper, run on this computer): the one named
-/// by its id, else the first downloaded one in the text's language — the reading aloud's own rule.
-/// Saves 16-bit WAV.
+/// A natural voice downloaded in Settings › Voz y sonido (Piper or Kokoro, run on this computer): the
+/// one named by its id, else the first downloaded one in the text's language — the reading aloud's
+/// own rule. Saves 16-bit WAV.
 async fn local_voice(ctx: &NodeCtx, said: &str, voice: &str, path: &Path) -> Result<(), NodeError> {
-    use crate::speech::{self, piper};
+    use crate::speech;
     if !path.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav")) {
         return Err(NodeError::failed("A downloaded voice saves .wav files — change the file's extension"));
     }
     let id = match voice.trim() {
         "" => {
             let lang = speech::language_of(said).unwrap_or_else(|| speech::language(&ctx.run.locale));
-            piper::VOICES.iter().find(|v| speech::language(v.lang) == lang && piper::installed(v.id)).map(|v| v.id).ok_or_else(|| {
+            speech::first_voice_for(lang).map(str::to_string).ok_or_else(|| {
                 let name = if lang == "es" { "Spanish" } else { "English" };
                 NodeError::failed(format!("No downloaded voice reads {name} — download one in Settings › Voice & sound › Models"))
             })?
         }
-        id => piper::spec(id)
-            .filter(|v| piper::installed(v.id))
-            .map(|v| v.id)
-            .ok_or_else(|| NodeError::failed(format!("The voice «{id}» is not downloaded — Settings › Voice & sound › Models")))?,
+        id if speech::voice_installed(id) => id.to_string(),
+        id => return Err(NodeError::failed(format!("The voice «{id}» is not downloaded — Settings › Voice & sound › Models"))),
     };
-    let words = said.to_string();
-    let (samples, rate) = tokio::task::spawn_blocking(move || piper::synthesize(id, &words, 1.0))
+    let (words, voice_id) = (said.to_string(), id.clone());
+    let (samples, rate) = tokio::task::spawn_blocking(move || speech::say_with_voice(&voice_id, &words, 1.0))
         .await
         .map_err(|e| NodeError::failed(e.to_string()))?
         .map_err(NodeError::Failed)?;

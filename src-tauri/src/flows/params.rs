@@ -2306,6 +2306,13 @@ const TERMINAL_OUTPUT: &[ParamSpec] = &[
     p("lines", COUNT, "100").literal(),
 ];
 
+/// «Acción de interfaz»: one of the interface's actions (`codi::ui`) — the same catalogue Codi and
+/// `cf ui` drive — by its id, with its params as JSON. A destructive one asks the user first.
+const UI_ACTION: &[ParamSpec] = &[
+    p("uiAction", text("app.open"), "\"app.open\"").literal(),
+    p("uiParams", text("{ \"app\": \"notes\" }"), "\"{}\""),
+];
+
 /// «Vulnerabilidades de dependencias»: the project's lockfiles against OSV.dev.
 const AUDIT: &[ParamSpec] = &[
     p("project", Kind::Project, "\"\"").literal(),
@@ -2671,6 +2678,7 @@ pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
         "app.knowledge" => KNOWLEDGE,
         "app.memory" => MEMORY,
         "app.terminalOutput" => TERMINAL_OUTPUT,
+        "app.ui" => UI_ACTION,
         "app.audit" => AUDIT,
         "data.table" => TABLE,
         "data.fake" => FAKE,

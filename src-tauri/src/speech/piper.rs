@@ -2,21 +2,18 @@
 //! library meetings separate voices with (`meetings::SHERPA`, the full build), so a machine that has
 //! one has half of the other.
 //!
-//! Measured on an M-series Mac: a voice loads in 0.3 s and writes 7.4 s of speech in 0.6 s of CPU.
-//! The voice stays loaded between sentences ([`LOADED`]); a different voice, or removing it, lets
-//! it go.
-//!
-//! **The config is opaque bytes.** `SherpaOnnxOfflineTtsConfig` nests nine model families' configs,
-//! 448 bytes on a 64-bit build; mirroring all of them in Rust would be a page of structs that only
-//! ever carry zeros. A zeroed buffer with the VITS fields written at their measured offsets (a C
-//! probe against v1.13.8's `c-api.h`, `offsets`) is the same call with nothing to drift.
+//! Measured on an M-series Mac: a voice loads in 0.3 s and writes 7.4 s of speech in 0.6 s of CPU —
+//! seven times faster than Kokoro (`super::kokoro`), which is why it is the voice a modest laptop
+//! is recommended. The voice stays loaded between sentences ([`LOADED`]); a different voice, or
+//! removing it, lets it go. The library calls are `super::sherpa`'s.
 
-use std::ffi::{c_char, c_void, CString};
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
-use libloading::Library;
 use serde::Serialize;
+
+use super::sherpa::{offsets, Config, Engine};
 
 /// One voice that can be downloaded.
 #[derive(Debug, Clone, Copy)]
@@ -180,26 +177,29 @@ pub fn any_installed() -> bool {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceRow {
-    pub id: &'static str,
-    pub label: &'static str,
+    pub id: Cow<'static, str>,
+    pub label: Cow<'static, str>,
     pub lang: &'static str,
     pub size_bytes: u64,
     pub licence: &'static str,
     pub gender: &'static str,
     pub installed: bool,
+    /// `piper` · `kokoro` — Kokoro's voices are one download for all of them (`super::kokoro`).
+    pub engine: &'static str,
 }
 
 pub fn rows() -> Vec<VoiceRow> {
     VOICES
         .iter()
         .map(|voice| VoiceRow {
-            id: voice.id,
-            label: voice.label,
+            id: voice.id.into(),
+            label: voice.label.into(),
             lang: voice.lang,
             size_bytes: voice.size,
             licence: voice.licence,
             gender: voice.gender,
             installed: installed(voice.id),
+            engine: "piper",
         })
         .collect()
 }
@@ -279,149 +279,41 @@ pub fn remove(id: &str) {
         }
     }
     let _ = std::fs::remove_dir_all(voice_dir(id));
-    if !any_installed() {
+    // Kokoro reads through the same data.
+    if !any_installed() && !super::kokoro::installed() {
         let _ = std::fs::remove_dir_all(espeak_dir());
     }
 }
 
 // ------------------------------------------------------------------------------------------ FFI
 
-/// Byte offsets inside `SherpaOnnxOfflineTtsConfig` (v1.13.8, 64-bit), measured with `offsetof`.
-mod offsets {
-    pub const SIZE: usize = 448;
-    pub const VITS_MODEL: usize = 0;
-    pub const VITS_TOKENS: usize = 16;
-    pub const VITS_DATA_DIR: usize = 24;
-    pub const VITS_NOISE_SCALE: usize = 32;
-    pub const VITS_NOISE_SCALE_W: usize = 36;
-    pub const VITS_LENGTH_SCALE: usize = 40;
-    pub const NUM_THREADS: usize = 56;
-    pub const PROVIDER: usize = 64;
-    pub const MAX_NUM_SENTENCES: usize = 424;
-    pub const SILENCE_SCALE: usize = 440;
-}
-
-#[repr(C)]
-struct GeneratedAudio {
-    samples: *const f32,
-    n: i32,
-    sample_rate: i32,
-}
-
-type CreateFn = unsafe extern "C" fn(*const u8) -> *const c_void;
-type DestroyFn = unsafe extern "C" fn(*const c_void);
-type RateFn = unsafe extern "C" fn(*const c_void) -> i32;
-type GenerateFn = unsafe extern "C" fn(*const c_void, *const c_char, i32, f32) -> *const GeneratedAudio;
-type DestroyAudioFn = unsafe extern "C" fn(*const GeneratedAudio);
-
-struct Api {
-    _library: Library,
-    create: CreateFn,
-    destroy: DestroyFn,
-    rate: RateFn,
-    generate: GenerateFn,
-    destroy_audio: DestroyAudioFn,
-}
-
-// SAFETY: plain C entry points; the library handle is only kept alive.
-unsafe impl Send for Api {}
-unsafe impl Sync for Api {}
-
-static API: OnceLock<Api> = OnceLock::new();
-
-fn load(path: &Path) -> Result<Api, String> {
-    // SAFETY: the pinned sherpa-onnx build meetings verified and unpacked. Loading the same file
-    // the speaker extractor loaded hands back the same module.
-    unsafe {
-        #[cfg(windows)]
-        let library = libloading::os::windows::Library::load_with_flags(path, 0x100 | 0x1000).map(Library::from);
-        #[cfg(not(windows))]
-        let library = Library::new(path);
-        let library = library.map_err(|e| format!("Couldn't load the voice library ({}): {e}", path.display()))?;
-        macro_rules! symbol {
-            ($name:literal, $ty:ty) => {
-                *library.get::<$ty>(concat!($name, "\0").as_bytes()).map_err(|e| format!("The voice library has no {}: {e}", $name))?
-            };
-        }
-        Ok(Api {
-            create: symbol!("SherpaOnnxCreateOfflineTts", CreateFn),
-            destroy: symbol!("SherpaOnnxDestroyOfflineTts", DestroyFn),
-            rate: symbol!("SherpaOnnxOfflineTtsSampleRate", RateFn),
-            generate: symbol!("SherpaOnnxOfflineTtsGenerate", GenerateFn),
-            destroy_audio: symbol!("SherpaOnnxDestroyOfflineTtsGeneratedAudio", DestroyAudioFn),
-            _library: library,
-        })
-    }
-}
-
-fn api() -> Result<&'static Api, String> {
-    if let Some(api) = API.get() {
-        return Ok(api);
-    }
-    let path = crate::meetings::sherpa_library().ok_or("The voice library is not installed — Settings › Voice & sound › Models")?;
-    let loaded = load(&path)?;
-    Ok(API.get_or_init(|| loaded))
-}
-
-/// Loads the library from `path` instead of the installed one — for the live test.
-#[cfg(test)]
-pub fn load_library_for_test(path: &Path) {
-    API.get_or_init(|| load(path).expect("the voice library loads"));
-}
-
 /// One loaded voice.
 struct Tts {
     voice: String,
-    handle: *const c_void,
-}
-
-// SAFETY: used under `LOADED`'s lock only.
-unsafe impl Send for Tts {}
-
-impl Drop for Tts {
-    fn drop(&mut self) {
-        if let Some(api) = API.get() {
-            // SAFETY: created by `create` and not destroyed elsewhere.
-            unsafe { (api.destroy)(self.handle) };
-        }
-    }
+    engine: Engine,
 }
 
 static LOADED: Mutex<Option<Tts>> = Mutex::new(None);
 
-fn create(dir: &Path, model: &str, espeak: &Path, threads: i32) -> Result<*const c_void, String> {
-    let api = api()?;
-    let cstr = |path: &Path| CString::new(path.to_string_lossy().as_bytes()).map_err(|_| "The voice's path has a NUL byte".to_string());
-    let model = cstr(&dir.join(model))?;
-    let tokens = cstr(&dir.join("tokens.txt"))?;
-    let data = cstr(espeak)?;
-    let provider = c"cpu";
-    let mut config = [0u8; offsets::SIZE];
-    let put_ptr = |buf: &mut [u8], at: usize, ptr: *const c_char| buf[at..at + 8].copy_from_slice(&(ptr as usize as u64).to_ne_bytes());
-    let put_f32 = |buf: &mut [u8], at: usize, value: f32| buf[at..at + 4].copy_from_slice(&value.to_ne_bytes());
-    let put_i32 = |buf: &mut [u8], at: usize, value: i32| buf[at..at + 4].copy_from_slice(&value.to_ne_bytes());
-    put_ptr(&mut config, offsets::VITS_MODEL, model.as_ptr());
-    put_ptr(&mut config, offsets::VITS_TOKENS, tokens.as_ptr());
-    put_ptr(&mut config, offsets::VITS_DATA_DIR, data.as_ptr());
+fn create(dir: &Path, model: &str, espeak: &Path, threads: i32) -> Result<Engine, String> {
+    let mut config = Config::new();
+    config.path(offsets::VITS_MODEL, &dir.join(model))?;
+    config.path(offsets::VITS_TOKENS, &dir.join("tokens.txt"))?;
+    config.path(offsets::VITS_DATA_DIR, espeak)?;
     // Piper's own defaults.
-    put_f32(&mut config, offsets::VITS_NOISE_SCALE, 0.667);
-    put_f32(&mut config, offsets::VITS_NOISE_SCALE_W, 0.8);
-    put_f32(&mut config, offsets::VITS_LENGTH_SCALE, 1.0);
-    put_i32(&mut config, offsets::NUM_THREADS, threads.clamp(1, 4));
-    put_ptr(&mut config, offsets::PROVIDER, provider.as_ptr());
-    put_i32(&mut config, offsets::MAX_NUM_SENTENCES, 1);
-    put_f32(&mut config, offsets::SILENCE_SCALE, 0.2);
-    // SAFETY: the buffer is the C struct's size, every pointer in it outlives the call (the library
-    // copies the strings into its own config).
-    let handle = unsafe { (api.create)(config.as_ptr()) };
-    if handle.is_null() {
-        return Err(format!("The voice could not be loaded ({})", dir.display()));
-    }
-    Ok(handle)
+    config.float(offsets::VITS_NOISE_SCALE, 0.667);
+    config.float(offsets::VITS_NOISE_SCALE_W, 0.8);
+    config.float(offsets::VITS_LENGTH_SCALE, 1.0);
+    config.int(offsets::NUM_THREADS, threads.clamp(1, 4));
+    config.text(offsets::PROVIDER, "cpu")?;
+    config.int(offsets::MAX_NUM_SENTENCES, 1);
+    config.float(offsets::SILENCE_SCALE, 0.2);
+    Engine::create(config).map_err(|_| format!("The voice could not be loaded ({})", dir.display()))
 }
 
-/// Says `text` with voice `id` at `speed` (1 = normal): mono samples and their rate.
-pub fn synthesize(id: &str, text: &str, speed: f32) -> Result<(Vec<f32>, u32), String> {
+/// Says `text` with voice `id` at `speed` (1 = normal), a sentence at a time into `on_chunk`
+/// (mono samples and their rate; `false` stops it).
+pub fn synthesize(id: &str, text: &str, speed: f32, on_chunk: &mut dyn FnMut(&[f32], u32) -> bool) -> Result<(), String> {
     if !supported() {
         return Err("Downloaded voices are not available on this computer".into());
     }
@@ -432,28 +324,11 @@ pub fn synthesize(id: &str, text: &str, speed: f32) -> Result<(Vec<f32>, u32), S
     let mut loaded = LOADED.lock().map_err(|_| "The voice is busy".to_string())?;
     if loaded.as_ref().map(|tts| tts.voice.as_str()) != Some(id) {
         *loaded = None;
-        let handle = create(&voice_dir(id), spec.model, &espeak_dir(), 2)?;
-        *loaded = Some(Tts { voice: id.to_string(), handle });
+        let engine = create(&voice_dir(id), spec.model, &espeak_dir(), 2)?;
+        *loaded = Some(Tts { voice: id.to_string(), engine });
     }
     let tts = loaded.as_ref().expect("loaded above");
-    let api = api()?;
-    let text = CString::new(text.replace('\0', " ")).map_err(|_| "The text has a NUL byte".to_string())?;
-    // SAFETY: the handle is live under the lock; the audio is freed below.
-    unsafe {
-        let audio = (api.generate)(tts.handle, text.as_ptr(), 0, speed.clamp(0.5, 2.0));
-        if audio.is_null() {
-            return Err("The voice said nothing".into());
-        }
-        let generated = &*audio;
-        let samples = if generated.samples.is_null() || generated.n <= 0 {
-            Vec::new()
-        } else {
-            std::slice::from_raw_parts(generated.samples, generated.n as usize).to_vec()
-        };
-        let rate = if generated.sample_rate > 0 { generated.sample_rate as u32 } else { (api.rate)(tts.handle).max(1) as u32 };
-        (api.destroy_audio)(audio);
-        Ok((samples, rate))
-    }
+    tts.engine.generate(text, 0, speed, on_chunk)
 }
 
 #[cfg(test)]
@@ -504,12 +379,13 @@ mod tests {
     }
 
     /// The real library and voice: `CODEFLOW_TEST_PIPER=<library>|<voice folder>|<espeak-ng-data>`.
+    /// Two sentences come out as two chunks, the first before the whole text is written.
     #[test]
     #[ignore]
     fn a_piper_voice_speaks_spanish() {
         let spec_env = std::env::var("CODEFLOW_TEST_PIPER").expect("CODEFLOW_TEST_PIPER=<library>|<voice folder>|<espeak-ng-data>");
         let parts: Vec<&str> = spec_env.split('|').collect();
-        load_library_for_test(Path::new(parts[0]));
+        super::super::sherpa::load_library_for_test(Path::new(parts[0]));
         let dir = Path::new(parts[1]);
         let model = std::fs::read_dir(dir)
             .unwrap()
@@ -517,23 +393,20 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .find(|name| name.ends_with(".onnx"))
             .expect("an .onnx in the folder");
-        let handle = create(dir, &model, Path::new(parts[2]), 2).unwrap();
-        *LOADED.lock().unwrap() = Some(Tts { voice: "test".into(), handle });
-        let api = api().unwrap();
-        let text = CString::new("Hola, soy el pensamiento de CodeFlow.").unwrap();
+        let engine = create(dir, &model, Path::new(parts[2]), 2).unwrap();
         let started = std::time::Instant::now();
-        let (samples, rate) = unsafe {
-            let tts = LOADED.lock().unwrap();
-            let audio = (api.generate)(tts.as_ref().unwrap().handle, text.as_ptr(), 0, 1.0);
-            let generated = &*audio;
-            let samples = std::slice::from_raw_parts(generated.samples, generated.n as usize).to_vec();
-            let rate = generated.sample_rate as u32;
-            (api.destroy_audio)(audio);
-            (samples, rate)
-        };
-        eprintln!("{} samples at {rate} Hz in {:?}", samples.len(), started.elapsed());
+        let mut chunks: Vec<(usize, std::time::Duration)> = Vec::new();
+        let mut rate = 0;
+        engine
+            .generate("Hola, soy el pensamiento de CodeFlow. Terminé de revisar el pull request.", 0, 1.0, &mut |chunk, at| {
+                chunks.push((chunk.len(), started.elapsed()));
+                rate = at;
+                true
+            })
+            .unwrap();
+        eprintln!("{chunks:?} at {rate} Hz in {:?}", started.elapsed());
         assert_eq!(rate, 22_050);
-        assert!(samples.len() > rate as usize);
-        *LOADED.lock().unwrap() = None;
+        assert_eq!(chunks.len(), 2, "one chunk a sentence");
+        assert!(chunks.iter().map(|(n, _)| n).sum::<usize>() > rate as usize);
     }
 }

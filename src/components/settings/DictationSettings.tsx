@@ -3,23 +3,17 @@ import { Keyboard } from "lucide-react";
 import { Select } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
 import { useDictationChord } from "../dictation/DictationControls";
-import type { DictationModel } from "../../lib/tauri/dictationCommands";
 import { useT } from "../../state/languageStore";
 import { useDictationStore } from "../../state/dictationStore";
 import { useUiStore } from "../../state/uiStore";
+import { useVoiceFitStore } from "../../state/voiceFitStore";
 
 /**
- * «Dictado»: which Whisper model dictation writes with, in which language, and its shortcut. The
- * models themselves — and the microphone — are «Voz»'s, shared with «Reuniones»; until one is
- * downloaded there and chosen here, no microphone is drawn anywhere.
+ * «Dictado»: which model dictation writes with — whisper's or sherpa-onnx's (Parakeet, Canary) — in
+ * which language, and its shortcut. The models themselves — and the microphone — are «Voz»'s,
+ * shared with «Reuniones» and «Codi»; until one is downloaded there and chosen here, no microphone is
+ * drawn anywhere. The one this machine is recommended (`voice_fit`) is marked.
  */
-
-const LABEL: Record<DictationModel["id"], string> = {
-  tiny: "Whisper tiny",
-  base: "Whisper base",
-  small: "Whisper small",
-  turbo: "Whisper large-v3 turbo",
-};
 
 const LANGUAGES: { value: string; label: string }[] = [
   { value: "es", label: "Español" },
@@ -34,9 +28,11 @@ export function DictationSettings() {
   const t = useT();
   const { status, model, language, load, setModel, setLanguage } = useDictationStore();
   const chord = useDictationChord();
+  const recommended = useVoiceFitStore((s) => s.fit?.picks.dictation);
 
   useEffect(() => {
     void load();
+    void useVoiceFitStore.getState().load();
   }, [load]);
 
   if (!status) {
@@ -46,7 +42,7 @@ export function DictationSettings() {
     return <p className="text-[12px] text-[var(--cf-text-muted)]">{t("dictation.unsupported")}</p>;
   }
 
-  const installed = status.models.filter((entry) => entry.installed);
+  const installed = status.models.filter((entry) => entry.installed && entry.features.includes("dictation"));
   const toVoice = (
     <button type="button" className="text-[var(--cf-accent)] hover:underline" onClick={() => useUiStore.getState().openSettingsAt("voice", "models")}>
       {t("voice.open")}
@@ -66,7 +62,10 @@ export function DictationSettings() {
               disabled={installed.length === 0}
               options={[
                 { value: "", label: t("dictation.off") },
-                ...installed.map((entry) => ({ value: entry.id, label: LABEL[entry.id] ?? entry.id })),
+                ...installed.map((entry) => ({
+                  value: entry.id,
+                  label: entry.id === recommended ? t("voiceFit.optionRecommended", { name: entry.label }) : entry.label,
+                })),
               ]}
             />
           </div>
@@ -74,6 +73,11 @@ export function DictationSettings() {
         <p className="pl-[92px] text-[11.5px] text-[var(--cf-text-muted)]">
           {installed.length === 0 ? t("dictation.noModels") : t("dictation.modelsInVoice")} {toVoice}
         </p>
+        {recommended && !installed.some((entry) => entry.id === recommended) && (
+          <p className="pl-[92px] text-[11.5px] text-[var(--cf-text-muted)]">
+            {t("voiceFit.suggest", { name: status.models.find((m) => m.id === recommended)?.label ?? recommended })}
+          </p>
+        )}
       </div>
 
       <div className="flex items-center gap-3">

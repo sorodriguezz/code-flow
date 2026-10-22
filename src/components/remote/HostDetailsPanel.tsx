@@ -1019,7 +1019,8 @@ function ConnectionTab({
           label={t("remote.fieldPassword")}
           hint={isEmbeddedScreen ? t("remote.fieldPasswordScreenHint") : t("remote.fieldPasswordHint")}
         >
-          <div className="flex w-full items-center gap-1">
+          {/* Private to «Codi» even while shown (`lib/codi/dom`). */}
+          <div className="flex w-full items-center gap-1" data-codi-private>
             <Field
               type={showPassword ? "text" : "password"}
               value={password}
@@ -1191,7 +1192,7 @@ function SecretField({
 }) {
   return (
     <FormRow label={label} hint={hint}>
-      <div className="flex w-full items-center gap-1">
+      <div className="flex w-full items-center gap-1" data-codi-private>
         <Field type={showPassword ? "text" : "password"} value={password} onChange={onPassword} mono />
         <RevealButton shown={showPassword} onToggle={onToggleShowPassword} />
       </div>

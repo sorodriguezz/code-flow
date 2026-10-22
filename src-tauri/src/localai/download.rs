@@ -108,8 +108,9 @@ pub async fn fetch(
     let final_path = dir.join(spec.file);
     let part_path = dir.join(format!("{}.part", spec.file));
 
-    // Already there and already verified — `final_path` only ever exists post-verification.
-    if final_path.is_file() {
+    // Already there and already verified — `final_path` only ever exists post-verification, unless
+    // something else put a short one there: that one is downloaded again, and replaced.
+    if super::models::complete(spec, &final_path) {
         emit(app, Progress::new(spec.id, Phase::Done, spec.size_bytes, spec.size_bytes));
         return Ok(final_path);
     }

@@ -190,6 +190,11 @@ pub(crate) enum AiTask {
     /// from an idea. Read-only, in the section's own working folder with its bundled skills; the
     /// document and what the app computed go on stdin, so it routes anywhere, a local model included.
     Architecture,
+    /// «Codi», the voice assistant: an order it could not run by itself (`crate::codi::router`) or on
+    /// the local model goes to this row's engine, with the app's UI actions as its only tools. Like
+    /// [`AiTask::ChatTitle`] it runs on the engine's fast model unless the row names another — every
+    /// second of it is a second the user waits with the microphone open.
+    Codi,
 }
 
 impl AiTask {
@@ -199,7 +204,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 27] = [
+    pub(crate) const ALL: [AiTask; 28] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -227,6 +232,7 @@ impl AiTask {
         AiTask::Api,
         AiTask::Skills,
         AiTask::Architecture,
+        AiTask::Codi,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -261,6 +267,7 @@ impl AiTask {
             AiTask::Api => "api",
             AiTask::Skills => "skills",
             AiTask::Architecture => "architecture",
+            AiTask::Codi => "codi",
         }
     }
 }
@@ -390,7 +397,7 @@ pub(crate) fn load_ai_config_in(
     let model = match own {
         Some(override_model) => override_model,
         None => match task {
-            AiTask::Commit | AiTask::ChatTitle | AiTask::SpokenSummary => {
+            AiTask::Commit | AiTask::ChatTitle | AiTask::SpokenSummary | AiTask::Codi => {
                 let dedicated = engine.commit_message_model();
                 if dedicated.is_empty() { base_model.clone() } else { dedicated.to_string() }
             }

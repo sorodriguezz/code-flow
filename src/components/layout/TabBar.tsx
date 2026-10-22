@@ -14,7 +14,7 @@ import { useShortcutChord } from "../../lib/useShortcutHint";
 import { monogram, monogramStyle } from "../../lib/monogram";
 import type { ShortcutId } from "../../lib/shortcuts";
 import type { TranslationKey } from "../../lib/i18n/translations";
-import { APPS } from "./AppRail";
+import { APPS } from "../../lib/railApps";
 import { StageChip } from "../common/StageChip";
 import { setChromeSlot } from "./ChromeSlot";
 

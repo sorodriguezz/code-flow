@@ -1,8 +1,10 @@
 import { ended, phaseGroup, type PhaseGroup, type ThinkingActivity } from "./activity";
-import { blink, INK, lipSync, lookFor, sleepZ, strokeEye, WHITE, type Gaze } from "./face";
+import { askBeat, askBlink, cueClock, hop, startle } from "./cue";
+import { blink, INK, lipSync, lookFor, mouthOpen, sleepZ, strokeEye, WHITE, type Gaze } from "./face";
 import { clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { listenLevel } from "./listen";
 import { voiceLevel } from "./voice";
 
 /**
@@ -13,7 +15,13 @@ import { voiceLevel } from "./voice";
  * eyes run along the lines; working, it leans and dances, flickering fast; writing, it burns taller
  * and embers rise off its shoulders. Speaking (the reading aloud), it swells taller and brighter
  * with each syllable of the voice, its mouth moving with it — no embers, those are writing's. Quiet,
- * it burns low with its eyes shut and dozes.
+ * it burns low with its eyes shut and dozes. Listening (Codi), it stands up tall and still, leaning
+ * in with its eyes wide on whoever speaks and its mouth shut; with every syllable it hears it draws
+ * in — its tongues pull close, the flame narrows a touch — and motes of light drift into it from
+ * either side: speaking swells it, hearing inhales.
+ *
+ * Codi's cues: woken, it flares up with a start, eyes wide on the viewer; asking, it tilts its tip
+ * to one side and looks at the viewer, blinking twice now and then — "well?".
  *
  * Finish: it flares up big, happy ^ ^ eyes, throws a few sparks and settles burning green. Failed:
  * it sputters and shrinks to a red ember with X X eyes, a wisp of smoke curling up from it — no
@@ -36,9 +44,10 @@ function flame(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number,
   ctx.closePath();
 }
 
-export function createSpark(canvas: HTMLCanvasElement, px: number): Painter {
+export function createSpark(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const clock = finishClock();
+  const cue = cueClock();
   const sparks = makeBurst(9, 53);
   /** Mouth and embers — what a flame smaller than this cannot hold. */
   const detail = px >= 20;
@@ -63,6 +72,9 @@ export function createSpark(canvas: HTMLCanvasElement, px: number): Painter {
   /** The voice this frame while it speaks (0–1), and the same smoothed into the flame's swell. */
   let voice = 0;
   let swell = 0;
+  /** Listening: how far into that look it is (0–1), and the microphone's level this frame. */
+  let perk = 0;
+  let hear = 0;
 
   const awake = (act: ThinkingActivity | undefined) => !ended(act) && !act?.quiet && !act?.stopping;
   // Speaking is its own look here, not writing's: `ThinkingOrb` hands this mark the phase as is.
@@ -93,22 +105,30 @@ export function createSpark(canvas: HTMLCanvasElement, px: number): Painter {
     const end = endColor(p, failed);
     const happy = !failed && !!act?.done && fin >= 0.25;
     const dazed = failed && fin >= 0.1;
-    // A dying flame barely flickers.
-    const calm = 1 - die * 0.75;
+    // A dying flame barely flickers; one listening holds still to hear.
+    const calm = (1 - die * 0.75) * (1 - 0.45 * perk);
+    // What it hears, as far as Codi's gain takes it: the inhale and the motes drawn in.
+    const draw = Math.min(1.4, hear * gain) * perk;
+    // The wake's start: a flare, a flash; the ask's tilt, deepening on its beat.
+    const start = startle(cue.wake);
+    const tilt = cue.ask * (0.07 + 0.05 * askBeat(time));
 
     const wobble = (Math.sin(flick * 3.1) * 0.6 + Math.sin(flick * 7.7) * 0.4) * calm;
-    const r = 0.235;
+    const r = 0.235 * (1 - 0.05 * draw);
     const cx = 0.5;
     const cy = 0.655;
-    const h = Math.max(0.12, 0.43 * height * (1 + flare + 0.2 * swell) * (1 - 0.45 * die + sputter) + wobble * 0.03);
-    const dx = (Math.sin(flick * 2.3) * 0.035 + Math.sin(flick * 5.9) * 0.018) * calm + lean;
+    // The voice's swell is capped with the finish's flare in mind: past 0.36 the tip leaves the square.
+    const voiced = Math.min(0.36, 0.2 * swell * gain);
+    const h = Math.max(0.12, 0.43 * height * (1 + flare + voiced + 0.16 * start) * (1 - 0.45 * die + sputter) + wobble * 0.03);
+    const dx = (Math.sin(flick * 2.3) * 0.035 + Math.sin(flick * 5.9) * 0.018) * calm + lean + tilt * 0.6;
     const a = alpha;
-    // Failing, the whole flame shrinks as it goes out.
-    const g = (0.4 + 0.6 * easeOut(grow)) * (1 - 0.14 * die);
+    // Failing, the whole flame shrinks as it goes out; listening, it leans in a little.
+    const g = (0.4 + 0.6 * easeOut(grow)) * (1 - 0.14 * die) * (1 + 0.03 * perk);
     const warm = (c: Rgb) => mix(c, p.warning, warn * 0.3);
 
     ctx.save();
-    ctx.translate(u(cx), u(cy + r));
+    ctx.translate(u(cx), u(cy + r - 0.02 * hop(cue.wake)));
+    ctx.rotate(tilt);
     ctx.scale(g, g);
     ctx.translate(-u(cx), -u(cy + r));
 
@@ -116,7 +136,9 @@ export function createSpark(canvas: HTMLCanvasElement, px: number): Painter {
     const tongue = (side: -1 | 1) => {
       const k = Math.sin(flick * 4.4 + (side > 0 ? 1.7 : 0)) * calm;
       const th = r * (1.05 + 0.25 * k) * Math.min(1.15, height) * (1 + flare * 0.6) * (1 - 0.7 * die);
-      flame(ctx, u(cx + side * r * 0.62), u(cy - r * 0.05), u(r * 0.42), u(th), u(side * (0.06 + 0.015 * k) + lean * 0.6));
+      // Hearing, the tongues pull in to the body and point up along it.
+      const inward = 1 - 0.3 * draw;
+      flame(ctx, u(cx + side * r * 0.62 * inward), u(cy - r * 0.05), u(r * 0.42), u(th), u(side * (0.06 + 0.015 * k) * inward + lean * 0.6));
     };
     ctx.beginPath();
     flame(ctx, u(cx), u(cy), u(r), u(h), u(dx));
@@ -130,7 +152,7 @@ export function createSpark(canvas: HTMLCanvasElement, px: number): Painter {
     grad.addColorStop(1, rgba(warm(mix(p.a, mix(end, INK, 0.15), tint)), a));
     ctx.save();
     ctx.shadowColor = rgba(warm(mix(mix(p.a, p.c, 0.35), end, tint)), (p.dark ? 0.7 : 0.45) * a * (1 - die * 0.5));
-    ctx.shadowBlur = u(0.14 + 0.12 * Math.max(0, flare) + 0.1 * swell);
+    ctx.shadowBlur = u(0.14 + 0.12 * Math.max(0, flare) + 0.1 * Math.min(1.6, swell * gain) + 0.08 * draw + 0.14 * start);
     ctx.fillStyle = grad;
     ctx.fill();
     ctx.restore();
@@ -140,14 +162,17 @@ export function createSpark(canvas: HTMLCanvasElement, px: number): Painter {
     flame(ctx, u(cx), u(cy + r * 0.2), u(r * 0.66), u(h * 0.52), u(dx * 0.5));
     const core = ctx.createLinearGradient(0, u(cy + r), 0, u(cy - h * 0.52));
     core.addColorStop(0, rgba(warm(mix(mix(WHITE, p.c, 0.18 * (1 - swell)), mix(end, WHITE, failed ? 0.35 : 0.6), tint)), 0.95 * a));
-    core.addColorStop(1, rgba(warm(mix(mix(p.c, WHITE, 0.35 + 0.35 * swell), mix(end, WHITE, 0.3), tint)), (0.6 + 0.3 * swell) * a));
+    // Brighter with the voice, with what it hears, and in the flash of a wake.
+    const bright = Math.min(1, Math.max(swell, draw * 0.55, start));
+    core.addColorStop(1, rgba(warm(mix(mix(p.c, WHITE, 0.35 + 0.35 * bright), mix(end, WHITE, 0.3), tint)), (0.6 + 0.3 * bright) * a));
     ctx.fillStyle = core;
     ctx.fill();
 
-    // The face.
-    const open = act?.stopping ? 0.45 : blink(time, 3.6);
+    // The face: eyes wide while it listens, wider still for a moment when woken.
+    const open = act?.stopping ? 0.45 : cue.ask > 0.5 ? askBlink(time) : blink(time, 3.6);
     const ey = cy + 0.015;
     const eyeR = detail ? 0.045 : 0.055;
+    const wide = 1 + 0.15 * perk + 0.2 * start;
     for (const side of [-1, 1]) {
       const ex = cx + side * 0.075 + dx * 0.15;
       if (dazed) strokeEye(ctx, u(ex), u(ey), u(eyeR), "x", rgba(INK, 0.9 * a), Math.max(1, u(0.03)));
@@ -157,7 +182,7 @@ export function createSpark(canvas: HTMLCanvasElement, px: number): Painter {
       } else {
         ctx.fillStyle = rgba(INK, 0.92 * a);
         ctx.beginPath();
-        ctx.ellipse(u(ex + lookX * 0.018), u(ey + lookY * 0.018), u(eyeR * 0.9), u(eyeR * 1.3 * open), 0, 0, TAU);
+        ctx.ellipse(u(ex + lookX * 0.018), u(ey + lookY * 0.018), u(eyeR * 0.9 * wide), u(eyeR * 1.3 * open * wide), 0, 0, TAU);
         ctx.fill();
       }
     }
@@ -171,7 +196,7 @@ export function createSpark(canvas: HTMLCanvasElement, px: number): Painter {
       if (speaking) {
         // Lip-sync: the mouth opens with the voice, a little wider than writing's chatter.
         const w = detail ? 0.03 : 0.045;
-        ctx.ellipse(u(cx + dx * 0.15), u(cy + 0.088), Math.max(0.6, u(w)), Math.max(0.5, u(w * (0.2 + 0.95 * mouth))), 0, 0, TAU);
+        ctx.ellipse(u(cx + dx * 0.15), u(cy + 0.088), Math.max(0.6, u(w)), Math.max(0.5, u(w * mouthOpen(mouth, gain))), 0, 0, TAU);
         ctx.fill();
       } else if (mouth > 0.05) {
         ctx.ellipse(u(cx + dx * 0.15), u(cy + 0.085), u(0.022), u(0.03 * mouth + 0.005), 0, 0, TAU);
@@ -183,6 +208,22 @@ export function createSpark(canvas: HTMLCanvasElement, px: number): Painter {
       }
     }
     ctx.restore();
+
+    // Listening: motes of light drifting in from either side and into the flame, as bright as what it
+    // hears is loud — writing's embers, the other way.
+    if (draw > 0.01) {
+      const motes = detail ? 6 : 4;
+      for (let i = 0; i < motes; i++) {
+        const k = (time * 0.85 + i / motes) % 1;
+        const side = i % 2 ? 1 : -1;
+        const x = cx + side * (0.42 - 0.3 * k);
+        const y = cy - 0.02 - 0.16 * Math.abs(Math.sin(i * 1.9 + 0.6)) + 0.05 * k;
+        ctx.fillStyle = rgba(warm(mix(i % 3 ? p.c : p.a, WHITE, 0.45)), Math.sin(k * Math.PI) * Math.min(1, draw) * a);
+        ctx.beginPath();
+        ctx.arc(u(x), u(y), Math.max(0.6, u(0.022) * (1 - k * 0.4)), 0, TAU);
+        ctx.fill();
+      }
+    }
 
     // Embers rising off its shoulders while it writes.
     if (detail && embers > 0.02) {
@@ -235,27 +276,33 @@ export function createSpark(canvas: HTMLCanvasElement, px: number): Painter {
 
   function settle(act: ThinkingActivity | undefined, k: number) {
     const group = groupOf(act);
-    // Speaking, it looks at whoever it is talking to.
+    // Speaking or listening, it looks at whoever it is talking with, and so it does when woken or
+    // asking — the wake snapping its eyes there.
     // Following the pointer, it looks at it — awake, and not while it is talking to someone.
+    const facing = group === "speak" || group === "listen" || cue.wake >= 0 || cue.ask > 0.5;
     const [tx, ty] =
-      gaze && group !== "speak" && !ended(act) && !act?.quiet && !act?.stopping
+      gaze && !facing && !ended(act) && !act?.quiet && !act?.stopping
         ? gaze
         : group
-          ? lookFor(group === "work" ? "edit" : group === "speak" ? "start" : act?.phase, time)
+          ? lookFor(group === "work" ? "edit" : facing ? "start" : act?.phase, time)
           : [0, 0];
-    lookX += (tx - lookX) * Math.min(1, k * 10);
-    lookY += (ty - lookY) * Math.min(1, k * 10);
+    const snap = cue.wake >= 0 ? 40 : 10;
+    lookX += (tx - lookX) * Math.min(1, k * snap);
+    lookY += (ty - lookY) * Math.min(1, k * snap);
+    perk += ((group === "listen" ? 1 : 0) - perk) * Math.min(1, k * 6);
     const resting = act?.quiet && !ended(act) ? 1 : 0;
     sleep += (resting - sleep) * Math.min(1, k * 3);
     warn += (resting - warn) * Math.min(1, k * 3);
     alpha += ((act?.stopping ? 0.35 : resting ? 0.6 : 1) - alpha) * Math.min(1, k * 3);
     swell += (lipSync(voice) - swell) * Math.min(1, k * 18);
-    const heightGoal = resting ? 0.55 : act?.stopping ? 0.7 : group === "write" ? 1.18 : group === "work" ? 1.06 : 1;
+    const heightGoal =
+      resting ? 0.55 : act?.stopping ? 0.7 : group === "write" ? 1.18 : group === "work" ? 1.06 : group === "listen" ? 1.1 : 1;
     height += (heightGoal - height) * Math.min(1, k * 4);
     // Working, it leans one way and the other — a dance.
     const leanGoal = group === "work" ? Math.sin(time * 4.2) * 0.075 : 0;
     lean += (leanGoal - lean) * Math.min(1, k * 8);
-    const paceGoal = group === "work" ? 2.4 : group === "write" ? 1.6 : group === "speak" ? 1.3 : resting ? 0.45 : 1;
+    const paceGoal =
+      group === "work" ? 2.4 : group === "write" ? 1.6 : group === "speak" ? 1.3 : group === "listen" ? 0.75 : resting ? 0.45 : 1;
     pace += (paceGoal - pace) * Math.min(1, k * 4);
     embers += ((group === "write" ? 1 : 0) - embers) * Math.min(1, k * 4);
     const say =
@@ -273,14 +320,17 @@ export function createSpark(canvas: HTMLCanvasElement, px: number): Painter {
     },
     setActivity(activity) {
       clock.set(activity);
+      cue.set(activity);
     },
     tick(dt) {
       clock.step(dt);
+      cue.step(dt);
       const act = clock.act;
       time += dt * (act?.quiet && !ended(act) ? 0.5 : 1);
       flick += dt * pace;
       grow += (1 - grow) * Math.min(1, dt * 3.5);
       voice = groupOf(act) === "speak" ? voiceLevel() : 0;
+      hear = groupOf(act) === "listen" ? listenLevel() : 0;
       settle(act, dt);
       paint();
     },
@@ -291,8 +341,11 @@ export function createSpark(canvas: HTMLCanvasElement, px: number): Painter {
         flick = 1.2;
       }
       grow = 1;
-      // A still frame of speech is mid-syllable: mouth open, flame up.
+      // A still frame of speech is mid-syllable: mouth open, flame up — and of listening, mid-word:
+      // drawn in, motes on their way.
       voice = groupOf(act) === "speak" ? 0.85 : 0;
+      hear = groupOf(act) === "listen" ? 0.7 : 0;
+      cue.settle();
       settle(act, 1);
       clock.settle();
       paint();

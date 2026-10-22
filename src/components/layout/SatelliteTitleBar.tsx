@@ -29,7 +29,7 @@ import {
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { isMac as platformIsMac, usePlatform } from "../../lib/platform";
 import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
-import { broadcast } from "../../lib/windowBus";
+import { returnThisIsland } from "../../lib/islandReturn";
 import { WINDOW } from "../../lib/windowIdentity";
 import { parseFileIslandRef, useFileIslandStore } from "../../lib/editorIslands";
 import { pushErrorToast } from "../../state/toastStore";
@@ -174,23 +174,9 @@ export function SatelliteTitleBar() {
     spec?.kind === "repo" ? (project?.name ?? t("windows.repoElsewhereShort")) : t(app.labelKey);
   const floating = spec?.kind === "file";
 
-  /** Sends this window's contents back to the main window: bring that one forward, then close this.
-   *  The order matters — closing first leaves the desk showing whatever was behind, which reads as
-   *  the thing having been thrown away rather than put back.
-   *
-   *  A floating editor's contents are a buffer, which has to *arrive* before the window may go —
-   *  its editor does the handing over (`giveBack`) and closes the window once the main window has
-   *  the file, coming forward on it. Before the editor is up there is nothing in here to hand over:
-   *  the main window still holds the file, and closing is enough. */
-  const reattach = () => {
-    const giveBack = floating ? useFileIslandStore.getState().giveBack : null;
-    if (giveBack) {
-      void giveBack(true);
-      return;
-    }
-    broadcast({ kind: "focus-main" });
-    void win.close();
-  };
+  /** Sends this window's contents back to the main window — see `returnThisIsland`, which «Codi»'s
+   *  `island.return` runs too, so both ways back hand a floating editor's buffer over first. */
+  const reattach = () => returnThisIsland();
 
   return (
     <div

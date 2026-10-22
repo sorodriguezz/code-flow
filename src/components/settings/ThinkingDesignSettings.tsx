@@ -28,8 +28,10 @@ import { onRadioKeys } from "./settingsNav";
  * one segmented row: they are all the same question, "what does it look like when…". On an ending
  * (Terminado, Error) pointing at a tile replays it. «Hablando» (2026-10-09) is the reading aloud:
  * every mark breathes with the voice (`.cf-orb--speaking`), here with a speech-like stand-in.
+ * «Escuchando» is Codi hearing the user: every design draws the microphone's level in, each its own
+ * way — here, with nothing feeding it, a stand-in of someone talking to it (`listenLevel`).
  */
-type PreviewState = "think" | "read" | "work" | "write" | "speak" | "quiet" | "done" | "failed";
+type PreviewState = "think" | "read" | "work" | "write" | "speak" | "listen" | "quiet" | "done" | "failed";
 
 /** Module-level, so the tiles hand every orb the same object across renders. */
 const PREVIEWS: Record<PreviewState, ThinkingActivity> = {
@@ -38,6 +40,7 @@ const PREVIEWS: Record<PreviewState, ThinkingActivity> = {
   work: { phase: "edit" },
   write: { phase: "write" },
   speak: { phase: "speak" },
+  listen: { phase: "listen" },
   quiet: { phase: "think", quiet: true },
   done: { done: true },
   failed: { failed: true },
@@ -49,6 +52,7 @@ const PREVIEW_LABELS: Record<PreviewState, TranslationKey> = {
   work: "settings.thinkingState.work",
   write: "settings.thinkingState.write",
   speak: "settings.thinkingState.speak",
+  listen: "settings.thinkingState.listen",
   quiet: "settings.thinkingState.quiet",
   done: "settings.thinkingState.done",
   failed: "settings.thinkingState.failed",

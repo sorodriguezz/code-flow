@@ -393,7 +393,7 @@ export function RunContainerDialog({ runtime, context, initialImage = "", onClos
                   spellCheck={false}
                   className={mono}
                 />
-                <div className="flex min-w-0 gap-1">
+                <div className="flex min-w-0 gap-1" data-codi-private={secret || undefined}>
                   <input
                     type={secret && !row.shown ? "password" : "text"}
                     value={row.value}

@@ -67,6 +67,7 @@ import { useThinkingDesignStore } from "./state/thinkingDesignStore";
 import { useGlassStore } from "./state/glassStore";
 import { useMotionStore } from "./state/motionStore";
 import { startAgentCli } from "./state/agentCliStore";
+import { startCodiBus } from "./lib/codi/bus";
 import { startTerminalAgents } from "./state/terminalAgentStore";
 import { useLanguageOverrideStore } from "./state/languageOverrideStore";
 import { useTourStore } from "./state/tourStore";
@@ -693,6 +694,9 @@ export default function App() {
         // `cf`'s three listeners and the focus it reports back. One socket's worth of plumbing,
         // already bound by the time the window appears — see `agentCliStore`.
         Promise.resolve(startAgentCli()),
+        // «Codi»'s actions: this window registers what it can do and answers `codi:act`. Returns at
+        // once — the catalogue loads behind the first paint (see `lib/codi/bus`).
+        Promise.resolve(startCodiBus()),
         // The agents in the app's terminals, followed from the start: a turn that ends while the
         // user is in another view is exactly the one worth a notification.
         Promise.resolve(startTerminalAgents()),
@@ -860,6 +864,12 @@ export default function App() {
             void showNoteHere(message.workspaceId, message.noteId).catch((e: unknown) =>
               pushErrorToast(String(e)),
             );
+            break;
+          case "open-settings":
+            // Codi's window asking for one of its panes («Voz y sonido › Codi», from its mode chip).
+            // It has already brought this window forward (`showMainWindow`); this opens the pane.
+            if (message.to !== WINDOW.label) break;
+            useUiStore.getState().openSettingsAt(message.section, message.tab);
             break;
           case "open-chat":
             // "Open in CodeFlow" in the hotkey ask box, in the ordinary case where the chat

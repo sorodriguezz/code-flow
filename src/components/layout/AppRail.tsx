@@ -1,22 +1,10 @@
-import {
-  ArrowUpRight,
-  Bot,
-  KeyRound,
-  ClipboardList,
-  Database,
-  Layers,
-  MessagesSquare,
-  MonitorSmartphone,
-  NotebookPen,
-  Send,
-  Waypoints,
-  Network,
-  Workflow,
-  type LucideIcon,
-} from "lucide-react";
-import { HoldProgress, HoldScrim, slotShift, useHoldReorder } from "../../lib/holdReorder";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { ArrowUpRight, Layers } from "lucide-react";
+import { HOLD_REVEAL_MS, HOLD_SLOP, HoldProgress, HoldScrim, slotShift, useHoldReorder } from "../../lib/holdReorder";
+import { openCodi } from "../codi/openCodi";
+import { useMotionLevel } from "../../lib/motion";
 import { useLayoutStore } from "../../state/layoutStore";
-import { useUiStore, type ApiWorkspace, type MainView } from "../../state/uiStore";
+import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useWindowStore } from "../../state/windowStore";
 import { useT } from "../../state/languageStore";
@@ -30,154 +18,14 @@ import { useAiRunStore } from "../../state/aiRunStore";
 
 /** The runs the Agentes app owns: a task's turn and a chain's step. See `aiRunStore`. */
 const AGENT_RUN_KINDS = new Set<string>(["agents.liveKindAgent", "agents.liveKindChain"]);
-import type { TranslationKey } from "../../lib/i18n/translations";
 import { ReturnBurst } from "./ReturnBurst";
-import { flushBeforeIsland } from "../../lib/islandSync";
 import { WORKSPACE_ICONS } from "./WorkspaceGlyph";
 import { monogram } from "../../lib/monogram";
+import { APPS, appKey, openRailApp, sendRailAppOut, type WorkspaceApp } from "../../lib/railApps";
 
-export interface WorkspaceApp {
-  id: MainView;
-  /**
-   * Which workspace *inside* that view, for a view that holds more than one.
-   *
-   * The API tab holds two — requests and databases — because both are workspace-scoped and neither
-   * follows the selected repository. They are separate buttons here so each is one click;
-   * `undefined` means the view has only one.
-   */
-  workspace?: ApiWorkspace;
-  icon: LucideIcon;
-  labelKey: TranslationKey;
-  /** What the app holds, so the tooltip can say it — the rail itself has room for an icon and
-   * nothing else. */
-  descriptionKey: TranslationKey;
-  /** Marks an app that is still settling, so the rail says so before it is opened rather than
-   * after something behaves unexpectedly inside it — the word under the icon, a chip in the tooltip
-   * and in the title row's crumb. No app wears one today: Flujos was beta until 2026-10-07. */
-  stage?: "alpha" | "beta";
-  /** What the stage means for this app, as the chip's tooltip in the title row. */
-  stageHintKey?: TranslationKey;
-}
-
-/** Everything that belongs to the workspace rather than to the selected repository. Adding the
- * next one is a single entry here — the rail follows.
- *
- * This is the order the rail *starts* in, and the comments below are the argument for it. It is no
- * longer the order it necessarily stays in: an icon held down can be moved, and [`ordered`] lays
- * this list out against what the user chose. It remains the source of truth for which apps exist. */
-export const APPS: WorkspaceApp[] = [
-  {
-    id: "api",
-    workspace: "requests",
-    icon: Send,
-    labelKey: "tabbar.api",
-    descriptionKey: "tabbar.apiDescription",
-  },
-  {
-    id: "api",
-    workspace: "database",
-    icon: Database,
-    labelKey: "tabbar.databases",
-    descriptionKey: "tabbar.databasesDescription",
-  },
-  // No `workspace`: the agent console is a view of its own. It sits here rather than in the tab
-  // bar for the same reason the other two do — the roster belongs to the workspace, and switching
-  // repository doesn't change which agents exist.
-  {
-    id: "agents",
-    icon: Bot,
-    labelKey: "tabbar.agents",
-    descriptionKey: "tabbar.agentsDescription",
-  },
-  // Below the agents, and workspace-scoped for the plainest reason of the three: a requirement is
-  // written before the code that satisfies it, so this screen has to work in a workspace whose
-  // repositories don't exist yet.
-  {
-    id: "stories",
-    icon: ClipboardList,
-    labelKey: "tabbar.stories",
-    descriptionKey: "tabbar.storiesDescription",
-  },
-  // Last, and workspace-scoped for the same reason as the databases above it: a host is part of the
-  // environment a workspace's repositories are deployed to, so switching repository must not change
-  // which machines are listed.
-  {
-    id: "remote",
-    icon: MonitorSmartphone,
-    labelKey: "tabbar.remote",
-    descriptionKey: "tabbar.remoteDescription",
-  },
-  // Under the machines, and among the least repository-bound of them: a note is the writing *around*
-  // the work — the decision, the runbook, the meeting — and none of it changes meaning when you
-  // click a different repo. It sits down here because it is one you come back to rather than one
-  // you pass through.
-  {
-    id: "notes",
-    icon: NotebookPen,
-    labelKey: "tabbar.notes",
-    descriptionKey: "tabbar.notesDescription",
-  },
-  // After the notes, because it is the same kind of thing one step further out: a diagram is the
-  // drawing *around* the work the way a note is the writing around it, and neither changes meaning
-  // when you click a different repo. Last because it is the newest, and because the rail's declared
-  // order is only where it starts — see `ordered`.
-  {
-    id: "diagrams",
-    icon: Workflow,
-    labelKey: "tabbar.diagrams",
-    descriptionKey: "tabbar.diagramsDescription",
-  },
-  // The first app here that is *not* scoped to the workspace: a password does not belong to the
-  // workspace it was typed in, and losing one because a workspace was tidied up is not a trade
-  // worth making. Its list narrows by workspace; the vault itself does not. See `vaultStore`'s
-  // closing comment.
-  {
-    id: "vault",
-    icon: KeyRound,
-    labelKey: "tabbar.vault",
-    descriptionKey: "tabbar.vaultDescription",
-  },
-  // Last, and the second app here that is not workspace-scoped — for a different reason than the
-  // vault above it. The vault is global because a secret outlives the workspace it was typed in;
-  // chat is global because the list was *designed* flat, the way ChatGPT's is, and a conversation
-  // you started this morning has to still be one click away after you switch workspace to answer
-  // something else. A `workspace_id` is still recorded on every conversation (backup groups by it,
-  // and so does the run-isolation stamp) — the sidebar simply does not filter on it.
-  //
-  // It is also the only app on this rail that routinely has nothing to do with a repository, which
-  // is what earns it a place in `WORKSPACE_VIEWS` rather than among the repository tabs.
-  {
-    id: "chat",
-    icon: MessagesSquare,
-    labelKey: "tabbar.chat",
-    descriptionKey: "tabbar.chatDescription",
-  },
-  // Node-based automations — schedules, scripts, APIs and AI. Workspace-scoped like the API client
-  // and the databases whose transports and connections its nodes reuse. Last because it is the
-  // newest. It wore "beta" from 2026-10-06 until the user took it off on 2026-10-07.
-  {
-    id: "flows",
-    icon: Waypoints,
-    labelKey: "tabbar.flows",
-    descriptionKey: "tabbar.flowsDescription",
-  },
-  // Architecture documents: the system as JSON, drawn, reviewed, simulated and discussed with AI.
-  // Its documents live in the diagrams table, but it is its own app — the user asked for a door of
-  // its own on the rail (2026-10-21).
-  {
-    id: "architecture",
-    icon: Network,
-    labelKey: "tabbar.architecture",
-    descriptionKey: "tabbar.architectureDescription",
-  },
-];
-
-/** Buttons are keyed by view *and* workspace, since two of them share a view. This key is also what
- * the stored order is written in, so it has to stay stable across releases — renaming one silently
- * drops that app to the bottom of a rail somebody had already arranged. */
-export function appKey(app: WorkspaceApp): string {
-  return app.workspace ? `${app.id}:${app.workspace}` : app.id;
-}
+/** The rail's apps and what opening and detaching one does live in `lib/railApps` — «Codi» does both
+ *  too. Re-exported for the readers that found them here. */
+export { APPS, appKey, type WorkspaceApp };
 
 /** `items` with the entry at `from` lifted out and put back in at `to`. */
 function move<T>(items: T[], from: number, to: number): T[] {
@@ -256,8 +104,6 @@ function ink(color: string): string {
 export function AppRail() {
   const activeView = useUiStore((s) => s.activeView);
   const apiWorkspace = useUiStore((s) => s.apiWorkspace);
-  const setActiveView = useUiStore((s) => s.setActiveView);
-  const openApiWorkspace = useUiStore((s) => s.openApiWorkspace);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const railOrder = useLayoutStore((s) => s.railOrder);
@@ -268,8 +114,6 @@ export function AppRail() {
   const satellites = useWindowStore((s) => s.satellites);
   // Islands that just came back, to point at where each one landed — see `ReturnBurst`.
   const returns = useWindowStore((s) => s.returns);
-  const detach = useWindowStore((s) => s.detach);
-  const focusWindow = useWindowStore((s) => s.focus);
   const t = useT();
   const agentsBusy = useAiRunStore((s) =>
     Object.keys(s.active).some((id) => s.active[id] && AGENT_RUN_KINDS.has(s.aboutByRun[id]?.kindKey ?? "")),
@@ -295,32 +139,15 @@ export function AppRail() {
   const windowFor = (app: WorkspaceApp) =>
     satellites.find((s) => s.kind === "app" && s.ref_id === appKey(app))?.label ?? null;
 
+  // Opening (or focusing the island that holds it) and sending out are `lib/railApps`' — the same
+  // two gestures «Codi» makes, so the rules behind them are written once.
   const open = (app: WorkspaceApp) => {
-    // Detaching moves rather than duplicates, so the icon for an app that is elsewhere is a way
-    // *to* that window, not a second copy of the app. Anything else would be two API clients on one
-    // workspace's collections, which is the case this whole design exists to prevent.
-    const label = windowFor(app);
-    if (label) {
-      void focusWindow(label);
-      return;
-    }
-    // A view with sub-workspaces needs both set at once, or the tab would open on whichever side
-    // was last on screen rather than the one just picked.
-    if (app.workspace) openApiWorkspace(app.workspace);
-    else setActiveView(app.id);
+    openRailApp(app);
   };
 
   /** Sends the app out to a window of its own, and takes it off this one. */
   const sendOut = async (app: WorkspaceApp) => {
-    // What this window still owes the database goes first, so the island boots onto it.
-    await flushBeforeIsland(appKey(app));
-    const moved = await detach("app", appKey(app), t(app.labelKey));
-    // Only once the window actually exists: refused (the limit is reached, the backend said no) the
-    // app stays exactly where it was, rather than leaving this window on an empty view.
-    if (!moved) return;
-    if (activeView === app.id && (app.workspace ?? apiWorkspace) === apiWorkspace) {
-      useUiStore.getState().returnToRepo();
-    }
+    await sendRailAppOut(app);
   };
 
   return (
@@ -604,31 +431,109 @@ export function AppRail() {
  * does. Not the lifted sheet of the active app — on
  * this rail that sheet means "the view you are in", and with the panel open beside an app the rail
  * would claim two of them.
+ *
+ * Held down for two seconds it opens «Codi» instead — the voice assistant's door since its title-bar
+ * button went (the user, 2026-10-21: "que se abra después de mantener presionado 2 segundos el
+ * pensamiento que está en el rail"). The rail's own hold gesture, drawn the same way (`HoldProgress`,
+ * after the same quarter-second of silence, dropped when the pointer drifts) — or, in Motion
+ * «Completa», with no ring: the button itself charges up from half a second in — filling with the
+ * accent, glowing, the mark thinking and swelling, trembling at the end — and the mark pops and
+ * startles awake when Codi opens. Let
+ * go before the two seconds and it is a click: the chat opens (or closes) as always. The click that
+ * ends a hold that opened Codi is not also a click on the panel.
  */
+/** How long the assistant's mark is held for «Codi» — the user's two seconds. */
+const CODI_HOLD_MS = 2000;
+/** Module-level, so the mark is handed the same object every render: held, it thinks — loading up
+ *  (user: «mientras se mantenga pulsado … alguna animación como de cargando»). */
+const CHARGING = { phase: "think" } as const;
+/** How long the mark plays its wake startle once Codi has opened. */
+const WOKE_MS = 1200;
+/** In Motion «Completa» the mark itself is the indicator, from half a second in — a click is well
+ *  under it — instead of the ring (user, 2026-10-21: «de 0.5 s a 2 s en vez de salir el círculo»). */
+const CHARGE_FROM_MS = 500;
+
 function AssistantButton() {
   const open = useUiStore((s) => s.aiPanelOpen);
   const toggle = useUiStore((s) => s.toggleAiPanel);
   const t = useT();
   const hint = useShortcutHint();
+  const [arming, setArming] = useState(false);
+  const charges = useMotionLevel() === "full";
+  const [wokeAt, setWokeAt] = useState<number | null>(null);
+  useEffect(() => {
+    if (wokeAt === null) return;
+    const id = window.setTimeout(() => setWokeAt(null), WOKE_MS);
+    return () => window.clearTimeout(id);
+  }, [wokeAt]);
+  const press = useRef<{ x: number; y: number; timers: number[] } | null>(null);
+  const openedCodi = useRef(false);
+
+  const release = useCallback(() => {
+    press.current?.timers.forEach((id) => window.clearTimeout(id));
+    press.current = null;
+    setArming(false);
+  }, []);
+  useEffect(() => release, [release]);
+
+  const onPointerDown = (event: ReactPointerEvent) => {
+    if (event.button !== 0) return;
+    release();
+    openedCodi.current = false;
+    press.current = {
+      x: event.clientX,
+      y: event.clientY,
+      timers: [
+        window.setTimeout(() => setArming(true), charges ? CHARGE_FROM_MS : HOLD_REVEAL_MS),
+        window.setTimeout(() => {
+          openedCodi.current = true;
+          release();
+          setWokeAt(performance.now());
+          openCodi();
+        }, CODI_HOLD_MS),
+      ],
+    };
+  };
+  const onPointerMove = (event: ReactPointerEvent) => {
+    const held = press.current;
+    if (held && Math.hypot(event.clientX - held.x, event.clientY - held.y) > HOLD_SLOP) release();
+  };
 
   return (
-    <Tooltip side="left" label={hint("panel.ai", t("statusbar.aiPanel"))}>
+    <Tooltip side="left" label={hint("panel.ai", t("statusbar.aiPanel"))} description={hint("codi.open", t("codi.rail.hold"))}>
       <button
         type="button"
-        onClick={toggle}
+        onClick={() => {
+          if (openedCodi.current) {
+            openedCodi.current = false;
+            return;
+          }
+          toggle();
+        }}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={release}
+        onPointerLeave={release}
+        onPointerCancel={release}
         data-tour="toggle-ai-panel"
         aria-label={t("statusbar.aiPanel")}
         aria-expanded={open}
-        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors ${
+        className={`relative flex h-9 w-9 shrink-0 select-none items-center justify-center rounded-lg transition-colors ${
           open ? "bg-[var(--cf-accent)]/15 hover:bg-[var(--cf-accent)]/20" : "hover:bg-[var(--cf-hover)]"
-        }`}
+        } ${arming && charges ? "cf-charging" : ""}`}
+        style={arming && charges ? ({ "--cf-charge-ms": `${CODI_HOLD_MS - CHARGE_FROM_MS}ms` } as CSSProperties) : undefined}
       >
+        {arming && charges && <span aria-hidden className="cf-charge-fill" />}
         {/* `card` (32px) rather than `md`: the designs draw inside their square with room to spare,
             and at 22px the mark read smaller than the app icons above it (user: "un poco más grande").
             `follow`: every design notices the pointer — the ones with eyes look at it (user: "que siga el
             mouse con los ojos"), the rest turn, lean or light up toward it — and perks up as it comes
-            close to the button. See `ThinkingOrb`. */}
-        <ThinkingOrb size="card" follow />
+            close to the button. See `ThinkingOrb`. Its charge (`index.css`, «charging up to open
+            Codi»): swelling while held, popping back as Codi opens. */}
+        <span className={`cf-charge-mark relative flex ${charges && !arming && wokeAt !== null ? "cf-charge-pop" : ""}`}>
+          <ThinkingOrb size="card" follow activity={arming && charges ? CHARGING : wokeAt !== null ? { cue: { kind: "wake", at: wokeAt } } : undefined} />
+        </span>
+        {arming && !charges && <HoldProgress shape="ring" ms={CODI_HOLD_MS - HOLD_REVEAL_MS} />}
       </button>
     </Tooltip>
   );

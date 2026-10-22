@@ -19,7 +19,7 @@ import {
 } from "../lib/tauri/speechCommands";
 import { speakable } from "../lib/speech/speakable";
 import { setNotificationOutput } from "../lib/notificationSound";
-import { endVoice, startVoice } from "../lib/thinking/voice";
+import { appendVoice, endVoice, startVoice } from "../lib/thinking/voice";
 import { watchSettings } from "../lib/settingsSync";
 import { NOTIFICATION_SOURCE_LABEL, onNotificationPushed } from "./notificationStore";
 import { usePreferencesStore } from "./preferencesStore";
@@ -28,6 +28,9 @@ import { useDictationStore } from "./dictationStore";
 import { translate, useLanguageStore } from "./languageStore";
 import type { Language } from "../lib/i18n/translations";
 import { pushErrorToast } from "./toastStore";
+import { useCodiStore } from "./codiStore";
+import { codiAnnounce } from "../lib/tauri/codiCommands";
+import { isMainWindow } from "../lib/windowIdentity";
 
 /**
  * «Lectura en voz alta»: what the thinking mark says, with which voice, and when it keeps quiet.
@@ -334,7 +337,9 @@ export function ensureSpeechEvents(): void {
       return;
     }
     if (event.phase === "speaking") {
-      startVoice(event.envelope, event.stepMs);
+      // A downloaded voice sends one `speaking` a sentence; the later ones continue the first.
+      if (event.append) appendVoice(event.envelope);
+      else startVoice(event.envelope, event.stepMs);
       useSpeechStore.setState({ speaking: { id: event.id, text: event.text, origin: event.origin, phase: "speaking" } });
       return;
     }
@@ -355,12 +360,27 @@ export function ensureSpeechEvents(): void {
       window.setTimeout(() => useSpeechStore.setState((s) => ({ progress: { ...s.progress, [event.item]: undefined } })), 1500);
     }
   });
+  // The main window follows Codi's microphone for the branch below.
+  if (isMainWindow()) void useCodiStore.getState().load();
   onNotificationPushed((item) => {
     if (!usePreferencesStore.getState().spokenNotificationSources.includes(item.source)) return;
     const source = translate(NOTIFICATION_SOURCE_LABEL[item.source]);
     const title = translate(item.titleKey, item.params);
-    useSpeechStore.getState().say(`${source}: ${title}${item.detail ? `. ${item.detail}` : ""}`, "notification");
+    const text = `${source}: ${title}${item.detail ? `. ${item.detail}` : ""}`;
+    if (announcesThroughCodi()) {
+      // Codi is listening: it says it, in its voice, and logs it in its window — one voice, not two
+      // talking over each other. The same quiet rules as the reading aloud's.
+      if (!quietNow()) void codiAnnounce(text, item.source).catch(() => {});
+      return;
+    }
+    useSpeechStore.getState().say(text, "notification");
   });
+}
+
+/** Whether a notification to be said goes to Codi instead: its microphone is on, and this is the
+ *  main window — the one whose notifications are said. */
+export function announcesThroughCodi(): boolean {
+  return isMainWindow() && !!useCodiStore.getState().state?.mic;
 }
 
 watchSettings(Object.values(KEY), () => {

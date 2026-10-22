@@ -45,8 +45,12 @@ export const MAIN_LABEL = "main";
  *
  * `file` is one editor tab torn out of the main window into a floating window of its own — see
  * `lib/editorIslands`. Its `refId` is `"<project id>:<path>"`.
+ *
+ * `codi` is the voice assistant's window (`windows::open_codi`, `window.html?kind=codi&ref=codi`):
+ * like `quick`, a satellite only mechanically — its own command builds it, it holds no screen of
+ * the app and scopes to nothing. See `components/codi/CodiWindow`.
  */
-export type SatelliteKind = "app" | "repo" | "quick" | "file";
+export type SatelliteKind = "app" | "repo" | "quick" | "file" | "codi";
 
 /**
  * The kinds a window can be *detached into*, which is not all of them.
@@ -56,8 +60,9 @@ export type SatelliteKind = "app" | "repo" | "quick" | "file";
  * its own command (`quick_ask_open`) because it is built differently — small, undecorated, placed
  * over whatever the user was looking at, and exempt from the close cascade. Routing it through the
  * generic builder would produce a window that looks like the ask box and behaves like a satellite.
+ * Codi's window is the same case: `codi_open_window` builds it, frameless and always on top.
  */
-export type DetachableKind = Exclude<SatelliteKind, "quick">;
+export type DetachableKind = Exclude<SatelliteKind, "quick" | "codi">;
 
 export interface WindowIdentity {
   /** The platform's own window label — `"main"`, or `sat-app-notes`. */
@@ -106,7 +111,9 @@ export function parseIdentity(label: string, search: string): WindowIdentity {
     // except that it happens on a window that is working perfectly: the webview loads, the label is
     // right, and `SatelliteApp` is handed `satellite: null` and paints a skeleton forever.
     satellite:
-      (kind === "app" || kind === "repo" || kind === "quick" || kind === "file") && refId ? { kind, refId } : null,
+      (kind === "app" || kind === "repo" || kind === "quick" || kind === "file" || kind === "codi") && refId
+        ? { kind, refId }
+        : null,
   };
 }
 

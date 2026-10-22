@@ -6,6 +6,7 @@ import type { AiRunAbout } from "../state/aiRunStore";
 import type { UnsavedItem } from "./unsavedWork";
 import type { IslandTab } from "./editorIslands";
 import type { ExplorerClipboardSnapshot } from "../state/explorerClipboardStore";
+import type { SettingsSectionId } from "../state/uiStore";
 
 /**
  * How the windows tell each other things.
@@ -128,6 +129,13 @@ export type WindowMessage =
    * to.
    */
   | { kind: "open-chat"; to: string; conversationId: string }
+  /**
+   * Open Settings on one pane, please — Codi's window asking the shell, the only window with a
+   * Settings screen, when its mode chip is pressed. Addressed like the three above: one window has
+   * Settings, and only it may act. `tab` is a pane id of `settingsCatalog`; the section falls back to
+   * its first pane when it is not one of its own (`RailSection`).
+   */
+  | { kind: "open-settings"; to: string; section: SettingsSectionId; tab: string }
   /**
    * What a satellite has unsaved, sent whenever the set changes — see `lib/unsavedWork.ts`.
    *

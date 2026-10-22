@@ -255,7 +255,110 @@ pub fn start(device_id: &str, on_level: impl Fn(f32) + Send + 'static, on_limit:
     }
 }
 
+/// Opens `device_id` and hands its audio on as it is heard — mono at [`TARGET_RATE`], about every
+/// [`TICK`] — to `on_audio`, with its levels to `on_level`, until the `Capture` is stopped or dropped.
+/// What «Codi» listens with: an assistant that waited for a recording to end would not hear its name.
+/// Nothing is kept here; `stop` returns nothing.
+///
+/// `gate` says whether the microphone runs at all. While it is `false` the input is paused — no
+/// audio, no levels, and the system's microphone light goes out — which is what «push to talk» means
+/// (user report, 2026-10-21: it went on hearing, and discarding, everything said between presses).
+/// Closing hands on what was heard up to that moment, so the end of a sentence is not cut; opening
+/// drops anything stale from before.
+pub fn listen(
+    device_id: &str,
+    gate: Arc<std::sync::atomic::AtomicBool>,
+    on_level: impl Fn(f32) + Send + 'static,
+    mut on_audio: impl FnMut(Vec<f32>) + Send + 'static,
+) -> Result<Capture, String> {
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+    let (stop_tx, stop_rx) = mpsc::channel::<()>();
+    let device_id = device_id.to_string();
+    let thread = std::thread::Builder::new()
+        .name("codi-mic".into())
+        .spawn(move || {
+            stream_health::enter_mta();
+            let shared = Arc::new(Mutex::new(Shared::default()));
+            let (stream, rate) = match open(&device_id, shared.clone()) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return (Vec::new(), TARGET_RATE);
+                }
+            };
+            let _ = ready_tx.send(Ok(()));
+            // A box filter needs whole spans of input: what does not fill one waits for the next tick.
+            let span = (rate / TARGET_RATE).max(1) as usize;
+            let mut carry: Vec<f32> = Vec::new();
+            let mut running = true;
+            while let Err(RecvTimeoutError::Timeout) = stop_rx.recv_timeout(TICK) {
+                let wanted = gate.load(std::sync::atomic::Ordering::SeqCst);
+                if wanted != running {
+                    let switched = if wanted { stream.play() } else { stream.pause() };
+                    if let Err(error) = switched {
+                        crate::applog::warn(&format!("codi: microphone {}: {error}", if wanted { "resume" } else { "pause" }));
+                    }
+                    running = wanted;
+                    let mut heard = {
+                        let mut shared = lock(&shared);
+                        shared.levels.clear();
+                        std::mem::take(&mut shared.samples)
+                    };
+                    if wanted {
+                        // Anything from before the press is not part of what is said now.
+                        carry.clear();
+                    } else {
+                        // Closing: what was heard up to the release goes out whole.
+                        carry.append(&mut heard);
+                        let block = std::mem::take(&mut carry);
+                        if !block.is_empty() {
+                            on_audio(downsample(&block, rate, TARGET_RATE));
+                        }
+                    }
+                    continue;
+                }
+                if !running {
+                    // A host that could not pause: what it hears now is for nobody.
+                    let mut shared = lock(&shared);
+                    shared.samples.clear();
+                    shared.levels.clear();
+                    continue;
+                }
+                let (levels, mut heard) = {
+                    let mut shared = lock(&shared);
+                    (std::mem::take(&mut shared.levels), std::mem::take(&mut shared.samples))
+                };
+                levels.into_iter().for_each(&on_level);
+                if heard.is_empty() {
+                    continue;
+                }
+                carry.append(&mut heard);
+                let whole = if rate % TARGET_RATE == 0 { carry.len() - carry.len() % span } else { carry.len() };
+                let block: Vec<f32> = carry.drain(..whole).collect();
+                on_audio(downsample(&block, rate, TARGET_RATE));
+            }
+            drop(stream);
+            (Vec::new(), TARGET_RATE)
+        })
+        .map_err(|e| e.to_string())?;
+    match ready_rx.recv() {
+        Ok(Ok(())) => Ok(Capture { stop: stop_tx, thread }),
+        Ok(Err(error)) => {
+            let _ = thread.join();
+            Err(error)
+        }
+        Err(_) => Err("The microphone stopped before it started".into()),
+    }
+}
+
 impl Capture {
+    /// Releases the microphone; the audio so far, mono at the rate the device gave it — a voice to
+    /// clone wants all of its bandwidth, not whisper's sixteen kilohertz.
+    pub fn stop_raw(self) -> (Vec<f32>, u32) {
+        let _ = self.stop.send(());
+        self.thread.join().unwrap_or_default()
+    }
+
     /// Releases the microphone; the audio so far, mono at [`TARGET_RATE`].
     pub fn stop(self) -> Vec<f32> {
         let _ = self.stop.send(());

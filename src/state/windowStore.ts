@@ -79,7 +79,8 @@ export const DEFAULT_SATELLITE_LIMIT = 4;
  * Settings counted a window nobody could see. `windows.rs` leaves it out of its own backstop too.
  */
 export function countedSatellites(satellites: readonly SatelliteInfo[]): number {
-  return satellites.filter((s) => s.kind !== "quick").length;
+  // Codi's window neither: one window of its own, summoned by its button, never a detached app.
+  return satellites.filter((s) => s.kind !== "quick" && s.kind !== "codi").length;
 }
 
 let nextReturnId = 0;

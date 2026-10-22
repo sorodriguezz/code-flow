@@ -2,11 +2,17 @@
 //! picked, on the speaker they picked (Settings › Voz y sonido).
 //!
 //! Three engines and one player. The computer's own voice ([`system`]: `say`, SAPI, espeak-ng), a
-//! downloaded natural voice ([`piper`], through the sherpa-onnx library meetings already use), or a
-//! service ([`cloud`]: OpenAI, ElevenLabs). Each turns text into samples; [`player`] plays them on
-//! the chosen output at the chosen volume and stops when told. Before it plays, the window is sent
-//! the loudness envelope ([`SpeechState`]) — the mark moves by it while the voice runs, without an
-//! event per frame.
+//! downloaded natural voice ([`piper`] or [`kokoro`], through the sherpa-onnx library meetings
+//! already use — [`sherpa`]), or a service ([`cloud`]: OpenAI, ElevenLabs). Each turns text into
+//! samples; [`player`] plays them on the chosen output at the chosen volume and stops when told. As
+//! each piece plays, the window is sent its loudness envelope ([`SpeechState`]) — the mark moves by
+//! it while the voice runs, without an event per frame.
+//!
+//! **A downloaded voice speaks a sentence at a time.** It hands each sentence over as soon as it is
+//! written, and the player starts on the first while the next is being written
+//! ([`player::play_stream`]); the window gets each piece's envelope appended to the last
+//! (`SpeechState::append`). Kokoro writes about a sentence in half a second on four cores — waiting
+//! for a whole answer before the first word is what that avoids.
 //!
 //! **Each text in its own language.** The app speaks Spanish and English, and each has its voice
 //! for every engine (`speech_system_voice_es`, `…_en`…). What is said is read in the language it is
@@ -17,9 +23,12 @@
 //! ([`MAX_WAITING`]); «Callar» empties it and cuts what is playing. What to say, and when to keep
 //! quiet (a meeting being recorded, a dictation), is the window's call — this module only speaks.
 
+pub mod clone;
 pub mod cloud;
+pub mod kokoro;
 pub mod piper;
 pub mod player;
+pub mod sherpa;
 pub mod system;
 pub mod wav;
 
@@ -142,6 +151,8 @@ pub struct Settings {
     pub rate: f32,
     pub volume: f32,
     pub device: String,
+    /// The user accepted XTTS v2's licence (`clone::XTTS_TERMS_KEY`).
+    pub xtts_accepted: bool,
 }
 
 pub fn load_settings(conn: &Connection) -> Settings {
@@ -157,36 +168,86 @@ pub fn load_settings(conn: &Connection) -> Settings {
         rate: number(keys::RATE, 1.0).clamp(0.6, 1.8),
         volume: (number(keys::VOLUME, 80.0) / 100.0).clamp(0.0, 1.0),
         device: get(player::DEVICE_KEY),
+        xtts_accepted: !get(clone::XTTS_TERMS_KEY).is_empty(),
     }
 }
 
-/// Turns `text`, written in `lang` (`es` · `en`), into mono samples with the chosen engine. Blocking.
-/// The services' voices are multilingual and read any language with the one voice.
-pub fn synthesize(settings: &Settings, text: &str, lang: &str) -> Result<(Vec<f32>, u32), String> {
-    let system = || system::synthesize(text, &system_voice(settings, lang), settings.rate);
+/// Turns `text`, written in `lang` (`es` · `en`), into mono samples with the chosen engine, handing
+/// them to `on_chunk` with their rate as they are written — a sentence at a time for a downloaded
+/// voice, all at once for the others; `false` from it stops the rest. Blocking. The services'
+/// voices are multilingual and read any language with the one voice.
+pub fn synthesize_into(settings: &Settings, text: &str, lang: &str, on_chunk: &mut dyn FnMut(&[f32], u32) -> bool) -> Result<(), String> {
+    let mut whole = |result: Result<(Vec<f32>, u32), String>| -> Result<(), String> {
+        let (samples, rate) = result?;
+        on_chunk(&samples, rate);
+        Ok(())
+    };
     match settings.engine.as_str() {
         // No downloaded voice in this language: the computer's own reads it, rather than a voice
         // of the other language saying it with the wrong sounds.
         "local" => match local_voice(settings, lang) {
-            Some(id) => piper::synthesize(&id, text, settings.rate),
-            None => system(),
+            Some(id) if clone::is_cloned(&id) => clone::synthesize(&id, text, lang, settings.xtts_accepted, on_chunk),
+            Some(id) if kokoro::voice(&id).is_some() => kokoro::synthesize(&id, text, settings.rate, on_chunk),
+            Some(id) => piper::synthesize(&id, text, settings.rate, on_chunk),
+            None => whole(system::synthesize(text, &system_voice(settings, lang), settings.rate)),
         },
-        "cloud" => tauri::async_runtime::block_on(cloud::synthesize(&settings.cloud_service, &settings.cloud_voice, text, settings.rate)),
-        _ => system(),
+        "cloud" => whole(tauri::async_runtime::block_on(cloud::synthesize(&settings.cloud_service, &settings.cloud_voice, text, settings.rate))),
+        _ => whole(system::synthesize(text, &system_voice(settings, lang), settings.rate)),
     }
 }
 
-/// The downloaded voice that reads `lang`: the one chosen for it while it is installed, else the
-/// first installed voice of that language («Automática»), else none.
+/// All of `text` said by downloaded voice `id` — Piper's or Kokoro's — as one buffer and its rate,
+/// for a caller that saves it rather than plays it (a flow's «Voz descargada»). Blocking.
+pub fn say_with_voice(id: &str, text: &str, speed: f32) -> Result<(Vec<f32>, u32), String> {
+    let mut samples = Vec::new();
+    let mut rate = 0;
+    let mut keep = |chunk: &[f32], at: u32| {
+        samples.extend_from_slice(chunk);
+        rate = at;
+        true
+    };
+    if clone::is_cloned(id) {
+        clone::synthesize(id, text, language_of(text).unwrap_or("es"), true, &mut keep)?;
+    } else if kokoro::voice(id).is_some() {
+        kokoro::synthesize(id, text, speed, &mut keep)?;
+    } else {
+        piper::synthesize(id, text, speed, &mut keep)?;
+    }
+    Ok((samples, rate.max(1)))
+}
+
+/// The first downloaded voice — Piper's or Kokoro's — that reads `lang`.
+pub fn first_voice_for(lang: &str) -> Option<&'static str> {
+    downloadable_voices().find(|(id, voice_lang)| language(voice_lang) == lang && voice_installed(id)).map(|(id, _)| id)
+}
+
+/// A downloaded voice is ready: Piper's own files, Kokoro's one model for all of its voices, or a
+/// cloned voice with its engine installed.
+pub fn voice_installed(id: &str) -> bool {
+    piper::installed(id) || (kokoro::voice(id).is_some() && kokoro::installed()) || (clone::is_cloned(id) && clone::ready(id))
+}
+
+/// The downloaded voices of both engines, as `(id, lang)`, in the catalogue's order — Piper's, then
+/// Kokoro's.
+fn downloadable_voices() -> impl Iterator<Item = (&'static str, &'static str)> {
+    piper::VOICES.iter().map(|voice| (voice.id, voice.lang)).chain(kokoro::VOICES.iter().map(|voice| (voice.id, voice.lang)))
+}
+
+/// The downloaded voice that reads `lang`: the one chosen for it while it is installed — a cloned
+/// one reads any language, its models are multilingual — else the first installed voice of that
+/// language («Automática»), else none. «Automática» never picks a cloned voice: a person's voice is
+/// chosen, not fallen into.
 pub fn local_voice(settings: &Settings, lang: &str) -> Option<String> {
-    let reads = |voice: &&piper::VoiceSpec| language(voice.lang) == lang && piper::installed(voice.id);
     let chosen = settings.local_voices.get(lang);
-    piper::VOICES
-        .iter()
+    if clone::is_cloned(chosen) && clone::ready(chosen) {
+        return Some(chosen.to_string());
+    }
+    let reads = |(id, voice_lang): &(&'static str, &'static str)| language(voice_lang) == lang && voice_installed(id);
+    downloadable_voices()
         .filter(reads)
-        .find(|voice| voice.id == chosen)
-        .or_else(|| piper::VOICES.iter().find(reads))
-        .map(|voice| voice.id.to_string())
+        .find(|(id, _)| *id == chosen)
+        .or_else(|| downloadable_voices().find(reads))
+        .map(|(id, _)| id.to_string())
 }
 
 /// The system voice that reads `lang`: the one chosen for it, else [`system::default_for`]; empty
@@ -226,6 +287,9 @@ pub struct SpeechState {
     pub origin: String,
     /// Loudness every [`STEP_MS`], 0–1, from the moment `speaking` is sent. Only on `speaking`.
     pub envelope: Vec<f32>,
+    /// This `speaking` continues the one before it: its envelope goes on the end of that one's (a
+    /// voice that speaks a sentence at a time sends one per sentence).
+    pub append: bool,
     pub step_ms: u32,
     pub duration_ms: u64,
     pub error: Option<String>,
@@ -237,6 +301,8 @@ struct Job {
     origin: String,
     /// `es` · `en`: what [`language_of`] read in the text, else the caller's.
     lang: &'static str,
+    /// A downloaded voice this utterance is said with instead of the reading aloud's (Codi's own).
+    voice: Option<String>,
     generation: u64,
     /// Told how it ended, for a caller that waits ([`say_and_wait`]). Dropped unsent when the job
     /// is — «Callar», or a burst pushing it out of the queue — which the receiver reads as stopped.
@@ -282,8 +348,42 @@ fn queue(app: &AppHandle) -> Arc<Queue> {
 /// too short to tell. `interrupt` cuts what is playing and what waits first (a test, a «Leer en voz
 /// alta» the user just asked for). Returns the utterance's id.
 pub fn say(app: &AppHandle, text: &str, origin: &str, interrupt: bool, fallback: &str) -> u64 {
-    enqueue(app, text, origin, interrupt, None, fallback, None)
+    enqueue(app, text, origin, interrupt, None, fallback, None, None)
 }
+
+/// [`say`] with voice `voice` (a downloaded or cloned one's id) when it is ready, else the reading
+/// aloud's — «Probar» on a voice chosen for Codi.
+pub fn say_voice(app: &AppHandle, text: &str, origin: &str, interrupt: bool, fallback: &str, voice: String) -> u64 {
+    enqueue(app, text, origin, interrupt, None, fallback, None, Some(voice).filter(|id| voice_installed(id)))
+}
+
+/// [`say_and_wait`] with a voice of its own — Codi's, when its settings name one that is downloaded
+/// (`voice`), else the reading aloud's. It cuts whatever was being said: Codi answers now.
+pub fn say_as(
+    app: &AppHandle,
+    text: &str,
+    origin: &str,
+    language: Option<&'static str>,
+    fallback: &str,
+    voice: Option<String>,
+) -> tokio::sync::oneshot::Receiver<Said> {
+    let (done, receiver) = tokio::sync::oneshot::channel();
+    enqueue(app, text, origin, true, language, fallback, Some(done), voice.filter(|id| voice_installed(id)));
+    receiver
+}
+
+/// Whether a voice is speaking right now — Codi's listener holds its own words apart by it.
+pub fn speaking() -> bool {
+    SPEAKING.load(Ordering::SeqCst)
+}
+
+/// What is being said, while it is — so Codi can tell its own words leaking back from the speakers.
+pub fn saying() -> Option<String> {
+    SAYING.lock().ok().and_then(|held| held.clone())
+}
+
+static SPEAKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SAYING: Mutex<Option<String>> = Mutex::new(None);
 
 /// [`say`] in `language` when it is given (`es` · `en`), and a receiver told how it ended — a flow's
 /// «Decir en voz alta» waits on it. An error on the receiver means the job was dropped before it
@@ -296,7 +396,7 @@ pub fn say_and_wait(
     fallback: &str,
 ) -> tokio::sync::oneshot::Receiver<Said> {
     let (done, receiver) = tokio::sync::oneshot::channel();
-    enqueue(app, text, origin, false, language, fallback, Some(done));
+    enqueue(app, text, origin, false, language, fallback, Some(done), None);
     receiver
 }
 
@@ -308,6 +408,7 @@ fn enqueue(
     fixed: Option<&'static str>,
     fallback: &str,
     done: Option<tokio::sync::oneshot::Sender<Said>>,
+    voice: Option<String>,
 ) -> u64 {
     let queue = queue(app);
     if interrupt {
@@ -316,7 +417,7 @@ fn enqueue(
     let id = queue.next_id.fetch_add(1, Ordering::SeqCst);
     let text = speakable(text);
     let lang = fixed.or_else(|| language_of(&text)).unwrap_or_else(|| language(fallback));
-    let job = Job { id, text, origin: origin.to_string(), lang, generation: queue.generation.load(Ordering::SeqCst), done };
+    let job = Job { id, text, origin: origin.to_string(), lang, voice, generation: queue.generation.load(Ordering::SeqCst), done };
     let mut jobs = queue.jobs.lock().unwrap_or_else(|p| p.into_inner());
     jobs.push_back(job);
     while jobs.len() > MAX_WAITING {
@@ -358,7 +459,9 @@ fn run(app: &AppHandle, queue: &Queue) {
 
 /// Says one job, telling the window every step; how it ended.
 fn speak(app: &AppHandle, queue: &Queue, job: &Job) -> Said {
-    let current = || queue.generation.load(Ordering::SeqCst) == job.generation;
+    // A copy, so the player's thread can ask it without borrowing the job.
+    let generation = job.generation;
+    let current = || queue.generation.load(Ordering::SeqCst) == generation;
     let ended = |phase: &'static str, duration_ms: u64, error: Option<String>| Said { phase, lang: job.lang, duration_ms, error };
     if !current() || job.text.trim().is_empty() {
         return ended("stopped", 0, None);
@@ -369,6 +472,7 @@ fn speak(app: &AppHandle, queue: &Queue, job: &Job) -> Said {
         text: job.text.clone(),
         origin: job.origin.clone(),
         envelope: Vec::new(),
+        append: false,
         step_ms: STEP_MS,
         duration_ms: 0,
         error: None,
@@ -379,7 +483,7 @@ fn speak(app: &AppHandle, queue: &Queue, job: &Job) -> Said {
         ended("failed", 0, Some(error))
     };
     let _ = app.emit(STATE_EVENT, state("preparing"));
-    let settings = {
+    let mut settings = {
         let db = app.state::<Db>();
         let conn = db.0.lock();
         match conn {
@@ -387,22 +491,61 @@ fn speak(app: &AppHandle, queue: &Queue, job: &Job) -> Said {
             Err(_) => return fail("The settings could not be read".into()),
         }
     };
-    let (samples, rate) = match synthesize(&settings, &job.text, job.lang) {
-        Ok(audio) => audio,
-        Err(error) => return fail(error),
-    };
-    if !current() {
-        let _ = app.emit(STATE_EVENT, state("stopped"));
-        return ended("stopped", 0, None);
+    // A voice of its own (Codi's): read as a downloaded voice chosen for this language.
+    if let Some(voice) = &job.voice {
+        settings.engine = "local".into();
+        if job.lang == "es" {
+            settings.local_voices.es = voice.clone();
+        } else {
+            settings.local_voices.en = voice.clone();
+        }
     }
-    let duration_ms = (samples.len() as u64 * 1000) / u64::from(rate.max(1));
-    let _ = app.emit(STATE_EVENT, SpeechState { envelope: player::envelope(&samples, rate, STEP_MS), duration_ms, ..state("speaking") });
-    if let Err(error) = player::play(&settings.device, &samples, rate, settings.volume, &current) {
+    SPEAKING.store(true, Ordering::SeqCst);
+    *SAYING.lock().unwrap_or_else(|p| p.into_inner()) = Some(job.text.clone());
+    struct Quiet;
+    impl Drop for Quiet {
+        fn drop(&mut self) {
+            SPEAKING.store(false, Ordering::SeqCst);
+            if let Ok(mut held) = SAYING.lock() {
+                *held = None;
+            }
+        }
+    }
+    let _quiet = Quiet;
+    // The voice writes on this thread; the player plays on its own as the pieces arrive.
+    let (tx, rx) = std::sync::mpsc::channel::<(Vec<f32>, u32)>();
+    let mut played_ms = 0u64;
+    let mut loudest = 0f32;
+    let mut pieces = 0usize;
+    let mut written = Ok(());
+    let playing = std::thread::scope(|scope| {
+        let player = scope.spawn(|| player::play_stream(&settings.device, settings.volume, rx, &current));
+        written = synthesize_into(&settings, &job.text, job.lang, &mut |samples, rate| {
+            if !current() || samples.is_empty() {
+                return current();
+            }
+            // Against the loudest piece so far, so a quiet sentence after a loud one stays quiet.
+            let raw = player::levels(samples, rate, STEP_MS);
+            loudest = raw.iter().copied().fold(loudest, f32::max);
+            let envelope = raw.iter().map(|level| if loudest > f32::EPSILON { (level / loudest).clamp(0.0, 1.0) } else { 0.0 }).collect();
+            let duration_ms = (samples.len() as u64 * 1000) / u64::from(rate.max(1));
+            let _ = app.emit(STATE_EVENT, SpeechState { envelope, duration_ms, append: pieces > 0, ..state("speaking") });
+            pieces += 1;
+            played_ms += duration_ms;
+            tx.send((samples.to_vec(), rate)).is_ok()
+        });
+        drop(tx);
+        player.join().unwrap_or_else(|_| Err("The speaker thread stopped unexpectedly".into()))
+    });
+    if let Err(error) = written {
+        return fail(error);
+    }
+    if let Err(error) = playing {
         return fail(format!("playing: {error}"));
     }
     let phase = if current() { "done" } else { "stopped" };
     let _ = app.emit(STATE_EVENT, state(phase));
-    ended(phase, duration_ms, None)
+    ended(phase, played_ms, None)
 }
 
 /// Plays a short sound (a notification's tone, «Probar» on the speaker) on the chosen output, on a

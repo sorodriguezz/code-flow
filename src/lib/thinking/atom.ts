@@ -1,6 +1,8 @@
 import { ended, type RunPhase, type ThinkingActivity } from "./activity";
+import { askBreath, cueClock, softHalo, startle } from "./cue";
 import { WHITE, type Gaze } from "./face";
 import { clamp01, easeIn, easeOut, endColor, finishClock, rgba, TAU } from "./finish";
+import { listenLevel } from "./listen";
 import { aiHue, mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 import { easeToward, lean, toward } from "./pointer";
@@ -18,6 +20,13 @@ import { easeToward, lean, toward } from "./pointer";
  *
  * Following the pointer (`ThinkingOrb follow`), the whole atom tips toward it like a gyroscope: the
  * orbits' near side swings out and grows, the far side recedes, and the nucleus drifts its way.
+ *
+ * Listening (Codi), the electrons slow and every syllable it hears pulls the orbits in tight round a
+ * nucleus that glows up with it, while rings close on it from outside — the finish's flash ring,
+ * the other way. Codi's cues: woken, the nucleus flashes and the orbits pop for an instant; asking,
+ * it breathes slowly in a soft halo, turning hardly at all.
+ *
+ * Big (Codi's window), smoother orbits on finer lines.
  */
 
 /** [electron speed in rad/s, orbit precession in rad/s] per phase. */
@@ -31,14 +40,20 @@ const MOTION: Partial<Record<RunPhase, [number, number]>> = {
   run: [5.2, 0.35],
   tool: [4.4, 0.3],
   write: [4.2, 0.3],
+  listen: [1.5, 0.12],
 };
 
 const ORBITS = [0, Math.PI / 3, (2 * Math.PI) / 3];
 
-export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
+export function createAtom(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const clock = finishClock();
+  const cue = cueClock();
   const u = (v: number) => v * px;
+  /** Points per orbit: 48 is round at the gutter sizes; big, it shows its corners. */
+  const steps = px > 64 ? 120 : 48;
+  /** The microphone's level this frame while it listens, as far as Codi's gain takes it. */
+  let pull = 0;
   const electrons = ORBITS.map((_, i) => (i * TAU) / 3);
   /** Where each electron left its orbit, for a failure's escape. */
   const escape: { x: number; y: number; vx: number; vy: number }[] = [];
@@ -98,14 +113,21 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
     const tint = fin >= 0 ? clamp01((fin - (failed ? 0 : 0.4)) / 0.4) : 0;
     const end = endColor(p, failed);
     const hue = (i: number): Rgb => mix(mix(aiHue(p, i / 2), end, tint), p.warning, warn * 0.3);
+    // Listening, the orbits pulled in by what it hears; woken, a pop and a flash; asking, a breath.
+    const drawn = Math.min(1.4, pull);
+    const start = startle(cue.wake);
+    const breath = askBreath(time);
+    size *= (1 - 0.16 * Math.min(1, drawn)) * (1 + 0.05 * start) * (1 + 0.05 * cue.ask * (breath - 0.5));
+    flash = Math.max(flash, 0.8 * start);
+    if (cue.ask > 0.01) softHalo(ctx, u(0.5), u(0.5), u(0.36), aiHue(p, 0.5), 0.2 * cue.ask * (0.6 + 0.4 * breath) * alpha);
 
     // Orbits.
-    ctx.lineWidth = Math.max(0.7, u(0.022));
+    ctx.lineWidth = Math.max(0.7, Math.min(u(0.022), 1 + px / 90));
     ORBITS.forEach((_, i) => {
       ctx.strokeStyle = rgba(hue(i), 0.4 * alpha * orbitFade);
       ctx.beginPath();
-      for (let s = 0; s <= 48; s++) {
-        const [x, y] = onOrbit(i, (s / 48) * TAU, size, wobble);
+      for (let s = 0; s <= steps; s++) {
+        const [x, y] = onOrbit(i, (s / steps) * TAU, size, wobble);
         if (s === 0) ctx.moveTo(u(x), u(y));
         else ctx.lineTo(u(x), u(y));
       }
@@ -115,7 +137,7 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
     // The nucleus: a few particles held together, glowing; it throbs while writing.
     const writing = !ended(act) && !act?.quiet && act?.phase === "write";
     const throb = writing ? 1 + 0.12 * Math.abs(Math.sin(time * 7)) : 1;
-    const core = 0.085 * throb * (1 + flash * 0.6) * (failed ? 1 - 0.15 * clamp01(fin / 0.6) : 1);
+    const core = 0.085 * throb * (1 + flash * 0.6 + 0.25 * Math.min(1, drawn)) * (failed ? 1 - 0.15 * clamp01(fin / 0.6) : 1);
     const [nx, ny] = lean(look, 0, 0, 0.4);
     ctx.save();
     ctx.shadowColor = rgba(mix(mix(p.a, end, tint), WHITE, flash * 0.6), (0.7 + flash * 0.3) * alpha);
@@ -140,8 +162,22 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
     }
     ctx.restore();
 
+    // Listening: rings closing on the nucleus from outside, fading as they land.
+    if (drawn > 0.01) {
+      ctx.strokeStyle = rgba(mix(p.c, WHITE, 0.35), 1);
+      ctx.lineWidth = Math.max(0.8, Math.min(u(0.022), 1 + px / 90));
+      for (const offset of [0, 0.5]) {
+        const k = (time * 0.9 + offset) % 1;
+        ctx.globalAlpha = Math.sin(k * Math.PI) * 0.65 * Math.min(1, drawn) * alpha;
+        ctx.beginPath();
+        ctx.arc(u(0.5 + nx), u(0.5 + ny), u(0.46 - 0.32 * k), 0, TAU);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    }
+
     // The flash's ring, opening out from the nucleus.
-    if (flash > 0) {
+    if (flash > 0 && fin >= 0) {
       const k = clamp01((fin - 0.35) / 0.5);
       ctx.strokeStyle = rgba(mix(end, WHITE, 0.3), (1 - k) * 0.8 * alpha);
       ctx.lineWidth = Math.max(0.8, u(0.03) * (1 - k));
@@ -188,6 +224,7 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
     setActivity(activity) {
       const wasFailed = clock.failed;
       clock.set(activity);
+      cue.set(activity);
       if (clock.failed && !wasFailed) launchEscape();
     },
     setGaze(next) {
@@ -195,7 +232,9 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
     },
     tick(dt) {
       clock.step(dt);
+      cue.step(dt);
       const act = clock.act;
+      pull = !ended(act) && !act?.quiet && !act?.stopping && act?.phase === "listen" ? listenLevel() * gain : 0;
       easeToward(look, ended(act) || act?.quiet || act?.stopping ? null : gaze, dt);
       const [s, q] = motion(act);
       const fin = clock.fin;
@@ -204,7 +243,8 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
       spin += (s - spin) * Math.min(1, dt * 3);
       precess += (q - precess) * Math.min(1, dt * 3);
       time += dt;
-      turn += dt * precess;
+      // Asking, it turns hardly at all.
+      turn += dt * precess * (1 - 0.7 * cue.ask);
       for (let i = 0; i < electrons.length; i++) electrons[i] += dt * (spin + boost) * (1 + i * 0.15);
       open += (1 - open) * Math.min(1, dt * 2.5);
       warn += ((act?.quiet && !ended(act) ? 1 : 0) - warn) * Math.min(1, dt * 3);
@@ -214,6 +254,9 @@ export function createAtom(canvas: HTMLCanvasElement, px: number): Painter {
     still() {
       const act = clock.act;
       if (time === 0) time = 1;
+      cue.settle();
+      // A still frame of listening is mid-word: drawn in, a ring on its way.
+      pull = !ended(act) && !act?.quiet && !act?.stopping && act?.phase === "listen" ? 0.7 * gain : 0;
       open = 1;
       [spin, precess] = motion(act);
       warn = act?.quiet && !ended(act) ? 1 : 0;

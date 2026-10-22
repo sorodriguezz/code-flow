@@ -63,10 +63,12 @@ fn device(id: &str) -> Result<cpal::Device, String> {
     host.default_output_device().ok_or_else(|| "There is no speaker to play on".to_string())
 }
 
-/// What the callback reads from: the samples at the output's rate, and how far it got.
+/// What the callback reads from: the samples at the output's rate, and how far it got. A streamed
+/// playback keeps appending to `samples` while it plays, and sets `closed` after the last.
 struct Cursor {
     samples: Vec<f32>,
     at: usize,
+    closed: bool,
 }
 
 /// Plays `samples` (mono, at `rate`) on output `device_id` at `volume` (0–1), until they end or
@@ -131,7 +133,7 @@ fn start_on(device: &cpal::Device, samples: &[f32], rate: u32, volume: f32) -> R
     let config = supported.config();
     let out_rate = config.sample_rate;
     let channels = usize::from(config.channels.max(1));
-    let cursor = Arc::new(Mutex::new(Cursor { samples: resample(samples, rate, out_rate).into_iter().map(|v| v * volume).collect(), at: 0 }));
+    let cursor = Arc::new(Mutex::new(Cursor { samples: resample(samples, rate, out_rate).into_iter().map(|v| v * volume).collect(), at: 0, closed: true }));
     let finished = Arc::new(AtomicBool::new(false));
     let stream = match supported.sample_format() {
         SampleFormat::F32 => build::<f32>(device, config, channels, cursor, finished.clone()),
@@ -161,7 +163,10 @@ where
                         cursor.at += 1;
                         v
                     } else {
-                        finished.store(true, Ordering::SeqCst);
+                        // Run dry while more is coming: silence, not the end.
+                        if cursor.closed {
+                            finished.store(true, Ordering::SeqCst);
+                        }
                         0.0
                     };
                     for slot in frame {
@@ -182,6 +187,114 @@ where
         .map_err(|e| e.to_string())
 }
 
+/// Plays chunks as they arrive on `chunks` — mono samples and their rate — on output `device_id`
+/// at `volume`, until the sender hangs up and the last of them has played, or `keep_going` says
+/// otherwise. What a voice that writes a sentence at a time is played with (`super::speak`): the
+/// first sentence sounds while the next is still being written. One output stream for the whole
+/// utterance, on a thread of its own as in [`play`]; a sentence that is late leaves a moment of
+/// silence rather than a stream reopened.
+pub fn play_stream(device_id: &str, volume: f32, chunks: std::sync::mpsc::Receiver<(Vec<f32>, u32)>, keep_going: &dyn Fn() -> bool) -> Result<(), String> {
+    let stop = AtomicBool::new(false);
+    let done = AtomicBool::new(false);
+    // The receiver moves to the player's thread (it is not `Sync`); the flags are borrowed.
+    let (stop_flag, done_flag) = (&stop, &done);
+    std::thread::scope(|scope| {
+        let player = std::thread::Builder::new()
+            .name("speaker".into())
+            .spawn_scoped(scope, move || {
+                let result = stream_here(device_id, volume, chunks, stop_flag);
+                done_flag.store(true, Ordering::SeqCst);
+                result
+            })
+            .map_err(|e| e.to_string())?;
+        while !done.load(Ordering::SeqCst) {
+            if !keep_going() {
+                stop.store(true, Ordering::SeqCst);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        player.join().unwrap_or_else(|_| Err("The speaker thread stopped unexpectedly".into()))
+    })
+}
+
+/// [`play_stream`]'s thread: opens the output on the first chunk, appends the rest as they come.
+fn stream_here(device_id: &str, volume: f32, chunks: std::sync::mpsc::Receiver<(Vec<f32>, u32)>, stop: &AtomicBool) -> Result<(), String> {
+    use std::sync::mpsc::RecvTimeoutError;
+    stream_health::enter_mta();
+    let volume = volume.clamp(0.0, 1.0);
+    // Nothing is opened before there is something to say: a voice that fails to write keeps the
+    // speaker closed.
+    let first = loop {
+        if stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        match chunks.recv_timeout(Duration::from_millis(15)) {
+            Ok(chunk) => break chunk,
+            Err(RecvTimeoutError::Timeout) => continue,
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        }
+    };
+    let device = device(device_id)?;
+    let opened = match open_stream(&device) {
+        Err(error) if stream_health::is_apartment_clash(&error) => {
+            let Some(concrete) = stream_health::concrete(&cpal::default_host(), &device) else { return Err(error) };
+            crate::applog::warn(&format!("speech: speaker: {error}; opening the device by its id"));
+            open_stream(&concrete)?
+        }
+        other => other?,
+    };
+    let (stream, cursor, finished, out_rate) = opened;
+    let push = |(samples, rate): (Vec<f32>, u32)| {
+        let resampled = resample(&samples, rate, out_rate);
+        let mut cursor = cursor.lock().unwrap_or_else(|p| p.into_inner());
+        cursor.samples.extend(resampled.into_iter().map(|v| v * volume));
+    };
+    push(first);
+    stream.play().map_err(|e| e.to_string())?;
+    let mut open = true;
+    while !stop.load(Ordering::SeqCst) {
+        if open {
+            match chunks.recv_timeout(Duration::from_millis(15)) {
+                Ok(chunk) => push(chunk),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    open = false;
+                    cursor.lock().unwrap_or_else(|p| p.into_inner()).closed = true;
+                }
+            }
+        } else {
+            if finished.load(Ordering::SeqCst) {
+                // The device's own buffer still holds the last few milliseconds.
+                std::thread::sleep(Duration::from_millis(60));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
+    drop(stream);
+    Ok(())
+}
+
+/// An output stream on `device` reading from a cursor that starts empty and open.
+fn open_stream(device: &cpal::Device) -> Result<(cpal::Stream, Arc<Mutex<Cursor>>, Arc<AtomicBool>, u32), String> {
+    let supported = device.default_output_config().map_err(|e| e.to_string())?;
+    let config = supported.config();
+    let out_rate = config.sample_rate;
+    let channels = usize::from(config.channels.max(1));
+    let cursor = Arc::new(Mutex::new(Cursor { samples: Vec::new(), at: 0, closed: false }));
+    let finished = Arc::new(AtomicBool::new(false));
+    let stream = match supported.sample_format() {
+        SampleFormat::F32 => build::<f32>(device, config, channels, cursor.clone(), finished.clone()),
+        SampleFormat::I16 => build::<i16>(device, config, channels, cursor.clone(), finished.clone()),
+        SampleFormat::U16 => build::<u16>(device, config, channels, cursor.clone(), finished.clone()),
+        SampleFormat::I32 => build::<i32>(device, config, channels, cursor.clone(), finished.clone()),
+        SampleFormat::F64 => build::<f64>(device, config, channels, cursor.clone(), finished.clone()),
+        other => Err(format!("The speaker takes {other:?} samples, which CodeFlow cannot write")),
+    }?;
+    Ok((stream, cursor, finished, out_rate))
+}
+
 /// Linear interpolation from `from` to `to` Hz — plenty for a voice and a chime.
 pub fn resample(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
     if from == to || from == 0 || samples.is_empty() {
@@ -200,16 +313,10 @@ pub fn resample(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
         .collect()
 }
 
-/// How loud the sound is every `step_ms`, 0–1 against its own loudest step — what the thinking mark
-/// moves by while it speaks.
-pub fn envelope(samples: &[f32], rate: u32, step_ms: u32) -> Vec<f32> {
+/// The loudness (RMS) of every `step_ms` of `samples`, unscaled.
+pub fn levels(samples: &[f32], rate: u32, step_ms: u32) -> Vec<f32> {
     let step = ((rate as usize * step_ms as usize) / 1000).max(1);
-    let levels: Vec<f32> = samples.chunks(step).map(|chunk| (chunk.iter().map(|v| v * v).sum::<f32>() / chunk.len() as f32).sqrt()).collect();
-    let peak = levels.iter().copied().fold(0.0f32, f32::max);
-    if peak <= f32::EPSILON {
-        return vec![0.0; levels.len()];
-    }
-    levels.iter().map(|level| (level / peak).clamp(0.0, 1.0)).collect()
+    samples.chunks(step).map(|chunk| (chunk.iter().map(|v| v * v).sum::<f32>() / chunk.len() as f32).sqrt()).collect()
 }
 
 #[cfg(test)]
@@ -245,12 +352,38 @@ mod tests {
         assert!(started.elapsed() < Duration::from_millis(1_000), "{:?}", started.elapsed());
     }
 
+    /// A streamed playback on the real default output, fed silence: `CODEFLOW_TEST_PLAY=1`. Two
+    /// chunks a little apart play for their length together, and a stop cuts it.
     #[test]
-    fn the_envelope_is_relative_to_the_loudest_step() {
+    #[ignore]
+    fn a_stream_plays_its_chunks_and_stops_when_told() {
+        if std::env::var("CODEFLOW_TEST_PLAY").is_err() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let feeder = std::thread::spawn(move || {
+            tx.send((vec![0.0f32; 11_025], 22_050)).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            tx.send((vec![0.0f32; 12_000], 24_000)).unwrap();
+        });
+        let started = Instant::now();
+        play_stream("", 0.0, rx, &|| true).unwrap();
+        feeder.join().unwrap();
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(900) && took < Duration::from_millis(2_000), "{took:?}");
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send((vec![0.0f32; 22_050 * 5], 22_050)).unwrap();
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(300);
+        play_stream("", 0.0, rx, &|| Instant::now() < deadline).unwrap();
+        drop(tx);
+        assert!(started.elapsed() < Duration::from_millis(1_000), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn levels_are_the_loudness_of_each_step() {
         let mut samples = vec![0.0f32; 1_000];
         samples.extend(vec![0.5f32; 1_000]);
-        let levels = envelope(&samples, 1_000, 1_000);
-        assert_eq!(levels, vec![0.0, 1.0]);
-        assert_eq!(envelope(&[0.0; 10], 1_000, 5), vec![0.0, 0.0]);
+        assert_eq!(levels(&samples, 1_000, 1_000), vec![0.0, 0.5]);
     }
 }

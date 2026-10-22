@@ -40,6 +40,7 @@ pub mod live;
 pub mod pipeline;
 pub mod speaker;
 pub mod transcript;
+pub mod turns;
 pub mod vad;
 
 use std::path::{Path, PathBuf};
@@ -310,6 +311,32 @@ pub fn sherpa_library() -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
+/// Whether anything still runs on sherpa-onnx — meetings' voices, a reading voice, a model that
+/// listens. The library is deleted with the last of them, never before.
+pub fn sherpa_still_needed() -> bool {
+    embedding_model_path().is_file() || crate::speech::piper::any_installed() || crate::speech::kokoro::installed() || crate::asr::any_installed()
+}
+
+/// Downloads and unpacks sherpa-onnx when it is not in yet; `progress(done)` counts its bytes.
+/// Whichever feature needs it first brings it — a voice, a model that listens, meetings' voices.
+pub async fn ensure_sherpa(cancel: &tokio_util::sync::CancellationToken, progress: impl Fn(u64)) -> Result<(), crate::reviewer::download::FetchError> {
+    use crate::reviewer::download::{self, FetchError};
+    if sherpa_library().is_some() {
+        return Ok(());
+    }
+    let library = SHERPA.ok_or_else(|| FetchError::Failed("This computer cannot run sherpa-onnx".into()))?;
+    let archive = models_root().join("downloads").join(library.archive);
+    download::fetch(library.url, library.size, library.sha256, &archive, cancel, |done, _| progress(done)).await?;
+    let (from, to) = (archive.clone(), sherpa_dir());
+    tokio::task::spawn_blocking(move || unpack_library(&library, &from, &to))
+        .await
+        .map_err(|e| FetchError::Failed(e.to_string()))?
+        .map_err(FetchError::Failed)?;
+    let _ = std::fs::remove_file(&archive);
+    remove_stale_sherpa();
+    Ok(())
+}
+
 /// Whether voices can be told apart on this machine right now.
 pub fn voices_installed() -> bool {
     sherpa_library().is_some() && embedding_model_path().is_file()
@@ -383,8 +410,35 @@ pub fn pick_model(chosen: &str, live: bool) -> Option<&'static crate::dictation:
         return Some(found);
     }
     let installed: Vec<_> = MODELS.iter().filter(|m| model_path(m).is_file()).collect();
-    let preference: &[&str] = if live { &["base", "small", "tiny", "turbo"] } else { &["small", "turbo", "base", "tiny"] };
+    let preference: &[&str] = if live { &["base", "small", "tiny", "turbo", "large"] } else { &["small", "turbo", "large", "base", "tiny"] };
     preference.iter().find_map(|id| installed.iter().find(|m| m.id == *id).copied())
+}
+
+/// The model the live text is written with: a whisper one, or Parakeet / Canary (`crate::asr`).
+/// The final pass is always whisper's — it lines words up with speakers by their times.
+#[derive(Debug, Clone, Copy)]
+pub enum LiveModel {
+    Whisper(&'static crate::dictation::WhisperModel),
+    Sherpa(&'static crate::asr::AsrModel),
+}
+
+/// [`pick_model`] for the live text, where the chosen model may also be a sherpa-onnx one — and
+/// «automático» prefers Parakeet when it is in: a fraction of whisper's cost per utterance, which is
+/// what keeps the live text up with a call on a laptop with no graphics card.
+pub fn pick_live_model(chosen: &str) -> Option<LiveModel> {
+    use crate::{asr, dictation};
+    let chosen = chosen.trim();
+    if let Some(model) = asr::model(chosen).filter(|m| asr::usable(m)) {
+        return Some(LiveModel::Sherpa(model));
+    }
+    if let Some(model) = dictation::model(chosen).filter(|m| dictation::model_path(m).is_file()) {
+        return Some(LiveModel::Whisper(model));
+    }
+    // «Automático», or a choice that is no longer downloaded.
+    if let Some(parakeet) = asr::model("parakeet").filter(|m| asr::usable(m)) {
+        return Some(LiveModel::Sherpa(parakeet));
+    }
+    pick_model("", true).map(LiveModel::Whisper)
 }
 
 /// Spoken-time label for logs and AI transcripts: `1:02:03`, `12:34`.

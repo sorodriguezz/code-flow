@@ -11,7 +11,7 @@ use crate::commands::claude_cmd::{load_ai_config_in, shared_template, AiTask};
 use crate::db::Db;
 use crate::meetings;
 use crate::reviewer::download::{self, FetchError};
-use crate::speech::{self, cloud, piper, player, system};
+use crate::speech::{self, cloud, kokoro, piper, player, system};
 
 pub const DOWNLOAD_EVENT: &str = "speech:download";
 
@@ -41,7 +41,10 @@ pub struct SpeechStatus {
     pub library_installed: bool,
     /// What the first voice download adds when the library is not in yet.
     pub library_bytes: u64,
+    /// Piper's voices, then Kokoro's (each of those `installed` when the one Kokoro model is).
     pub voices: Vec<piper::VoiceRow>,
+    /// Kokoro's single download, for its row in «Modelos».
+    pub kokoro: kokoro::PackRow,
     pub keys: SpeechKeys,
 }
 
@@ -65,20 +68,54 @@ pub async fn speech_status() -> Result<SpeechStatus, String> {
         local_supported: piper::supported(),
         library_installed,
         library_bytes: if library_installed { 0 } else { meetings::SHERPA.map_or(0, |spec| spec.size) },
-        voices: piper::rows(),
+        voices: piper::rows().into_iter().chain(kokoro::rows()).chain(cloned_rows()).collect(),
+        kokoro: kokoro::pack_row(),
         keys: SpeechKeys { openai: has_key(cloud::OPENAI_KEY), elevenlabs: has_key(cloud::ELEVENLABS_KEY) },
     })
+}
+
+/// The cloned voices as rows of the voices list: read any language (their models are
+/// multilingual), so `lang` is `multi`; `installed` when their engine is in.
+fn cloned_rows() -> Vec<piper::VoiceRow> {
+    speech::clone::voices()
+        .into_iter()
+        .map(|voice| piper::VoiceRow {
+            installed: speech::clone::ready(&voice.id),
+            id: voice.id.into(),
+            label: voice.name.into(),
+            lang: "multi",
+            size_bytes: 0,
+            licence: voice.engine.licence(),
+            gender: "nonbinary",
+            engine: "clone",
+        })
+        .collect()
 }
 
 /// Queues `text` to be said; the id of the utterance its `speech:state` events carry. `lang` is the
 /// window's language, for a text too short to tell its own; without it, the app's setting.
 #[tauri::command]
-pub fn speech_say(app: AppHandle, text: String, origin: String, interrupt: Option<bool>, lang: Option<String>) -> u64 {
+pub fn speech_say(app: AppHandle, text: String, origin: String, interrupt: Option<bool>, lang: Option<String>, voice: Option<String>) -> u64 {
     let fallback = match lang {
         Some(lang) => speech::language(&lang),
         None => app.state::<Db>().0.lock().map(|conn| speech::app_language(&conn)).unwrap_or("en"),
     };
-    speech::say(&app, &text, &origin, interrupt.unwrap_or(false), fallback)
+    // A voice of its own (Codi's «Voz» ▶): said with it, when it is downloaded.
+    match voice.filter(|id| !id.trim().is_empty()) {
+        Some(voice) => speech::say_voice(&app, &text, &origin, interrupt.unwrap_or(false), fallback, voice),
+        None => speech::say(&app, &text, &origin, interrupt.unwrap_or(false), fallback),
+    }
+}
+
+/// Says `text` with voice `voice` (a downloaded or cloned one) — «Probar» on a voice that is not the
+/// one the reading aloud uses.
+#[tauri::command]
+pub fn speech_say_voice(app: AppHandle, text: String, voice: String, lang: Option<String>) {
+    let fallback = match lang {
+        Some(lang) => speech::language(&lang),
+        None => app.state::<Db>().0.lock().map(|conn| speech::app_language(&conn)).unwrap_or("en"),
+    };
+    let _ = speech::say_as(&app, &text, "test", None, fallback, Some(voice));
 }
 
 /// «Callar».
@@ -144,10 +181,22 @@ pub async fn speech_install_voice(app: AppHandle, state: State<'_, SpeechInstall
     if let Ok(mut slot) = state.install.lock() {
         *slot = None;
     }
+    // Its speed here, measured rather than estimated (`voice_fit`).
+    if result.is_ok() {
+        let measured = if id == KOKORO_ITEM || kokoro::voice(&id).is_some() { KOKORO_ITEM } else { id.as_str() };
+        crate::voice_fit::measure_in_background(&app, measured);
+    }
     result
 }
 
+/// The id Kokoro's one download goes by in `speech:download` and in `speech_install_voice` — any of
+/// its voices' ids brings the same model.
+pub const KOKORO_ITEM: &str = "kokoro";
+
 async fn install(app: &AppHandle, id: &str, cancel: &CancellationToken) -> Result<(), String> {
+    if id == KOKORO_ITEM || kokoro::voice(id).is_some() {
+        return install_kokoro(app, cancel).await;
+    }
     let voice = *piper::spec(id).ok_or_else(|| format!("Unknown voice {id}"))?;
     if !piper::supported() {
         return Err("Downloaded voices are not available on this computer".into());
@@ -194,6 +243,38 @@ async fn install(app: &AppHandle, id: &str, cancel: &CancellationToken) -> Resul
     Ok(())
 }
 
+/// Kokoro's model (and sherpa-onnx first, when nothing has brought it yet), on its own row.
+async fn install_kokoro(app: &AppHandle, cancel: &CancellationToken) -> Result<(), String> {
+    if !piper::supported() {
+        return Err("Downloaded voices are not available on this computer".into());
+    }
+    let item = KOKORO_ITEM;
+    let pack = kokoro::PACK;
+    let library = meetings::SHERPA.map_or(0, |spec| spec.size);
+    let offset = if meetings::sherpa_library().is_none() { library } else { 0 };
+    let total = pack.size + offset;
+    meetings::ensure_sherpa(cancel, |done| emit_download(app, item, "downloading", done, total, None))
+        .await
+        .map_err(|e| settle(app, item, e))?;
+    let archive = piper::root().join("downloads").join(pack.archive);
+    download::fetch(pack.url, pack.size, pack.sha256, &archive, cancel, |done, _| emit_download(app, item, "downloading", offset + done, total, None))
+        .await
+        .map_err(|e| settle(app, item, e))?;
+    emit_download(app, item, "unpacking", total, total, None);
+    let from = archive.clone();
+    tokio::task::spawn_blocking(move || kokoro::unpack(&from))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r)
+        .map_err(|message| {
+            emit_download(app, item, "failed", 0, 0, Some(message.clone()));
+            message
+        })?;
+    let _ = std::fs::remove_file(&archive);
+    emit_download(app, item, "done", total, total, None);
+    Ok(())
+}
+
 #[tauri::command]
 pub fn speech_cancel_install(state: State<SpeechInstalls>) {
     if let Some(cancel) = state.install.lock().ok().and_then(|slot| slot.clone()) {
@@ -201,12 +282,16 @@ pub fn speech_cancel_install(state: State<SpeechInstalls>) {
     }
 }
 
-/// Deletes voice `id` — and sherpa-onnx with the last voice, unless meetings still separates
-/// voices with it.
+/// Deletes voice `id` (`kokoro`, or any Kokoro voice, deletes Kokoro's one model) — and sherpa-onnx
+/// with the last thing that runs on it (`meetings::sherpa_still_needed`).
 #[tauri::command]
 pub fn speech_remove_voice(id: String) -> Result<(), String> {
-    piper::remove(&id);
-    if !piper::any_installed() && !meetings::embedding_model_path().is_file() {
+    if id == KOKORO_ITEM || kokoro::voice(&id).is_some() {
+        kokoro::remove();
+    } else {
+        piper::remove(&id);
+    }
+    if !meetings::sherpa_still_needed() {
         let _ = std::fs::remove_dir_all(meetings::sherpa_dir());
     }
     Ok(())

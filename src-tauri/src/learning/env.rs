@@ -71,7 +71,7 @@ pub struct EnvStatus {
     pub ready: bool,
 }
 
-async fn output(program: &std::path::Path, args: &[&str]) -> Option<String> {
+pub(crate) async fn output(program: &std::path::Path, args: &[&str]) -> Option<String> {
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args).stdin(std::process::Stdio::null());
     crate::proc::hide_console(&mut cmd);
@@ -341,7 +341,7 @@ pub async fn prepare(app: &tauri::AppHandle, worker: Worker) -> Result<(), Strin
     Ok(())
 }
 
-async fn run_logged(program: &std::path::Path, args: &[String], say: &impl Fn(&str)) -> Result<(), String> {
+pub(crate) async fn run_logged(program: &std::path::Path, args: &[String], say: &impl Fn(&str)) -> Result<(), String> {
     use tokio::io::AsyncBufReadExt;
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);

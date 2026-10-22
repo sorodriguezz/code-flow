@@ -1,4 +1,4 @@
-import { useEffect, useRef, type MutableRefObject, type ReactElement } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type MutableRefObject, type ReactElement } from "react";
 import { thinkingDesignKind, thinkingSpeaksItself, type ThinkingDesign } from "../../lib/thinkingDesigns";
 import { phaseGroup, thinkingState, type ThinkingActivity } from "../../lib/thinking/activity";
 import { ORB_PX, register, prefersReducedMotion, type OrbSize, type Painter } from "../../lib/thinking/ticker";
@@ -20,6 +20,7 @@ import { createBulb } from "../../lib/thinking/bulb";
 import { createAlien } from "../../lib/thinking/alien";
 import { useThinkingDesignStore } from "../../state/thinkingDesignStore";
 import { voiceLevel } from "../../lib/thinking/voice";
+import { listenLevel } from "../../lib/thinking/listen";
 import { gazeAt, nearness, watchPointer } from "../../lib/thinking/pointer";
 
 /**
@@ -49,6 +50,14 @@ import { gazeAt, nearness, watchPointer } from "../../lib/thinking/pointer";
  * clicked. None of it while the run is ending or resting, nor for a reader who asked for reduced
  * motion.
  *
+ * Codi, the voice assistant, wears it too, big (`size="hero"`) in a window of its own. There it
+ * listens (`phase: "listen"`), every design drawing the microphone's level *in* — the characters
+ * perk up and look at whoever speaks, mouths shut; the rest pull their light or their shape inward
+ * — where speaking pushes it out. Its cues (`activity.cue`) play on top: a startle when the wake word
+ * is heard, a waiting pose while a question waits on the user. `gain` (Codi passes about 2.2)
+ * multiplies how far every speaking and listening reaction goes — the voice's pulse, the mouths, each
+ * design's own cue — each clamped so nothing leaves the square; at 1 they are what they always were.
+ *
  * `aria-hidden`: it says nothing a screen reader can use. Every caller sits next to text that
  * already names what is running, and a second announcement per row would be noise.
  */
@@ -57,40 +66,59 @@ export function ThinkingOrb({
   design,
   activity,
   follow = false,
+  gain = 1,
 }: {
   size?: OrbSize;
   design?: ThinkingDesign;
   activity?: ThinkingActivity;
   follow?: boolean;
+  /** How far the speaking and listening reactions go, 1 as everywhere in the app. Past 3 every one
+   *  of them is at its ceiling anyway. */
+  gain?: number;
 }) {
   const chosen = useThinkingDesignStore((s) => s.design);
   const look = design ?? chosen;
   const state = thinkingState(activity);
   const kind = thinkingDesignKind(look);
+  const css = kind === "css";
   const speaking = state === "run" && activity?.phase === "speak";
+  const listening = state === "run" && activity?.phase === "listen";
+  const amp = Math.max(0, Math.min(3, Number.isFinite(gain) ? gain : 1));
   const ref = useRef<HTMLSpanElement>(null);
   /** How close the pointer is, 0–1, while following — read by the canvas loop to run faster. */
   const near = useRef(0);
   // While it speaks, the whole mark breathes with the voice: one value per frame, written straight
-  // to a CSS variable on the shared ticker (visible marks only), so nothing re-renders.
+  // to a CSS variable on the shared ticker (visible marks only), so nothing re-renders. While a CSS
+  // design listens it is handed the microphone's level the same way, which its own listening look
+  // reads; the canvas designs read it themselves.
+  const level = speaking ? "voice" : listening && css ? "listen" : null;
   useEffect(() => {
     const el = ref.current;
-    if (!speaking || !el) return;
+    if (!level || !el) return;
+    const name = level === "voice" ? "--cf-orb-voice" : "--cf-orb-listen";
+    const read = level === "voice" ? voiceLevel : listenLevel;
     const off = register(el, {
-      tick: () => el.style.setProperty("--cf-orb-voice", voiceLevel().toFixed(3)),
-      still: () => el.style.setProperty("--cf-orb-voice", "0"),
+      tick: () => el.style.setProperty(name, read().toFixed(3)),
+      still: () => el.style.setProperty(name, "0"),
       setActivity: () => {},
     });
     return () => {
       off();
-      el.style.removeProperty("--cf-orb-voice");
+      el.style.removeProperty(name);
     };
-  }, [speaking]);
+  }, [level]);
+  // A CSS design's cues play on a wrapper of their own round its parts (`.cf-orb-cue`), whose
+  // animations are the cues' alone — the parts' loops own theirs. A wake runs once when `data-cue`
+  // arrives, so a second wake word, while the first's cue is still set, remounts the wrapper to play
+  // it again: keyed by the latest wake's `at`, kept after the cue clears, so going back to listening
+  // does not restart every loop the parts are running.
+  const wakeAt = activity?.cue?.kind === "wake" ? activity.cue.at : undefined;
+  const [lastWake, setLastWake] = useState(wakeAt);
+  if (wakeAt !== undefined && wakeAt !== lastWake) setLastWake(wakeAt);
   // Following: how close the pointer is (`--cf-near` and `data-near`, which every design's glow
   // reads), and for the CSS designs where it is too (`--cf-gaze-x/y` while `data-gaze` is set) and
   // how fast they run — written straight onto the element each frame the pointer moves, so nothing
   // re-renders. The canvas designs are told where it is by their own painter (`OrbCanvas`).
-  const css = kind === "css";
   useEffect(() => {
     const el = ref.current;
     if (!follow || !el || prefersReducedMotion()) return;
@@ -132,7 +160,10 @@ export function ThinkingOrb({
       className={`cf-orb cf-orb-${size} cf-orb--${look}${speaking ? " cf-orb--speaking" : ""}`}
       data-state={state === "run" ? undefined : state}
       // Only where it is read, and only while running: the canvas designs take the phase itself.
-      data-phase={kind === "css" && state === "run" && activity?.phase ? phaseGroup(activity.phase) : undefined}
+      data-phase={css && state === "run" && activity?.phase ? phaseGroup(activity.phase) : undefined}
+      data-cue={css && state === "run" && activity?.cue ? activity.cue.kind : undefined}
+      // Read by the CSS designs' speaking and listening rules; the painters are handed it.
+      style={amp !== 1 ? ({ "--cf-orb-gain": String(amp) } as CSSProperties) : undefined}
       aria-hidden="true"
     >
       {kind === "canvas" ? (
@@ -141,18 +172,22 @@ export function ThinkingOrb({
           key={`${look}-${size}`}
           design={look}
           px={ORB_PX[size]}
+          gain={amp}
           activity={activity}
           follow={follow}
           near={near}
         />
       ) : (
-        PARTS[look]
+        <span key={lastWake ?? 0} className="cf-orb-cue">
+          {PARTS[look]}
+        </span>
       )}
     </span>
   );
 }
 
-const PAINTERS: Partial<Record<ThinkingDesign, (canvas: HTMLCanvasElement, px: number) => Painter>> = {
+/** Each canvas design's painter, built for one canvas at one size and one `gain`. */
+const PAINTERS: Partial<Record<ThinkingDesign, (canvas: HTMLCanvasElement, px: number, gain: number) => Painter>> = {
   sphere: createSphere,
   orb: createOrb,
   network: createNetwork,
@@ -177,12 +212,14 @@ const RUSH = 0.6;
 function OrbCanvas({
   design,
   px,
+  gain,
   activity,
   follow,
   near,
 }: {
   design: ThinkingDesign;
   px: number;
+  gain: number;
   activity?: ThinkingActivity;
   follow: boolean;
   /** How close the pointer is, 0–1 — the painter runs up to `1 + RUSH` times faster for it. */
@@ -197,7 +234,7 @@ function OrbCanvas({
     const canvas = ref.current;
     const make = PAINTERS[design];
     if (!canvas || !make) return;
-    const p = make(canvas, px);
+    const p = make(canvas, px, gain);
     p.setActivity(latest.current);
     painter.current = p;
     // The pointer's nearness speeds the painter's clock while the run runs — eased, so the pace
@@ -217,10 +254,11 @@ function OrbCanvas({
       p.destroy?.();
       painter.current = null;
     };
-  }, [design, px, near]);
+    // `gain` is fixed for a window (Codi's never changes it), so a new one simply rebuilds the painter.
+  }, [design, px, gain, near]);
 
   // After the effect above, so it finds this canvas's painter — and runs again whenever that one is
-  // rebuilt for another design or size.
+  // rebuilt for another design, size or gain.
   useEffect(() => {
     const canvas = ref.current;
     const p = painter.current;
@@ -230,25 +268,29 @@ function OrbCanvas({
       off();
       p.setGaze?.(null);
     };
-  }, [follow, design, px]);
+  }, [follow, design, px, gain]);
 
   // Primitives, so a caller passing a fresh object each render does not re-run this. Speaking is
   // drawn as writing by the designs that have no voice of their own; the ones that do (the orb's
   // shader, the waves, and the four mascots — Chispa, Nube, Bombilla, Marciano — each with a
   // lip-synced mouth) take the phase and the voice's loudness themselves (`voice` in
-  // `lib/thinkingDesigns`).
+  // `lib/thinkingDesigns`). Listening is every design's own: each takes it as is. A cue goes by its
+  // kind and `at`, so a new wake — a new `at` — reaches the painter even when nothing else changed.
   const phase = activity?.phase === "speak" && !thinkingSpeaksItself(design) ? "write" : activity?.phase;
   const quiet = activity?.quiet;
   const done = activity?.done;
   const failed = activity?.failed;
   const stopping = activity?.stopping;
+  const cueKind = activity?.cue?.kind;
+  const cueAt = activity?.cue?.at;
   useEffect(() => {
     const p = painter.current;
     if (!p) return;
-    p.setActivity({ phase, quiet, done, failed, stopping });
+    const cue = cueKind && cueAt !== undefined ? { kind: cueKind, at: cueAt } : undefined;
+    p.setActivity({ phase, quiet, done, failed, stopping, cue });
     // With no loop running, the still frame is the only frame — repaint it in the new state.
     if (prefersReducedMotion()) p.still();
-  }, [phase, quiet, done, failed, stopping]);
+  }, [phase, quiet, done, failed, stopping, cueKind, cueAt]);
 
   return <canvas ref={ref} className="cf-orb-canvas" />;
 }

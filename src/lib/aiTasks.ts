@@ -127,5 +127,9 @@ export const AI_TASKS: AiTaskDef[] = [
   // document goes on stdin, so it routes anywhere, a local model included.
   { key: "architecture", labelKey: "task.architecture", hintKey: "task.architectureHint", area: "docs", modelForKey: "task.architectureModelFor" },
   { key: "spoken_summary", labelKey: "task.spokenSummary", hintKey: "task.spokenSummaryHint", area: "other", modelForKey: "task.spokenSummaryModelFor" },
+  // «Codi», the voice assistant (`AiTask::Codi`): what its own router and the local model cannot run
+  // goes to this row's engine, with the app's UI actions as its only tools. Like `chat_title` it runs
+  // on the engine's fast model unless this row names another — the user waits with the mic open.
+  { key: "codi", labelKey: "task.codi", hintKey: "task.codiHint", area: "other", modelForKey: "task.codiModelFor" },
 ];
 

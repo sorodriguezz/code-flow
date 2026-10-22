@@ -47,6 +47,7 @@ import {
   NotebookPen,
   GitPullRequest,
   Speaker,
+  Speech,
   Layers,
   Files,
   GraduationCap,
@@ -265,6 +266,9 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "dictation", labelKey: "dictation.title", hintKey: "dictation.hint", icon: Mic, searchKey: "settings.searchTermsDictation" },
       { id: "meetings", labelKey: "meetings.settings.title", hintKey: "meetings.settings.hint", icon: AudioLines, searchKey: "meetings.settings.searchTerms" },
       { id: "reading", labelKey: "speech.title", hintKey: "speech.hint", icon: Volume2, searchKey: "settings.searchTermsReading" },
+      // The voice assistant, last: it listens with what «Modelos» downloads and speaks with what the
+      // reading aloud is set to, unless it is given a voice of its own here.
+      { id: "codi", labelKey: "codi.settings.title", hintKey: "codi.settings.hint", icon: Speech, searchKey: "codi.settings.searchTerms" },
     ],
   },
   {

@@ -1,5 +1,7 @@
 import { ended, type ThinkingActivity } from "./activity";
+import { askBreath, cueClock, softHalo, startle } from "./cue";
 import { clamp01, easeOut, endColor, finishClock } from "./finish";
+import { listenLevel } from "./listen";
 import { mix, palette, rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 import { voiceLevel } from "./voice";
@@ -22,6 +24,11 @@ import { easeToward, toward } from "./pointer";
  * Following the pointer (`ThinkingOrb follow`), the swell moves along the line to the pointer's
  * side — the waves stay pinned at both ends, their crest leaning toward it — and the line rises or
  * dips a little toward it.
+ *
+ * Listening (Codi), the waves run *inward*: from both ends toward the middle, mirrored, so the line
+ * draws the sound into its centre, as high as what it hears is loud — speaking, they travel along
+ * it every which way. Codi's cues: woken, one quick bright swell; asking, a slow low breath in a soft
+ * halo. Big, the lines stay fine rather than thickening with the square.
  */
 
 /** The finish's beats, in seconds since `done`. */
@@ -34,9 +41,10 @@ const CURVES = [
   { freq: 1.1, speed: 1.8, phase: 3.4, weight: 0.6 },
 ];
 
-export function createWave(canvas: HTMLCanvasElement, px: number): Painter {
+export function createWave(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const clock = finishClock();
+  const cue = cueClock();
   let time = 0;
   let energy = 0.4;
   let activity: ThinkingActivity | undefined;
@@ -50,13 +58,25 @@ export function createWave(canvas: HTMLCanvasElement, px: number): Painter {
     }
     if (activity?.stopping) return 0;
     if (activity?.quiet) return 0.08;
+    // Woken: one quick swell over whatever it was drawing. Asking: low, breathing slowly.
+    const start = startle(cue.wake);
+    if (start > 0.01) return Math.min(1.2, base() + 0.5 * start);
+    if (cue.ask > 0.5) return 0.22 + 0.16 * askBreath(time);
+    return base();
+  }
+
+  /** The height the phase alone asks for. Up to 1.2 with Codi's gain — past that the crests leave
+   *  the square. */
+  function base(): number {
     switch (activity?.phase) {
       case "start":
         return 0.25;
       case "write":
         return 0.35 + 0.65 * Math.abs(Math.sin(time * 7.3) * Math.sin(time * 2.9));
       case "speak":
-        return 0.12 + 0.88 * voiceLevel();
+        return 0.12 + 0.88 * Math.min(1.2, voiceLevel() * gain);
+      case "listen":
+        return 0.12 + 0.88 * Math.min(1.2, listenLevel() * gain);
       case "think":
       case "plan":
         return 0.6 + 0.2 * Math.sin(time * 1.4);
@@ -78,13 +98,20 @@ export function createWave(canvas: HTMLCanvasElement, px: number): Painter {
     const steps = Math.max(16, Math.round(px * 1.5));
     const colors = [p.a, p.c, p.b];
     const fin = clock.fin;
+    // Listening, the waves run in from both ends: mirrored about the middle, travelling toward it.
+    const inward = !ended(activity) && !activity?.quiet && !activity?.stopping && activity?.phase === "listen";
+    if (cue.ask > 0.01) softHalo(ctx, px / 2, mid, px * 0.33, mix(p.b, p.c, 0.5), 0.2 * cue.ask * (0.6 + 0.4 * askBreath(time)));
     // How far the three have folded into the first, and how green they are.
     const failed = clock.failed;
     const merge = fin >= 0 ? easeOut((fin - (failed ? 0 : SWELL)) / MERGE) : 0;
     const green = fin >= 0 ? clamp01((fin - (failed ? 0 : SWELL * 0.8)) / 0.45) : 0;
     const end = endColor(p, failed);
     const yOf = (curve: (typeof CURVES)[number], i: number, nx: number, envelope: number) =>
-      Math.sin(nx * curve.freq * Math.PI + time * curve.speed + curve.phase) *
+      Math.sin(
+        // Inward: by the distance from the middle — rounded there, or the mirrored crests meet in a kink.
+        (inward ? Math.hypot(nx, 0.12) * curve.freq * Math.PI + time * Math.abs(curve.speed) : nx * curve.freq * Math.PI + time * curve.speed) +
+          curve.phase,
+      ) *
       envelope *
       height *
       curve.weight *
@@ -106,7 +133,8 @@ export function createWave(canvas: HTMLCanvasElement, px: number): Painter {
         if (s === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
-      ctx.lineWidth = Math.max(1, px / (i === 0 ? 16 : 22));
+      // In proportion up to the gutter sizes; finer than that big, where px / 16 reads as a rope.
+      ctx.lineWidth = Math.max(1, i === 0 ? Math.min(px / 16, 3 + px / 60) : Math.min(px / 22, 2 + px / 80));
       const hue = activity?.quiet && !ended(activity) ? p.warning : colors[i];
       ctx.strokeStyle = rgb(green > 0 ? mix(hue, end, green) : hue);
       // Folded, the other two fade out under the first: summed by "lighter" they washed the end
@@ -122,20 +150,24 @@ export function createWave(canvas: HTMLCanvasElement, px: number): Painter {
     setActivity(next) {
       activity = next;
       clock.set(next);
+      cue.set(next);
     },
     setGaze(next) {
       gaze = next;
     },
     tick(dt) {
       clock.step(dt);
+      cue.step(dt);
       easeToward(look, ended(activity) || activity?.quiet || activity?.stopping ? null : gaze, dt, 4);
-      time += dt;
+      // Asking, the waves slow to a breath.
+      time += dt * (1 - 0.6 * cue.ask);
       energy += (target() - energy) * Math.min(1, dt * 5);
       paint();
     },
     still() {
       if (time === 0) time = 0.8;
       clock.settle();
+      cue.settle();
       energy = Math.max(0.35, target());
       paint();
     },

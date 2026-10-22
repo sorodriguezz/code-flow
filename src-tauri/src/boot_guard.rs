@@ -5,15 +5,19 @@
 //! that went wrong there — a migration step that met data it did not expect, a file that is no longer
 //! a database, a full disk — was a panic before any window existed: on that launch and on every one
 //! after it, with the reason only in the log. Nothing was copied before a new version migrated, so a
-//! bad migration had nothing to go back to. And a *downgrade* went through in silence: an older build
-//! ran its migrations over a database a newer one had already moved on, and some of them are not
-//! harmless there — `move_openai_settings_to_cline` deletes the rows it moves.
+//! bad migration had nothing to go back to. And a *downgrade* went through with nothing to go back
+//! to either: an older build ran its migrations over a database a newer one had already moved on,
+//! and some of them are not harmless there — `move_openai_settings_to_cline` deletes the rows it
+//! moves. It still goes through without asking, but after a copy.
 //!
 //! What a launch does now, in order ([`open_at`]):
 //!
 //! 1. **Read the stamp** — which build last migrated this file (`db::read_stamp`).
-//! 2. **Leave a newer build's database alone.** Nothing is written until the user has been told and
-//!    chose to go on ([`ask_about_the_newer_database`]).
+//! 2. **A newer build's database opens without a question.** It used to stop the launch with a
+//!    warning and «Continuar bajo mi riesgo», which the user met every time they went between a
+//!    development build and the installed one and read as alarming (removed 2026-10-21, on both
+//!    systems). The copy in the next step is what protects it: it holds exactly what the newer build
+//!    left, and «Restaurar copia previa» puts it back.
 //! 3. **Copy before a different build migrates it** — `codeflow.db.pre-<version>` beside it, taken
 //!    with `VACUUM INTO`, which reads a live WAL database consistently where a file copy of three
 //!    sidecars would not. The last [`KEEP_COPIES`] are kept.
@@ -57,8 +61,6 @@ pub enum Verdict {
     /// The layout migration could not vouch for the state root, so nothing on disk was opened. The
     /// frontend's `DataDirsNotice` handles that one, as it always has.
     Scratch,
-    /// A newer build migrated this database. Nothing has been written to it.
-    Newer { stamped: String, running: String },
     /// Opening failed; the reason, verbatim.
     Failed { error: String },
 }
@@ -91,9 +93,6 @@ pub fn take_over(app: &AppHandle) -> bool {
     let handle = app.clone();
     let spawned = match verdict {
         Verdict::Ready | Verdict::Scratch => return false,
-        Verdict::Newer { stamped, running } => std::thread::Builder::new()
-            .name("boot-guard".into())
-            .spawn(move || ask_about_the_newer_database(&handle, &stamped, &running)),
         Verdict::Failed { error } => std::thread::Builder::new()
             .name("boot-guard".into())
             .spawn(move || offer_recovery(&handle, &error)),
@@ -115,19 +114,11 @@ fn open_database(version: &str) -> (db::Db, Verdict) {
         return (scratch(), Verdict::Failed { error });
     }
     let path = paths::db_path();
-    let consent = take_consent(&path);
-    match open_at(&path, version, consent.as_deref()) {
+    match open_at(&path, version) {
         Ok(database) => (database, Verdict::Ready),
         Err(verdict) => {
-            match &verdict {
-                Verdict::Newer { stamped, .. } => applog::warn(&format!(
-                    "database: CodeFlow {stamped} migrated this database and this is {version} — \
-                     asking before touching it"
-                )),
-                Verdict::Failed { error } => {
-                    applog::error(&format!("database: could not be opened — {error}; asking what to do"))
-                }
-                Verdict::Ready | Verdict::Scratch => {}
+            if let Verdict::Failed { error } = &verdict {
+                applog::error(&format!("database: could not be opened — {error}; asking what to do"));
             }
             (scratch(), verdict)
         }
@@ -135,10 +126,7 @@ fn open_database(version: &str) -> (db::Db, Verdict) {
 }
 
 /// The on-disk sequence against any path — the one the tests drive. See the module note.
-///
-/// `consent` is what [`take_consent`] found: the user's answer to the downgrade question, carried
-/// across the relaunch it asked for.
-fn open_at(path: &Path, version: &str, consent: Option<&str>) -> Result<db::Db, Verdict> {
+fn open_at(path: &Path, version: &str) -> Result<db::Db, Verdict> {
     let failed = |what: &str, e: &dyn std::fmt::Display| Verdict::Failed { error: format!("{what}: {e}") };
     let running = db::version_stamp(version);
     let opening = |e: &dyn std::fmt::Display| failed(&format!("opening {}", path.display()), e);
@@ -147,16 +135,11 @@ fn open_at(path: &Path, version: &str, consent: Option<&str>) -> Result<db::Db, 
     let conn = Connection::open(path).map_err(|e| opening(&e))?;
     let stamp = db::read_stamp(&conn).map_err(|e| failed("reading which version last updated it", &e))?;
 
-    if let Some(running) = running {
-        if stamp > running {
-            let stamped = db::stamp_version(stamp);
-            if consent != Some(consent_token(version, &stamped).as_str()) {
-                return Err(Verdict::Newer { stamped, running: version.to_string() });
-            }
-            applog::warn(&format!(
-                "database: opening what CodeFlow {stamped} migrated with {version}, as the user chose"
-            ));
-        }
+    if running.is_some_and(|running| stamp > running) {
+        applog::warn(&format!(
+            "database: opening what CodeFlow {} migrated with {version}, after copying it",
+            db::stamp_version(stamp)
+        ));
     }
     let conn = db::configure(conn).map_err(|e| opening(&e))?;
 
@@ -396,46 +379,7 @@ fn remove_database_files(path: &Path) {
     }
 }
 
-// ---------- the downgrade answer ----------
-
-/// Where the answer "continue at my own risk" waits for the relaunch it asked for.
-fn consent_path(db: &Path) -> PathBuf {
-    sibling(db, ".downgrade-ok")
-}
-
-/// Names both versions, so an answer about one pair never waves another through.
-fn consent_token(running: &str, stamped: &str) -> String {
-    format!("{running} over {stamped}")
-}
-
-/// Reads and deletes the answer: it covers exactly one launch.
-fn take_consent(db: &Path) -> Option<String> {
-    let path = consent_path(db);
-    let token = std::fs::read_to_string(&path).ok()?;
-    let _ = std::fs::remove_file(&path);
-    Some(token.trim().to_string())
-}
-
 // ---------- the questions ----------
-
-fn ask_about_the_newer_database(app: &AppHandle, stamped: &str, running: &str) {
-    let spanish = crate::tray::spanish(app);
-    let w = words(spanish);
-    let body = newer_body(spanish, stamped, running);
-    if native_dialog::ask(app, MessageDialogKind::Warning, w.newer_title, &body, &[w.go_on, w.quit]) == Some(0) {
-        match std::fs::write(consent_path(&paths::db_path()), consent_token(running, stamped)) {
-            Ok(()) => {
-                applog::warn(&format!(
-                    "database: the user chose to open CodeFlow {stamped}'s database with {running}; relaunching"
-                ));
-                app.request_restart();
-                return;
-            }
-            Err(e) => applog::error(&format!("database: could not record the answer — {e}")),
-        }
-    }
-    app.exit(0);
-}
 
 fn offer_recovery(app: &AppHandle, error: &str) {
     let spanish = crate::tray::spanish(app);
@@ -626,8 +570,6 @@ fn offer_a_way_out(app: &AppHandle) {
 /// The dialogs' labels, in the app's language — decided here for the reason `tray::TrayLabels` gives.
 /// `native_dialog::ask` tells buttons apart by label, so the ones that share a dialog must differ.
 struct Words {
-    newer_title: &'static str,
-    go_on: &'static str,
     quit: &'static str,
     failed_title: &'static str,
     retry: &'static str,
@@ -647,8 +589,6 @@ struct Words {
 fn words(spanish: bool) -> Words {
     if spanish {
         Words {
-            newer_title: "Estos datos son de una versión más nueva",
-            go_on: "Continuar bajo mi riesgo",
             quit: "Salir",
             failed_title: "CodeFlow no pudo abrir tus datos",
             retry: "Reintentar",
@@ -666,8 +606,6 @@ fn words(spanish: bool) -> Words {
         }
     } else {
         Words {
-            newer_title: "This data is from a newer version",
-            go_on: "Continue at my own risk",
             quit: "Quit",
             failed_title: "CodeFlow couldn't open its data",
             retry: "Retry",
@@ -683,20 +621,6 @@ fn words(spanish: bool) -> Words {
             keep_waiting: "Keep waiting",
             releases: "Open releases page",
         }
-    }
-}
-
-fn newer_body(spanish: bool, stamped: &str, running: &str) -> String {
-    if spanish {
-        format!(
-            "CodeFlow {stamped} ya actualizó esta base de datos, y esta es la {running}. Una versión \
-             anterior puede perder o dañar datos que no conoce.\n\nSi continúas, antes se guarda una copia."
-        )
-    } else {
-        format!(
-            "CodeFlow {stamped} already updated this database, and this is {running}. An older version \
-             can lose or damage data it doesn't know about.\n\nIf you continue, a copy is saved first."
-        )
     }
 }
 
@@ -810,7 +734,7 @@ mod tests {
         let path = dir.db();
         database_from(&path, "2.0.4");
 
-        let opened = open_at(&path, "2.0.5", None).expect("opens");
+        let opened = open_at(&path, "2.0.5").expect("opens");
         drop(opened);
 
         let copy = dir.0.join("codeflow.db.pre-2.0.5");
@@ -829,11 +753,11 @@ mod tests {
         let dir = TempDir::new();
         let path = dir.db();
 
-        drop(open_at(&path, "2.0.5", None).expect("a fresh database opens"));
+        drop(open_at(&path, "2.0.5").expect("a fresh database opens"));
         assert!(copies(&path).is_empty(), "a new, empty database has nothing to keep");
         assert_eq!(stamp_of(&path), 2_000_005);
 
-        drop(open_at(&path, "2.0.5", None).expect("opens again"));
+        drop(open_at(&path, "2.0.5").expect("opens again"));
         assert!(copies(&path).is_empty(), "the version that stamped it does not copy it again");
     }
 
@@ -847,7 +771,7 @@ mod tests {
         drop(conn);
         assert_eq!(stamp_of(&path), 0);
 
-        drop(open_at(&path, "2.0.5", None).expect("opens"));
+        drop(open_at(&path, "2.0.5").expect("opens"));
         assert_eq!(names(&copies(&path)), ["codeflow.db.pre-2.0.5"]);
     }
 
@@ -893,7 +817,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let verdict = match open_at(&path, "2.0.5", None) {
+        let verdict = match open_at(&path, "2.0.5") {
             Ok(_) => panic!("a database that cannot be migrated opened"),
             Err(verdict) => verdict,
         };
@@ -920,7 +844,7 @@ mod tests {
         let dir = TempDir::new();
         let path = dir.db();
         std::fs::write(&path, vec![0x42_u8; 8192]).unwrap();
-        let verdict = match open_at(&path, "2.0.5", None) {
+        let verdict = match open_at(&path, "2.0.5") {
             Ok(_) => panic!("garbage opened as a database"),
             Err(verdict) => verdict,
         };
@@ -932,7 +856,7 @@ mod tests {
         let dir = TempDir::new();
         let path = dir.db();
         database_from(&path, "2.0.4");
-        drop(open_at(&path, "2.0.5", None).expect("opens"));
+        drop(open_at(&path, "2.0.5").expect("opens"));
         // What happened after the copy: 2.0.5 wrote something, and a stale WAL sits beside it.
         {
             let conn = Connection::open(&path).unwrap();
@@ -986,43 +910,19 @@ mod tests {
         assert_eq!(marker(&path), "written by 2.0.5");
     }
 
-    /// A database a newer build migrated is not written to — not migrated, not stamped, not copied —
-    /// until the user has answered, and the answer covers exactly that pair of versions.
+    /// A database a newer build migrated opens without asking — copied first, so what the newer
+    /// build left is one «Restaurar copia previa» away — and is stamped by the version running now.
     #[test]
-    fn a_newer_database_is_left_alone_until_the_user_answers() {
+    fn a_newer_database_is_copied_then_opened() {
         let dir = TempDir::new();
         let path = dir.db();
         database_from(&path, "2.1.0");
-        // In rollback-journal mode, where even switching it to WAL would be a write to its header.
-        Connection::open(&path).unwrap().execute_batch("PRAGMA journal_mode = DELETE;").unwrap();
-        let before = std::fs::read(&path).unwrap();
 
-        let verdict = match open_at(&path, "2.0.5", None) {
-            Ok(_) => panic!("opened a newer database without asking"),
-            Err(verdict) => verdict,
-        };
-        assert_eq!(verdict, Verdict::Newer { stamped: "2.1.0".into(), running: "2.0.5".into() });
-        assert_eq!(std::fs::read(&path).unwrap(), before, "the database changed");
-        assert!(copies(&path).is_empty());
-
-        // An answer about another pair does not count.
-        assert!(open_at(&path, "2.0.5", Some(&consent_token("2.0.5", "2.2.0"))).is_err());
-
-        // The answer given: opened, copied first, and stamped by the version that is running now.
-        drop(open_at(&path, "2.0.5", Some(&consent_token("2.0.5", "2.1.0"))).expect("opens once answered"));
+        drop(open_at(&path, "2.0.5").expect("opens without a question"));
         assert_eq!(stamp_of(&path), 2_000_005);
         let copy = copy_path(&path, "2.0.5");
         assert_eq!(stamp_of(&copy), 2_001_000);
         assert_eq!(marker(&copy), "written by 2.1.0");
-    }
-
-    #[test]
-    fn the_answer_to_the_downgrade_question_covers_one_launch() {
-        let dir = TempDir::new();
-        let path = dir.db();
-        std::fs::write(consent_path(&path), consent_token("2.0.5", "2.1.0")).unwrap();
-        assert_eq!(take_consent(&path).as_deref(), Some("2.0.5 over 2.1.0"));
-        assert_eq!(take_consent(&path), None);
     }
 
     #[test]
@@ -1051,8 +951,7 @@ mod tests {
     fn both_languages_name_every_button_and_no_two_in_a_dialog_match() {
         for spanish in [false, true] {
             let w = words(spanish);
-            let dialogs: [&[&str]; 6] = [
-                &[w.go_on, w.quit],
+            let dialogs: [&[&str]; 5] = [
                 &[w.retry, w.more, w.quit],
                 &[w.restore, w.show_logs, w.back],
                 &[w.show_logs, w.back],
@@ -1065,7 +964,7 @@ mod tests {
                     assert!(!buttons[i + 1..].contains(label), "{label} twice in one dialog");
                 }
             }
-            for title in [w.newer_title, w.failed_title, w.more_title, w.restore_failed_title, w.stalled_title, w.ok] {
+            for title in [w.failed_title, w.more_title, w.restore_failed_title, w.stalled_title, w.ok] {
                 assert!(!title.trim().is_empty());
             }
         }

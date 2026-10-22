@@ -20,6 +20,7 @@ export type Selection =
 const LENS_KEY = "cf.arch.lens";
 const PALETTE_KEY = "cf.arch.palette";
 const PANEL_KEY = "cf.arch.panel";
+const PANEL_STATES = ["open", "closed", "collapsed"] as const;
 const read = <T extends string>(key: string, allowed: readonly T[], fallback: T): T => {
   try {
     const v = localStorage.getItem(key) as T | null;
@@ -42,6 +43,12 @@ interface ViewState {
   paletteOpen: boolean;
   /** The lens's side panel, open or closed — one toggle for every lens. */
   panelOpen: boolean;
+  /**
+   * Hidden with the toolbar's toggle: a card picked on the canvas leaves it hidden until the toggle
+   * shows it again. Closed with its own ×, the next card picked brings it back with the inspector —
+   * the toggle that a pick undid was the one that "did nothing" (user report, 2026-10-21).
+   */
+  panelCollapsed: boolean;
   /** Which of its pages the Diagram lens's panel shows. */
   diagramTab: DiagramTab;
   selection: Selection | null;
@@ -56,9 +63,12 @@ interface ViewState {
   setLens: (lens: Lens) => void;
   togglePalette: () => void;
   setPanelOpen: (open: boolean) => void;
+  /** The toolbar's toggle: hides the panel for good (see `panelCollapsed`), or shows it. */
+  togglePanel: () => void;
   /** Shows that page of the Diagram lens's panel, opening the panel. */
   setDiagramTab: (tab: DiagramTab) => void;
-  /** A card just picked on the canvas: the inspector comes up if the panel was closed. */
+  /** A card just clicked on the canvas — not dragged: the inspector comes up if the panel was closed
+   *  with its ×, never when it was hidden with the toolbar's toggle. */
   revealInspector: () => void;
   select: (selection: Selection | null, opts?: { reveal?: boolean }) => void;
   setHover: (selection: Selection | null) => void;
@@ -85,7 +95,8 @@ export function sameSelection(a: Selection | null, b: Selection | null): boolean
 export const useArchitectureViewStore = create<ViewState>((set, get) => ({
   lens: read(LENS_KEY, LENSES, "diagram"),
   paletteOpen: read(PALETTE_KEY, ["open", "closed"] as const, "open") === "open",
-  panelOpen: read(PANEL_KEY, ["open", "closed"] as const, "open") === "open",
+  panelOpen: read(PANEL_KEY, PANEL_STATES, "open") === "open",
+  panelCollapsed: read(PANEL_KEY, PANEL_STATES, "open") === "collapsed",
   diagramTab: "inspector",
   selection: null,
   hover: null,
@@ -105,14 +116,20 @@ export const useArchitectureViewStore = create<ViewState>((set, get) => ({
   },
   setPanelOpen: (panelOpen) => {
     write(PANEL_KEY, panelOpen ? "open" : "closed");
-    set({ panelOpen });
+    set({ panelOpen, panelCollapsed: false });
+  },
+  togglePanel: () => {
+    if (!get().panelOpen) return get().setPanelOpen(true);
+    write(PANEL_KEY, "collapsed");
+    set({ panelOpen: false, panelCollapsed: true });
   },
   setDiagramTab: (diagramTab) => {
     set({ diagramTab });
     if (!get().panelOpen) get().setPanelOpen(true);
   },
   revealInspector: () => {
-    if (get().lens === "diagram" && !get().panelOpen) get().setDiagramTab("inspector");
+    const { lens, panelOpen, panelCollapsed } = get();
+    if (lens === "diagram" && !panelOpen && !panelCollapsed) get().setDiagramTab("inspector");
   },
   select: (selection, opts = {}) => {
     if (!sameSelection(get().selection, selection)) set({ selection });

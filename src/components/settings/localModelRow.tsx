@@ -79,6 +79,8 @@ export function ModelDownloadRow({
   onUse,
   onDelete,
   blocked,
+  details,
+  actions,
 }: {
   model: DownloadableModel;
   active: boolean;
@@ -96,6 +98,10 @@ export function ModelDownloadRow({
   onDelete: () => void;
   /** Why this machine cannot run the model, when it cannot: the download button gives way to it. */
   blocked?: string;
+  /** A second line under the description — the voice models' speed here and what they suit. */
+  details?: ReactNode;
+  /** More buttons beside a downloaded model's delete — «Medir» on the voice models. */
+  actions?: ReactNode;
 }) {
   const t = useT();
   const busy = progress?.phase === "downloading" || progress?.phase === "verifying";
@@ -142,6 +148,7 @@ export function ModelDownloadRow({
               <span>{model.licence}</span>
             )}
           </div>
+          {details}
         </div>
 
         <div className="flex shrink-0 items-center gap-1">
@@ -151,6 +158,7 @@ export function ModelDownloadRow({
             </button>
           ) : model.installed ? (
             <>
+              {actions}
               {!active && onUse && (
                 <button onClick={onUse} className={buttonClass({ variant: "secondary", size: "sm" })}>
                   <Check size={13} /> {t("localai.use")}

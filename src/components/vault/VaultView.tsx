@@ -82,7 +82,8 @@ export function VaultView() {
   // arrived first and empty, which is the same startled second as the lock screen flashing.
   if (!unlocked || resuming) {
     return (
-      <div className={`flex h-full min-h-0 ${CARD}`} data-tour="vault-view">
+      // `data-codi-private`: nothing of the keyring is listed, pressed or read by «Codi» (`lib/codi/dom`).
+      <div className={`flex h-full min-h-0 ${CARD}`} data-tour="vault-view" data-codi-private>
         <VaultLockScreen />
         {dialogs}
       </div>
@@ -92,7 +93,7 @@ export function VaultView() {
   const active = items.find((item) => item.id === activeId) ?? null;
 
   return (
-    <div className="flex h-full min-h-0" data-tour="vault-view">
+    <div className="flex h-full min-h-0" data-tour="vault-view" data-codi-private>
       <div
         className={`flex min-h-0 shrink-0 flex-col border-r border-[var(--cf-border)] ${CARD}`}
         style={{ width: sidebarWidth }}

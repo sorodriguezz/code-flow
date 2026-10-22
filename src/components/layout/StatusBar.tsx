@@ -6,6 +6,7 @@ import { ServicesActivity } from "./ServicesActivity";
 import { FlowsActivity } from "./FlowsActivity";
 import { MeetingActivity } from "./MeetingActivity";
 import { SpeechActivity } from "./SpeechActivity";
+import { CodiActivity } from "./CodiActivity";
 import { CompletionActivity } from "./CompletionActivity";
 import { BatteryMeter } from "./BatteryMeter";
 import { SystemMeter } from "./SystemMeter";
@@ -79,6 +80,7 @@ export function StatusBar() {
           <ServicesActivity />
           <FlowsActivity />
           <MeetingActivity />
+          <CodiActivity />
           <SpeechActivity />
           <CompletionActivity />
           <SystemMeter />
@@ -169,6 +171,7 @@ export function StatusBar() {
         <ServicesActivity />
         <FlowsActivity />
         <MeetingActivity />
+        <CodiActivity />
         <SpeechActivity />
         <CompletionActivity />
         <SystemMeter />

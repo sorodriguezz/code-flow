@@ -13,7 +13,7 @@
  * here opens the inspector.
  */
 import "@xyflow/react/dist/style.css";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -304,13 +304,19 @@ function CanvasArea({ model, palette, lens }: Props) {
       return;
     }
     if (ids.length === 1) {
+      // Selected, not inspected: React Flow selects a card on the press that starts a drag too, and a
+      // card only moved is not a card asked about — `onNodeClick` is what brings the inspector up.
       select(zoneIds.has(ids[0]) ? { kind: "zone", id: ids[0] } : { kind: "card", id: ids[0] });
-      if (!zoneIds.has(ids[0])) revealInspector();
       return;
     }
     const cards = ids.filter((id) => !zoneIds.has(id));
     select(cards.length ? { kind: "cards", ids: cards } : { kind: "zone", id: ids[ids.length - 1] });
-  }, [select, zoneIds, revealInspector]);
+  }, [select, zoneIds]);
+
+  /** A click, which a drag never ends in (d3-drag swallows the click after a move): the inspector. */
+  const onNodeClick = useCallback((_: ReactMouseEvent, node: ArchNode) => {
+    if (node.type === "card") revealInspector();
+  }, [revealInspector]);
 
   const startPending = useCallback(() => {
     if (pending.current) return pending.current;
@@ -364,11 +370,8 @@ function CanvasArea({ model, palette, lens }: Props) {
   const onConnect = useCallback((c: { source: string | null; target: string | null }) => {
     if (!c.source || !c.target || c.source === c.target) return;
     const index = mutate<number>((d) => { const r = connect(d, { from: c.source!, to: c.target! }); return { doc: r.doc, result: r.index }; });
-    if (index != null && index >= 0) {
-      select({ kind: "edge", index });
-      revealInspector();
-    }
-  }, [select, revealInspector]);
+    if (index != null && index >= 0) select({ kind: "edge", index });
+  }, [select]);
 
   const isValidConnection = useCallback((c: { source: string | null; target: string | null }) =>
     !!c.source && !!c.target && c.source !== c.target && !!comps[c.source] && !!comps[c.target] && !zoneIds.has(c.source) && !zoneIds.has(c.target), [comps, zoneIds]);
@@ -394,11 +397,8 @@ function CanvasArea({ model, palette, lens }: Props) {
     }
     const pos = relativeTo(zone, fx - CARD_W / 2, fy - 30);
     const id = mutate<string>((d) => { const r = addComponentAt(d, componentFor(item.icon, item.name, item.category, item.type), zone, pos); return { doc: r.doc, result: r.id }; });
-    if (id) {
-      select({ kind: "card", id });
-      revealInspector();
-    }
-  }, [zoneAt, relativeTo, select, revealInspector]);
+    if (id) select({ kind: "card", id });
+  }, [zoneAt, relativeTo, select]);
 
   const actions = useMemo<CanvasActions>(() => ({
     resizeZone: (id, x, y, w, h) => { mutate((d) => setPosition(d, id, { x, y, w, h })); },
@@ -566,6 +566,7 @@ function CanvasArea({ model, palette, lens }: Props) {
             nodeTypes={NODE_TYPES}
             edgeTypes={EDGE_TYPES}
             onNodesChange={onNodesChange}
+            onNodeClick={onNodeClick}
             onEdgesChange={onEdgesChange}
             onNodeDragStart={onNodeDragStart}
             onNodeDragStop={onNodeDragStop}

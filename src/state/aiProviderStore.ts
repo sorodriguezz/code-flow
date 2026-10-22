@@ -116,7 +116,7 @@ async function loadRouting(defaultProvider: string, prefetched?: Record<string, 
     // model, which is what `load_ai_config_in` runs them on when the row names none. Without it
     // every chip for commits named the base model — Opus, say — over a run that went to Haiku.
     const dedicated =
-      key === "commit" || key === "chat_title" || key === "spoken_summary"
+      key === "commit" || key === "chat_title" || key === "spoken_summary" || key === "codi"
         ? AI_PROVIDERS.find((p) => p.id === providerFor[key])?.commitMessageModel
         : undefined;
     // The meetings row, inheriting, is the notes row: its engine and its model.

@@ -14,6 +14,7 @@ import { useDbModalStore } from "../state/dbModalStore";
 import { usePreferencesStore } from "../state/preferencesStore";
 import { useDictationStore } from "../state/dictationStore";
 import { speechStop } from "./tauri/speechCommands";
+import { codiOpenWindow } from "./tauri/codiCommands";
 import { fetchNow, pullNow, pushNow } from "./gitActions";
 import type { Chord } from "./keys";
 import type { TranslationKey } from "./i18n/translations";
@@ -43,6 +44,7 @@ export type ShortcutId =
   | "app.shortcuts"
   | "dictation.toggle"
   | "speech.stop"
+  | "codi.open"
   | "panel.sidebar"
   | "panel.ai"
   | "panel.terminal"
@@ -376,6 +378,15 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     // A letter, not ⌥⌘. as it was: on macOS Option turns `.` into `≥`, so that chord never matched.
     defaultChord: "Mod+Alt+X",
     run: () => void speechStop().catch(() => {}),
+  },
+  {
+    // «Codi»: its window, opened or brought forward. V for «voz» — a letter, so Option cannot turn
+    // it into a symbol on macOS, and free on both platforms (⌥⌘V is Finder's own, in Finder only).
+    id: "codi.open",
+    group: "general",
+    labelKey: "shortcuts.cmdCodi",
+    defaultChord: "Mod+Alt+V",
+    run: () => void codiOpenWindow().catch(() => {}),
   },
 
   {

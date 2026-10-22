@@ -1,12 +1,27 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-/** `dictation::WhisperModel` + whether it is on disk. */
+/** What may pick a model that listens. A meeting's final pass needs per-word times, which only
+ *  whisper gives; everything else takes either engine. */
+export type ListenFeature = "dictation" | "codi" | "meetingsLive" | "meetingsFinal" | "flows";
+
+/** `dictation::ModelStatus`: one model that listens — whisper.cpp's or sherpa-onnx's (Parakeet,
+ *  Canary). One setting (`dictation_model`, `meetings_live_model`…) holds either id. */
 export interface DictationModel {
-  id: "tiny" | "base" | "small" | "turbo";
-  file: string;
+  id: string;
+  family: "whisper" | "parakeet" | "canary";
+  label: string;
   sizeBytes: number;
   installed: boolean;
+  /** Model and the library that runs it are both in. */
+  usable: boolean;
+  /** The library's download, when this model would bring it. */
+  engineBytes: number;
+  /** Codes it hears; empty = whisper's ninety-nine. */
+  languages: string[];
+  translates: boolean;
+  licence: string;
+  features: ListenFeature[];
 }
 
 /** `dictation::Status`. */
@@ -15,6 +30,9 @@ export interface DictationStatus {
   supported: boolean;
   engineInstalled: boolean;
   engineBytes: number;
+  /** sherpa-onnx's library, shared with meetings' voices and the reading voices. */
+  sherpaInstalled: boolean;
+  sherpaBytes: number;
   models: DictationModel[];
 }
 

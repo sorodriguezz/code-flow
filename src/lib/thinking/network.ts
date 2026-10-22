@@ -1,6 +1,8 @@
 import { ended, type RunPhase, type ThinkingActivity } from "./activity";
+import { askBreath, cueClock, softHalo, startle } from "./cue";
 import { WHITE, type Gaze } from "./face";
 import { clamp01, endColor, finishClock, rgba, TAU } from "./finish";
+import { listenLevel } from "./listen";
 import { aiHue, mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 import { easeToward, facing, lean, toward } from "./pointer";
@@ -23,6 +25,15 @@ import { easeToward, facing, lean, toward } from "./pointer";
  *
  * Following the pointer (`ThinkingOrb follow`), the net tips toward it, the neurons on its side
  * light up, and the passes run toward it — right to left when it is to the left.
+ *
+ * Listening (Codi), the signals run *inward*: two fronts at once, from the inputs and from the
+ * outputs, meeting in the middle, while both outer layers light with what it hears and the whole
+ * net draws in a little with every syllable — writing pulses its outputs out. Codi's cues: woken,
+ * every neuron flashes and the net pops for an instant; asking, it breathes slowly in a soft halo,
+ * a slow pass now and then.
+ *
+ * Big (Codi's window), a wider net, 4-6-6-3, on finer links: the gutter's thirteen neurons would
+ * read as a diagram drawn with a marker.
  */
 
 /** The net's radius in the square, for leaning it toward the pointer. */
@@ -57,11 +68,15 @@ function seeded(seed: number) {
   };
 }
 
-export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
+export function createNetwork(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
   const clock = finishClock();
+  const cue = cueClock();
   const u = (v: number) => v * px;
-  const shape = px >= 20 ? [3, 4, 4, 2] : [2, 3, 2];
+  const big = px >= 96;
+  const shape = big ? [4, 6, 6, 3] : px >= 20 ? [3, 4, 4, 2] : [2, 3, 2];
+  /** How much of the gutter's line width the links and rings keep. */
+  const fine = big ? 0.7 : 1;
   const last = shape.length - 1;
   const neurons: Neuron[] = [];
   const layers: number[][] = shape.map((count, layer) => {
@@ -93,25 +108,41 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
   let endFront = -1;
   let gaze: Gaze = null;
   const look = toward();
+  /** Listening: how far the two fronts have closed in, in layers from either end, and the
+   *  microphone's level this frame as far as Codi's gain takes it. */
+  let meet = -0.4;
+  let pull = 0;
+  /** How far the net is drawn in (listening), popped (a wake) or breathing (an ask): 1 at rest. */
+  let squeeze = 1;
 
   /** A point of the net, in px, leaned toward the pointer. */
   function at(x: number, y: number): [number, number] {
-    const [lx, ly] = lean(look, x - 0.5, y - 0.5, REACH);
+    const [lx, ly] = lean(look, (x - 0.5) * squeeze, (y - 0.5) * squeeze, REACH);
     return [u(0.5 + lx), u(0.5 + ly)];
   }
+
+  const listening = (act: ThinkingActivity | undefined) =>
+    !ended(act) && !act?.quiet && !act?.stopping && act?.phase === "listen";
 
   function pace(act: ThinkingActivity | undefined): [number, number] {
     if (act?.stopping) return [0, 1];
     if (act?.quiet) return [0.8, 1.6];
+    // Asking: a slow pass now and then, like a held breath.
+    if (cue.ask > 0.5) return [1.2, 1.1];
     return PACE[act?.phase ?? "think"] ?? [2.2, 0.15];
   }
 
-  function newPass(reverse: boolean) {
+  /** A different few neurons to fire, the outer layers always among them. */
+  function pick() {
     passSeed += 1;
     const r = seeded(passSeed * 7 + 3);
     firing = new Set(
       neurons.map((_, i) => i).filter((i) => neurons[i].layer === 0 || neurons[i].layer === last || r() < 0.6),
     );
+  }
+
+  function newPass(reverse: boolean) {
+    pick();
     backward = reverse;
     front = reverse ? last + 0.4 : -0.4;
     running = true;
@@ -136,6 +167,8 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
       return mix(c, p.warning, warn * 0.3);
     };
 
+    if (cue.ask > 0.01) softHalo(ctx, u(0.5), u(0.5), u(0.36), aiHue(p, 0.5), 0.2 * cue.ask * (0.6 + 0.4 * askBreath(time)) * alpha);
+
     // Links: faint by weight, brighter between lit neurons; past a failure's front, dark.
     for (const link of links) {
       const A = neurons[link.a];
@@ -145,15 +178,16 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
       const broken = failed && endFront >= 0 && B.layer > endFront ? 0.25 : 1;
       const lit = Math.min(A.glow, B.glow);
       ctx.strokeStyle = rgba(ink(A.layer, lit), (0.1 + 0.18 * link.weight + 0.35 * lit) * vis * broken * alpha);
-      ctx.lineWidth = Math.max(0.5, u(0.012 + 0.012 * link.weight));
+      ctx.lineWidth = Math.max(0.5, u(0.012 + 0.012 * link.weight) * fine);
       ctx.beginPath();
       ctx.moveTo(...at(A.x, A.y));
       ctx.lineTo(...at(B.x, B.y));
       ctx.stroke();
     }
 
-    // The signal crossing between two layers: one dot per link whose ends both fire.
-    if (running && !ended(act)) {
+    // The signal crossing between two layers: one dot per link whose ends both fire. Listening has
+    // its own two (below), and a pass it interrupted waits, unseen, to go on afterwards.
+    if (running && !ended(act) && !listening(act)) {
       const from = backward ? Math.ceil(front) : Math.floor(front);
       const to = backward ? from - 1 : from + 1;
       const t = backward ? from - front : front - from;
@@ -176,8 +210,37 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
       }
     }
 
+    // Listening: the two fronts closing in, one dot per link whose ends both fire — from the inputs
+    // rightward and from the outputs leftward, as bright as what it hears is loud.
+    if (listening(act) && meet >= 0) {
+      const from = Math.floor(meet);
+      const t = meet - from;
+      const strength = (0.35 + 0.65 * Math.min(1, pull)) * alpha;
+      for (const [a, b] of [
+        [from, from + 1],
+        [last - from, last - from - 1],
+      ]) {
+        // Each front stops where they meet: no dot past the middle on its way.
+        if (b < 0 || b > last || (a + (b - a) * t - last / 2) * (b - a) > 0) continue;
+        for (const link of links) {
+          const A = neurons[link.a];
+          const B = neurons[link.b];
+          const forward = A.layer === a && B.layer === b;
+          const back = B.layer === a && A.layer === b;
+          if (!(forward || back) || !firing.has(link.a) || !firing.has(link.b)) continue;
+          const src = forward ? A : B;
+          const dst = forward ? B : A;
+          const [sx, sy] = at(src.x + (dst.x - src.x) * t, src.y + (dst.y - src.y) * t);
+          ctx.fillStyle = rgba(mix(aiHue(p, src.layer / last), WHITE, 0.3), (0.5 + 0.5 * link.weight) * strength);
+          ctx.beginPath();
+          ctx.arc(sx, sy, Math.max(0.6, u(0.022) * fine), 0, TAU);
+          ctx.fill();
+        }
+      }
+    }
+
     // Neurons: a ring around a core that lights up.
-    const r = Math.max(1.1, u(shape.length > 3 ? 0.05 : 0.07));
+    const r = Math.max(1.1, u(big ? 0.042 : shape.length > 3 ? 0.05 : 0.07));
     for (const n of neurons) {
       const vis = shown(n.layer);
       if (vis <= 0) continue;
@@ -195,7 +258,7 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
       ctx.fill();
       ctx.restore();
       ctx.strokeStyle = rgba(col, (0.55 + 0.45 * n.glow) * vis * alpha);
-      ctx.lineWidth = Math.max(0.6, u(0.016));
+      ctx.lineWidth = Math.max(0.6, u(0.016) * fine);
       ctx.beginPath();
       ctx.arc(nx, ny, radius, 0, TAU);
       ctx.stroke();
@@ -206,6 +269,7 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
     setActivity(activity) {
       const was = ended(clock.act);
       clock.set(activity);
+      cue.set(activity);
       if (ended(activity) && !was) {
         // The last pass: forward from the inputs, every neuron firing.
         firing = new Set(neurons.map((_, i) => i));
@@ -219,9 +283,17 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
     },
     tick(dt) {
       clock.step(dt);
+      cue.step(dt);
       const act = clock.act;
       easeToward(look, ended(act) || act?.quiet || act?.stopping ? null : gaze, dt);
       time += dt;
+      pull = listening(act) ? listenLevel() * gain : 0;
+      // Drawn in by what it hears, popped by a wake, breathing while it asks.
+      const start = startle(cue.wake);
+      const squeezeGoal =
+        (1 - 0.07 * Math.min(1, pull)) * (1 + 0.05 * start) * (1 + 0.035 * cue.ask * (askBreath(time) - 0.5));
+      squeeze += (squeezeGoal - squeeze) * Math.min(1, dt * 14);
+      if (start > 0.01) for (const n of neurons) n.glow = Math.max(n.glow, start);
       grow = Math.min(1, grow + dt * 1.6);
       warn += ((act?.quiet && !ended(act) ? 1 : 0) - warn) * Math.min(1, dt * 3);
       alpha += ((act?.stopping ? 0.35 : act?.quiet && !ended(act) ? 0.55 : 1) - alpha) * Math.min(1, dt * 3);
@@ -235,6 +307,27 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
           endFront = Math.min(stop, endFront + dt * 3.2);
           for (let l = Math.max(0, Math.ceil(before)); l <= Math.min(last, Math.floor(endFront)); l++) reach(l, 1);
         }
+        paint();
+        return;
+      }
+
+      if (listening(act)) {
+        // The two fronts: from both ends at once, lighting the layers they reach, meeting in the
+        // middle — then a fresh few to fire, and again.
+        const before = meet;
+        meet += dt * 2.6;
+        for (let l = Math.max(0, Math.ceil(before)); l <= Math.min(last, Math.floor(meet)); l++) {
+          reach(l, 1);
+          reach(last - l, 1);
+        }
+        if (meet > last / 2 + 0.4) {
+          meet = -0.4;
+          pick();
+        }
+        // Both outer layers light with what it hears.
+        const heard = 0.9 * Math.min(1, pull);
+        for (const i of [...layers[0], ...layers[last]]) neurons[i].glow = Math.max(neurons[i].glow, heard);
+        for (const n of neurons) n.glow = Math.max(n.glow, facing(look, n.x - 0.5, n.y - 0.5, REACH) * 0.75);
         paint();
         return;
       }
@@ -281,6 +374,15 @@ export function createNetwork(canvas: HTMLCanvasElement, px: number): Painter {
     still() {
       const act = clock.act;
       grow = 1;
+      cue.settle();
+      if (listening(act)) {
+        // A still frame of listening: the fronts half-way in, the outer layers lit.
+        pull = 0.7 * gain;
+        squeeze = 1 - 0.07 * Math.min(1, pull);
+        meet = Math.min(last / 2, 1) * 0.6;
+        reach(0, 0.9);
+        reach(last, 0.9);
+      }
       warn = act?.quiet && !ended(act) ? 1 : 0;
       alpha = act?.stopping ? 0.35 : act?.quiet && !ended(act) ? 0.55 : 1;
       clock.settle();

@@ -267,6 +267,17 @@ async fn install(app: &AppHandle, item: &str, cancel: &CancellationToken) -> Res
             })
             .await
             .map_err(|e| settle(app, "voices", e))?;
+            // pyannote's turn detector (7 MB), which cuts a stretch where the voice changes.
+            if !meetings::turns::model_path().is_file() {
+                let segmentation = meetings::turns::MODEL_ARCHIVE;
+                let archive = meetings::models_root().join("downloads").join(segmentation.file);
+                download::fetch(segmentation.url, segmentation.size, segmentation.sha256, &archive, cancel, |_, _| {})
+                    .await
+                    .map_err(|e| settle(app, "voices", e))?;
+                let from = archive.clone();
+                tokio::task::spawn_blocking(move || meetings::turns::unpack(&from)).await.map_err(|e| e.to_string())??;
+                let _ = std::fs::remove_file(&archive);
+            }
             emit_download(app, "voices", "done", total, total, None);
             Ok(())
         }
@@ -281,13 +292,14 @@ pub fn meetings_cancel_install(state: State<MeetingsState>) {
     }
 }
 
-/// Deletes the voice separation model — and the library, unless a downloaded reading voice still
-/// needs it (`crate::speech::piper`). A library this process has loaded cannot be deleted on Windows
-/// until it quits; it goes at the next attempt.
+/// Deletes the voice separation model — and the library, unless a reading voice or a model that
+/// listens still needs it (`meetings::sherpa_still_needed`). A library this process has loaded
+/// cannot be deleted on Windows until it quits; it goes at the next attempt.
 #[tauri::command]
 pub fn meetings_remove_voices() -> Result<(), String> {
     let _ = std::fs::remove_file(meetings::embedding_model_path());
-    if !crate::speech::piper::any_installed() {
+    let _ = std::fs::remove_file(meetings::turns::model_path());
+    if !meetings::sherpa_still_needed() {
         let _ = std::fs::remove_dir_all(meetings::sherpa_dir());
     }
     Ok(())
@@ -452,7 +464,7 @@ pub async fn meetings_start(
         if cloud && hosted && key.trim().is_empty() {
             return Err("MEETINGS_NO_CLOUD_KEY".into());
         }
-        let live_model = meetings::pick_model(&settings.live_model, true);
+        let live_model = meetings::pick_live_model(&settings.live_model);
         if !cloud && meetings::pick_model(&settings.final_model, false).is_none() {
             return Err("MEETINGS_NO_MODEL".into());
         }
@@ -529,7 +541,10 @@ pub async fn meetings_start(
             let engine = if cloud {
                 live::Engine::Cloud { settings: settings.cloud_settings.clone(), key: key.clone() }
             } else {
-                live::Engine::Local { model: crate::dictation::model_path(live_model.expect("checked above")) }
+                match live_model.expect("checked above") {
+                    meetings::LiveModel::Whisper(model) => live::Engine::Local { model: crate::dictation::model_path(model) },
+                    meetings::LiveModel::Sherpa(model) => live::Engine::Sherpa { model },
+                }
             };
             let separate = if meeting.kind == "room" { vec![Channel::Mic] } else { vec![Channel::System] };
             let config = live::Config {

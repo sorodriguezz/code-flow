@@ -8,7 +8,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 use tokio_util::sync::CancellationToken;
 
-use crate::dictation::{self, engine, permission, EngineSpec, WhisperModel};
+use crate::dictation::{self, engine, permission, EngineSpec, Listener, WhisperModel};
 use crate::reviewer::download::{self, FetchError};
 
 /// Progress of an install, for Settings: `item` is `"engine"` or a model's id.
@@ -49,11 +49,12 @@ pub fn dictation_status() -> dictation::Status {
     dictation::status()
 }
 
-/// Downloads the engine (when it is not there yet) and `model_id`, verified, into `models/whisper/`.
+/// Downloads `model_id`, verified, with the library that runs it when that is not there yet: a
+/// whisper model and whisper.cpp into `models/whisper/`, or Parakeet / Canary and sherpa-onnx into
+/// `models/asr/`.
 #[tauri::command]
 pub async fn dictation_install(app: AppHandle, registry: State<'_, DictationRegistry>, model_id: String) -> Result<(), String> {
-    let model = dictation::model(&model_id).ok_or_else(|| format!("Unknown dictation model: {model_id}"))?;
-    let spec = dictation::ENGINE.ok_or("Dictation is not available on this platform")?;
+    let listener = dictation::listener(&model_id).ok_or_else(|| format!("Unknown dictation model: {model_id}"))?;
     let cancel = CancellationToken::new();
     {
         let mut slot = registry.install.lock().map_err(|e| e.to_string())?;
@@ -62,11 +63,50 @@ pub async fn dictation_install(app: AppHandle, registry: State<'_, DictationRegi
         }
         *slot = Some(cancel.clone());
     }
-    let result = install(&app, spec, model, &cancel).await;
+    let result = match listener {
+        Listener::Whisper(model) => match dictation::ENGINE {
+            Some(spec) => install(&app, spec, model, &cancel).await,
+            None => Err("Dictation is not available on this platform".into()),
+        },
+        Listener::Sherpa(model) => install_sherpa_model(&app, model, &cancel).await,
+    };
     if let Ok(mut slot) = registry.install.lock() {
         *slot = None;
     }
+    // Its speed here, measured rather than estimated (`voice_fit`).
+    if result.is_ok() {
+        crate::voice_fit::measure_in_background(&app, &model_id);
+    }
     result
+}
+
+/// sherpa-onnx (when it is not in yet) and a Parakeet / Canary archive, on the model's row: one bar
+/// for both, as a voice download draws it.
+async fn install_sherpa_model(app: &AppHandle, model: &'static crate::asr::AsrModel, cancel: &CancellationToken) -> Result<(), String> {
+    if !crate::asr::supported() {
+        return Err("These models are not available on this computer".into());
+    }
+    let library = crate::meetings::SHERPA.map_or(0, |spec| spec.size);
+    let need_library = crate::meetings::sherpa_library().is_none();
+    let offset = if need_library { library } else { 0 };
+    let total = model.size + offset;
+    crate::meetings::ensure_sherpa(cancel, |done| emit(app, model.id, "downloading", done, total, None))
+        .await
+        .map_err(|e| settle(app, model.id, e))?;
+    let archive = crate::asr::root().join("downloads").join(model.archive);
+    download::fetch(model.url, model.size, model.sha256, &archive, cancel, |done, _| emit(app, model.id, "downloading", offset + done, total, None))
+        .await
+        .map_err(|e| settle(app, model.id, e))?;
+    emit(app, model.id, "unpacking", total, total, None);
+    let from = archive.clone();
+    let unpacked = tokio::task::spawn_blocking(move || crate::asr::unpack(model, &from)).await.map_err(|e| e.to_string()).and_then(|r| r);
+    if let Err(message) = unpacked {
+        emit(app, model.id, "failed", 0, 0, Some(message.clone()));
+        return Err(message);
+    }
+    let _ = std::fs::remove_file(&archive);
+    emit(app, model.id, "done", total, total, None);
+    Ok(())
 }
 
 /// What a failed or stopped download tells the pane, and the caller.
@@ -124,7 +164,17 @@ pub fn dictation_cancel_install(registry: State<DictationRegistry>) {
 /// behind. The loaded model is freed first: Windows cannot delete a file a process has open.
 #[tauri::command]
 pub async fn dictation_remove(model_id: String) -> Result<(), String> {
-    let model = dictation::model(&model_id).ok_or_else(|| format!("Unknown dictation model: {model_id}"))?;
+    let model = match dictation::listener(&model_id).ok_or_else(|| format!("Unknown dictation model: {model_id}"))? {
+        Listener::Whisper(model) => model,
+        Listener::Sherpa(model) => {
+            tokio::task::spawn_blocking(move || crate::asr::remove(model)).await.map_err(|e| e.to_string())?;
+            // sherpa-onnx goes with the last thing that runs on it — a voice may still need it.
+            if !crate::meetings::sherpa_still_needed() {
+                let _ = std::fs::remove_dir_all(crate::meetings::sherpa_dir());
+            }
+            return Ok(());
+        }
+    };
     tokio::task::spawn_blocking(engine::unload).await.map_err(|e| e.to_string())?;
     let path = dictation::model_path(model);
     if path.is_file() {
@@ -243,15 +293,22 @@ pub async fn dictation_record_finish(session: String, model_id: String, language
     {
         let capture = take_recording(Some(&session)).ok_or("The recording is no longer under way")?;
         let samples = tokio::task::spawn_blocking(move || capture.stop()).await.map_err(|e| e.to_string())?;
-        let model = dictation::model(&model_id).ok_or_else(|| format!("Unknown dictation model: {model_id}"))?;
-        let path = dictation::model_path(model);
-        if !path.is_file() {
+        let listener = dictation::listener(&model_id).ok_or_else(|| format!("Unknown dictation model: {model_id}"))?;
+        if !listener.usable() {
             return Err("The dictation model is not downloaded — Settings › Voice & sound › Models".into());
         }
         if samples.len() < SHORTEST {
             return Ok(String::new());
         }
-        tokio::task::spawn_blocking(move || engine::transcribe(&path, &samples, &language)).await.map_err(|e| e.to_string())?
+        match listener {
+            Listener::Whisper(model) => {
+                let path = dictation::model_path(model);
+                tokio::task::spawn_blocking(move || engine::transcribe(&path, &samples, &language)).await.map_err(|e| e.to_string())?
+            }
+            Listener::Sherpa(model) => tokio::task::spawn_blocking(move || crate::asr::transcribe(&crate::asr::DICTATION, model, &samples, &language, &language, None))
+                .await
+                .map_err(|e| e.to_string())?,
+        }
     }
     #[cfg(not(any(target_os = "macos", windows)))]
     {
