@@ -229,11 +229,15 @@ pub async fn train_process(spec: &Spec, mut cancel: watch::Receiver<bool>, mut o
         Ok(cmd) => cmd,
         Err(error) => return (Ended::Failed(error), progress),
     };
+    let program = std::path::Path::new(cmd.as_std().get_program()).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => return (Ended::Failed(format!("could not start the trainer: {error}")), progress),
     };
     PID.store(child.id().unwrap_or(0), std::sync::atomic::Ordering::SeqCst);
+    if let Some(pid) = child.id() {
+        crate::background::adopt(pid, &program, "training", spec.base.label);
+    }
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let pipes: [Option<Box<dyn tokio::io::AsyncRead + Send + Unpin>>; 2] = [
         child.stdout.take().map(|p| Box::new(p) as Box<dyn tokio::io::AsyncRead + Send + Unpin>),
@@ -267,6 +271,7 @@ pub async fn train_process(spec: &Spec, mut cancel: watch::Receiver<bool>, mut o
             },
             _ = cancel.changed() => {
                 if *cancel.borrow() {
+                    crate::background::release_id(child.id());
                     let _ = child.start_kill();
                     let _ = child.wait().await;
                     PID.store(0, std::sync::atomic::Ordering::SeqCst);

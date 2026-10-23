@@ -6,6 +6,8 @@ import { Checkbox } from "../common/Checkbox";
 import { Segmented } from "../common/Segmented";
 import { chipClass, fieldClass } from "../common/recipes";
 import { ModelDownloadRow } from "./localModelRow";
+import { VectorizingLine } from "../layout/EnginesActivity";
+import { useBackgroundStore } from "../../state/backgroundStore";
 import { useT } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useKnowledgeStore } from "../../state/knowledgeStore";
@@ -161,7 +163,7 @@ export function AiKnowledgeSettings() {
                 params: model.params,
                 licence: model.licence,
                 size_bytes: model.sizeBytes,
-                min_ram_gb: 1,
+                min_ram_gb: model.minRamGb,
                 installed: model.installed,
                 partial_bytes: model.partialBytes,
               }}
@@ -178,6 +180,7 @@ export function AiKnowledgeSettings() {
         <span className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
           {overview.space ? t("knowledge.semanticOn") : t("knowledge.semanticOff")}
         </span>
+        <VectorizingNow onDone={() => void load(workspaceId)} />
       </div>
 
       <div className="flex flex-col gap-1.5">
@@ -315,6 +318,32 @@ export function AiKnowledgeSettings() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The vectorizing pass under way, under the models — what used to go on unseen for minutes after
+ * Reindexar had already answered (2026-10-22). When it ends, `onDone` re-reads the counts.
+ */
+function VectorizingNow({ onDone }: { onDone: () => void }) {
+  const t = useT();
+  const watch = useBackgroundStore((s) => s.watch);
+  const vectorizing = useBackgroundStore((s) => s.status?.vectorizing ?? null);
+  const [was, setWas] = useState(false);
+  useEffect(() => watch(), [watch]);
+  useEffect(() => {
+    if (vectorizing) setWas(true);
+    else if (was) {
+      setWas(false);
+      onDone();
+    }
+  }, [vectorizing, was, onDone]);
+  if (!vectorizing) return null;
+  return (
+    <div className="rounded-md border border-[var(--cf-border)] px-2.5 py-2">
+      <span className="text-[11.5px] font-medium text-[var(--cf-text)]">{t("knowledge.vectorizing")}</span>
+      <VectorizingLine done={vectorizing.done} total={vectorizing.total} etaSecs={vectorizing.etaSecs} />
     </div>
   );
 }

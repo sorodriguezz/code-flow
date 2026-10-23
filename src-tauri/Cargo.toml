@@ -526,6 +526,9 @@ windows = { version = "0.61", features = [
   "Win32_Storage_Xps",
   "Win32_Storage_FileSystem",
   "Win32_System_Threading",
+  # Every model server joins one Job Object that dies with the app (`background`): none outlives it.
+  "Win32_System_JobObjects",
+  "Win32_Security",
   "Graphics_Imaging",
   "Media_Ocr",
   "Security_Cryptography",

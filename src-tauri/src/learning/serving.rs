@@ -109,6 +109,7 @@ fn alive(child: &mut tokio::process::Child) -> bool {
 }
 
 async fn stop_slot(slot: &mut Slot) {
+    crate::background::release_id(slot.child.id());
     let _ = slot.child.start_kill();
     let _ = tokio::time::timeout(Duration::from_secs(5), slot.child.wait()).await;
     let _ = std::fs::remove_file(pidfile());
@@ -211,9 +212,11 @@ async fn start(target: &Target, key: String, adapter_id: Option<&str>) -> Result
     let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
     let mut cmd = command(target, port)?;
     cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(log).kill_on_drop(true);
+    let program = std::path::Path::new(cmd.as_std().get_program()).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mut child = cmd.spawn().map_err(|e| format!("could not start the adapter server: {e}"))?;
     if let Some(pid) = child.id() {
         let _ = std::fs::write(pidfile(), format!("{pid}\n{port}\n"));
+        crate::background::adopt(pid, &program, "adapter", &key);
     }
     let probe = format!("http://127.0.0.1:{port}/v1/models");
     let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().map_err(|e| e.to_string())?;
@@ -227,6 +230,7 @@ async fn start(target: &Target, key: String, adapter_id: Option<&str>) -> Result
             break;
         }
         if started.elapsed() > READY_WAIT {
+            crate::background::release_id(child.id());
             let _ = child.start_kill();
             let _ = std::fs::remove_file(pidfile());
             return Err(format!("the adapter server didn't answer in {} s: {}", READY_WAIT.as_secs(), last_lines(&log_path, 6)));
@@ -292,6 +296,7 @@ pub async fn reap_idle() {
 pub fn shutdown() {
     if let Ok(mut guard) = SLOT.try_lock() {
         if let Some(slot) = guard.as_mut() {
+            crate::background::release_id(slot.child.id());
             let _ = slot.child.start_kill();
         }
         *guard = None;

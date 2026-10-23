@@ -23,6 +23,8 @@
 //! book ([`render`]).
 
 pub mod chunker;
+#[cfg(test)]
+mod code_bench;
 pub mod embed;
 pub mod fresh;
 pub mod index;
@@ -746,33 +748,106 @@ fn refresh_repo(key: &str, root: &Path, force: bool, now: i64) -> Result<Option<
 }
 
 static VECTORIZING: AtomicBool = AtomicBool::new(false);
+/// The pass asked for while one was running: started when it ends. A pass for another model (the
+/// user switched) stops the running one at its next batch rather than finishing vectors nobody will
+/// read. Held under its lock with [`VECTORIZING`] so a request is never lost between the two.
+static NEXT: std::sync::Mutex<Option<(Scope, embed::Space)>> = std::sync::Mutex::new(None);
 
 /// Embeds the scope's prose chunks that have no vector yet, in the background, one pass at a time.
 /// Without a local embedding model it does nothing: search stays lexical.
 pub fn vectorize_in_background(scope: Scope, space: embed::Space) {
-    if VECTORIZING.swap(true, Ordering::SeqCst) {
+    let mut next = NEXT.lock().unwrap_or_else(|e| e.into_inner());
+    if VECTORIZING.load(Ordering::SeqCst) {
+        *next = Some((scope, space));
         return;
     }
-    tokio::spawn(async move {
-        let keys = scope.keys();
-        loop {
-            let pending = match index::global() {
-                Ok(index) => index::pending_vectors(&index, &space.name, &keys, 64).unwrap_or_default(),
-                Err(_) => Vec::new(),
-            };
-            if pending.is_empty() {
-                break;
+    VECTORIZING.store(true, Ordering::SeqCst);
+    drop(next);
+    tokio::spawn(vectorize(scope, space));
+}
+
+async fn vectorize(mut scope: Scope, mut space: embed::Space) {
+    loop {
+        vectorize_pass(&scope, &space).await;
+        let mut next = NEXT.lock().unwrap_or_else(|e| e.into_inner());
+        match next.take() {
+            Some((s, sp)) => {
+                scope = s;
+                space = sp;
             }
-            let texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
-            let Ok(vectors) = space.embed_documents(&texts).await else { break };
-            let items: Vec<(i64, Vec<f32>)> = pending.iter().map(|(id, _)| *id).zip(vectors).collect();
-            let stored = index::global().and_then(|mut index| index::store_vectors(&mut index, &space.name, &items).map_err(|e| e.to_string()));
-            if stored.is_err() {
-                break;
+            None => {
+                VECTORIZING.store(false, Ordering::SeqCst);
+                drop(next);
+                set_progress(None);
+                return;
             }
         }
-        VECTORIZING.store(false, Ordering::SeqCst);
-    });
+    }
+}
+
+async fn vectorize_pass(scope: &Scope, space: &embed::Space) {
+    let keys = scope.keys();
+    let started = std::time::Instant::now();
+    let mut done = 0usize;
+    loop {
+        let switched = NEXT.lock().ok().is_some_and(|next| next.as_ref().is_some_and(|(_, wanted)| wanted.name != space.name));
+        if switched {
+            return;
+        }
+        let (pending, left) = match index::global() {
+            Ok(index) => (
+                index::pending_vectors(&index, &space.name, &keys, 64).unwrap_or_default(),
+                index::count_pending_vectors(&index, &space.name, &keys).unwrap_or(0),
+            ),
+            Err(_) => (Vec::new(), 0),
+        };
+        if pending.is_empty() {
+            return;
+        }
+        set_progress(Some(Vectorizing::now(&space.name, done, done + left, started.elapsed())));
+        let texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
+        let Ok(vectors) = space.embed_documents(&texts).await else { return };
+        let items: Vec<(i64, Vec<f32>)> = pending.iter().map(|(id, _)| *id).zip(vectors).collect();
+        let stored = index::global().and_then(|mut index| index::store_vectors(&mut index, &space.name, &items).map_err(|e| e.to_string()));
+        if stored.is_err() {
+            return;
+        }
+        done += items.len();
+    }
+}
+
+/// A vectorizing pass under way: what the knowledge pane and the status bar show (the user,
+/// 2026-10-22: Reindexar «termina tan rápido» while the vectors go on unseen for minutes).
+#[derive(Clone, Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Vectorizing {
+    /// The embedding space: `<model>@<digest>`.
+    pub space: String,
+    pub done: usize,
+    pub total: usize,
+    /// Seconds left at the pace so far; `None` before the first batch is in.
+    pub eta_secs: Option<u64>,
+}
+
+impl Vectorizing {
+    fn now(space: &str, done: usize, total: usize, elapsed: Duration) -> Self {
+        let eta_secs = (done > 0).then(|| (elapsed.as_secs_f64() / done as f64 * total.saturating_sub(done) as f64).round() as u64);
+        Vectorizing { space: space.to_string(), done, total, eta_secs }
+    }
+}
+
+static PROGRESS: std::sync::Mutex<Option<Vectorizing>> = std::sync::Mutex::new(None);
+
+fn set_progress(progress: Option<Vectorizing>) {
+    if let Ok(mut held) = PROGRESS.lock() {
+        *held = progress;
+    }
+    crate::background::changed();
+}
+
+/// The vectorizing pass under way, if any.
+pub fn vectorizing() -> Option<Vectorizing> {
+    PROGRESS.lock().ok().and_then(|held| held.clone())
 }
 
 /// One result.

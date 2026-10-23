@@ -159,6 +159,22 @@ impl Slot {
     }
 }
 
+impl Slot {
+    /// The model folder this slot holds, if any; `None` while a run holds the lock.
+    fn holding(&self) -> Option<String> {
+        let guard = self.0.try_lock().ok()?;
+        guard.as_ref().map(|loaded| loaded.key.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+    }
+}
+
+/// The recognizers held in memory, by what holds them: `dictation`, `codi`, `meetings`, `flows`.
+pub fn loaded() -> Vec<(&'static str, String)> {
+    [("dictation", &DICTATION), ("codi", &CODI), ("meetings", &MEETINGS), ("flows", &FLOWS)]
+        .into_iter()
+        .filter_map(|(by, slot)| slot.holding().map(|model| (by, model)))
+        .collect()
+}
+
 pub static DICTATION: Slot = Slot::new();
 /// «Codi», listening all the time it is on.
 pub static CODI: Slot = Slot::new();

@@ -435,6 +435,15 @@ mod tests {
             cloud: false,
             ..Default::default()
         };
+        // The embedder lives in a static, which a test binary never drops: stopped here, panic or
+        // not, or every run leaves a `llama-server` behind (five were found alive, 2026-10-22).
+        struct StopEmbedder;
+        impl Drop for StopEmbedder {
+            fn drop(&mut self) {
+                let _ = std::thread::spawn(|| tauri::async_runtime::block_on(crate::localai::embedder::shutdown())).join();
+            }
+        }
+        let _stop = StopEmbedder;
         let started = std::time::Instant::now();
         while !crate::knowledge::search_answer(&scope, "warm up", 6).await.unwrap().partial.is_empty() {
             assert!(started.elapsed().as_secs() < 900, "indexing took over 15 minutes");

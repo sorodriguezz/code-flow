@@ -818,6 +818,25 @@ pub fn pending_vectors(conn: &Connection, space: &str, collections: &[String], l
     Ok(rows)
 }
 
+/// How many prose chunks of `collections` still have no vector in `space` — what a vectorizing pass
+/// has left, for its progress.
+pub fn count_pending_vectors(conn: &Connection, space: &str, collections: &[String]) -> rusqlite::Result<usize> {
+    if collections.is_empty() {
+        return Ok(0);
+    }
+    let sql = format!(
+        "SELECT COUNT(*) FROM chunks c JOIN sources s ON s.id = c.source_id
+         WHERE c.prose = 1 AND s.collection IN ({})
+           AND NOT EXISTS (SELECT 1 FROM vectors v WHERE v.chunk_id = c.id AND v.space = ?1)",
+        placeholders(collections.len(), 2),
+    );
+    let mut values: Vec<&dyn rusqlite::ToSql> = vec![&space];
+    for c in collections {
+        values.push(c);
+    }
+    conn.query_row(&sql, values.as_slice(), |r| r.get::<_, i64>(0)).map(|n| n.max(0) as usize)
+}
+
 pub fn store_vectors(conn: &mut Connection, space: &str, items: &[(i64, Vec<f32>)]) -> rusqlite::Result<()> {
     let tx = conn.transaction()?;
     for (chunk_id, vector) in items {

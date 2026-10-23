@@ -197,6 +197,11 @@ struct Loaded {
 
 static LOADED: Mutex<Option<Loaded>> = Mutex::new(None);
 
+/// The Kokoro model held in memory, by its language, if any (`crate::background`).
+pub fn loaded() -> Option<String> {
+    LOADED.try_lock().ok()?.as_ref().map(|loaded| loaded.lang.to_string())
+}
+
 fn create(lang: &'static str, threads: i32) -> Result<Engine, String> {
     let dir = dir();
     let mut config = Config::new();

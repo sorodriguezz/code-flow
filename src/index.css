@@ -3479,6 +3479,23 @@ body.cf-dragging * {
   background: color-mix(in oklab, var(--cf-text) 5%, transparent);
   font-weight: 600;
 }
+/* The chat app's answers (2026-10-23, «cuando dibuja tablas… no da el ancho»). Its column breaks
+   words anywhere (`wrap-anywhere`, for pasted logs) — inside a table that crushed every column to a
+   few letters and split words mid-way. Here the table is a scroller the column's width: its grid
+   inside takes what its content needs up to that width (long cells wrap at spaces), and only a
+   table that cannot fit even so — many columns, long unbroken values — scrolls sideways. */
+.cf-chat-reading table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.cf-chat-reading th,
+.cf-chat-reading td {
+  overflow-wrap: normal;
+  word-break: normal;
+  min-width: 4ch;
+  vertical-align: top;
+}
 .cf-markdown-preview hr {
   border: none;
   border-top: 1px solid var(--cf-border);

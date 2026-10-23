@@ -33,6 +33,7 @@ export interface EmbedRow {
   installed: boolean;
   partialBytes: number | null;
   dims: number;
+  minRamGb: number;
 }
 
 export interface KnowledgeOverview {
@@ -78,12 +79,26 @@ export const knowledgeUpdateFolder = (id: string, patch: { localOnly?: boolean; 
   invoke<void>("knowledge_update_folder", { id, localOnly: patch.localOnly ?? null, enabled: patch.enabled ?? null });
 export const knowledgeRemoveFolder = (id: string) => invoke<void>("knowledge_remove_folder", { id });
 export const knowledgeSetCloud = (workspaceId: string, allowed: boolean) => invoke<void>("knowledge_set_cloud", { workspaceId, allowed });
-export const knowledgeSetEmbedModel = (model: string | null) => invoke<void>("knowledge_set_embed_model", { model });
+/** Chooses the embedding model; with a workspace, its vectors start at once (in the background). */
+export const knowledgeSetEmbedModel = (model: string | null, workspaceId: string | null) =>
+  invoke<void>("knowledge_set_embed_model", { model, workspaceId });
 export const knowledgeReindex = (workspaceId: string) => invoke<[string, KnowledgeRefreshed][]>("knowledge_reindex", { workspaceId });
 /** Empties the workspace's part of the index (rebuilt by the next search); resolves to the collections removed. */
 export const knowledgeClear = (workspaceId: string) => invoke<number>("knowledge_clear", { workspaceId });
 export const knowledgeSearch = (workspaceId: string, query: string, limit?: number) =>
   invoke<KnowledgeFound[]>("knowledge_search", { workspaceId, query, limit: limit ?? null });
-export const knowledgeDownloadModel = (modelId: string) => invoke<void>("knowledge_download_model", { modelId });
+/** Downloads an embedding model; with a workspace, its vectors start as soon as it is in. */
+export const knowledgeDownloadModel = (modelId: string, workspaceId: string | null) =>
+  invoke<void>("knowledge_download_model", { modelId, workspaceId });
+/** A vectorizing pass under way (`knowledge::Vectorizing`). */
+export interface KnowledgeVectorizing {
+  /** `<model>@<digest>`. */
+  space: string;
+  done: number;
+  total: number;
+  /** Seconds left at the pace so far; null before the first batch. */
+  etaSecs: number | null;
+}
+export const knowledgeVectorizing = () => invoke<KnowledgeVectorizing | null>("knowledge_vectorizing");
 export const knowledgeCancelDownload = (modelId: string) => invoke<void>("knowledge_cancel_download", { modelId });
 export const knowledgeDeleteModel = (modelId: string) => invoke<void>("knowledge_delete_model", { modelId });

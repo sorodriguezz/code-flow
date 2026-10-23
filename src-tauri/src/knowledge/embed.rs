@@ -155,12 +155,22 @@ impl Space {
 
     pub async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
         let (_, doc) = self.prefixes();
-        self.embed(texts.iter().map(|t| format!("{doc}{t}")).collect()).await
+        self.embed(texts.iter().map(|t| format!("{doc}{}", self.cut(t))).collect()).await
     }
 
     pub async fn embed_query(&self, text: &str) -> Result<Vec<f32>, String> {
         let (query, _) = self.prefixes();
-        self.embed(vec![format!("{query}{text}")]).await?.into_iter().next().ok_or_else(|| "no vector".to_string())
+        self.embed(vec![format!("{query}{}", self.cut(text))]).await?.into_iter().next().ok_or_else(|| "no vector".to_string())
+    }
+
+    /// `text` within the model's `max_chars`, when it has one.
+    fn cut<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        match &self.provider {
+            Provider::Bundled(entry) if entry.max_chars > 0 && text.chars().count() > entry.max_chars => {
+                std::borrow::Cow::Owned(text.chars().take(entry.max_chars).collect())
+            }
+            _ => std::borrow::Cow::Borrowed(text),
+        }
     }
 }
 

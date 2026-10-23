@@ -266,6 +266,21 @@ impl Slot {
     const fn new() -> Self {
         Slot(Mutex::new(None))
     }
+
+    /// The model file this slot holds, if any — `None` too while a run holds the lock, which is
+    /// fine for the status bar that asks (`crate::background`): it never waits on a transcription.
+    fn holding(&self) -> Option<String> {
+        let guard = self.0.try_lock().ok()?;
+        guard.as_ref().map(|loaded| loaded.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+    }
+}
+
+/// The whisper models held in memory, by what holds them: `dictation`, `meetings`, `flows`, `codi`.
+pub fn loaded() -> Vec<(&'static str, String)> {
+    [("dictation", &MODEL), ("meetings", &MEETINGS), ("flows", &FLOWS), ("codi", &CODI)]
+        .into_iter()
+        .filter_map(|(by, slot)| slot.holding().map(|model| (by, model)))
+        .collect()
 }
 
 static MODEL: Slot = Slot::new();

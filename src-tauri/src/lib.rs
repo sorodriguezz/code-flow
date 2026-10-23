@@ -9,6 +9,7 @@ mod ai;
 mod applog;
 mod asr;
 mod autostart;
+mod background;
 mod api;
 mod appmenu;
 mod ai_locks;
@@ -442,6 +443,8 @@ pub fn run() {
     // same reasoning applies to it — with a model that can be twenty gigabytes.
     localai::executor::sweep_stale();
     localai::embedder::sweep_stale();
+    // …and any other one of ours whose parent is gone, which a pidfile (one process a slot) misses.
+    std::thread::spawn(localai::engine::sweep_orphans);
     // The fine-tuning pane's `mlx_lm server`, by the same reasoning (checked to be our venv's Python).
     learning::serving::sweep_stale();
 
@@ -575,6 +578,7 @@ pub fn run() {
         // both, and the first time that was forgotten the limit would be silently gone.
         .manage(sandbox::SandboxRegistry::default())
         .setup(|app| {
+            background::init(app.handle());
             // The database, before anything else here reaches for it — and here, not at `.manage()`
             // time where it used to be opened, for two reasons.
             //
@@ -2124,6 +2128,9 @@ sharded_invoke_handler! {
         commands::codemap_cmd::codemap_key_symbols,
         commands::codemap_cmd::codemap_health,
         commands::localai_cmd::localai_state,
+        commands::localai_cmd::background_status,
+        commands::localai_cmd::background_stop,
+        commands::knowledge_cmd::knowledge_vectorizing,
         commands::localai_cmd::localai_set_enabled,
         commands::localai_cmd::localai_set_model,
         commands::localai_cmd::localai_download_model,

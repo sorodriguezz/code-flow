@@ -279,6 +279,7 @@ async fn stop_locked(guard: &mut Option<Arc<Engine>>) {
     // not a moment anyone controls — a completion request in flight holds a clone. Killing here
     // makes the stop synchronous with the decision to stop.
     if let Ok(mut child) = engine.child.lock() {
+        crate::background::release_id(child.id());
         let _ = child.start_kill();
     }
     clear_pidfile();
@@ -345,6 +346,9 @@ impl Engine {
         }
 
         write_pidfile(child.id(), port);
+        if let Some(pid) = child.id() {
+            crate::background::adopt(pid, "llama-server", "completion", spec.label);
+        }
 
         let client = reqwest::Client::builder()
             // No proxy, ever. A machine configured with a corporate HTTP proxy would otherwise
@@ -401,6 +405,7 @@ impl Engine {
 
         self.alive.store(false, Ordering::SeqCst);
         if let Ok(mut child) = self.child.lock() {
+            crate::background::release_id(child.id());
             let _ = child.start_kill();
         }
         Err(format!(
@@ -606,6 +611,50 @@ fn clear_pidfile() {
 /// because the last run cleared it.
 pub fn sweep_stale() {
     sweep_pidfile(pidfile());
+}
+
+/// Every `llama-server` of ours whose parent is gone — what the pidfiles cannot cover: each slot
+/// remembers only its last process, and a process that never runs its destructors (a test binary
+/// that ends with the embedder in a static, a dev build killed on every rebuild) leaves one behind
+/// each time. Found 2026-10-22: five embedders from five runs of a live test, alive for ten hours.
+///
+/// Ours means its executable is the binary this build starts ([`locate`]) or the source checkout's
+/// copy, which tests and dev runs start; orphaned means its parent is launchd (pid 1) or no longer
+/// exists. A server another running CodeFlow owns has that instance as its parent, so it is left
+/// alone. Lists every process once, so it runs off the startup path.
+pub fn sweep_orphans() {
+    let ours = server_binaries();
+    if ours.is_empty() {
+        return;
+    }
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::nothing().with_exe(UpdateKind::Always));
+    let mut killed = 0;
+    for process in system.processes().values() {
+        if !process.exe().is_some_and(|exe| ours.iter().any(|own| own == exe)) {
+            continue;
+        }
+        let orphaned = process.parent().is_none_or(|parent| parent.as_u32() == 1 || system.process(parent).is_none());
+        if orphaned && process.kill() {
+            killed += 1;
+        }
+    }
+    if killed > 0 {
+        crate::applog::info(&format!("localai: stopped {killed} llama-server process(es) a previous run left behind"));
+    }
+}
+
+/// The `llama-server` executables that are ours: the one this build starts ([`locate`]) and the
+/// source checkout's copy, which tests and dev runs start.
+pub fn server_binaries() -> Vec<PathBuf> {
+    let name = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    let mut ours: Vec<PathBuf> = locate().into_iter().collect();
+    let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join("llama").join(name);
+    if checkout.is_file() && !ours.contains(&checkout) {
+        ours.push(checkout);
+    }
+    ours
 }
 
 /// The sweep itself, for any pidfile this module's engines write.

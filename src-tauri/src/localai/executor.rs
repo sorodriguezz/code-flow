@@ -235,6 +235,7 @@ async fn stop_locked(guard: &mut Option<Arc<ExecEngine>>) {
     let Some(engine) = guard.take() else { return };
     engine.alive.store(false, Ordering::SeqCst);
     if let Ok(mut child) = engine.child.lock() {
+        crate::background::release_id(child.id());
         let _ = child.start_kill();
     }
     clear_pidfile();
@@ -298,6 +299,9 @@ impl ExecEngine {
             engine::collect_diagnostics(stderr, diagnostics.clone());
         }
         write_pidfile(child.id(), port);
+        if let Some(pid) = child.id() {
+            crate::background::adopt(pid, "llama-server", "executor", entry.spec.label);
+        }
 
         let client = reqwest::Client::builder()
             .no_proxy()
@@ -340,6 +344,7 @@ impl ExecEngine {
         }
         self.alive.store(false, Ordering::SeqCst);
         if let Ok(mut child) = self.child.lock() {
+            crate::background::release_id(child.id());
             let _ = child.start_kill();
         }
         Err(format!(

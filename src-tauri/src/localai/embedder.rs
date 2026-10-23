@@ -32,6 +32,9 @@ pub struct EmbedModelSpec {
     /// The context (and batch) the server is started with — a chunk is far shorter, and every token
     /// of batch is GPU memory taken from the executor beside it.
     pub ctx: u32,
+    /// Texts are cut to this many characters before they are sent (`0`: as they are) — for a model
+    /// trained on shorter inputs than a chunk can be (Nomic v2: 512 tokens).
+    pub max_chars: usize,
 }
 
 pub const EMBED_CATALOGUE: &[EmbedModelSpec] = &[
@@ -53,6 +56,7 @@ pub const EMBED_CATALOGUE: &[EmbedModelSpec] = &[
         query_prefix: "search_query: ",
         doc_prefix: "search_document: ",
         ctx: 2_048,
+        max_chars: 0,
     },
     EmbedModelSpec {
         spec: ModelSpec {
@@ -75,6 +79,80 @@ pub const EMBED_CATALOGUE: &[EmbedModelSpec] = &[
         // and keeps the compute buffers small enough to sit beside the executor on a 16 GB Mac — at
         // 8k, both on the GPU together failed with "Compute error" (measured 2026-10-19).
         ctx: 2_048,
+        max_chars: 0,
+    },
+    // Added 2026-10-23 (the user: «implementa todo» of the three proposed). Sizes and hashes from the
+    // Hugging Face API (`/api/models/<repo>/tree/main`, the LFS `oid` is the SHA-256).
+    //
+    // Nomic v2: the multilingual successor of v1.5 at a similar cost — ~100 languages, a MoE of 475M
+    // with 305M active. GGUF from ggml-org, llama.cpp's own organisation. Same prefixes as v1.5. Its
+    // training length is 512 tokens, so a chunk is cut to 1,200 characters (~400 tokens of Spanish
+    // prose) rather than read past what it learned on.
+    EmbedModelSpec {
+        spec: ModelSpec {
+            id: "nomic-embed-text-v2-moe",
+            label: "Nomic Embed Text v2",
+            tier: Tier::Light,
+            repo: "ggml-org/Nomic-Embed-Text-V2-GGUF",
+            file: "nomic-embed-text-v2-moe-q8_0.gguf",
+            size_bytes: 512_225_120,
+            sha256: "36c5817bc25f379e62021f49efde05b10ed3b0c93ab8059c43173a7a5de73565",
+            params: "475M MoE · Q8_0",
+            min_ram_gb: 2,
+            licence: "Apache-2.0",
+        },
+        dims: 768,
+        pooling: "mean",
+        query_prefix: "search_query: ",
+        doc_prefix: "search_document: ",
+        ctx: 2_048,
+        max_chars: 1_200,
+    },
+    // Harrier OSS v1 0.6B (Microsoft, April 2026): Qwen3's architecture and prompt format, ahead of
+    // Qwen3 0.6B on multilingual retrieval at the same size. Microsoft publishes no GGUF; this is a
+    // community conversion of its weights, pinned to the exact file by hash — a different file is
+    // refused, so what is downloaded is what was checked.
+    EmbedModelSpec {
+        spec: ModelSpec {
+            id: "harrier-oss-v1-0.6b",
+            label: "Harrier OSS v1 0.6B",
+            tier: Tier::Light,
+            repo: "SuperPauly/harrier-oss-v1-0.6b-gguf",
+            file: "harrier-oss-v1-0.6B-Q8_0.gguf",
+            size_bytes: 639_447_872,
+            sha256: "f97092bd73f6814b8b1170ca855071bc468b5fa2cf61a6de7e1d2c4a8a6a50b0",
+            params: "0.6B · Q8_0",
+            min_ram_gb: 2,
+            licence: "MIT",
+        },
+        dims: 1024,
+        pooling: "last",
+        query_prefix: "Instruct: Given a question about a software project, retrieve the passages of its code and documentation that answer it\nQuery: ",
+        doc_prefix: "",
+        ctx: 2_048,
+        max_chars: 0,
+    },
+    // Qwen3 Embedding 4B: the step up in quality, for 16 GB machines and up. Q4_K_M keeps it at
+    // 2.5 GB; vectors are 2,560 numbers (an index of ~9,000 prose chunks is ~90 MB of them).
+    EmbedModelSpec {
+        spec: ModelSpec {
+            id: "qwen3-embedding-4b",
+            label: "Qwen3 Embedding 4B",
+            tier: Tier::Large,
+            repo: "Qwen/Qwen3-Embedding-4B-GGUF",
+            file: "Qwen3-Embedding-4B-Q4_K_M.gguf",
+            size_bytes: 2_496_703_776,
+            sha256: "2b0cf8f17b4c723c27303015383c27ec4bf2d8314bb677d05e920dd70bb0f16b",
+            params: "4B · Q4_K_M",
+            min_ram_gb: 12,
+            licence: "Apache-2.0",
+        },
+        dims: 2560,
+        pooling: "last",
+        query_prefix: "Instruct: Given a question about a software project, retrieve the passages of its code and documentation that answer it\nQuery: ",
+        doc_prefix: "",
+        ctx: 2_048,
+        max_chars: 0,
     },
 ];
 
@@ -217,6 +295,7 @@ async fn spawn(entry: &EmbedModelSpec, model_path: PathBuf) -> Result<Embedder, 
     }
     if let Some(pid) = child.id() {
         let _ = std::fs::write(pidfile(), format!("{pid}\n{port}\n"));
+        crate::background::adopt(pid, "llama-server", "embeddings", entry.spec.label);
     }
     let client = reqwest::Client::builder().no_proxy().build().map_err(|e| e.to_string())?;
     let embedder = Embedder {
@@ -246,6 +325,7 @@ async fn spawn(entry: &EmbedModelSpec, model_path: PathBuf) -> Result<Embedder, 
         tokio::time::sleep(HEALTH_POLL).await;
     }
     if let Ok(mut child) = embedder.child.lock() {
+        crate::background::release_id(child.id());
         let _ = child.start_kill();
     }
     Err(format!("{} didn't finish loading within {} seconds.", entry.spec.label, START_BUDGET.as_secs()))
@@ -255,6 +335,7 @@ fn stop_locked(guard: &mut Option<Arc<Embedder>>) {
     let Some(embedder) = guard.take() else { return };
     embedder.alive.store(false, Ordering::SeqCst);
     if let Ok(mut child) = embedder.child.lock() {
+        crate::background::release_id(child.id());
         let _ = child.start_kill();
     }
     let _ = std::fs::remove_file(pidfile());
@@ -321,7 +402,7 @@ mod tests {
     #[test]
     fn the_catalogue_is_offerable_and_unique() {
         for entry in EMBED_CATALOGUE {
-            assert_eq!(entry.spec.licence, "Apache-2.0");
+            assert!(matches!(entry.spec.licence, "Apache-2.0" | "MIT"), "{}", entry.spec.licence);
             assert_eq!(entry.spec.sha256.len(), 64);
             assert!(entry.dims > 0 && entry.ctx >= 2_048);
             assert!(matches!(entry.pooling, "last" | "mean"));

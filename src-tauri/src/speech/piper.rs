@@ -295,6 +295,11 @@ struct Tts {
 
 static LOADED: Mutex<Option<Tts>> = Mutex::new(None);
 
+/// The Piper voice held in memory, if any (`crate::background`); never waits on a sentence.
+pub fn loaded() -> Option<String> {
+    LOADED.try_lock().ok()?.as_ref().map(|tts| tts.voice.clone())
+}
+
 fn create(dir: &Path, model: &str, espeak: &Path, threads: i32) -> Result<Engine, String> {
     let mut config = Config::new();
     config.path(offsets::VITS_MODEL, &dir.join(model))?;

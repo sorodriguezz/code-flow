@@ -13,13 +13,15 @@ import { useLanguageStore } from "../../state/languageStore";
  * is a panel that fills whatever it is given — the AI panel, the notes editor, the diff. This one is
  * a *page*: a transcript is prose, prose is read left to right, and a line of prose that runs the
  * full width of a 34" monitor is one the eye loses its place in between the right edge and the next
- * line's left. 740px at this font size lands around 90 characters, which is the upper end of the
- * range typography has agreed on for a century. The column is centred rather than left-aligned
+ * line's left. It was 740px (~90 characters); widened to 960px on 2026-10-23 because answers are
+ * not only prose — a table or a code block at 740px had no room (the user: «cuando dibuja tablas…
+ * se ve mal porque no da el ancho»). Wider than that is the full-width line this column exists to
+ * avoid. A table wider still scrolls sideways inside it (`cf-chat-reading` in `index.css`). The column is centred rather than left-aligned
  * against the sidebar so that widening the window makes the reading experience *unchanged* rather
  * than lopsided — which is the whole promise of a reading surface, and the thing a dense IDE panel
  * deliberately does not make.
  */
-export const READING_COLUMN = "mx-auto w-full max-w-[740px]";
+export const READING_COLUMN = "mx-auto w-full max-w-[960px]";
 
 /** The side gutter the column keeps off the window edge, and off the sidebar's seam. Split out from
  *  `READING_COLUMN` because the composer wants the same gutter with a different vertical rhythm. */

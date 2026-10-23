@@ -496,7 +496,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
             // The reading variant takes `cf-markdown-preview` on its own — the app's document
             // style, 13.5px at 1.65 — where the panel adds `cf-markdown-chat` to squeeze it to
             // 12px. That is the whole typographic difference between a page and a sidebar.
-            className={`cf-markdown-preview ${reading ? "" : "cf-markdown-chat"}`}
+            className={`cf-markdown-preview ${reading ? "cf-chat-reading" : "cf-markdown-chat"}`}
             // The memoised object, never an inline `{{ __html }}` — see `markup`.
             dangerouslySetInnerHTML={markup}
           />

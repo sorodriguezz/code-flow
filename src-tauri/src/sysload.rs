@@ -376,7 +376,7 @@ fn responsible_for(_pid: u32) -> Option<u32> {
 /// walk it at all, which are the ones with the panel open. That is what makes a per-process syscall
 /// affordable here when doing it for every process on the machine would not be.
 #[cfg(target_os = "macos")]
-fn footprint(pid: Pid) -> Option<u64> {
+pub(crate) fn footprint(pid: Pid) -> Option<u64> {
     /// `struct rusage_info_v0` from `<sys/resource.h>`, field for field. Only the footprint is read;
     /// the rest is here to put it at the offset the kernel writes it to.
     #[repr(C)]
@@ -429,7 +429,7 @@ fn footprint(pid: Pid) -> Option<u64> {
 /// `PROCESS_QUERY_LIMITED_INFORMATION` rather than `PROCESS_QUERY_INFORMATION`: it is all this call
 /// needs, and it is the one that still opens a process running at a different integrity level.
 #[cfg(windows)]
-fn footprint(pid: Pid) -> Option<u64> {
+pub(crate) fn footprint(pid: Pid) -> Option<u64> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::ProcessStatus::{
         GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2,
@@ -471,7 +471,7 @@ fn footprint(pid: Pid) -> Option<u64> {
 /// shared page among the processes mapping it, so summing it over a tree counts every page once —
 /// and that is where this goes next.
 #[cfg(not(any(target_os = "macos", windows)))]
-fn footprint(_pid: Pid) -> Option<u64> {
+pub(crate) fn footprint(_pid: Pid) -> Option<u64> {
     None
 }
 

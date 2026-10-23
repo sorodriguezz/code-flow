@@ -20,6 +20,7 @@ pub struct EmbedRow {
     pub installed: bool,
     pub partial_bytes: Option<u64>,
     pub dims: usize,
+    pub min_ram_gb: u32,
 }
 
 #[derive(Serialize)]
@@ -155,6 +156,7 @@ pub async fn knowledge_overview(db: State<'_, Db>, workspace_id: String) -> Resu
             installed: models::is_installed(&e.spec),
             partial_bytes: models::partial_bytes(&e.spec),
             dims: e.dims,
+            min_ram_gb: e.spec.min_ram_gb,
         })
         .collect();
     Ok(KnowledgeOverview { cloud_allowed, embed_models, embed_setting, space: space.map(|s| s.name), repos, folders, sources })
@@ -203,7 +205,15 @@ pub fn knowledge_set_cloud(db: State<'_, Db>, workspace_id: String, allowed: boo
 /// Chooses the embedding model (`None`: the default). Vectors of another model stay, unused, until
 /// that model is chosen again.
 #[tauri::command]
-pub fn knowledge_set_embed_model(db: State<'_, Db>, model: Option<String>) -> Result<(), String> {
+pub async fn knowledge_set_embed_model(db: State<'_, Db>, model: Option<String>, workspace_id: Option<String>) -> Result<(), String> {
+    set_embed_model(&db, model)?;
+    if let Some(workspace_id) = workspace_id {
+        vectorize_workspace(&db, &workspace_id).await?;
+    }
+    Ok(())
+}
+
+fn set_embed_model(db: &State<'_, Db>, model: Option<String>) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     match model.filter(|m| !m.trim().is_empty()) {
         // The same door every local model passes: no Ollama cloud model, and no server off this
@@ -217,6 +227,27 @@ pub fn knowledge_set_embed_model(db: State<'_, Db>, model: Option<String>) -> Re
         Some(model) => crate::db::queries::set_setting(&conn, embed::KEY_EMBED_MODEL, &model).map_err(|e| e.to_string()),
         None => conn.execute("DELETE FROM app_settings WHERE key = ?1", [embed::KEY_EMBED_MODEL]).map(|_| ()).map_err(|e| e.to_string()),
     }
+}
+
+/// Starts vectorizing what the workspace's index has without vectors, in the background — after a
+/// model is downloaded or chosen, so the vectors do not wait for a Reindexar or a search (the user,
+/// 2026-10-22: the model finished downloading and nothing was vectorized). Nothing without a local
+/// embedding model; a pass already running is left to finish.
+async fn vectorize_workspace(db: &State<'_, Db>, workspace_id: &str) -> Result<(), String> {
+    let (scope, (setting, ollama_url)) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        (workspace_scope(&conn, workspace_id)?, embed_settings(&conn))
+    };
+    if let Some(space) = embed::Space::resolve(setting.as_deref(), &ollama_url).await {
+        knowledge::vectorize_in_background(scope, space);
+    }
+    Ok(())
+}
+
+/// The vectorizing pass under way, for the knowledge pane's progress line.
+#[tauri::command]
+pub fn knowledge_vectorizing() -> Option<knowledge::Vectorizing> {
+    knowledge::vectorizing()
 }
 
 /// Re-indexes every repository and folder of the workspace now, then embeds what is new in the
@@ -248,12 +279,23 @@ pub async fn knowledge_search(db: State<'_, Db>, workspace_id: String, query: St
 }
 
 #[tauri::command]
-pub async fn knowledge_download_model(app: AppHandle, registry: State<'_, LocalAiRegistry>, model_id: String) -> Result<(), String> {
+pub async fn knowledge_download_model(
+    app: AppHandle,
+    db: State<'_, Db>,
+    registry: State<'_, LocalAiRegistry>,
+    model_id: String,
+    workspace_id: Option<String>,
+) -> Result<(), String> {
     let entry = embedder::find(&model_id).ok_or_else(|| format!("Unknown model: {model_id}"))?;
     let cancel = registry.register_download(model_id.clone())?;
     let result = download::fetch(&app, &entry.spec, &models::dir(), cancel).await;
     registry.clear_download(&model_id);
-    result.map(|_| ())
+    result?;
+    // The vectors start as soon as the model they need is here — if it is the one in use.
+    if let Some(workspace_id) = workspace_id {
+        vectorize_workspace(&db, &workspace_id).await?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

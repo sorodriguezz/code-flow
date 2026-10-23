@@ -260,3 +260,17 @@ fn read_model_id(conn: &rusqlite::Connection) -> Result<String, String> {
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| catalogue::DEFAULT_MODEL_ID.to_string()))
 }
+
+/// What runs in the background for CodeFlow: its model servers, the models held in memory, a
+/// vectorizing pass, Codi's microphone (`crate::background`). `detail`: each server's CPU and
+/// memory, and our servers nobody here started — asked only while the bar's panel is open.
+#[tauri::command]
+pub async fn background_status(app: AppHandle, detail: bool) -> crate::background::Status {
+    tokio::task::spawn_blocking(move || crate::background::status(&app, detail)).await.unwrap_or_else(|_| crate::background::Status::default())
+}
+
+/// Stops one model server from the bar's panel.
+#[tauri::command]
+pub async fn background_stop(pid: u32) -> Result<(), String> {
+    crate::background::stop(pid).await
+}

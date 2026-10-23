@@ -112,8 +112,8 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => {
 
     updateFolder: (id, patch) => guard(() => knowledgeUpdateFolder(id, patch)),
     removeFolder: (id) => guard(() => knowledgeRemoveFolder(id)),
-    useModel: (id) => guard(() => knowledgeSetEmbedModel(id)),
-    download: (id) => guard(() => knowledgeDownloadModel(id)),
+    useModel: (id) => guard(() => knowledgeSetEmbedModel(id, get().workspaceId)),
+    download: (id) => guard(() => knowledgeDownloadModel(id, get().workspaceId)),
     cancelDownload: (id) => guard(() => knowledgeCancelDownload(id)),
     removeModel: (id) => guard(() => knowledgeDeleteModel(id)),
   };
