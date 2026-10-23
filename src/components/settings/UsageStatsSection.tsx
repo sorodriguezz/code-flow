@@ -536,6 +536,18 @@ const TASK_LABELS: Record<string, TranslationKey> = {
   "api-tests": "usage.task.apiTests",
   "api-request": "usage.task.apiRequest",
   "skill-write": "usage.task.skillWrite",
+  "db-assist": "usage.task.dbAssist",
+  "diagram-draw": "usage.task.diagramDraw",
+  "diagram-rows": "usage.task.diagramRows",
+  "pipeline-analyze": "usage.task.pipelineAnalyze",
+  "hybrid-execute": "usage.task.hybridExecute",
+  meetings: "usage.task.meetings",
+  "spoken-summary": "usage.task.spokenSummary",
+  codi: "usage.task.codi",
+  "codi-research": "usage.task.codiResearch",
+  "codi-answer": "usage.task.codiAnswer",
+  "codi-read": "usage.task.codiRead",
+  architecture: "usage.task.architecture",
   other: "usage.task.other",
 };
 

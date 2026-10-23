@@ -344,6 +344,14 @@ pub fn reviewer_dir() -> PathBuf {
     state_dir().join("reviewer")
 }
 
+/// The clones of the reference repositories (`crate::refrepos`), one folder per repository id.
+///
+/// Under the state root: the app made them and a clone brings any of them back, so a reset may take
+/// them — the list of what to clone is in the database and survives it in a backup.
+pub fn reference_repos_dir() -> PathBuf {
+    state_dir().join("reference-repos")
+}
+
 /// Where a workspace's skills (installed via `npx skills add`) live before being synced
 /// into whichever project is actually being reviewed — the canonical, workspace-scoped copy.
 pub fn workspace_skills_dir(workspace_id: &str) -> PathBuf {
@@ -886,6 +894,7 @@ mod tests {
             db_path(),
             logs_dir(),
             models_dir(),
+            reference_repos_dir(),
             workspace_skills_dir("w1"),
             chain_memory_dir("c1"),
             reset_marker_path(),

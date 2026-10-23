@@ -72,6 +72,21 @@ const FILLER: &[&str] = &[
     "panel", "codi",
 ];
 
+/// What may come before an order's verb without being part of what is ordered: a call to Codi, a
+/// courtesy, the generic «haz» of «haz un pull». Anything else said first means the verb found later
+/// is not the sentence's — «haz un pool **del repositorio** x» is not «repositorio x».
+const LEAD: &[&str] = &[
+    "oye", "hey", "ok", "okay", "vale", "bueno", "ahora", "ya", "now", "haz", "hazme", "hace", "do", "puedes", "podrias", "can", "could",
+    "would", "you",
+];
+
+/// Words a question carries around what it asks about, explained by its being asked: «how does
+/// flows **work**», «¿cuántas conexiones **tengo**?».
+const ASKED: &[&str] = &[
+    "work", "works", "exactly", "exactamente", "ahora", "now", "actualmente", "currently", "local", "localmente", "locally", "tengo", "tenemos",
+    "have", "i", "we",
+];
+
 /// Splits a sentence in words, keeping each one's normalized form beside the original.
 fn words(order: &str) -> Vec<(String, String)> {
     order
@@ -129,8 +144,76 @@ fn number(words: &[(String, String)], used: &[bool]) -> Option<(i64, Vec<usize>)
     None
 }
 
-/// One action this order plainly names, with its params — or `None` when it is not sure.
+/// Words that ask to see what is done: «…y muéstramelo», «…en pantalla». Only after the order's
+/// first word — «muéstrame las notas» is an order of its own, not a wish about another one.
+const SHOW: &[&str] = &[
+    "y muestramelo", "y muestralo", "y abremelo", "y abrelo", "muestramelo", "abrelo", "en pantalla", "a la vista", "and show me", "and show it",
+    "and open it", "show me", "on screen",
+];
+
+/// Words that ask not to see it: «sin abrir», «en segundo plano» — anywhere in the order.
+const HIDE: &[&str] = &[
+    "sin abrir nada", "sin abrirlo", "sin abrir", "sin mostrarlo", "sin mostrar", "en segundo plano", "in the background", "without opening it", "without opening", "without showing", "dont open", "do not open",
+];
+
+/// What an order says about being seen — `Some(true)` for «…y muéstramelo», `Some(false)` for «sin
+/// abrir» — and the order without those words. An action that can work out of sight takes it as its
+/// `show` (Settings › Codi › «Trabajar en segundo plano» decides when nothing is said).
+pub fn screen_hint(order: &str) -> (Option<bool>, String) {
+    let all = words(order);
+    let mut cut = vec![false; all.len()];
+    let mut hint = None;
+    let mut phrases: Vec<(&str, bool)> = HIDE.iter().map(|p| (*p, false)).chain(SHOW.iter().map(|p| (*p, true))).collect();
+    // The longest first, so «sin abrir nada» is not left with «nada».
+    phrases.sort_by_key(|(phrase, _)| std::cmp::Reverse(phrase.split(' ').count()));
+    for (phrase, show) in phrases {
+        let wanted: Vec<&str> = phrase.split(' ').collect();
+        if wanted.len() > all.len() {
+            continue;
+        }
+        for start in 0..=all.len() - wanted.len() {
+            if show && start == 0 {
+                continue;
+            }
+            let span = start..start + wanted.len();
+            if cut[span.clone()].iter().any(|c| *c) || !wanted.iter().enumerate().all(|(i, w)| all[start + i].0 == *w) {
+                continue;
+            }
+            cut[span].iter_mut().for_each(|c| *c = true);
+            hint = Some(show);
+        }
+    }
+    if hint.is_none() {
+        return (None, order.to_string());
+    }
+    let mut rest = all.iter().zip(&cut).filter(|(_, c)| !**c).map(|((_, original), _)| original.as_str()).collect::<Vec<_>>().join(" ");
+    // What makes it a question is kept.
+    if order.trim_start().starts_with('¿') {
+        rest.insert(0, '¿');
+    }
+    if order.trim_end().ends_with('?') {
+        rest.push('?');
+    }
+    (hint, rest)
+}
+
+/// One action this order plainly names, with its params — or `None` when it is not sure. Said with
+/// «…y muéstramelo» or «sin abrir», an action that takes `show` gets it.
 pub fn route(order: &str, specs: &[ActionSpec]) -> Option<(String, Value)> {
+    let (hint, rest) = screen_hint(order);
+    let (id, mut params) = route_plain(&rest, specs)?;
+    if let Some(show) = hint {
+        let takes = specs.iter().find(|spec| spec.id == id).and_then(|spec| spec.params.pointer("/properties/show")).is_some();
+        if takes {
+            if let Some(map) = params.as_object_mut() {
+                map.insert("show".into(), Value::Bool(show));
+            }
+        }
+    }
+    Some((id, params))
+}
+
+fn route_plain(order: &str, specs: &[ActionSpec]) -> Option<(String, Value)> {
     let words = words(order);
     if words.is_empty() {
         return None;
@@ -140,37 +223,43 @@ pub fn route(order: &str, specs: &[ActionSpec]) -> Option<(String, Value)> {
         return None;
     }
     // A question wants an answer read from the screen, which is the model's: «en qué rama estoy»
-    // is not «lista las ramas».
-    if order.trim_end().ends_with('?')
-        || order.trim_start().starts_with('¿')
-        || words.first().is_some_and(|(w, _)| QUESTION.contains(&w.as_str()) || (w == "en" && words.get(1).is_some_and(|(next, _)| QUESTION.contains(&next.as_str()))))
-    {
-        return None;
-    }
+    // is not «lista las ramas». The few actions that answer one by acting — «cómo funciona
+    // flujos» is its tour — say how it is asked (`questions`), and only those are looked for in
+    // one; every word of it must then be explained, so «qué es un commit» stays the model's.
+    let question = asks(order, &words);
+    let verbs = |spec: &ActionSpec| if question { spec.questions.clone() } else { spec.aliases.clone() };
     // Two actions' verbs in two places of the sentence («abre el panel… y reinicia el backend») are
     // two orders.
     // Each action's verbs taken together («abre la configuración», «configuración de»): the span of
     // the sentence they cover.
+    // An alias made only of words that ride along anyway («repositorio», «repo») names a thing, not
+    // an order, and does not make a second one.
     let mut spans: Vec<(String, (usize, usize))> = Vec::new();
     for spec in specs {
-        let Some(aliases) = &spec.aliases else { continue };
+        let Some(aliases) = verbs(spec) else { continue };
         let covered = aliases
             .es
             .iter()
             .chain(aliases.en.iter())
-            .filter_map(|alias| find(&words, &normalize(alias)))
+            .map(|alias| normalize(alias))
+            .filter(|alias| !alias.split(' ').all(|w| FILLER.contains(&w)))
+            .filter_map(|alias| find(&words, &alias))
             .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
         if let Some(span) = covered {
             spans.push((spec.id.clone(), span));
         }
     }
+    // A verb inside another action's longer one is part of it, not an order of its own: «abre» and
+    // «consulta» in «abre una consulta rápida».
+    let inside = |id: &str, at: (usize, usize)| spans.iter().any(|(other, there)| other != id && there.0 <= at.0 && at.1 <= there.1 && there.1 - there.0 > at.1 - at.0);
+    let spans: Vec<(String, (usize, usize))> = spans.iter().filter(|(id, at)| !inside(id, *at)).cloned().collect();
     let apart = |a: (usize, usize), b: (usize, usize)| a.1 <= b.0 || b.1 <= a.0;
     if spans.iter().any(|(id, at)| spans.iter().any(|(other, there)| other != id && apart(*at, *there))) {
         return None;
     }
     let mut found: Vec<(i64, String, Value)> = Vec::new();
     for spec in specs {
-        let Some(aliases) = &spec.aliases else { continue };
+        let Some(aliases) = verbs(spec) else { continue };
         // The longest of its verbs present in the order.
         let hit = aliases
             .es
@@ -182,10 +271,35 @@ pub fn route(order: &str, specs: &[ActionSpec]) -> Option<(String, Value)> {
         let Some((verb_len, (from, to))) = hit else { continue };
         let mut used = vec![false; words.len()];
         used[from..to].iter_mut().for_each(|u| *u = true);
-        let Some(params) = fill(spec, &words, &mut used) else { continue };
+        let Some(mut params) = fill(spec, &words, &mut used, from) else { continue };
+        // A `question` is the user's, whole: «¿qué decidimos sobre el login?» is answered as it was
+        // asked, not from the words its phrase left over.
+        if let Some(question) = params.as_object_mut().and_then(|map| map.get_mut("question")) {
+            *question = Value::String(order.trim().to_string());
+        }
+        // The verb opens the order: what is said before it is a call, a courtesy, a value it named
+        // («las notas en modo isla») or another of its own verbs («saca el chat a una ventana aparte»).
+        let mut own = vec![false; words.len()];
+        for alias in aliases.es.iter().chain(aliases.en.iter()) {
+            if let Some((a, b)) = find(&words, &normalize(alias)) {
+                own[a..b].iter_mut().for_each(|o| *o = true);
+            }
+        }
+        if (0..from).any(|i| !used[i] && !own[i] && !FILLER.contains(&words[i].0.as_str()) && !LEAD.contains(&words[i].0.as_str())) {
+            continue;
+        }
         // What is left unexplained: a sure match explains nearly every word.
-        let left = words.iter().zip(&used).filter(|((w, _), u)| !**u && !FILLER.contains(&w.as_str())).count();
-        if left > 2 {
+        let left = words
+            .iter()
+            .zip(&used)
+            .filter(|((w, _), u)| !**u && !FILLER.contains(&w.as_str()) && !LEAD.contains(&w.as_str()) && !(question && ASKED.contains(&w.as_str())))
+            .count();
+        if left > if question { 0 } else { 2 } {
+            continue;
+        }
+        // Words left where a closed value was expected name something it does not offer: «explícame
+        // el proyecto noah cli» is not the tour of the app on screen.
+        if left > 0 && spec_has_unfilled_enum(spec, &params) {
             continue;
         }
         let explained = used.iter().filter(|u| **u).count() as i64;
@@ -200,11 +314,30 @@ pub fn route(order: &str, specs: &[ActionSpec]) -> Option<(String, Value)> {
     }
 }
 
+/// `order` is a question: «¿…?», or a first word that asks («cómo», «qué», «en qué», «para qué»,
+/// «por qué»)
+/// — after the name, when the order still carries it (typed into Codi's window).
+fn asks(order: &str, words: &[(String, String)]) -> bool {
+    let words: Vec<&str> = words.iter().map(|(w, _)| w.as_str()).skip_while(|w| matches!(*w, "codi" | "cody" | "oye" | "hey")).collect();
+    order.trim_end().ends_with('?')
+        || order.trim_start().trim_start_matches(|c: char| !c.is_alphanumeric() && c != '¿').starts_with('¿')
+        || words.first().is_some_and(|w| QUESTION.contains(w) || (matches!(*w, "en" | "para" | "por") && words.get(1).is_some_and(|next| QUESTION.contains(next))))
+}
+
 /// Every required param of `spec` from the words not used yet, or `None` when one is missing.
-fn fill(spec: &ActionSpec, words: &[(String, String)], used: &mut [bool]) -> Option<Value> {
+/// Free text is read only after the verb, which starts at `from`.
+///
+/// An optional `repo` is free text too, when nothing else was said: «haz pull del repositorio api
+/// pagos».
+fn fill(spec: &ActionSpec, words: &[(String, String)], used: &mut [bool], from: usize) -> Option<Value> {
     let empty = Map::new();
     let properties = spec.params.get("properties").and_then(Value::as_object).unwrap_or(&empty);
     let required: Vec<&str> = spec.params.get("required").and_then(Value::as_array).map(|r| r.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+    // A repository and the workspace it is in, said together, are two free texts in one: the model
+    // splits them.
+    if properties.contains_key("workspace") && (words.iter().any(|(w, _)| w == "workspace") || find(words, "espacio de trabajo").is_some()) {
+        return None;
+    }
     let mut params = Map::new();
     let mut free: Option<String> = None;
     // Closed values first (an app's name), then numbers, then what is left as the free text.
@@ -250,25 +383,18 @@ fn fill(spec: &ActionSpec, words: &[(String, String)], used: &mut [bool]) -> Opt
             Some("string") if schema.get("enum").is_none() && required.contains(&name.as_str()) => {
                 // One free-text param a sentence: the words not explained, in their own spelling.
                 if free.is_none() {
-                    let text: Vec<&str> = words
-                        .iter()
-                        .zip(used.iter())
-                        .filter(|((normal, _), u)| !**u && !FILLER.contains(&normal.as_str()))
-                        .map(|((_, original), _)| original.as_str())
-                        .collect();
-                    if !text.is_empty() {
-                        let joined = text.join(" ");
+                    if let Some(text) = free_text(words, used, from) {
                         free = Some(name.clone());
-                        for (index, (normal, _)) in words.iter().enumerate() {
-                            if !used[index] && !FILLER.contains(&normal.as_str()) {
-                                used[index] = true;
-                            }
-                        }
-                        params.insert(name.clone(), Value::String(joined));
+                        params.insert(name.clone(), Value::String(text));
                     }
                 }
             }
             _ => {}
+        }
+    }
+    if params.is_empty() && properties.get("repo").is_some_and(|schema| schema.get("type").and_then(Value::as_str) == Some("string")) {
+        if let Some(text) = free_text(words, used, from) {
+            params.insert("repo".into(), Value::String(text));
         }
     }
     // Fillers around what was found count as explained.
@@ -278,6 +404,24 @@ fn fill(spec: &ActionSpec, words: &[(String, String)], used: &mut [bool]) -> Opt
         }
     }
     required.iter().all(|key| params.contains_key(*key)).then_some(Value::Object(params))
+}
+
+/// Whether `spec` takes a closed value (an app, a tour) that the order did not name.
+fn spec_has_unfilled_enum(spec: &ActionSpec, params: &Value) -> bool {
+    spec.params
+        .get("properties")
+        .and_then(Value::as_object)
+        .is_some_and(|properties| properties.iter().any(|(name, schema)| schema.get("enum").is_some() && params.get(name).is_none()))
+}
+
+/// The words after `from` not explained yet, in their own spelling — and marks them explained.
+fn free_text(words: &[(String, String)], used: &mut [bool], from: usize) -> Option<String> {
+    let taken: Vec<usize> = (from..words.len()).filter(|&i| !used[i] && !FILLER.contains(&words[i].0.as_str())).collect();
+    if taken.is_empty() {
+        return None;
+    }
+    taken.iter().for_each(|&i| used[i] = true);
+    Some(taken.iter().map(|&i| words[i].1.as_str()).collect::<Vec<_>>().join(" "))
 }
 
 #[cfg(test)]
@@ -306,6 +450,7 @@ mod tests {
             title: Title { es: id.into(), en: id.into() },
             aliases: Some(aliases),
             vocabulary: vocabulary.then(|| [("app".to_string(), apps.clone())].into_iter().collect()),
+            questions: None,
             params,
             risk: Risk::Navigate,
             place: "main".into(),
@@ -316,12 +461,17 @@ mod tests {
             spec("island.detach", words_of(&["saca", "separa"], &["detach", "pop out"]), app_param.clone(), true),
             spec(
                 "repo.switch",
-                words_of(&["cambia al repositorio", "cambia al repo", "cambia de repositorio"], &["switch to repository", "switch to repo"]),
-                json!({ "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] }),
+                words_of(&["cambia al repositorio", "cambia al repo", "cambia de repositorio", "repositorio"], &["switch to repository", "switch to repo"]),
+                json!({ "type": "object", "properties": { "name": { "type": "string" }, "workspace": { "type": "string" } }, "required": ["name"] }),
                 false,
             ),
             spec("review.pr", words_of(&["revisa el pull request", "revisa el pr"], &["review pull request", "review pr"]), json!({ "type": "object", "properties": { "number": { "type": "integer" } }, "required": ["number"] }), false),
-            spec("git.pull", words_of(&["haz pull", "pull"], &["pull"]), json!({ "type": "object", "properties": {} }), false),
+            spec(
+                "git.pull",
+                words_of(&["haz pull", "pull", "pool"], &["pull"]),
+                json!({ "type": "object", "properties": { "repo": { "type": "string" }, "workspace": { "type": "string" } } }),
+                false,
+            ),
         ]
     }
 
@@ -336,6 +486,91 @@ mod tests {
         assert_eq!(route("revisa el pull request 42", &specs), Some(("review.pr".into(), json!({ "number": 42 }))));
         assert_eq!(route("revisa el pull request cuarenta y dos", &specs), Some(("review.pr".into(), json!({ "number": 42 }))));
         assert_eq!(route("haz pull", &specs), Some(("git.pull".into(), json!({}))));
+    }
+
+    /// «Haz un pool del repositorio node.core» went to «repositorio» with «Haz pool node.core» as
+    /// the name (user report, 2026-10-22): the verb opens the order, and a repository named after it
+    /// is the order's.
+    #[test]
+    fn an_order_on_a_named_repository_is_that_order() {
+        let specs = catalogue();
+        let pull = |repo: &str| Some(("git.pull".to_string(), json!({ "repo": repo })));
+        assert_eq!(route("Haz un pool del repositorio node.core.", &specs), pull("node.core"));
+        assert_eq!(route("haz pull de api pagos", &specs), pull("api pagos"));
+        assert_eq!(route("pull del repo facturación por favor", &specs), pull("facturación"));
+        assert_eq!(route("repositorio api pagos", &specs), Some(("repo.switch".into(), json!({ "name": "api pagos" }))));
+        assert_eq!(route("haz pull de api pagos del workspace clientes", &specs), None, "repository and workspace: the model splits them");
+        assert_eq!(route("cambia al repositorio api pagos del workspace clientes", &specs), None);
+        assert_eq!(route("configura el pool de conexiones", &specs), None, "another verb said first");
+        assert_eq!(route("oye, haz pull", &specs), Some(("git.pull".into(), json!({}))));
+    }
+
+    /// «…y muéstramelo» and «sin abrir» say whether the work is seen: taken off the order and handed
+    /// to an action that takes `show`, and never read as an order of their own when said first.
+    #[test]
+    fn whether_it_is_seen_rides_the_order_without_changing_it() {
+        assert_eq!(screen_hint("ejecuta el flujo facturación y muéstramelo"), (Some(true), "ejecuta el flujo facturación".to_string()));
+        assert_eq!(screen_hint("corre los tests sin abrir nada"), (Some(false), "corre los tests".to_string()));
+        assert_eq!(screen_hint("en segundo plano, envía la petición login"), (Some(false), "envía la petición login".to_string()));
+        assert_eq!(screen_hint("muéstrame las notas"), (None, "muéstrame las notas".to_string()), "an order to show is not a wish about another");
+        assert_eq!(screen_hint("show me the notes"), (None, "show me the notes".to_string()));
+        assert_eq!(screen_hint("¿cuántas conexiones hay sin abrir nada?"), (Some(false), "¿cuántas conexiones hay?".to_string()));
+
+        let mut specs = catalogue();
+        specs.push(ActionSpec {
+            id: "flow.run".into(),
+            title: Title { es: "flow.run".into(), en: "flow.run".into() },
+            aliases: Some(words_of(&["ejecuta el flujo"], &["run the flow"])),
+            vocabulary: None,
+            questions: None,
+            params: json!({ "type": "object", "properties": { "name": { "type": "string" }, "show": { "type": "boolean" } }, "required": ["name"] }),
+            risk: Risk::Write,
+            place: "main".into(),
+            frequent: true,
+        });
+        assert_eq!(route("ejecuta el flujo facturación y muéstramelo", &specs), Some(("flow.run".into(), json!({ "name": "facturación", "show": true }))));
+        assert_eq!(route("ejecuta el flujo facturación sin abrir", &specs), Some(("flow.run".into(), json!({ "name": "facturación", "show": false }))));
+        assert_eq!(route("ejecuta el flujo facturación", &specs), Some(("flow.run".into(), json!({ "name": "facturación" }))));
+        assert_eq!(route("haz pull en segundo plano", &specs), Some(("git.pull".into(), json!({}))), "an action without `show` just runs");
+    }
+
+    /// A question is taken only by the actions that say how it is asked — a tour answers «cómo
+    /// funciona flujos» — and only when every word of it is explained.
+    #[test]
+    fn a_question_is_routed_only_through_its_own_phrases() {
+        let mut specs = catalogue();
+        let tours: HashMap<String, Words> = [
+            ("flows", words_of(&["flujos"], &["flows"])),
+            ("api", words_of(&["cliente api", "api client", "api cliente"], &["api client"])),
+            ("db", words_of(&["base de datos", "bd"], &["database"])),
+            ("current", words_of(&["esto", "esta app"], &["this", "this app"])),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        specs.push(ActionSpec {
+            id: "tour.start".into(),
+            title: Title { es: "tour".into(), en: "tour".into() },
+            aliases: Some(words_of(&["abre el tour", "tour de", "explicame"], &["start the tour", "tour of", "explain"])),
+            vocabulary: Some([("tour".to_string(), tours)].into_iter().collect()),
+            questions: Some(words_of(&["como funciona", "como se usa", "que es", "para que sirve"], &["how does", "what is"])),
+            params: json!({ "type": "object", "properties": { "tour": { "type": "string", "enum": ["current", "flows", "api", "db"] } }, "required": [] }),
+            risk: Risk::Navigate,
+            place: "main".into(),
+            frequent: true,
+        });
+        let tour = |name: &str| Some(("tour.start".to_string(), json!({ "tour": name })));
+        assert_eq!(route("¿Cómo funciona la app de API client?", &specs), tour("api"));
+        assert_eq!(route("cómo funciona la base de datos", &specs), tour("db"));
+        assert_eq!(route("Codi, ¿para qué sirve flujos?", &specs), tour("flows"));
+        assert_eq!(route("¿qué es esto?", &specs), tour("current"));
+        assert_eq!(route("abre el tour de flujos", &specs), tour("flows"));
+        assert_eq!(route("explícame la base de datos", &specs), tour("db"));
+        assert_eq!(route("abre el tour", &specs), Some(("tour.start".into(), json!({}))));
+        assert_eq!(route("¿qué es un commit?", &specs), None, "a word left over: the model's");
+        assert_eq!(route("explícame el proyecto noah cli", &specs), None, "not a tour it has: the repository's research, through the model");
+        assert_eq!(route("¿cómo funciona el login de la app de pagos?", &specs), None);
+        assert_eq!(route("¿abro flujos?", &specs), None, "an action with no question phrase is never asked");
     }
 
     #[test]
@@ -356,7 +591,9 @@ mod tests {
     #[ignore]
     fn the_real_catalogue_routes_the_plain_orders() {
         let path = std::env::var("CODEFLOW_TEST_CATALOGUE").expect("CODEFLOW_TEST_CATALOGUE=<json>");
-        let specs: Vec<ActionSpec> = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut specs: Vec<ActionSpec> = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        // The backend's own, as `ui::specs` lists them, first.
+        specs.splice(0..0, super::super::native::specs());
         let cases: &[(&str, Option<(&str, &str)>)] = &[
             ("abre flujos", Some(("app.open", "flows"))),
             ("abre las notas", Some(("app.open", "notes"))),
@@ -369,10 +606,79 @@ mod tests {
             ("abre la configuración de voz", Some(("settings.open", "voice"))),
             ("muéstrame el grafo de commits", Some(("view.open", "graph"))),
             ("haz pull", Some(("git.pull", ""))),
+            // The main window put away, Codi still up (user, 2026-10-22).
+            ("Codi, trae la aplicación al frente", Some(("app.front", ""))),
+            ("muestra codeflow", Some(("app.front", ""))),
+            ("abre la app", Some(("app.front", ""))),
+            ("Codi, nueva consulta rápida", Some(("quick.open", ""))),
+            ("abre una consulta rápida", Some(("quick.open", ""))),
+            // Outside CodeFlow (user, 2026-10-22).
+            ("abre la app de teams", Some(("system.open", "teams"))),
+            ("abre el programa spotify", Some(("system.open", "spotify"))),
+            // The filler goes, as from any free text: a search engine needs no articles.
+            ("busca en internet el precio del dolar", Some(("web.search", "precio dolar"))),
+            ("ejecuta la rutina noticias", Some(("routine.run", "noticias"))),
+            ("¿qué apps tengo abiertas?", Some(("desktop.windows", ""))),
+            // «pull» heard as «pool», on a repository named (user report, 2026-10-22).
+            ("Haz un pool del repositorio node.core.", Some(("git.pull", "node.core"))),
+            ("haz fetch de api pagos", Some(("git.fetch", "api pagos"))),
+            ("haz push del repo facturación", Some(("git.push", "facturación"))),
+            ("haz pull de api pagos en el workspace clientes", None),
             // No verb: named, it is to be seen (user report, 2026-10-21).
             ("Ahora el panel de chat.", Some(("panel.ai", ""))),
             ("cierra el panel de chat", Some(("panel.ai", "close"))),
+            // The tours (user, 2026-10-22): asked as a question, or as an order.
+            ("¿Cómo funciona la app de API client?", Some(("tour.start", "api"))),
+            ("cómo funciona el api cliente", Some(("tour.start", "api"))),
+            ("Codi, ¿cómo funciona la base de datos?", Some(("tour.start", "db"))),
+            ("¿para qué sirve flujos?", Some(("tour.start", "flows"))),
+            ("how does the database work?", Some(("tour.start", "db"))),
+            ("abre el tour de las notas", Some(("tour.start", "notes"))),
+            ("explícame el llavero", Some(("tour.start", "vault"))),
+            ("¿qué es esto?", Some(("tour.start", "current"))),
+            ("abre el tour", Some(("tour.start", ""))),
+            ("siguiente paso", Some(("tour.next", ""))),
+            ("paso anterior", Some(("tour.back", ""))),
+            ("repite", Some(("tour.repeat", ""))),
+            ("pausa", Some(("tour.pause", ""))),
+            ("sigue", Some(("tour.resume", ""))),
+            ("termina el tour", Some(("tour.stop", ""))),
+            ("¿qué es un commit?", None),
+            // Answered from the index, the question whole (user, 2026-10-22: «que la busque súper rápido»).
+            ("¿qué decidimos sobre el login?", Some(("knowledge.ask", "¿qué decidimos sobre el login?"))),
+            ("codi, ¿qué sabes de la migración a postgres?", Some(("knowledge.ask", "codi, ¿qué sabes de la migración a postgres?"))),
+            ("busca en mis notas lo del deploy", Some(("knowledge.ask", "busca en mis notas lo del deploy"))),
+            // A repository to explain is researched, through a model (user report, 2026-10-22).
+            ("explícame el proyecto noah cli", None),
+            ("Necesito que me expliques el proyecto No CLI.", None),
+            ("¿cómo funciona el login del repositorio de pagos?", None),
+            // Asked, answered without moving the screen; a panel with no tour explained (user, 2026-10-22).
+            ("¿Cuántos contenedores tengo corriendo?", Some(("containers.list", ""))),
+            ("codi cuántos contenedores tengo corriendo en local", Some(("containers.list", ""))),
+            ("¿qué contenedores hay?", Some(("containers.list", ""))),
+            ("¿Por qué se cayó el contenedor postgres?", Some(("container.why", "postgres"))),
+            ("¿cómo va el pipeline?", Some(("pipeline.status", ""))),
+            ("¿por qué falló el pipeline?", Some(("pipeline.explain", ""))),
+            // Codi's own tour, narrated by itself (user, 2026-10-22).
+            ("¿cómo funciona Codi?", Some(("tour.start", "codi"))),
+            ("abre el tour de codi", Some(("tour.start", "codi"))),
+            ("¿qué es el panel de contenedores?", Some(("app.about", "containers"))),
+            ("¿para qué sirve arquitectura?", Some(("tour.start", "architecture"))),
+            ("¿cómo funciona la app de arquitectura?", Some(("tour.start", "architecture"))),
+            ("abre el panel de contenedores", Some(("dock.show", "containers"))),
+            ("muéstrame los contenedores", Some(("dock.show", "containers"))),
+            ("¿cómo va el último pipeline de api pagos en el workspace clientes?", None),
+            ("¿qué base de datos ocupa el repositorio api pagos?", None),
             ("en qué rama estoy", None),
+            // The app's data from its data, never from what the screen shows — Settings was in front of
+            // the database client (user report, 2026-10-22).
+            ("¿cuántas conexiones de base de datos tengo?", Some(("db.list", ""))),
+            ("¿cuántas conexiones tengo?", Some(("db.list", ""))),
+            ("how many database connections do I have?", Some(("db.list", ""))),
+            // Work done out of sight, or shown when asked (user, 2026-10-22).
+            ("ejecuta el flujo facturación y muéstramelo", Some(("flow.run", "facturación"))),
+            ("ejecuta el flujo facturación sin abrir", Some(("flow.run", "facturación"))),
+            ("haz pull en segundo plano", Some(("git.pull", ""))),
             ("abre el panel de servicios y reinicia el backend", None),
             ("levanta el frontend y después ábreme la terminal", None),
         ];

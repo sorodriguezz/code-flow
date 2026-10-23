@@ -67,6 +67,13 @@ pub struct ReviewInputs {
     /// The repository's conventions, for an engine that will not read them itself — see
     /// [`conventions_block`].
     pub conventions: Option<(String, String)>,
+    /// The reference repositories the workspace switched on (`crate::refrepos`): where the blast
+    /// radius also looks for the contracts this PR changes.
+    pub references: Vec<super::graph::Reference>,
+    /// The reviewer has the tools to consult them (the map's server, or the local agent's own): they
+    /// are named in its context. An engine without them would only be told about something it cannot
+    /// reach, so it is not.
+    pub references_reachable: bool,
 }
 
 /// Who a set of contexts is for.
@@ -124,6 +131,11 @@ pub fn contexts_for(inputs: &ReviewInputs, impacts: &[Impact], audience: Audienc
         if let Some(block) = graph::block(impacts) {
             out.push(("Impacto fuera del PR (referencias)".to_string(), block));
         }
+        if inputs.references_reachable {
+            if let Some(block) = references_block(&inputs.references) {
+                out.push(("Repositorios de referencia".to_string(), block));
+            }
+        }
     }
     if let Some(block) = pending_comments_block(&inputs.remembered, &inputs.threads, inputs.since.as_deref(), audience) {
         out.push(("Conversación abierta en el PR".to_string(), block));
@@ -152,6 +164,30 @@ pub fn contexts_for(inputs: &ReviewInputs, impacts: &[Impact], audience: Audienc
         }
     }
     out
+}
+
+/// The reference repositories, named for a reviewer that can consult them — and told what they are
+/// for: comparing with a convention or a contract that lives there, not grading this PR against
+/// somebody else's code.
+pub fn references_block(references: &[graph::Reference]) -> Option<String> {
+    if references.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "\nEl equipo mantiene estos repositorios de referencia (solo lectura, no son parte de este PR):\n",
+    );
+    for reference in references {
+        match reference.purpose.trim() {
+            "" => out.push_str(&format!("- {}\n", reference.name)),
+            purpose => out.push_str(&format!("- {} — {purpose}\n", reference.name)),
+        }
+    }
+    out.push_str(
+        "Si un hallazgo depende de una convención o de un contrato que vive ahí, confírmalo antes de afirmarlo: \
+         search_knowledge ya busca en ellos, find_symbol/find_usages aceptan repo=\"<nombre>\" y read_reference_file lee \
+         un archivo. Una diferencia de estilo con ellos no es un hallazgo.\n",
+    );
+    Some(out)
 }
 
 /// The still-open conversation on a pull request, rendered as one context block for the review
@@ -342,6 +378,7 @@ mod tests {
             start_line: file.map(|_| 3),
             end_line: None,
             comments: vec![PrThreadComment { author: "ana".into(), content: text.into(), published_date: "2026-10-01T10:00:00Z".into() }],
+            resolved: false,
         }
     }
 

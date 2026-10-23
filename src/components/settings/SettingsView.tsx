@@ -6,8 +6,10 @@ import { GitHostingSettings } from "./GitHostingSettings";
 import { ClaudeSettings } from "./ClaudeSettings";
 import { ReviewSettings } from "./ReviewSettings";
 import { ToolsSettings } from "./ToolsSettings";
+import { ReferenceReposSettings } from "./ReferenceReposSettings";
 import { TasksSettings } from "./TasksSettings";
 import { VoiceSoundSettings } from "./VoiceSoundSettings";
+import { CodiSection } from "./CodiSettings";
 import { DatabasesSettings } from "./DatabasesSettings";
 import { GitSettings } from "./GitSettings";
 import { TerminalSettings } from "./TerminalSettings";
@@ -723,6 +725,7 @@ export function SettingsView() {
               {section === "keybindings" && <ShortcutsSettings />}
               {section === "notifications" && <NotificationSettings />}
               {section === "voice" && <VoiceSoundSettings />}
+              {section === "codi" && <CodiSection />}
               {section === "backup" && <BackupSettings />}
               {section === "projects" && <ProjectsSection />}
               {section === "editor" && <EditorSettings />}
@@ -733,6 +736,7 @@ export function SettingsView() {
               {section === "tasks" && <TasksSettings />}
               {section === "review" && <ReviewSettings />}
               {section === "tools" && <ToolsSettings />}
+              {section === "references" && <ReferenceReposSettings />}
               {section === "api" && <ApiSettingsBody />}
               {section === "databases" && <DatabasesSettings />}
               {section === "vault" && <VaultSettings />}

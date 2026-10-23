@@ -64,7 +64,7 @@ mod transcribe;
 mod transform;
 pub(crate) mod utils;
 mod vision;
-mod web;
+pub(crate) mod web;
 
 use std::sync::Arc;
 use std::time::Duration;

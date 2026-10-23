@@ -307,6 +307,20 @@ impl Snapshot {
         hits
     }
 
+    /// Whether the project declares `name` — as written, or in another case (`checkout` for a
+    /// `Checkout`). What a chat turn's judgement asks of a word of the question (`context::need`).
+    pub fn declares(&self, name: &str) -> bool {
+        let name = name.trim().trim_end_matches("()");
+        if name.is_empty() {
+            return false;
+        }
+        if self.decls.contains_key(name) {
+            return true;
+        }
+        let lower = name.to_lowercase();
+        self.decls.keys().any(|declared| declared.len() == name.len() && declared.to_lowercase() == lower)
+    }
+
     /// Whether `user` reaches `owner`: imports it (re-exports followed), or shares its package.
     pub fn links(&self, user: u32, owner: u32) -> bool {
         user == owner
@@ -360,6 +374,40 @@ impl Snapshot {
         report.usages.sort_by(|a, b| b.confirmed.cmp(&a.confirmed).then_with(|| a.path.cmp(&b.path)));
         report.usages.truncate(limit);
         report
+    }
+
+    /// Where a name declared in *another* repository is used in this one — what a change over there
+    /// can reach here. Nothing in this map can resolve to code that is not in it, so every use is
+    /// found by name only (`confirmed: false`); a file that declares the name itself has its own and
+    /// is left out, as is a name too generic to mean anything ([`specific`]).
+    pub fn foreign_uses(&self, name: &str, limit: usize) -> Vec<Usage> {
+        let name = name.trim().trim_end_matches("()");
+        let name = name.rsplit(['.', ':']).next().unwrap_or(name);
+        if !specific(name) {
+            return Vec::new();
+        }
+        let declaring: HashSet<u32> = self.decls.get(name).map(|places| places.iter().map(|(file, _)| *file).collect()).unwrap_or_default();
+        // Read from each file's own references, not `users`: that index only keeps the names this
+        // map declares, and a name from another repository is, by definition, not one of them.
+        let mut out: Vec<Usage> = Vec::new();
+        for (file, row) in self.files.iter().enumerate() {
+            let file = file as u32;
+            if declaring.contains(&file) {
+                continue;
+            }
+            let refs = &row.facts.refs;
+            let found = match refs.binary_search_by(|(n, _)| n.as_str().cmp(name)) {
+                Ok(i) => Some(refs[i].1),
+                Err(_) => refs.iter().find(|(n, _)| n == name).map(|(_, line)| *line),
+            };
+            if let Some(line) = found {
+                let signature = self.enclosing(file, line).map(|s| s.label.clone()).unwrap_or_default();
+                out.push(Usage { path: self.path(file).to_string(), line, signature, confirmed: false });
+            }
+        }
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        out.truncate(limit);
+        out
     }
 
     pub fn outline(&self, path: &str) -> Option<FileOutline> {
@@ -468,6 +516,31 @@ mod tests {
         let cart = report.usages.iter().find(|u| u.path == "src/cart.ts").unwrap();
         assert_eq!(cart.line, 1, "the first mention");
         assert!(map.usages("applyDiscount", Some("src/other.ts"), 50).usages.is_empty());
+    }
+
+    /// Another repository's name, used here: every mention by name, once per file, unconfirmed — and
+    /// none in a file that declares its own, or for a name too generic to mean the same thing.
+    #[test]
+    fn foreign_uses_find_another_repositorys_name_by_name_only() {
+        let consumer = snapshot(&[
+            ("src/api.ts", "import { CrearSiniestroDto } from '@acme/core';\nexport function crear(dto: CrearSiniestroDto) {\n  return send(dto as CrearSiniestroDto);\n}\n"),
+            ("src/own.ts", "export class CrearSiniestroDto {}\nexport const z = new CrearSiniestroDto();\n"),
+            ("src/none.ts", "export const nothing = 1;\n"),
+        ]);
+        let found = consumer.foreign_uses("CrearSiniestroDto", 10);
+        assert_eq!(found.iter().map(|u| u.path.as_str()).collect::<Vec<_>>(), vec!["src/api.ts"]);
+        assert!(found.iter().all(|u| !u.confirmed));
+        assert!(consumer.foreign_uses("data", 10).is_empty(), "too generic");
+    }
+
+    #[test]
+    fn declares_answers_for_a_name_as_written_or_in_another_case_and_never_by_prefix() {
+        let map = snapshot(&[("a.ts", "export class Checkout {}\nexport function applyDiscount() {}\n")]);
+        assert!(map.declares("applyDiscount"));
+        assert!(map.declares("applyDiscount()"));
+        assert!(map.declares("checkout"), "a plain word in a question names the class");
+        assert!(!map.declares("apply"), "a prefix is not the name");
+        assert!(!map.declares(""));
     }
 
     #[test]

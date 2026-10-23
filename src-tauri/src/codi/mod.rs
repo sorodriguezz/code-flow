@@ -21,10 +21,16 @@
 pub mod brain;
 pub mod hotkey;
 pub mod listen;
+pub mod memory;
+pub mod native;
+pub mod recollections;
+pub mod research;
 pub mod router;
+pub mod routines;
 pub mod ui;
 pub mod vad;
 pub mod wake;
+pub mod web;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -61,6 +67,12 @@ pub mod keys {
     pub const VOICE: &str = "codi_voice";
     /// The microphone, shared with dictation and meetings.
     pub const DEVICE: &str = "dictation_device";
+    /// `on` · `off`: launched at login, CodeFlow opens Codi in its corner, listening, and keeps the
+    /// main window in the background. Takes the login item with it (`codi_set_at_login`).
+    pub const AT_LOGIN: &str = "codi_at_login";
+    /// `on` (the default) · `local` · `off`: whether Codi reads other apps' windows, and whether what
+    /// it reads may reach the provider or stays with the local model (`desktop::read`).
+    pub const READ_APPS: &str = "codi_read_apps";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -164,6 +176,25 @@ fn settings(app: &AppHandle) -> Settings {
 }
 
 /// The language Codi speaks and reads in: the app's.
+/// `codi_read_apps`: `on`, `local` or `off`.
+pub fn read_apps_mode(app: &AppHandle) -> &'static str {
+    let stored = app.state::<Db>().0.lock().ok().and_then(|conn| queries::get_setting(&conn, keys::READ_APPS).ok().flatten()).unwrap_or_default();
+    match stored.trim() {
+        "off" => "off",
+        "local" => "local",
+        _ => "on",
+    }
+}
+
+/// Another app's front window, read — or why not, `codi_read_apps` included.
+pub async fn read_app(app: &AppHandle, name: &str) -> Result<crate::desktop::read::Reading, String> {
+    if read_apps_mode(app) == "off" {
+        return Err(if lang(app) == "es" { "leer otras apps está desactivado en Configuración › Codi".into() } else { "reading other apps is off in Settings › Codi".into() });
+    }
+    let name = name.to_string();
+    tokio::task::spawn_blocking(move || crate::desktop::read::read(&name)).await.map_err(|e| e.to_string())?
+}
+
 pub fn lang(app: &AppHandle) -> &'static str {
     app.state::<Db>().0.lock().map(|conn| crate::speech::app_language(&conn)).unwrap_or("en")
 }
@@ -344,6 +375,9 @@ pub struct Acted {
     pub ok: bool,
     pub say: Option<String>,
     pub error: Option<String>,
+    /// Its `say` was said already — as part of the question its offer asked — and is not said again.
+    #[serde(skip)]
+    pub spoken: bool,
 }
 
 static TURNS: AtomicU64 = AtomicU64::new(1);
@@ -388,6 +422,7 @@ async fn run_turn(app: &AppHandle, order: &str) {
     };
     let turn = Turn { id, order: order.to_string(), reply: reply.clone(), tier, actions, ms: started.elapsed().as_millis() as u64, error };
     let _ = app.emit(TURN_EVENT, &turn);
+    memory::remember(app, order, &reply, &turn.actions);
     say(app, &reply).await;
     rest(app);
 }
@@ -403,6 +438,52 @@ pub async fn say(app: &AppHandle, text: &str) {
     let voice = if lang == "es" { settings.voice_es } else { settings.voice_en };
     let receiver = crate::speech::say_as(app, text, "codi", Some(lang), lang, (!voice.is_empty()).then_some(voice));
     let _ = receiver.await;
+}
+
+// ------------------------------------------------------------------------------- narration
+
+/// The newest narration asked for. One that was overtaken while it waited is not said.
+static NARRATION: AtomicU64 = AtomicU64::new(0);
+
+/// How long a narration waits for the turn under way (and its answer, said) before giving up.
+const NARRATION_WAIT: Duration = Duration::from_secs(30);
+
+/// Says one step of a guided tour in Codi's voice and tells how it ended — `done` (said whole),
+/// `stopped` (hushed, talked over, or overtaken by the next step), `silent` (Codi's sound is off),
+/// `failed`. The tour moves on to the next step only on `done` (user, 2026-10-22: «que codi
+/// mientras vaya explicando el tour vaya pasando»).
+///
+/// It waits for the turn under way, so the turn's answer («Te explico Flujos») is said first and
+/// the step after it, never over it.
+pub async fn narrate(app: &AppHandle, text: &str) -> &'static str {
+    if !sound_on(app) {
+        return "silent";
+    }
+    let ticket = NARRATION.fetch_add(1, Ordering::SeqCst) + 1;
+    let started = std::time::Instant::now();
+    while BUSY.load(Ordering::SeqCst) || asking() {
+        if started.elapsed() > NARRATION_WAIT {
+            return "stopped";
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if NARRATION.load(Ordering::SeqCst) != ticket {
+        return "stopped";
+    }
+    set_phase(app, Phase::Speaking);
+    let lang = lang(app);
+    let settings = settings(app);
+    let voice = if lang == "es" { settings.voice_es } else { settings.voice_en };
+    let said = crate::speech::say_as(app, text, "codi", Some(lang), lang, (!voice.is_empty()).then_some(voice)).await;
+    // A turn that cut in has the phase now; only an idle Codi is put back to rest.
+    if !BUSY.load(Ordering::SeqCst) {
+        rest(app);
+    }
+    match said {
+        Ok(said) if said.phase == "done" => "done",
+        Ok(said) if said.phase == "failed" => "failed",
+        _ => "stopped",
+    }
 }
 
 // ------------------------------------------------------------------------------- confirmations
@@ -430,6 +511,19 @@ const CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
 /// Asks the user to confirm `what` — in Codi's window and aloud — and waits for a yes (the button,
 /// or «sí» said). `false` on a no, on silence, or when another question replaced this one.
 pub async fn confirm(app: &AppHandle, action: &str, params: &Value, what: &str) -> bool {
+    let asked = if lang(app) == "es" { format!("¿Confirmo «{what}»? Di sí o no.") } else { format!("Shall I {what}? Say yes or no.") };
+    question(app, action, params, what, &asked).await
+}
+
+/// Asks `asked` as it is — «No encontré api-pagos en este workspace, pero está en Clientes. ¿Lo
+/// abro?» — before running `action` with `params`, which is what the user probably meant but did
+/// not say (user, 2026-10-22: «codi debería preguntar siempre para estar seguro»). Same card, same
+/// spoken yes or no as [`confirm`].
+pub async fn ask(app: &AppHandle, action: &str, params: &Value, asked: &str) -> bool {
+    question(app, action, params, asked, asked).await
+}
+
+async fn question(app: &AppHandle, action: &str, params: &Value, what: &str, asked: &str) -> bool {
     let id = format!("confirm-{}", TURNS.fetch_add(1, Ordering::SeqCst));
     let (sender, receiver) = tokio::sync::oneshot::channel();
     *waiting().lock().unwrap_or_else(|p| p.into_inner()) = Some((id.clone(), sender));
@@ -437,12 +531,11 @@ pub async fn confirm(app: &AppHandle, action: &str, params: &Value, what: &str) 
     let _ = app.emit(CONFIRM_EVENT, &question);
     set_phase(app, Phase::Waiting);
     let lang = lang(app);
-    let asked = if lang == "es" { format!("¿Confirmo «{what}»? Di sí o no.") } else { format!("Shall I {what}? Say yes or no.") };
     // Said without waiting for it: the answer may come while it is still being said.
     if sound_on(app) {
         let settings = settings(app);
         let voice = if lang == "es" { settings.voice_es } else { settings.voice_en };
-        let _ = crate::speech::say_as(app, &asked, "codi", Some(lang), lang, (!voice.is_empty()).then_some(voice));
+        let _ = crate::speech::say_as(app, asked, "codi", Some(lang), lang, (!voice.is_empty()).then_some(voice));
     }
     let yes = matches!(tokio::time::timeout(CONFIRM_TIMEOUT, receiver).await, Ok(Ok(true)));
     if let Ok(mut held) = waiting().lock() {
@@ -489,6 +582,67 @@ pub async fn announce(app: &AppHandle, text: &str, source: &str) {
     rest(app);
 }
 
+/// How long something that finished in the background waits for Codi to stop talking before it is
+/// said anyway (a long answer, a question waiting for its yes).
+const TELL_WAIT: Duration = Duration::from_secs(90);
+
+/// Something Codi went to find out in the background — a repository researched, a log read — and
+/// now knows: logged in its window, and said in its voice once nothing else is being said (sound
+/// on). Unlike [`announce`], it was asked of Codi, so it is told even with the microphone off (an
+/// order typed into the window).
+pub async fn tell(app: &AppHandle, text: &str, source: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let _ = app.emit(ANNOUNCE_EVENT, serde_json::json!({ "text": text, "source": source }));
+    memory::told(app, source, text);
+    let started = std::time::Instant::now();
+    while (BUSY.load(Ordering::SeqCst) || asking() || crate::speech::speaking()) && started.elapsed() < TELL_WAIT {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    say(app, text).await;
+    if !BUSY.load(Ordering::SeqCst) {
+        rest(app);
+    }
+}
+
+/// What Codi found in the background leads somewhere — «lo indexado no lo responde: ¿lo investigo a
+/// fondo?» — asked once nothing else is being said, on the same card and by the same voice as a
+/// turn's offer; a yes runs `action` as if confirmed in that turn. Holds the turn while it asks, so
+/// an order heard meanwhile waits for it and then runs.
+pub async fn offer(app: &AppHandle, action: &str, params: Value, question: &str, source: &str) {
+    let started = std::time::Instant::now();
+    while (BUSY.load(Ordering::SeqCst) || asking() || crate::speech::speaking()) && started.elapsed() < TELL_WAIT {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let _ = app.emit(ANNOUNCE_EVENT, serde_json::json!({ "text": question, "source": source }));
+    memory::told(app, source, question);
+    if BUSY.swap(true, Ordering::SeqCst) {
+        // A turn began in the same instant: the question stays in the window and the memory, unasked.
+        return;
+    }
+    if ask(app, action, &params, question).await {
+        let said = match ui::act(app, action, params, ui::Asker::Codi, true).await {
+            Ok(result) => result.say.filter(|s| !s.trim().is_empty()).or(if result.ok { None } else { result.error }),
+            Err(error) => Some(error),
+        };
+        if let Some(said) = said {
+            say(app, &said).await;
+        }
+    }
+    // An order that arrived while the question waited is the user's next turn.
+    match queued().lock().unwrap_or_else(|p| p.into_inner()).take() {
+        Some(next) => {
+            BUSY.store(false, Ordering::SeqCst);
+            order(app, next);
+        }
+        None => {
+            BUSY.store(false, Ordering::SeqCst);
+            rest(app);
+        }
+    }
+}
+
 /// The level the microphone hears, for the face.
 pub fn level(app: &AppHandle, level: f32) {
     let _ = app.emit(LEVEL_EVENT, level);
@@ -503,4 +657,6 @@ pub fn listening_failed(app: &AppHandle, error: String) {
 pub fn window_closed(app: &AppHandle) {
     stop(app);
     hush();
+    // The session is the window: what Codi remembered of it goes with it.
+    memory::forget(app);
 }

@@ -5,6 +5,7 @@ import {
   KeyRound,
   MessagesSquare,
   MonitorSmartphone,
+  Network,
   NotebookPen,
   Route,
   Send,
@@ -92,7 +93,13 @@ export type TourId =
   | "pipelines"
   /** Flujos, the automations app — a canvas whose rules (what may connect to what) are worth a
    *  sentence before the first drag. */
-  | "flows";
+  | "flows"
+  /** Arquitectura — a canvas too, and lenses over it, whose panel opens on a click and not on a
+   *  drag; the one Codi could only describe in a sentence until it had a tour (2026-10-22). */
+  | "architecture"
+  /** Codi, the voice assistant — not an app on the rail but a window of its own, so its tour stages
+   *  its settings and says the rest: how to talk to it, what it does, what it never does. */
+  | "codi";
 
 /**
  * The one-screen tour of the main window.
@@ -1413,6 +1420,161 @@ const FLOWS_TOUR: TourStep[] = [
   closingStep("flows", "tour.chapter.flows", "tour.flows.done.title", "tour.flows.done.body", FLOWS_STAGE),
 ];
 
+const ARCH_STAGE: TourStage = { view: "architecture" };
+/** The inspector: the Diagram lens with its panel open. */
+const ARCH_PANEL_STAGE: TourStage = { ...ARCH_STAGE, archPanel: true };
+const ARCH_REVIEW_STAGE: TourStage = { ...ARCH_STAGE, archLens: "review", archPanel: true };
+const ARCH_DECISIONS_STAGE: TourStage = { ...ARCH_STAGE, archLens: "decisions", archPanel: true };
+
+/**
+ * The Arquitectura tour: the list, the two ways a document starts, the library and the canvas, the
+ * inspector (and the rule that a click opens it while a drag does not), the sources everything else
+ * reads, the lenses, and Decisiones. Every step pointing into a document falls back to the explorer
+ * and then the view, so a workspace with no architecture yet still gets the whole story.
+ */
+const ARCHITECTURE_TOUR: TourStep[] = [
+  {
+    id: "architecture.intro",
+    chapterKey: "tour.chapter.architecture",
+    titleKey: "tour.architecture.intro.title",
+    bodyKey: "tour.architecture.intro.body",
+    anchors: ['[data-tour="arch-view"]', '[data-tour="main-content"]'],
+    placement: "inside",
+    stage: ARCH_STAGE,
+  },
+  {
+    id: "architecture.explorer",
+    chapterKey: "tour.chapter.architecture",
+    titleKey: "tour.architecture.explorer.title",
+    bodyKey: "tour.architecture.explorer.body",
+    anchors: ['[data-tour="arch-explorer"]', '[data-tour="arch-view"]'],
+    stage: ARCH_STAGE,
+  },
+  {
+    id: "architecture.new",
+    chapterKey: "tour.chapter.architecture",
+    titleKey: "tour.architecture.new.title",
+    bodyKey: "tour.architecture.new.body",
+    anchors: ['[data-tour="arch-new"]', '[data-tour="arch-explorer"]', '[data-tour="arch-view"]'],
+    padding: 6,
+    stage: ARCH_STAGE,
+  },
+  {
+    id: "architecture.library",
+    chapterKey: "tour.chapter.architecture",
+    titleKey: "tour.architecture.library.title",
+    bodyKey: "tour.architecture.library.body",
+    // Only with a document open; otherwise the view, where the editor would be.
+    anchors: ['[data-tour="arch-library"]', '[data-tour="arch-view"]'],
+    stage: ARCH_STAGE,
+  },
+  {
+    id: "architecture.canvas",
+    chapterKey: "tour.chapter.architecture",
+    titleKey: "tour.architecture.canvas.title",
+    bodyKey: "tour.architecture.canvas.body",
+    anchors: ['[data-tour="arch-canvas"]', '[data-tour="arch-view"]'],
+    placement: "inside",
+    stage: ARCH_STAGE,
+  },
+  {
+    id: "architecture.inspector",
+    chapterKey: "tour.chapter.architecture",
+    titleKey: "tour.architecture.inspector.title",
+    bodyKey: "tour.architecture.inspector.body",
+    anchors: ['[data-tour="arch-panel"]', '[data-tour="arch-panel-toggle"]', '[data-tour="arch-view"]'],
+    stage: ARCH_PANEL_STAGE,
+  },
+  {
+    id: "architecture.sources",
+    chapterKey: "tour.chapter.architecture",
+    titleKey: "tour.architecture.sources.title",
+    bodyKey: "tour.architecture.sources.body",
+    anchors: ['[data-tour="arch-sources-button"]', '[data-tour="arch-new"]', '[data-tour="arch-view"]'],
+    padding: 6,
+    stage: ARCH_STAGE,
+  },
+  {
+    id: "architecture.lenses",
+    chapterKey: "tour.chapter.architecture",
+    titleKey: "tour.architecture.lenses.title",
+    bodyKey: "tour.architecture.lenses.body",
+    anchors: ['[data-tour="arch-lenses"]', '[data-tour="arch-view"]'],
+    padding: 4,
+    stage: ARCH_REVIEW_STAGE,
+  },
+  {
+    id: "architecture.decisions",
+    chapterKey: "tour.chapter.architecture",
+    titleKey: "tour.architecture.decisions.title",
+    bodyKey: "tour.architecture.decisions.body",
+    anchors: ['[data-tour="arch-panel"]', '[data-tour="arch-lenses"]', '[data-tour="arch-view"]'],
+    stage: ARCH_DECISIONS_STAGE,
+  },
+  closingStep("architecture", "tour.chapter.architecture", "tour.architecture.done.title", "tour.architecture.done.body", ARCH_STAGE),
+];
+
+/** Codi's settings pane — where it listens and what thinks for it. */
+/** Codi's own settings section (IA › Codi): each step opens the pane it is about. */
+const CODI_PANE: TourStage = { settings: "codi", settingsTab: "listen" };
+const CODI_BRAIN_PANE: TourStage = { settings: "codi", settingsTab: "brain" };
+const CODI_PRIVACY_PANE: TourStage = { settings: "codi", settingsTab: "privacy" };
+
+/**
+ * Codi, the voice assistant (user, 2026-10-22: «un tour de Codi»). It has no view to stage — its own
+ * window is outside this one — so the steps that are about a control open its settings pane, and the
+ * rest are said in the middle: how to open it and talk to it, the three kinds of thing it does
+ * (orders, questions answered without moving the screen, tours), and what it never does.
+ */
+const CODI_TOUR: TourStep[] = [
+  { id: "codi.intro", chapterKey: "tour.chapter.codi", titleKey: "tour.codi.intro.title", bodyKey: "tour.codi.intro.body", placement: "center" },
+  { id: "codi.open", chapterKey: "tour.chapter.codi", titleKey: "tour.codi.open.title", bodyKey: "tour.codi.open.body", placement: "center", chord: "Mod+Alt+V" },
+  {
+    id: "codi.listen",
+    chapterKey: "tour.chapter.codi",
+    titleKey: "tour.codi.listen.title",
+    bodyKey: "tour.codi.listen.body",
+    anchors: ['[data-tour="settings-panel"]'],
+    placement: "inside",
+    radius: 16,
+    stage: CODI_PANE,
+  },
+  {
+    id: "codi.brain",
+    chapterKey: "tour.chapter.codi",
+    titleKey: "tour.codi.brain.title",
+    bodyKey: "tour.codi.brain.body",
+    anchors: ['[data-tour="settings-panel"]'],
+    placement: "inside",
+    radius: 16,
+    stage: CODI_BRAIN_PANE,
+  },
+  { id: "codi.orders", chapterKey: "tour.chapter.codi", titleKey: "tour.codi.orders.title", bodyKey: "tour.codi.orders.body", placement: "center" },
+  { id: "codi.questions", chapterKey: "tour.chapter.codi", titleKey: "tour.codi.questions.title", bodyKey: "tour.codi.questions.body", placement: "center" },
+  {
+    id: "codi.research",
+    chapterKey: "tour.chapter.codi",
+    titleKey: "tour.codi.research.title",
+    bodyKey: "tour.codi.research.body",
+    anchors: ['[data-tour="settings-panel"]'],
+    placement: "inside",
+    radius: 16,
+    stage: { settings: "tasks", settingsTab: "other" },
+  },
+  { id: "codi.tours", chapterKey: "tour.chapter.codi", titleKey: "tour.codi.tours.title", bodyKey: "tour.codi.tours.body", placement: "center" },
+  {
+    id: "codi.memory",
+    chapterKey: "tour.chapter.codi",
+    titleKey: "tour.codi.memory.title",
+    bodyKey: "tour.codi.memory.body",
+    anchors: ['[data-tour="settings-panel"]'],
+    placement: "inside",
+    radius: 16,
+    stage: CODI_PRIVACY_PANE,
+  },
+  { id: "codi.safety", chapterKey: "tour.chapter.codi", titleKey: "tour.codi.safety.title", bodyKey: "tour.codi.safety.body", placement: "center" },
+];
+
 export const TOURS: Record<TourId, TourStep[]> = {
   main: MAIN_TOUR,
   api: API_TOUR,
@@ -1426,6 +1588,8 @@ export const TOURS: Record<TourId, TourStep[]> = {
   chat: CHAT_TOUR,
   pipelines: PIPELINES_TOUR,
   flows: FLOWS_TOUR,
+  architecture: ARCHITECTURE_TOUR,
+  codi: CODI_TOUR,
 };
 
 /**
@@ -1465,6 +1629,7 @@ export const APP_TOURS: AppTour[] = [
   { tour: "vault", view: "vault", labelKey: "tabbar.vault", icon: KeyRound },
   { tour: "chat", view: "chat", labelKey: "tabbar.chat", icon: MessagesSquare },
   { tour: "flows", view: "flows", labelKey: "tabbar.flows", icon: Waypoints },
+  { tour: "architecture", view: "architecture", labelKey: "tabbar.architecture", icon: Network },
   // Last, and the only one on a repository-scoped view: the tab exists only where the repository
   // is linked to a host with CI, so the launcher offers this exactly where the screen is real.
   { tour: "pipelines", view: "pipelines", labelKey: "tabbar.pipelines", icon: Route },

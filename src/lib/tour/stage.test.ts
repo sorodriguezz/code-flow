@@ -3,11 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 // The stores `stage` moves subscribe to backend events when they load.
 vi.mock("@tauri-apps/api/event", () => ({ listen: () => Promise.resolve(() => {}), emit: () => Promise.resolve() }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: () => Promise.resolve(null), transformCallback: () => 0 }));
-import { applyStage } from "./stage";
+import { applyStage, captureAppState, restoreAppState } from "./stage";
 import { TOURS } from "./steps";
 import { tabsFor } from "../settingsCatalog";
 import { translations } from "../i18n/translations";
 import { useUiStore } from "../../state/uiStore";
+import { useArchitectureViewStore } from "../../state/architectureViewStore";
 
 describe("the tours' settings steps", () => {
   it("land on a settings pane that exists", () => {
@@ -33,5 +34,28 @@ describe("the tours' settings steps", () => {
     applyStage(undefined);
     expect(useUiStore.getState().settingsOpen).toBe(false);
     expect(useUiStore.getState().settingsTab).toBeNull();
+  });
+});
+
+describe("the Arquitectura tour's stages", () => {
+  it("open the lens and panel each step names, and put back what the user had", () => {
+    useArchitectureViewStore.setState({ lens: "simulate", panelOpen: false, panelCollapsed: true });
+    useUiStore.setState({ activeView: "graph" });
+    const before = captureAppState();
+    const step = (id: string) => TOURS.architecture.find((s) => s.id === id)!.stage;
+    applyStage(step("architecture.decisions"));
+    expect(useUiStore.getState().activeView).toBe("architecture");
+    expect(useArchitectureViewStore.getState()).toMatchObject({ lens: "decisions", panelOpen: true, panelCollapsed: false });
+    // Back from Decisiones lands on the lenses step exactly as going forward did.
+    applyStage(step("architecture.lenses"));
+    expect(useArchitectureViewStore.getState()).toMatchObject({ lens: "review", panelOpen: true });
+    applyStage(step("architecture.canvas"));
+    expect(useArchitectureViewStore.getState()).toMatchObject({ lens: "diagram", panelOpen: false });
+    // Another tour's step leaves Arquitectura's lens alone.
+    applyStage(TOURS.flows[0].stage);
+    expect(useArchitectureViewStore.getState().lens).toBe("diagram");
+    restoreAppState(before);
+    expect(useArchitectureViewStore.getState()).toMatchObject({ lens: "simulate", panelOpen: false, panelCollapsed: true });
+    expect(useUiStore.getState().activeView).toBe("graph");
   });
 });

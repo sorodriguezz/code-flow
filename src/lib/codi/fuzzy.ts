@@ -122,3 +122,28 @@ function decide<T>(hits: T[], prefer?: (item: T) => boolean): NameMatch<T> | nul
   if (preferred.length === 1) return { kind: "match", item: preferred[0] };
   return { kind: "ambiguous", candidates: hits };
 }
+
+/**
+ * The one item `query` most likely meant when [`matchByName`] found nothing — for «¿quisiste decir
+ * api-pagos?», asked rather than run. Looser than the match's own last tier (a third of the name may
+ * differ), and only when one item is clearly nearest: two at the same distance suggest neither.
+ */
+export function closestByName<T>(items: readonly T[], query: string, nameOf: (item: T) => string): T | null {
+  const wanted = foldName(query);
+  if (wanted.length < 3) return null;
+  const cap = Math.max(2, Math.floor(wanted.length / 3));
+  let best = cap + 1;
+  let hits: T[] = [];
+  for (const item of items) {
+    const name = foldName(nameOf(item));
+    // A name that starts like the query («pagos» for «pagos-api-v2») is as near as a typo.
+    const d = name.startsWith(wanted) || wanted.startsWith(name) ? Math.min(cap, Math.abs(name.length - wanted.length)) : distance(wanted, name, cap);
+    if (d < best) {
+      best = d;
+      hits = [item];
+    } else if (d === best) {
+      hits.push(item);
+    }
+  }
+  return best <= cap && hits.length === 1 ? hits[0] : null;
+}

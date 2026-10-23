@@ -72,6 +72,10 @@ pub struct ReviewContext {
     pub content: String,
     pub enabled: bool,
     pub created_at: String,
+    /// A chat lists it and reads it when needed instead of opening with it (`context::on_demand`).
+    /// Reviews, stories and analyses read every enabled context whole regardless.
+    #[serde(default)]
+    pub on_demand: bool,
 }
 
 /// A saved PR-review run as listed in the memory manager — the slim projection (no heavy

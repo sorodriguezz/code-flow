@@ -194,6 +194,10 @@ pub const TABLES: &[&str] = &[
     "ai_memories",
     "ai_memory_revisions",
     "ai_knowledge_collections",
+    // The reference repositories the user keeps for the AI surfaces, and where each applies. The
+    // clones do not travel: a restore lists them and clones each again on this machine.
+    "reference_repos",
+    "reference_repo_workspaces",
     "ai_experiences",
     "ai_model_registry",
     "ai_evaluations",
@@ -278,6 +282,12 @@ pub const NEVER_BACKED_UP: &[&str] = &[
     // The last running cost each CLI session reported: bookkeeping about sessions whose files are on
     // this machine's disk. Without it a resumed session files one turn's tokens with no price.
     "ai_session_costs",
+    // Codi's memory of the session under way: it ends with Codi's window, and a restore is never
+    // in the middle of one.
+    "codi_memory",
+    // What Codi remembers across sessions: its own notes, forgettable with one button, and not a
+    // thing a restore should bring back after the user cleared them.
+    "codi_recollections",
 ];
 
 // ---------------------------------------------------------------------------
@@ -434,7 +444,16 @@ pub const GROUPS: &[Group] = &[
     Group { key: "reviews", tables: &["review_runs"] },
     Group {
         key: "aiLearning",
-        tables: &["ai_memories", "ai_memory_revisions", "ai_knowledge_collections", "ai_experiences", "ai_model_registry", "ai_evaluations"],
+        tables: &[
+            "ai_memories",
+            "ai_memory_revisions",
+            "ai_knowledge_collections",
+            "reference_repos",
+            "reference_repo_workspaces",
+            "ai_experiences",
+            "ai_model_registry",
+            "ai_evaluations",
+        ],
     },
     Group {
         key: "agentWork",

@@ -145,11 +145,12 @@ pub struct Pruned {
 }
 
 /// The ids the index's collections may still point at: every project (`repo:`, `commits:`,
-/// `reviews:`), every added folder (`folder:`) and every workspace (`notes:`, `meetings:`, `docs:`,
-/// `stories:`), whatever their workspace.
+/// `reviews:`), every reference repository (`repo:ref:`), every added folder (`folder:`) and every
+/// workspace (`notes:`, `meetings:`, `docs:`, `stories:`), whatever their workspace.
 pub fn alive_ids(main: &Connection) -> rusqlite::Result<HashSet<String>> {
     let mut alive = HashSet::new();
-    for sql in ["SELECT id FROM projects", "SELECT id FROM ai_knowledge_collections", "SELECT id FROM workspaces"] {
+    let references = format!("SELECT '{}' || id FROM reference_repos", crate::refrepos::KNOWLEDGE_PREFIX);
+    for sql in ["SELECT id FROM projects", "SELECT id FROM ai_knowledge_collections", "SELECT id FROM workspaces", references.as_str()] {
         let mut stmt = main.prepare(sql)?;
         for id in stmt.query_map([], |r| r.get::<_, String>(0))? {
             alive.insert(id?);
@@ -242,6 +243,12 @@ pub fn clear(index: &Connection, scope: &Scope, alive: &HashSet<String>) -> rusq
 
 pub fn repo_key(project_id: &str) -> String {
     format!("repo:{project_id}")
+}
+
+/// A scope repository that is a reference repository (`crate::refrepos`) rather than a project: it
+/// has files and a map, but no commits worth indexing (its clone is one commit deep) and no reviews.
+fn is_reference(id: &str) -> bool {
+    id.starts_with(crate::refrepos::KNOWLEDGE_PREFIX)
 }
 
 pub fn folder_key(collection_id: &str) -> String {
@@ -353,7 +360,7 @@ impl Scope {
             }
         }
         if self.sources.reviews {
-            for (id, _, _) in self.repos.iter().filter(|(id, _, _)| !id.starts_with("path:")) {
+            for (id, _, _) in self.repos.iter().filter(|(id, _, _)| !id.starts_with("path:") && !is_reference(id)) {
                 out.push((reviews_key(id), DocKind::Reviews(id.clone())));
             }
         }
@@ -364,7 +371,7 @@ impl Scope {
         let mut keys: Vec<String> = self.repos.iter().map(|(id, _, _)| repo_key(id)).collect();
         keys.extend(self.folders.iter().map(|(id, _, _)| folder_key(id)));
         if self.sources.commits {
-            keys.extend(self.repos.iter().map(|(id, _, _)| commits_key(id)));
+            keys.extend(self.repos.iter().filter(|(id, _, _)| !is_reference(id)).map(|(id, _, _)| commits_key(id)));
         }
         keys.extend(self.documents().into_iter().map(|(key, _)| key));
         keys
@@ -424,10 +431,15 @@ pub fn scope_for_repo(conn: &Connection, root: &str, cloud: bool) -> Option<Scop
         .map(|p| p.local_path.clone());
     // The project's own folder even from a worktree, as `agentcli::place` keys it: one index per
     // project, not a second copy built from scratch for every checkout a task makes.
-    let repos = match project {
+    let mut repos = match project {
         Some(p) => vec![(p.id, p.name, PathBuf::from(p.local_path))],
         None => vec![(format!("path:{}", root), Path::new(root).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(), PathBuf::from(root))],
     };
+    // The reference repositories the workspace has switched on, after its own: they are searched
+    // beside it and cited by name, never mistaken for it.
+    if let Some(ws) = workspace_id.as_deref() {
+        repos.extend(crate::refrepos::scope_entries(conn, ws, cloud));
+    }
     let folders = folders_of(conn, workspace_id.as_deref(), cloud);
     Some(Scope { notes: workspace_id.is_some(), workspace_id, repos, folders, cloud, sources: Sources::default(), via_main_checkout })
 }
@@ -440,12 +452,13 @@ pub fn scope_for_workspace(conn: &Connection, workspace_id: &str, cloud: bool) -
     if cloud && cloud_off(conn, workspace_id) {
         return None;
     }
-    let repos = crate::db::queries::list_projects(conn, workspace_id)
+    let mut repos: Vec<(String, String, PathBuf)> = crate::db::queries::list_projects(conn, workspace_id)
         .unwrap_or_default()
         .into_iter()
         .filter(|p| !p.local_path.trim().is_empty() && Path::new(&p.local_path).is_dir())
         .map(|p| (p.id, p.name, PathBuf::from(p.local_path)))
         .collect();
+    repos.extend(crate::refrepos::scope_entries(conn, workspace_id, cloud));
     let folders = folders_of(conn, Some(workspace_id), cloud);
     Some(Scope { workspace_id: Some(workspace_id.to_string()), repos, folders, notes: true, cloud, sources: Sources::default(), via_main_checkout: None })
 }
@@ -601,7 +614,7 @@ pub fn refresh_with(main: &Main<'_>, scope: &Scope, force: bool) -> Result<Vec<(
         note(&key, outcome);
     }
     if scope.sources.commits {
-        for (id, name, root) in &scope.repos {
+        for (id, name, root) in scope.repos.iter().filter(|(id, _, _)| !is_reference(id)) {
             let key = commits_key(id);
             note(&key, refresh_commits(&key, root, name, force));
         }
@@ -698,6 +711,12 @@ fn refresh_repo(key: &str, root: &Path, force: bool, now: i64) -> Result<Option<
     let Some(_claim) = fresh::claim(key) else { return Ok(None) };
     let meta = index::meta(&*index::global()?, key);
     let head = sources::head_of(root);
+    // A reference repository is a mirror only an update changes, and an update moves its commit: at
+    // the commit it was indexed at, it is what it was — no walk, however long since the last one.
+    let reference = key.strip_prefix("repo:").is_some_and(is_reference);
+    if reference && !force && head.as_deref().is_some_and(|head| meta.as_ref().is_some_and(|(_, indexed)| indexed == head)) {
+        return Ok(None);
+    }
     let (watched, walk, paths) = fresh::take(root);
     let outcome = match need_of(force, meta.as_ref(), head.as_deref(), watched, walk, !paths.is_empty(), now) {
         Need::Skip => {
@@ -710,7 +729,12 @@ fn refresh_repo(key: &str, root: &Path, force: bool, now: i64) -> Result<Option<
             index::refresh_paths(&mut index::Global, key, root, &paths, &keep)
         }
         Need::Full => {
-            let files = crate::search::list_files(&root.to_string_lossy()).unwrap_or_else(|_| walk_folder(root));
+            let mut files = crate::search::list_files(&root.to_string_lossy()).unwrap_or_else(|_| walk_folder(root));
+            // Somebody else's repository can have committed a `.env`; redaction would catch the
+            // values, but a file whose whole point is credentials is not read at all.
+            if reference {
+                files.retain(|rel| !crate::refrepos::sensitive(rel));
+            }
             index::refresh_files(&mut index::Global, key, root, &files, Some(head.as_deref().unwrap_or_default()))
         }
     };
@@ -1207,48 +1231,100 @@ pub fn render(answer: &Answer) -> String {
     notices.join("\n\n")
 }
 
-/// The MCP / agent tool's answer: `question` searched in the scope of the run at `root` — the
-/// checkout's, or the whole workspace's from the workspace chat's folder ([`scope_for_root`]).
-pub async fn tool_answer(root: &str, question: &str, limit: usize, cloud: bool) -> Result<String, String> {
+/// The scope a tool call or a prompt's passages search for the run at `root`: [`scope_for_root`]'s,
+/// or the repository alone where there is no app database (tests, the bench). `Err` with the words
+/// to say when the workspace keeps its knowledge from cloud engines.
+fn run_scope(root: &str, cloud: bool) -> Result<Scope, String> {
     let scope = crate::ai_usage::with_conn(|conn| scope_for_root(conn, root, cloud)).flatten();
-    let scope = match scope {
-        Some(scope) => scope,
-        // No app database (tests, the bench): the repository alone.
-        None if crate::ai_usage::with_conn(|_| ()).is_none() => Scope {
+    match scope {
+        Some(scope) => Ok(scope),
+        None if crate::ai_usage::with_conn(|_| ()).is_none() => Ok(Scope {
             // Keyed by the path: two checkouts are two collections, whatever they are called.
             repos: vec![(format!("path:{root}"), String::new(), PathBuf::from(root))],
             cloud,
             ..Default::default()
-        },
-        None => return Ok("Knowledge search is turned off for this workspace's cloud engines.".to_string()),
+        }),
+        None => Err("Knowledge search is turned off for this workspace's cloud engines.".to_string()),
+    }
+}
+
+/// The MCP / agent tool's answer: `question` searched in the scope of the run at `root` — the
+/// checkout's, or the whole workspace's from the workspace chat's folder ([`scope_for_root`]).
+pub async fn tool_answer(root: &str, question: &str, limit: usize, cloud: bool) -> Result<String, String> {
+    let scope = match run_scope(root, cloud) {
+        Ok(scope) => scope,
+        Err(off) => return Ok(off),
     };
     let answer = search_answer(&scope, question, limit.clamp(1, 20)).await?;
     Ok(render(&answer))
 }
 
+/// The passages the in-process agent is handed before its first step: the best `limit` for
+/// `question`, and with `strict` only the ones that clear [`strong`]'s bar. `None` when none is left
+/// — a model handed a passage that barely touches the question reads it as the question's subject.
+pub async fn prompt_passages(root: &str, question: &str, limit: usize, strict: bool) -> Option<String> {
+    let scope = run_scope(root, false).ok()?;
+    let mut answer = search_answer(&scope, question, limit.clamp(1, 20)).await.ok()?;
+    if strict {
+        let terms = index::query_terms(question);
+        answer.found.retain(|found| strong(&terms, found));
+    }
+    (!answer.found.is_empty()).then(|| render(&answer))
+}
+
+/// One fused vote at the top of one list: a place that scored more was found by two retrievers.
+const ONE_VOTE: f32 = 1.0 / (RRF_K + 1.0) + 1e-6;
+
+/// Whether a passage is worth handing a model that did not ask for it — the bar of
+/// `context::need`'s "relevant": a declaration the question names, a place two retrievers agree on
+/// (the words and the meaning, or a passage and a symbol), or one that [`index::covers`] the
+/// question. The search's own floor ([`relevant`]) keeps what is worth listing to a model that
+/// searched; this keeps what is worth its window unasked.
+pub fn strong(terms: &[index::Term], found: &Found) -> bool {
+    found.source == "symbol"
+        || found.score > ONE_VOTE
+        || index::covers(terms, &format!("{} {} {} {}", found.path, found.title, found.heading, found.snippet))
+}
+
+/// Whether `question` shares its words with what `scope` covers: a passage of the index as it is (no
+/// refresh, the map only if built) that clears [`strong`]'s bar. The turn's judgement asks it
+/// (`context::need`) while the caller holds the app's database (`main`).
+pub fn shares_vocabulary(main: &Connection, scope: &Scope, question: &str) -> bool {
+    let terms = index::query_terms(question);
+    if terms.is_empty() {
+        return false;
+    }
+    drop_unshareable(main, &lexical(scope, question, 6, MapUse::Ready), scope.cloud).iter().any(|found| strong(&terms, found))
+}
+
 /// The passages a run that cannot call `search_knowledge` is handed in its prompt instead — a
 /// read-only Gemini or Grok run, which refuses MCP tools. Lexical only and from the index as it
 /// is (a refresh starts in the background), so the question is never kept waiting on indexing.
-pub fn prompt_note(main: &Connection, root: &str, question: &str) -> Option<(String, Vec<crate::context::ContextSource>)> {
-    note_for(main, scope_for_repo(main, root, true)?, question)
+/// `strict`: only the ones that clear [`strong`]'s bar (`context::need::Push::Relevant`).
+pub fn prompt_note(main: &Connection, root: &str, question: &str, strict: bool) -> Option<(String, Vec<crate::context::ContextSource>)> {
+    note_for(main, scope_for_repo(main, root, true)?, question, strict)
 }
 
 /// [`prompt_note`] for the workspace chat on an engine the map's server does not reach there (agy,
 /// Grok): the passages that best match the question across the whole workspace, each naming its
 /// repository.
-pub fn workspace_prompt_note(main: &Connection, workspace_id: &str, question: &str) -> Option<(String, Vec<crate::context::ContextSource>)> {
-    note_for(main, scope_for_workspace(main, workspace_id, true)?, question)
+pub fn workspace_prompt_note(main: &Connection, workspace_id: &str, question: &str, strict: bool) -> Option<(String, Vec<crate::context::ContextSource>)> {
+    note_for(main, scope_for_workspace(main, workspace_id, true)?, question, strict)
 }
 
 /// The caller holds the app's database (`main`): nothing here may ask for it again — the refresh
 /// runs on a thread of its own, which waits for the lock — and the code map is used only if it is
 /// already in memory, never built under the lock.
-fn note_for(main: &Connection, scope: Scope, question: &str) -> Option<(String, Vec<crate::context::ContextSource>)> {
+fn note_for(main: &Connection, scope: Scope, question: &str, strict: bool) -> Option<(String, Vec<crate::context::ContextSource>)> {
     let background = scope.clone();
     std::thread::spawn(move || {
         let _ = refresh_blocking(&background, false);
     });
     let mut found = drop_unshareable(main, &lexical(&scope, question, 6, MapUse::Ready), scope.cloud);
+    if strict {
+        let terms = index::query_terms(question);
+        found.retain(|f| strong(&terms, f));
+    }
     found.truncate(3);
     if found.is_empty() {
         return None;

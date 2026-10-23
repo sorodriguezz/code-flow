@@ -1,15 +1,13 @@
 import { useWorkspaceStore } from "../../../state/workspaceStore";
 import { useRepoStore } from "../../../state/repoStore";
-import { useMissingProjectsStore } from "../../../state/missingProjectsStore";
 import { useWindowStore } from "../../../state/windowStore";
 import { REPO_VIEWS, useUiStore } from "../../../state/uiStore";
-import { listProjects } from "../../tauri/commands";
-import { openable } from "../../shortcuts";
-import { matchByName } from "../fuzzy";
 import { CodiError, type CodiAction } from "../registry";
-import type { BranchInfo, Project } from "../../../types/domain";
+import type { BranchInfo } from "../../../types/domain";
 import {
+  closedReason,
   defineAction,
+  findRepoToAct,
   optionalText,
   params,
   pickByName,
@@ -17,6 +15,7 @@ import {
   say,
   spokenList,
   text,
+  workspaceName,
 } from "./shared";
 
 /**
@@ -25,15 +24,6 @@ import {
  * Names are matched loosely (see `fuzzy`) and never guessed at: "api pagos" finds `api-pagos`, and a
  * name that fits two repositories is asked back rather than picked.
  */
-
-/** Why a repository this window lists cannot be opened here, or `null` when it can. */
-function closedReason(project: Project): "missing" | "notARepo" | "island" | null {
-  const { missing, notARepo } = useMissingProjectsStore.getState();
-  if (missing.has(project.local_path)) return "missing";
-  if (notARepo.has(project.local_path)) return "notARepo";
-  if (!openable(project)) return "island";
-  return null;
-}
 
 /** The island a repository is showing in, if it is in one. */
 function repoIsland(projectId: string): string | null {
@@ -72,7 +62,7 @@ export function workspaceActions(): CodiAction[] {
       frequent: true,
       run: async ({ name }) => {
         const { workspaces, activeWorkspaceId, setActiveWorkspace } = useWorkspaceStore.getState();
-        const target = pickByName(workspaces, String(name), (w) => w.name, "workspace");
+        const target = pickByName(workspaces, String(name), (w) => w.name, "workspace", undefined, (w) => ({ action: "workspace.switch", params: { name: w.name } }));
         if (target.id === activeWorkspaceId) {
           return { result: { workspace: target.name, already: true }, say: say("codi.say.alreadyInWorkspace", { name: target.name }) };
         }
@@ -116,36 +106,24 @@ export function repoActions(): CodiAction[] {
     defineAction({
       id: "repo.switch",
       title: {
-        en: "Open another repository in this window, by name (loose match: \"api pagos\" finds api-pagos). Looks in this workspace first, then in the others. A repository in an island brings that island forward.",
-        es: "Abre otro repositorio en esta ventana, por nombre (coincidencia flexible: «api pagos» encuentra api-pagos). Busca primero en este workspace y luego en los demás. Si está en una isla, la trae al frente.",
+        en: "Open another repository in this window, by name (loose match: \"api pagos\" finds api-pagos). Looks in this workspace; one found only in another workspace is asked about first, unless `workspace` names where it is. A repository in an island brings that island forward. «The X app» is often a repository.",
+        es: "Abre otro repositorio en esta ventana, por nombre (coincidencia flexible: «api pagos» encuentra api-pagos). Busca en este workspace; si solo está en otro, pregunta antes, salvo que `workspace` diga dónde está. Si está en una isla, la trae al frente. «La app X» suele ser un repositorio.",
       },
       aliases: { es: ["cambia al repositorio", "cambia al repo", "cambia de repo", "cambia de repositorio", "ve al repo", "ve al repositorio", "abre el repo", "abre el repositorio", "pasa al repo", "repo", "repositorio"], en: ["switch to repo", "switch to repository", "switch repo", "go to repo", "open repo", "open the repository", "change repo"] },
-      params: params({ name: text("The repository's name, as said.") }, ["name"]),
+      params: params({ name: text("The repository's name, as said."), workspace: optionalText("The workspace it is in, when the user said it (or said yes to it).") }, ["name"]),
       risk: "navigate",
       where: "main",
       frequent: true,
-      run: async ({ name }) => {
-        const query = String(name);
+      run: async ({ name, workspace }) => {
         const ws = useWorkspaceStore.getState();
-        const here = ws.activeWorkspaceId ? (ws.projectsByWorkspace[ws.activeWorkspaceId] ?? []) : [];
-        let target: Project;
-        if (matchByName(here, query, (p) => p.name).kind !== "none") {
-          target = pickByName(here, query, (p) => p.name, "repository");
-        } else {
-          // Not in this workspace: every workspace's list, read without touching the store — loading
-          // another workspace's projects into it would pick one of them as the active repository.
-          const lists = await Promise.all(
-            ws.workspaces.map(async (w) => ws.projectsByWorkspace[w.id] ?? (await listProjects(w.id).catch(() => []))),
-          );
-          const everywhere = lists.flat();
-          target = pickByName(
-            everywhere,
-            query,
-            (p) => p.name,
-            "repository",
-            (p) => p.workspace_id === ws.activeWorkspaceId,
-          );
-        }
+        // Found only in another workspace, it is asked about rather than gone to: the window would
+        // change workspace under the user.
+        const target = await findRepoToAct(
+          String(name),
+          workspace,
+          (p) => ({ action: "repo.switch", params: { name: p.name, workspace: workspaceName(p.workspace_id) } }),
+          (p) => say("codi.say.repoElsewhere", { name: p.name, workspace: workspaceName(p.workspace_id) }),
+        );
         const island = repoIsland(target.id);
         if (island) {
           void useWindowStore.getState().focus(island);

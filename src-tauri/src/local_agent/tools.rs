@@ -114,6 +114,12 @@ pub struct Inventory {
     /// Approved memories for this place, in all — `recall` is offered only while there are more of
     /// them than the run was already handed ([`Toolbox::with_given_memories`]).
     pub memories: usize,
+    /// Reference repositories the workspace switched on (`crate::refrepos`): with any, the map's tools
+    /// take `repo` and the two reference tools are offered.
+    pub references: usize,
+    /// The workspace's contexts a chat lists by name instead of including (`context::on_demand`):
+    /// with any, `read_context` is offered to a conversation.
+    pub contexts: usize,
 }
 
 /// One request to the app on the run's behalf.
@@ -146,6 +152,9 @@ pub fn offered(grants: Grants, map: bool, checks: bool, inventory: &Inventory, g
         names.extend(["find_symbol", "find_usages", "outline"]);
     }
     names.push("search_knowledge");
+    if inventory.references > 0 {
+        names.extend(["reference_repos", "read_reference_file"]);
+    }
     if inventory.memories > given_memories {
         names.push("recall");
     }
@@ -153,6 +162,10 @@ pub fn offered(grants: Grants, map: bool, checks: bool, inventory: &Inventory, g
     // but has no business opening a whole notebook (the MCP server's grounding set has no reader).
     if inventory.notes && grants.reach > Reach::Project {
         names.push("read_note");
+    }
+    // Only a conversation lists contexts to read; every other task is handed them whole.
+    if inventory.contexts > 0 && grants.reach > Reach::Project {
+        names.push("read_context");
     }
     names.extend(["list_files", "find_files", "read_file", "search"]);
     if grants.write {
@@ -400,27 +413,50 @@ impl Toolbox {
     fn schema(&self, name: &str) -> Option<Value> {
         let string = |description: &str| json!({ "type": "string", "description": description });
         let integer = |description: &str| json!({ "type": "integer", "description": description });
+        // With reference repositories, the map's tools can look in one of them instead.
+        let repo = |mut properties: Value| {
+            if self.inventory.references > 0 {
+                properties["repo"] = string("A reference repository's name (see reference_repos) to look in instead of this project. Optional.");
+            }
+            properties
+        };
         Some(match name {
             "find_symbol" => tool(
                 "find_symbol",
                 "Find where a function, method, class or type is declared, by name. Returns path:start-end for each. Use it instead of search to locate a definition.",
-                json!({ "name": string("The name, e.g. applyDiscount or Cart.total") }),
+                repo(json!({ "name": string("The name, e.g. applyDiscount or Cart.total") })),
                 &["name"],
             ),
             "find_usages" => tool(
                 "find_usages",
                 "List the files that use a function or class (and the line), leaving out files that only have a different thing with the same name. Use it before changing a function's parameters, or to see where a value comes from.",
-                json!({
+                repo(json!({
                     "name": string("The function or class name."),
                     "path": string("The file that declares it, if the name is declared in several files. Optional.")
-                }),
+                })),
                 &["name"],
             ),
             "outline" => tool(
                 "outline",
                 "List what a file declares with line numbers (so read_file can start at the right line), plus the files it imports and the files that import it.",
-                json!({ "path": string("File path relative to the project root.") }),
+                repo(json!({ "path": string("File path relative to the project root.") })),
                 &["path"],
+            ),
+            "reference_repos" => tool(
+                "reference_repos",
+                "List the reference repositories: other code bases the user keeps for consultation (a team template, a shared library), with what each is for. search_knowledge already searches them.",
+                json!({}),
+                &[],
+            ),
+            "read_reference_file" => tool(
+                "read_reference_file",
+                "Read a file of a reference repository, with line numbers (up to 300 lines from start_line). Read-only: compare with it, never edit it.",
+                json!({
+                    "repo": string("The reference repository's name."),
+                    "path": string("Path relative to that repository's root."),
+                    "start_line": integer("First line to read (default 1).")
+                }),
+                &["repo", "path"],
             ),
             "search_knowledge" => tool(
                 "search_knowledge",
@@ -433,6 +469,12 @@ impl Toolbox {
                 "The memories the user approved in CodeFlow for this project: decisions, conventions and preferences to respect. The ones that bear on this request are already above; call this with a topic to look up others.",
                 json!({ "topic": string("What to recall memories about. Optional.") }),
                 &[],
+            ),
+            "read_context" => tool(
+                "read_context",
+                "Read one of the workspace's contexts in full: the ones the request lists by name and first line instead of including (\"Workspace contexts to read when needed\"). Only when the request needs it.",
+                json!({ "name": string("The context's name, as listed.") }),
+                &["name"],
             ),
             "read_note" => tool(
                 "read_note",
@@ -630,7 +672,7 @@ impl Toolbox {
         // What was never offered does not exist — the same answer for a tool this run may not have
         // as for one nobody has, so a model that invents a call learns nothing it was not shown.
         // The file and command tools keep their own refusals below, which say why.
-        let gated = matches!(name, "recall" | "read_note") || OBSERVE_TOOLS.contains(&name) || ACT_TOOLS.contains(&name);
+        let gated = matches!(name, "recall" | "read_note" | "read_context" | "reference_repos" | "read_reference_file") || OBSERVE_TOOLS.contains(&name) || ACT_TOOLS.contains(&name);
         if gated && !self.offered().contains(&name) {
             return Outcome::err(format!("there is no tool named {name:?}"));
         }
@@ -646,6 +688,18 @@ impl Toolbox {
                 Err(error) => Outcome::err(error),
             },
             "read_note" => self.read_note(&text("note")).await,
+            "read_context" => match crate::codemap::mcp::call_tool_as(&self.root_str, "read_context", args, false).await {
+                Ok(content) => Outcome::ok(content, text("name")),
+                Err(error) => Outcome::err(error),
+            },
+            "reference_repos" | "read_reference_file" => match crate::codemap::mcp::call_tool_as(&self.root_str, name, args, false).await {
+                Ok(content) => {
+                    let path = text("path");
+                    let summary = if path.is_empty() { name.to_string() } else { format!("{} · {path}", text("repo")) };
+                    Outcome::ok(content, summary)
+                }
+                Err(error) => Outcome::err(error),
+            },
             "list_files" => self.list_files(&text("path")),
             "find_files" => self.find_files(&text("pattern")),
             "read_file" => self.read_file(&text("path"), line_arg(args, "start_line"), line_arg(args, "end_line")),
@@ -1000,7 +1054,8 @@ impl Toolbox {
         if subject.is_empty() {
             return Outcome::err(format!("{key} is empty"));
         }
-        match crate::codemap::mcp::call_tool(&self.root_str, tool, args).await {
+        // `call_tool_as` rather than the map alone: a `repo` names a reference repository's map.
+        match crate::codemap::mcp::call_tool_as(&self.root_str, tool, args, false).await {
             Ok(content) => {
                 let count = if name == "outline" { None } else { Some(content.lines().filter(|l| l.contains(':')).count()) };
                 Outcome::ok(content, count.map(|n| format!("{subject} · {n}")).unwrap_or(subject))
@@ -1218,7 +1273,7 @@ impl Toolbox {
 /// Whether a tool's answer is text from outside the run — the project's files, a command's output,
 /// what the app reaches — and so is checked for instructions aimed at a model before it reads it.
 fn is_outside_text(name: &str) -> bool {
-    matches!(name, "read_file" | "search" | "run_command" | "run_check" | "search_knowledge" | "recall" | "read_note")
+    matches!(name, "read_file" | "search" | "run_command" | "run_check" | "search_knowledge" | "recall" | "read_note" | "read_context" | "read_reference_file")
         || OBSERVE_TOOLS.contains(&name)
         || matches!(name, "db_query" | "http_request" | "run_with_secret")
 }
@@ -1348,6 +1403,9 @@ fn take_inventory(conn: &rusqlite::Connection, root: &str, reach: Reach) -> (Opt
             |row| row.get::<_, bool>(0),
         )
         .unwrap_or(false);
+    // Every reach: comparing with a team template is as much a review's business as a chat's.
+    inventory.references = crate::refrepos::enabled_for(conn, ws, false).len();
+    inventory.contexts = crate::context::on_demand::waiting(conn, ws);
     if workspace_chat {
         return (workspace, inventory, true);
     }
@@ -1624,7 +1682,28 @@ mod tests {
 
     /// Everything a workspace can have for the app tools.
     const FULL: Inventory =
-        Inventory { project: true, services: true, terminals: true, databases: true, requests: true, secrets: true, notes: true, memories: 3 };
+        Inventory { project: true, services: true, terminals: true, databases: true, requests: true, secrets: true, notes: true, memories: 3, references: 0, contexts: 0 };
+
+    /// Reference repositories add the two reference tools and teach the map's tools `repo` — and
+    /// cost nothing where there are none.
+    #[test]
+    fn reference_repositories_are_offered_only_where_there_are_some() {
+        let with = Inventory { references: 2, ..Default::default() };
+        let offered_with = offered(READ, true, false, &with, 0);
+        assert!(offered_with.contains(&"reference_repos") && offered_with.contains(&"read_reference_file"));
+        assert!(!offered(READ, true, false, &Inventory::default(), 0).contains(&"reference_repos"));
+    }
+
+    /// The context reader goes to a conversation whose workspace lists contexts, and to nothing
+    /// else: a review or a fix is handed every context whole.
+    #[test]
+    fn the_context_reader_is_offered_to_a_conversation_with_contexts_waiting() {
+        let chat = Grants { write: true, run: false, reach: Reach::Act };
+        let waiting = Inventory { contexts: 1, ..Default::default() };
+        assert!(offered(chat, true, false, &waiting, 0).contains(&"read_context"));
+        assert!(!offered(READ, true, false, &waiting, 0).contains(&"read_context"), "a run judging material is handed them whole");
+        assert!(!offered(chat, true, false, &Inventory::default(), 0).contains(&"read_context"));
+    }
 
     /// A door that answers `reply` to everything and keeps what it was asked.
     fn stub_door(reply: Result<String, String>) -> (Door, Arc<std::sync::Mutex<Vec<AppCall>>>) {

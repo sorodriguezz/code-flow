@@ -26,6 +26,10 @@ export interface CodiActionSpec {
   /** For a param, for each of its enum values, the names a user says for it — `{ app: { flows: { es:
    *  ["flujos"], en: ["flows"] } } }`. What lets «abre flujos» run without a model. */
   vocabulary?: Record<string, Record<string, { es: string[]; en: string[] }>>;
+  /** How a *question* names it — «cómo funciona», "how does" — for the few actions that answer one
+   *  by acting (a tour explains an app). The router takes a question only through these, and only
+   *  when every word of it is explained. */
+  questions?: { es: string[]; en: string[] };
   /** JSON Schema of `params` (an object schema). Enums wherever the values are a closed set. */
   params: Record<string, unknown>;
   risk: CodiRisk;
@@ -55,6 +59,17 @@ export interface CodiActResult {
   result?: unknown;
   say?: string;
   error?: string;
+  /** Not what was asked, but what was probably meant: `say` asks it as a yes or no, and a yes runs
+   *  this action (`codi::brain`). */
+  offer?: CodiOffer;
+}
+
+/** An action another proposes, with its params. A failed action asks it with its `say`; one that
+ *  worked says what it found and then asks `question` («¿Quieres que analice el registro?»). */
+export interface CodiOffer {
+  action: string;
+  params: Record<string, unknown>;
+  question?: string;
 }
 
 export const codiRegisterActions = (window: string, actions: CodiActionSpec[]) => invoke<void>("codi_register_actions", { window, actions });
@@ -146,8 +161,107 @@ export const codiSuspendPttHotkey = (suspended: boolean) => invoke<void>("codi_s
 export const codiOrder = (text: string) => invoke<void>("codi_order", { text });
 export const codiConfirm = (id: string, yes: boolean) => invoke<boolean>("codi_confirm", { id, yes });
 export const codiHush = () => invoke<void>("codi_hush");
+/** How a narrated line ended: said whole, stopped (hushed, talked over, overtaken), Codi's sound
+ *  off, or failed. */
+export type CodiNarration = "done" | "stopped" | "silent" | "failed";
+/** Researches a question in a repository's code, read-only, in the background; Codi says the
+ *  answer when it is ready. Rejects when the folder is gone or three are already running. */
+export const codiResearch = (path: string, name: string, question: string) => invoke<void>("codi_research", { path, name, question });
+
+/** What the index gave a fast answer (`codi::research::Looked`). */
+export interface CodiLooked {
+  found: number;
+  partial: string[];
+  ms: number;
+}
+
+/** Answers `question` from what the app has indexed — the repository at `path`, or the workspace with
+ *  none — the answer told when written. `deep` is offered when the index does not answer it. */
+export const codiKnow = (path: string | null, workspaceId: string, subject: string, question: string, deep: CodiOffer | null) =>
+  invoke<CodiLooked>("codi_know", { path, workspaceId, subject, question, deep });
+/** Explains `material` (a container's log, credentials already redacted) to answer `question` about
+ *  `subject`, in the background; Codi says the answer when it is ready. */
+export const codiExplain = (subject: string, question: string, material: string) => invoke<void>("codi_explain", { subject, question, material });
+/** Why the run `runId` of `projectId` failed, read from its failed job's log in the background; told when ready. */
+export const codiExplainPipeline = (projectId: string, runId: string, subject: string, question: string) =>
+  invoke<void>("codi_explain_pipeline", { projectId, runId, subject, question });
+/** Says one step of a guided tour in Codi's voice, after the turn under way (and its answer). */
+export const codiNarrate = (text: string) => invoke<CodiNarration>("codi_narrate", { text });
 export const codiAnnounce = (text: string, source: string) => invoke<void>("codi_announce", { text, source });
+/** One recollection of an earlier session: when (unix seconds) and what it keeps. */
+export interface CodiRecollection {
+  id: number;
+  at: number;
+  text: string;
+}
+/** What Codi keeps from earlier sessions, newest first. */
+export const codiRecollections = () => invoke<CodiRecollection[]>("codi_recollections");
+/** One recollection forgotten. */
+export const codiForget = (id: number) => invoke<void>("codi_forget", { id });
+/** The apps installed on this computer, by name. */
+export const codiInstalledApps = () => invoke<string[]>("codi_installed_apps");
+/** Every action Codi can run now: its own (`native`) and every window's. */
+export const codiActionCatalog = () => invoke<CodiActionSpec[]>("codi_action_catalog");
+/** «Olvidar todo»: every recollection of earlier sessions goes. */
+export const codiForgetAll = () => invoke<void>("codi_forget_all");
+/** What an action finished after its turn answered, told in Codi's voice even with the microphone off. */
+/** Told in Codi's voice once nothing else is being said; with an `offer` that has a question, it is
+ *  asked next and a yes runs it (`codi_cmd::codi_tell`). */
+export const codiTell = (text: string, source: string, offer: CodiOffer | null = null) => invoke<void>("codi_tell", { text, source, offer });
+
+/** What a shell command run out of sight came to (`codi_cmd::codi_run_command`). */
+export interface CodiCommandRun {
+  /** `null` when it was stopped (the time ran out) or ended by a signal. */
+  code: number | null;
+  /** The end of what it printed, without colours, with any credential masked. */
+  output: string;
+  timedOut: boolean;
+  ms: number;
+}
+export const codiRunCommand = (cwd: string, command: string) => invoke<CodiCommandRun>("codi_run_command", { cwd, command });
 export const codiPrepare = () => invoke<CodiState>("codi_prepare");
+/** Codi's window back to the top-right corner, forgetting where it was left. */
+export const codiWindowToCorner = () => invoke<void>("codi_window_to_corner");
+/** «Abrir Codi al encender el equipo» — switching it on also switches on CodeFlow's login item.
+ *  Answers whether CodeFlow now starts at login. */
+export const codiSetAtLogin = (on: boolean) => invoke<boolean>("codi_set_at_login", { on });
+
+/** One step of a routine (`codi::routines::Step`). */
+export type CodiRoutineStep =
+  | { kind: "search"; query: string; pages?: number }
+  | { kind: "read"; url: string }
+  | { kind: "readApp"; app: string }
+  | { kind: "open"; target: string }
+  | { kind: "say"; text: string }
+  | { kind: "command"; command: string; cwd?: string }
+  | { kind: "action"; action: string; params?: Record<string, unknown> }
+  | { kind: "answer"; instruction: string };
+
+/** A routine: the sentences that start it (`{slot}` takes words), its slots' defaults, its steps. */
+export interface CodiRoutine {
+  id: string;
+  name: string;
+  phrases: string[];
+  defaults: Record<string, string>;
+  steps: CodiRoutineStep[];
+  enabled: boolean;
+}
+
+/** The routines — the three examples while none are saved. */
+export const codiRoutines = () => invoke<CodiRoutine[]>("codi_routines");
+export const codiSetRoutines = (routines: CodiRoutine[]) => invoke<void>("codi_set_routines", { routines });
+/** Runs a routine by name (or id); `input` fills its one slot. Answers what it says at the end. */
+export const codiRunRoutine = (name: string, input: string | null = null) => invoke<string>("codi_run_routine", { name, input });
+
+/** What reading other apps needs from the system — macOS asks; Windows grants it all. */
+export interface DesktopPermissions {
+  accessibility: boolean;
+  screen: boolean;
+  supported: boolean;
+}
+export const desktopPermissions = () => invoke<DesktopPermissions>("desktop_permissions");
+/** The system's prompt and its settings pane, for `accessibility` or `screen`. */
+export const desktopAskPermission = (kind: "accessibility" | "screen") => invoke<void>("desktop_ask_permission", { kind });
 
 export const onCodiState = (f: (state: CodiState) => void): Promise<UnlistenFn> => listen<CodiState>("codi:state", (e) => f(e.payload));
 /** The microphone's level, ~25 a second while it is open: what `setListenLevel` is fed. */

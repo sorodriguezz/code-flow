@@ -139,6 +139,20 @@ pub fn latest_review_findings(
     .optional()
 }
 
+/// Every saved report of this PR, newest first — where a finding carried forward without being
+/// re-read is found again in full, in the run that last rendered it.
+pub fn review_reports_for_pr(
+    conn: &Connection,
+    project_id: &str,
+    pr_id: i64,
+    repo_key: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut stmt =
+        conn.prepare(&format!("SELECT review_md FROM review_runs WHERE {MEMORY_SCOPE} ORDER BY created_at DESC"))?;
+    let rows = stmt.query_map(params![project_id, pr_id, repo_key], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
 /// The head commit SHA of this PR's most recent run (from its `meta` JSON), if any — used to
 /// detect "nothing changed since last review" and to diff which files changed since.
 pub fn latest_review_head(
@@ -913,6 +927,7 @@ pub fn upsert_review_context(
     name: &str,
     content: &str,
     enabled: bool,
+    on_demand: bool,
 ) -> rusqlite::Result<ReviewContext> {
     let ctx = ReviewContext {
         id: id.unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -921,19 +936,21 @@ pub fn upsert_review_context(
         content: content.to_string(),
         enabled,
         created_at: now(),
+        on_demand,
     };
     conn.execute(
-        "INSERT INTO review_contexts (id, workspace_id, name, content, enabled, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name, content = excluded.content, enabled = excluded.enabled",
-        params![ctx.id, ctx.workspace_id, ctx.name, ctx.content, ctx.enabled, ctx.created_at],
+        "INSERT INTO review_contexts (id, workspace_id, name, content, enabled, created_at, on_demand)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, content = excluded.content, enabled = excluded.enabled,
+             on_demand = excluded.on_demand",
+        params![ctx.id, ctx.workspace_id, ctx.name, ctx.content, ctx.enabled, ctx.created_at, ctx.on_demand],
     )?;
     Ok(ctx)
 }
 
 pub fn list_review_contexts(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<ReviewContext>> {
     let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, name, content, enabled, created_at FROM review_contexts WHERE workspace_id = ?1 ORDER BY created_at",
+        "SELECT id, workspace_id, name, content, enabled, created_at, on_demand FROM review_contexts WHERE workspace_id = ?1 ORDER BY created_at",
     )?;
     let rows = stmt.query_map(params![workspace_id], |row| {
         Ok(ReviewContext {
@@ -943,6 +960,7 @@ pub fn list_review_contexts(conn: &Connection, workspace_id: &str) -> rusqlite::
             content: row.get(3)?,
             enabled: row.get(4)?,
             created_at: row.get(5)?,
+            on_demand: row.get(6)?,
         })
     })?;
     rows.collect()

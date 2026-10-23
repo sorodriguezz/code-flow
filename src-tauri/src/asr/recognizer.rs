@@ -53,6 +53,8 @@ type CreateStreamFn = unsafe extern "C" fn(*const c_void) -> *const c_void;
 type AcceptFn = unsafe extern "C" fn(*const c_void, i32, *const f32, i32);
 type DecodeFn = unsafe extern "C" fn(*const c_void, *const c_void);
 type ResultFn = unsafe extern "C" fn(*const c_void) -> *const c_void;
+type ResultJsonFn = unsafe extern "C" fn(*const c_void) -> *const c_char;
+type DestroyJsonFn = unsafe extern "C" fn(*const c_char);
 
 struct Api {
     _library: Library,
@@ -64,6 +66,10 @@ struct Api {
     decode: DecodeFn,
     result: ResultFn,
     destroy_result: DestroyFn,
+    /// The result as JSON — text, tokens and each token's time — read by field name, so the
+    /// result struct's layout is never assumed past its first field.
+    result_json: ResultJsonFn,
+    destroy_json: DestroyJsonFn,
 }
 
 // SAFETY: plain C entry points; the library handle is only kept alive.
@@ -95,6 +101,8 @@ fn load(path: &Path) -> Result<Api, String> {
             decode: symbol!("SherpaOnnxDecodeOfflineStream", DecodeFn),
             result: symbol!("SherpaOnnxGetOfflineStreamResult", ResultFn),
             destroy_result: symbol!("SherpaOnnxDestroyOfflineRecognizerResult", DestroyFn),
+            result_json: symbol!("SherpaOnnxGetOfflineStreamResultAsJson", ResultJsonFn),
+            destroy_json: symbol!("SherpaOnnxDestroyOfflineStreamResultJson", DestroyJsonFn),
             _library: library,
         })
     }
@@ -216,6 +224,118 @@ pub fn threads() -> i32 {
 /// code or `auto`: a transducer tells by itself; Canary needs one and falls back to `fallback`
 /// (the app's language). `translate_to` makes Canary write another of its languages. Blocking.
 pub fn transcribe(slot: &Slot, model: &AsrModel, samples: &[f32], language: &str, fallback: &str, translate_to: Option<&str>) -> Result<String, String> {
+    let text = decode(slot, model, samples, language, fallback, translate_to, |api, stream| {
+        // SAFETY: the stream is live for the call; the result is destroyed after the text is
+        // copied out of it. `SherpaOnnxOfflineRecognizerResult` starts with `const char *text`.
+        unsafe {
+            let result = (api.result)(stream);
+            if result.is_null() {
+                return String::new();
+            }
+            let pointer = *(result as *const *const c_char);
+            let text = if pointer.is_null() { String::new() } else { CStr::from_ptr(pointer).to_string_lossy().into_owned() };
+            (api.destroy_result)(result);
+            text
+        }
+    })?;
+    Ok(text.unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// One word heard, with where it sits in the clip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimedWord {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    /// Starts with a space when it is a word of its own, not when it is glued to the one before
+    /// (a comma, a full stop) — as whisper's segments come.
+    pub text: String,
+}
+
+/// Whether `model` says when each word was spoken — what a meeting's final pass needs to give
+/// every word to the person speaking at that moment. A transducer does (Parakeet); Canary's
+/// decoder does not.
+pub fn times_words(model: &AsrModel) -> bool {
+    model.family == Family::Transducer
+}
+
+/// [`transcribe`], word by word with each word's time — for a meeting's final pass. Only for a
+/// model that [`times_words`]. Blocking.
+pub fn transcribe_timed(slot: &Slot, model: &AsrModel, samples: &[f32], language: &str, fallback: &str) -> Result<Vec<TimedWord>, String> {
+    if !times_words(model) {
+        return Err(format!("{} does not time its words", model.label));
+    }
+    let json = decode(slot, model, samples, language, fallback, None, |api, stream| {
+        // SAFETY: as in `transcribe`; the JSON string is the library's and is freed by it.
+        unsafe {
+            let pointer = (api.result_json)(stream);
+            if pointer.is_null() {
+                return String::new();
+            }
+            let json = CStr::from_ptr(pointer).to_string_lossy().into_owned();
+            (api.destroy_json)(pointer);
+            json
+        }
+    })?;
+    let Some(json) = json else { return Ok(Vec::new()) };
+    let value: serde_json::Value = serde_json::from_str(&json).map_err(|e| format!("The speech model's answer was not readable: {e}"))?;
+    let strings = |key: &str| value.get(key).and_then(|v| v.as_array()).map(|a| a.iter().map(|t| t.as_str().unwrap_or_default().to_string()).collect::<Vec<_>>()).unwrap_or_default();
+    let numbers = |key: &str| value.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|t| t.as_f64()).collect::<Vec<_>>()).unwrap_or_default();
+    let clip_ms = (samples.len() as i64 * 1000) / i64::from(RATE);
+    Ok(words_of(&strings("tokens"), &numbers("timestamps"), &numbers("durations"), clip_ms))
+}
+
+/// The longest a token is taken to last when nothing says how long it did.
+const TOKEN_MS: i64 = 600;
+
+/// Tokens and their start times (seconds) put together into words. A token that starts with a
+/// space — or SentencePiece's `▁` — starts a word; any other is glued to the word before. A token
+/// ends where its duration says, else where the next one starts (never more than [`TOKEN_MS`] on),
+/// and the last one by the clip's end. Every word starts with its space, the first too: a line
+/// may run on from the piece before.
+fn words_of(tokens: &[String], starts: &[f64], durations: &[f64], clip_ms: i64) -> Vec<TimedWord> {
+    let count = tokens.len().min(starts.len());
+    let at = |i: usize| (starts[i] * 1000.0).round() as i64;
+    let mut words: Vec<TimedWord> = Vec::new();
+    // A token that is only a space: the next one starts a word.
+    let mut spaced = false;
+    for i in 0..count {
+        let raw = tokens[i].replace('▁', " ");
+        let piece = raw.trim();
+        if piece.is_empty() {
+            spaced = true;
+            continue;
+        }
+        let start = at(i);
+        let end = match durations.get(i) {
+            Some(duration) if durations.len() >= count && *duration > 0.0 => start + (duration * 1000.0).round() as i64,
+            _ if i + 1 < count => at(i + 1).min(start + TOKEN_MS),
+            _ => clip_ms.min(start + TOKEN_MS),
+        }
+        .max(start);
+        let glued = !raw.starts_with(' ') && !spaced;
+        spaced = false;
+        match words.last_mut() {
+            Some(word) if glued => {
+                word.text.push_str(piece);
+                word.end_ms = word.end_ms.max(end);
+            }
+            _ => words.push(TimedWord { start_ms: start, end_ms: end, text: format!(" {piece}") }),
+        }
+    }
+    words
+}
+
+/// Loads `slot`'s recognizer for `model` (or keeps the one loaded), feeds it `samples` and hands
+/// the decoded stream to `read`. `None` for no samples.
+fn decode<T>(
+    slot: &Slot,
+    model: &AsrModel,
+    samples: &[f32],
+    language: &str,
+    fallback: &str,
+    translate_to: Option<&str>,
+    read: impl FnOnce(&Api, *const c_void) -> T,
+) -> Result<Option<T>, String> {
     if !super::installed(model) {
         return Err("That speech model is not downloaded — Settings › Voice & sound › Models".into());
     }
@@ -245,10 +365,9 @@ pub fn transcribe(slot: &Slot, model: &AsrModel, samples: &[f32], language: &str
     }
     let recognizer = held.as_ref().map(|loaded| loaded.handle).unwrap_or(std::ptr::null());
     if samples.is_empty() {
-        return Ok(String::new());
+        return Ok(None);
     }
-    // SAFETY: the recognizer is live under the lock; the stream and result are destroyed below,
-    // after the text is copied out of the result.
+    // SAFETY: the recognizer is live under the lock; the stream is destroyed below, after `read`.
     unsafe {
         let stream = (api.create_stream)(recognizer);
         if stream.is_null() {
@@ -256,19 +375,9 @@ pub fn transcribe(slot: &Slot, model: &AsrModel, samples: &[f32], language: &str
         }
         (api.accept)(stream, RATE, samples.as_ptr(), samples.len() as i32);
         (api.decode)(recognizer, stream);
-        let result = (api.result)(stream);
-        // `SherpaOnnxOfflineRecognizerResult` starts with `const char *text`.
-        let text = if result.is_null() {
-            String::new()
-        } else {
-            let pointer = *(result as *const *const c_char);
-            if pointer.is_null() { String::new() } else { CStr::from_ptr(pointer).to_string_lossy().into_owned() }
-        };
-        if !result.is_null() {
-            (api.destroy_result)(result);
-        }
+        let out = read(api, stream);
         (api.destroy_stream)(stream);
-        Ok(text.split_whitespace().collect::<Vec<_>>().join(" "))
+        Ok(Some(out))
     }
 }
 
@@ -311,6 +420,75 @@ pub fn transcribe_in_test(dir: &Path, samples: &[f32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn strings(list: &[&str]) -> Vec<String> {
+        list.iter().map(|t| t.to_string()).collect()
+    }
+
+    #[test]
+    fn tokens_come_together_into_timed_words() {
+        let tokens = strings(&["▁Hola", ",", "▁qué", "▁tal", "▁es", "tás", "?"]);
+        let starts = [0.24, 0.56, 0.72, 1.04, 1.36, 1.52, 1.84];
+        let words = words_of(&tokens, &starts, &[], 2_400);
+        let texts: Vec<&str> = words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(texts, [" Hola,", " qué", " tal", " estás?"]);
+        assert_eq!((words[0].start_ms, words[0].end_ms), (240, 720), "a word ends where its last token does");
+        assert_eq!((words[3].start_ms, words[3].end_ms), (1360, 2400), "the last token runs to the clip's end at most");
+    }
+
+    #[test]
+    fn a_token_never_lasts_past_the_next_or_its_own_duration() {
+        let tokens = strings(&[" uno", " dos", " tres"]);
+        let words = words_of(&tokens, &[0.0, 3.0, 3.2], &[], 10_000);
+        assert_eq!(words[0].end_ms, TOKEN_MS, "a long silence after a word is not part of it");
+        assert_eq!(words[1].end_ms, 3_200);
+        let timed = words_of(&tokens, &[0.0, 3.0, 3.2], &[0.3, 0.1, 0.4], 10_000);
+        assert_eq!([timed[0].end_ms, timed[1].end_ms, timed[2].end_ms], [300, 3_100, 3_600]);
+        assert!(words_of(&[], &[], &[], 1_000).is_empty());
+        assert_eq!(words_of(&strings(&["▁", "hola"]), &[0.1, 0.2], &[], 1_000)[0].text, " hola", "a lone space starts the next word");
+    }
+
+    /// The real library and Parakeet on a real clip, word by word:
+    /// `CODEFLOW_TEST_ASR_TIMED=<sherpa library>|<parakeet folder>|<wav>`.
+    #[test]
+    #[ignore]
+    fn times_the_words_of_a_spanish_clip() {
+        let spec = std::env::var("CODEFLOW_TEST_ASR_TIMED").expect("CODEFLOW_TEST_ASR_TIMED=<library>|<parakeet dir>|<wav>");
+        let parts: Vec<&str> = spec.split('|').collect();
+        load_library_for_test(Path::new(parts[0]));
+        let model = *super::super::model("parakeet").expect("parakeet");
+        let slot = Slot::new();
+        let key = Key { dir: Path::new(parts[1]).to_path_buf(), family: model.family, source: String::new(), target: String::new(), threads: 2 };
+        *slot.0.lock().unwrap() = Some(Loaded { key, handle: build(&Key { dir: Path::new(parts[1]).to_path_buf(), family: model.family, source: String::new(), target: String::new(), threads: 2 }, &model).expect("the model loads") });
+        let samples = samples_of(parts[2]);
+        // The slot is keyed by the catalogue's folder: run the stream by hand on the loaded handle.
+        let handle = slot.0.lock().unwrap().as_ref().unwrap().handle;
+        let api = api().unwrap();
+        let json = unsafe {
+            let stream = (api.create_stream)(handle);
+            (api.accept)(stream, RATE, samples.as_ptr(), samples.len() as i32);
+            (api.decode)(handle, stream);
+            let pointer = (api.result_json)(stream);
+            let json = CStr::from_ptr(pointer).to_string_lossy().into_owned();
+            (api.destroy_json)(pointer);
+            (api.destroy_stream)(stream);
+            json
+        };
+        eprintln!("{json}");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let list = |key: &str| value[key].as_array().cloned().unwrap_or_default();
+        let tokens: Vec<String> = list("tokens").iter().map(|t| t.as_str().unwrap().to_string()).collect();
+        let starts: Vec<f64> = list("timestamps").iter().filter_map(|t| t.as_f64()).collect();
+        let durations: Vec<f64> = list("durations").iter().filter_map(|t| t.as_f64()).collect();
+        let words = words_of(&tokens, &starts, &durations, samples.len() as i64 * 1000 / 16_000);
+        for word in &words {
+            eprintln!("{:>6} {:>6} {:?}", word.start_ms, word.end_ms, word.text);
+        }
+        assert!(words.len() > 3, "words came out");
+        assert!(words.windows(2).all(|pair| pair[0].start_ms <= pair[1].start_ms), "in order");
+        let joined: String = words.iter().map(|w| w.text.as_str()).collect();
+        assert_eq!(joined.split_whitespace().collect::<Vec<_>>().join(" "), value["text"].as_str().unwrap().split_whitespace().collect::<Vec<_>>().join(" "), "the words are the text");
+    }
 
     fn samples_of(path: &str) -> Vec<f32> {
         let bytes = std::fs::read(path).expect("the clip");

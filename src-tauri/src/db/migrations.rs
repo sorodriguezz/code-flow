@@ -2030,7 +2030,57 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_context_to_activity_log(conn)?;
     add_ai_platform_tables(conn)?;
     add_ai_session_costs(conn)?;
+    add_codi_memory(conn)?;
+    add_codi_recollections(conn)?;
+    add_reference_repos(conn)?;
+    add_on_demand_to_review_contexts(conn)?;
     Ok(())
+}
+
+/// A workspace context marked «a demanda» (`context::on_demand`): a chat lists it by name and the
+/// model reads it when a question needs it, instead of every session opening with it whole. Off for
+/// every context that existed before, so nothing a chat was told changes until the user says so.
+fn add_on_demand_to_review_contexts(conn: &Connection) -> rusqlite::Result<()> {
+    if !has_column(conn, "review_contexts", "on_demand")? {
+        conn.execute_batch("ALTER TABLE review_contexts ADD COLUMN on_demand INTEGER NOT NULL DEFAULT 0;")?;
+    }
+    Ok(())
+}
+
+/// Repositorios de referencia (`crate::refrepos`): other code bases the app keeps a clone of so its
+/// AI surfaces can search and map them — a team's template, a shared library, the service another
+/// one calls. Global, like the user who keeps them: `all_workspaces`, or the workspaces in the join
+/// table, say where each applies. The clone itself lives at `paths::reference_repos_dir()/<id>` and
+/// is not a column — a restore on another machine clones it again into its own folder.
+///
+/// `auth` names the connected account a private clone authenticates with (`github:github.com`,
+/// `azure:<org>`…), never the credential, which stays in the keychain.
+fn add_reference_repos(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS reference_repos (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            url             TEXT NOT NULL,
+            branch          TEXT NOT NULL DEFAULT '',
+            purpose         TEXT NOT NULL DEFAULT '',
+            all_workspaces  INTEGER NOT NULL DEFAULT 1,
+            local_only      INTEGER NOT NULL DEFAULT 0,
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            auto_pull_hours INTEGER NOT NULL DEFAULT 24,
+            auth            TEXT NOT NULL DEFAULT '',
+            head            TEXT NOT NULL DEFAULT '',
+            pulled_at       INTEGER,
+            size_bytes      INTEGER NOT NULL DEFAULT 0,
+            last_error      TEXT NOT NULL DEFAULT '',
+            created_at      INTEGER NOT NULL,
+            updated_at      INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS reference_repo_workspaces (
+            repo_id      TEXT NOT NULL REFERENCES reference_repos(id) ON DELETE CASCADE,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            PRIMARY KEY (repo_id, workspace_id)
+        );",
+    )
 }
 
 /// The executable hash covers more node types since milestone 12 (`spec::EXECUTABLE_TYPES`): a flow
@@ -3723,6 +3773,42 @@ fn add_ai_session_costs(conn: &Connection) -> rusqlite::Result<()> {
             updated_at  TEXT NOT NULL,
             PRIMARY KEY (provider, session_id)
         );",
+    )
+}
+
+/// Codi's memory of the session under way (`codi::memory`): each order and answer, what it went to
+/// find out in the background, and the summary older entries were folded into. One session at a
+/// time — the rows of any other are a session that ended (its window closed, the app quit) and are
+/// deleted when the next begins.
+fn add_codi_memory(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS codi_memory (
+            id       INTEGER PRIMARY KEY AUTOINCREMENT,
+            session  TEXT NOT NULL,
+            at       INTEGER NOT NULL,
+            kind     TEXT NOT NULL,
+            said     TEXT NOT NULL DEFAULT '',
+            answer   TEXT NOT NULL DEFAULT '',
+            actions  TEXT NOT NULL DEFAULT '',
+            folded   INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS codi_memory_session ON codi_memory(session, id);",
+    )
+}
+
+/// What Codi remembers from one session to the next (`codi::recollections`): one short text a
+/// session that ended, with its vector in the local embedding space it was written in (`space`, empty
+/// with none — found by its words then).
+fn add_codi_recollections(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS codi_recollections (
+            id      INTEGER PRIMARY KEY AUTOINCREMENT,
+            at      INTEGER NOT NULL,
+            text    TEXT NOT NULL,
+            space   TEXT NOT NULL DEFAULT '',
+            vector  BLOB NOT NULL DEFAULT x''
+        );
+        CREATE INDEX IF NOT EXISTS codi_recollections_at ON codi_recollections(at);",
     )
 }
 

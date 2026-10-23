@@ -1,4 +1,4 @@
-import { AtSign, Brain, FileCode2, FileDiff, FilePen, ListTree, TextSelect, TriangleAlert } from "lucide-react";
+import { AtSign, Brain, CircleSlash, FileCode2, FileDiff, FilePen, ListTree, TextSelect, TriangleAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
@@ -14,6 +14,7 @@ const ICON: Record<ContextSourceKind, LucideIcon> = {
   diff: FileDiff,
   memory: Brain,
   knowledge: ListTree,
+  withheld: CircleSlash,
 };
 
 const KIND_KEY: Record<ContextSourceKind, TranslationKey> = {
@@ -25,7 +26,22 @@ const KIND_KEY: Record<ContextSourceKind, TranslationKey> = {
   diff: "context.diff",
   memory: "context.memory",
   knowledge: "context.knowledge",
+  withheld: "context.withheld",
 };
+
+/** Why nothing went, by the code the backend files it with (`context::need::Withheld`). */
+const WITHHELD_KEY: Record<string, TranslationKey> = {
+  follow_up: "context.withheldFollowUp",
+  general: "context.withheldGeneral",
+  tools_only: "context.withheldToolsOnly",
+};
+
+/** What a chip says: its file or place, or — for nothing attached — why, in the user's language. */
+function chipLabel(source: ContextSource, t: ReturnType<typeof useT>): string {
+  if (source.kind !== "withheld") return source.label;
+  const key = WITHHELD_KEY[source.label];
+  return key ? t(key) : source.label;
+}
 
 /**
  * «Contexto usado»: what CodeFlow put in front of the engine for an answer besides the question —
@@ -39,11 +55,12 @@ export function ContextSources({ sources }: { sources: ContextSource[] }) {
       <span>{t("context.used")}</span>
       {sources.map((source, index) => {
         const Icon = ICON[source.kind] ?? FileCode2;
-        const title = `${t(KIND_KEY[source.kind])}: ${source.label}`;
+        const label = chipLabel(source, t);
+        const title = source.kind === "withheld" ? t("context.withheld") : `${t(KIND_KEY[source.kind])}: ${label}`;
         const body = (
           <>
             <Icon size={11} className="shrink-0" />
-            <span className="max-w-[220px] truncate">{source.label}</span>
+            <span className="max-w-[220px] truncate">{label}</span>
           </>
         );
         const chip = "inline-flex h-5 items-center gap-1 rounded-[5px] px-1.5 shadow-[inset_0_0_0_1px_var(--cf-border)]";

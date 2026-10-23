@@ -154,7 +154,6 @@ const islandReturn = defineAction({
   // In an app island, the island holding that app; in a repository or file island, that window; in
   // the main window, the main window — which hands the request on to the island it names.
   where: WINDOW.satellite?.kind === "app" ? `app:${WINDOW.satellite.refId}` : WINDOW.satellite ? "any" : "main",
-  frequent: true,
   run: returnIsland,
 });
 

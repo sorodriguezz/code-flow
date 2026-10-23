@@ -118,6 +118,11 @@ export interface SceneHeader {
 }
 
 export interface Scene {
+  /** Where the board starts: 0, or less when something was placed above or left of the origin —
+   *  the canvas has no edge (user, 2026-10-22: «no deja poner más componentes hacia arriba y la
+   *  izquierda»), so an export frames whatever is there. */
+  left: number;
+  top: number;
   width: number;
   height: number;
   env: string;
@@ -376,7 +381,10 @@ export function layoutDoc(doc: ArchDoc, comps: ResolvedComponents, opts: LayoutO
     chips.push({ id: n.id, target: n.on, x: b[0] + b[2] - w - 10, y: card ? b[1] - 8 : b[1] + 8 });
   }
 
-  const width = BOARD_PAD.left + contentW + BOARD_PAD.right;
-  const height = bottom + BOARD_PAD.bottom;
-  return { width, height, env, header, zones: out.zones, cards: out.cards, edges, chips, titles };
+  const placed = [...out.cards.map((c) => c.box), ...out.zones.map((z) => z.box)];
+  const left = Math.min(0, ...placed.map((b) => b[0] - BOARD_PAD.left));
+  const topEdge = Math.min(0, ...placed.map((b) => b[1] - BOARD_PAD.top));
+  const width = BOARD_PAD.left + contentW + BOARD_PAD.right - left;
+  const height = bottom + BOARD_PAD.bottom - topEdge;
+  return { left, top: topEdge, width, height, env, header, zones: out.zones, cards: out.cards, edges, chips, titles };
 }

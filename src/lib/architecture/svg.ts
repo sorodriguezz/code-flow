@@ -320,14 +320,16 @@ export function chipSvg(chip: { id: string; x: number; y: number }, p: ArchPalet
 
 export function renderSvg(scene: Scene, opts: RenderOptions): string {
   const p = opts.palette;
-  const panelX = scene.width + 16;
+  // The board may start above or left of the origin (a card dragged there): the frame starts with it.
+  const left = scene.left ?? 0, top = scene.top ?? 0;
+  const panelX = left + scene.width + 16;
   const panels = opts.panels ? panelsSvg(scene, opts.panels.doc, opts.panels.labels, p, panelX) : null;
-  const width = panels ? panelX + PANEL_W + 44 : scene.width;
-  const height = panels ? Math.max(scene.height, panels.bottom + 48) : scene.height;
-  let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${f1(width)}" height="${f1(height)}" viewBox="0 0 ${f1(width)} ${f1(height)}" font-family="${SANS}">`;
+  const width = panels ? panelX - left + PANEL_W + 44 : scene.width;
+  const height = panels ? Math.max(scene.height, panels.bottom + 48 - top) : scene.height;
+  let s = `<svg xmlns="http://www.w3.org/2000/svg" width="${f1(width)}" height="${f1(height)}" viewBox="${f1(left)} ${f1(top)} ${f1(width)} ${f1(height)}" font-family="${SANS}">`;
   s += `<defs>${sceneDefs(scene, p)}</defs>`;
   s += `<style>.arch-focus .card:not(.sel):not(.hot){opacity:.38}.arch-focus .edge:not(.hot){opacity:.13}.arch-focus .lab:not(.hot){opacity:.22}.edge.hot .ln{stroke:${p.hot};stroke-width:2}.card.sel .cb{stroke:${p.hot};stroke-width:2}.zone.sel .zb{stroke:${p.hot};stroke-width:2}.card,.edge,.lab{transition:opacity .15s ease}.arch-hide-labels .labels{display:none}</style>`;
-  if (opts.background) s += `<rect width="100%" height="100%" fill="${p.canvas}"/>`;
+  if (opts.background) s += `<rect x="${f1(left)}" y="${f1(top)}" width="100%" height="100%" fill="${p.canvas}"/>`;
   s += headerSvg(scene, p);
   for (const z of scene.zones) s += zoneSvg(z, p);
   s += `<g class="edges">${scene.edges.map((e) => edgeSvg(e, p)).join("")}</g>`;

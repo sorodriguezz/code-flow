@@ -1,9 +1,24 @@
 import { deriveRunning, isActive, useServicesStore } from "../../../state/servicesStore";
 import { useTerminalStore } from "../../../state/terminalStore";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
-import { CodiError, type CodiAction } from "../registry";
+import { codiRunCommand } from "../../tauri/codiCommands";
+import { CodiError, type CodiAction, type CodiOutcome } from "../registry";
 import type { ServiceRow } from "../../../types/services";
-import { defineAction, params, pickByName, requireProject, requireWorkspace, say, spokenList, text } from "./shared";
+import {
+  answerOrTell,
+  defineAction,
+  outOfSight,
+  params,
+  pickByName,
+  requireProject,
+  requireWorkspace,
+  say,
+  showParam,
+  spokenDuration,
+  spokenList,
+  spokenReason,
+  text,
+} from "./shared";
 
 /**
  * Starting things: the workspace's services (the Rust supervisor's — this store only asks it), and
@@ -106,23 +121,63 @@ export function serviceActions(): CodiAction[] {
   ];
 }
 
+/**
+ * A command that keeps running until it is stopped — a dev server, a watcher, a log followed — belongs
+ * in a terminal, where it can be seen and stopped: run out of sight, it would be cut off at the limit
+ * (`codi_cmd::codi_run_command`) without ever having said anything.
+ */
+export function keepsRunning(command: string): boolean {
+  return /(^|[\s;&|])(npm|pnpm|yarn|bun)\s+(run\s+)?(dev|start|serve|watch)\b|\b(nodemon|tail\s+-f|next\s+dev|vite(\s+dev)?\s*$|cargo\s+watch|tauri\s+dev)\b|--watch\b|\bdocker[- ]compose\s+up\b(?!.*\s-d\b)|\bpython3?\s+-m\s+http\.server\b|\bwatch\s/.test(command);
+}
+
+/** The last line of output that says something — what a command's result is said with. */
+function lastLine(output: string): string {
+  const line = output.split("\n").map((l) => l.trim()).filter(Boolean).pop() ?? "";
+  return line.length > 140 ? `${line.slice(0, 139)}…` : line;
+}
+
+/** A command run out of sight, and how it ended — said within the turn, or told when it lands. */
+function runOutOfSight(cwd: string, line: string, repo: string): Promise<CodiOutcome> {
+  const work = (async (): Promise<CodiOutcome> => {
+    const run = await codiRunCommand(cwd, line);
+    const result = { ran: line, in: repo, code: run.code, ms: run.ms, output: run.output.slice(-600) };
+    if (run.timedOut) {
+      throw new CodiError(`${line} did not finish in time and was stopped`, say("codi.say.commandTimedOut", { command: line }), {
+        action: "terminal.run",
+        params: { command: line, show: true },
+      });
+    }
+    if (run.code === 0) return { result, say: say("codi.say.commandDone", { time: spokenDuration(run.ms), last: lastLine(run.output) }) };
+    throw new CodiError(`${line} failed with code ${run.code ?? "?"}: ${lastLine(run.output)}`, say("codi.say.commandFailedAsk", { code: run.code ?? "?", last: lastLine(run.output) }), {
+      action: "terminal.run",
+      params: { command: line, show: true },
+    });
+  })();
+  return answerOrTell(work, {
+    source: `command:${repo}`,
+    still: { result: { running: line, in: repo }, say: say("codi.say.commandStillRunning") },
+    failed: (error) => say("codi.say.commandFailedWhy", { reason: spokenReason(error) }),
+  });
+}
+
 export function terminalActions(): CodiAction[] {
   return [
     defineAction({
       id: "terminal.run",
       title: {
-        en: "Run a shell command in the open repository, in a terminal of Codi's own in the dock. Asks the user first.",
-        es: "Ejecuta un comando de shell en el repositorio abierto, en una terminal propia de Codi en el dock. Pide confirmación.",
+        en: "Run a shell command in the open repository and say how it ended — out of sight, unless show is true or it keeps running (a server, a watcher), which goes to a terminal of Codi's own in the dock. Asks the user first.",
+        es: "Ejecuta un comando de shell en el repositorio abierto y dice cómo terminó, sin abrir nada salvo que show sea true o que siga corriendo (un servidor, un watcher), que va a una terminal propia de Codi en el dock. Pide confirmación.",
       },
       aliases: { es: ["ejecuta", "ejecuta el comando", "corre", "corre el comando", "lanza", "lanza el comando", "en la terminal ejecuta"], en: ["run", "run the command", "execute", "execute the command", "in the terminal run"] },
-      params: params({ command: text("The command line, exactly as it should be typed.") }, ["command"]),
+      params: params({ command: text("The command line, exactly as it should be typed."), show: showParam }, ["command"]),
       risk: "destructive",
       where: "any",
       frequent: true,
-      run: async ({ command }) => {
+      run: async ({ command, show }) => {
         const project = requireProject();
         const line = String(command).trim();
         if (line.includes("\n")) throw new CodiError("one command line at a time");
+        if (!keepsRunning(line) && (await outOfSight(show))) return runOutOfSight(project.local_path, line, project.name);
         await useTerminalStore.getState().runCommand(project.id, {
           cwd: project.local_path,
           command: line,

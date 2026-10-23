@@ -47,7 +47,7 @@ import { mutate } from "../edits";
 import type { ArchModel } from "../useArchModel";
 import { EDGE_TYPES, type ArchEdgeT } from "./ArchEdge";
 import { ArchLibrary } from "./ArchLibrary";
-import { CanvasActionsContext, useArchDragStore, type CanvasActions, type LibraryItem } from "./canvasState";
+import { CanvasActionsContext, carryOver, useArchDragStore, type CanvasActions, type LibraryItem } from "./canvasState";
 import { NODE_TYPES, type ArchNode, type CardData } from "./nodes";
 
 interface Props {
@@ -61,6 +61,15 @@ const chipId = (id: string) => `art:chip:${id}`;
 const edgeId = (index: number) => `e:${index}`;
 const edgeIndex = (id: string) => (id.startsWith("e:") ? Number(id.slice(2)) : -1);
 const ZONE_SIZE = { w: 380, h: 240 };
+/**
+ * The export's order, set by hand (`zIndexMode="manual"`): zones at their depth, then the lines, then
+ * the cards, then the note chips. All positive on purpose — React Flow's own lifting put a line between
+ * two top-level cards at a negative z, which WebKit stops painting after the first redraw.
+ */
+const EDGE_Z = 500;
+const CARD_Z = 1000;
+const PICKED_CARD_Z = 1010;
+const CHIP_Z = 1100;
 const SEVERITY_RANK: Record<Severity, number> = { critical: 0, warning: 1, suggestion: 2, risk: 3 };
 
 const fmtPct = (x: number) => `${Math.round(Math.min(x, 9.99) * 100)} %`;
@@ -125,6 +134,8 @@ function CanvasArea({ model, palette, lens }: Props) {
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[]; heading?: string } | null>(null);
   const [zoom, setZoom] = useState(1);
   const [warningsOpen, setWarningsOpen] = useState(false);
+  // A line being drawn: every card shows its dots, so the far end is a target to aim at.
+  const [connecting, setConnecting] = useState(false);
   // Below this width the library folds to its rail on its own, so the canvas keeps room to draw in.
   const area = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(false);
@@ -186,7 +197,8 @@ function CanvasArea({ model, palette, lens }: Props) {
 
   /** `box`'s top-left relative to `zone`, kept clear of the zone's title band. */
   const relativeTo = useCallback((zone: string | null, x: number, y: number): Pos => {
-    if (!zone) return { x: Math.max(0, x), y: Math.max(0, y) };
+    // On the board itself there is no edge: up and left of the origin are places like any other.
+    if (!zone) return { x, y };
     const b = liveBox(zone) ?? scene.zones.find((z) => z.id === zone)!.box;
     const style = scene.zones.find((z) => z.id === zone)?.style ?? "cluster";
     return { x: Math.max(8, x - b[0]), y: Math.max(ZONE_METRICS[style].head + 6, y - b[1]) };
@@ -225,7 +237,7 @@ function CanvasArea({ model, palette, lens }: Props) {
       }
       const evidence = comp?.evidence ?? [];
       out.push({
-        id: c.id, type: "card", position: rel(c.box, c.parent), parentId: c.parent ?? undefined, width: w, height: h, zIndex: 1000,
+        id: c.id, type: "card", position: rel(c.box, c.parent), parentId: c.parent ?? undefined, width: w, height: h, zIndex: CARD_Z,
         data: {
           svg: cardSvg({ ...c, box: [0, 0, w, h] }, palette, t("arch.missing")), w, h, dim: false, hot: false, badge,
           severity: worst.get(c.id) ?? null, down: lens === "simulate" && !!m?.down,
@@ -234,14 +246,15 @@ function CanvasArea({ model, palette, lens }: Props) {
       });
     }
     for (const chip of scene.chips) {
-      out.push({ id: chipId(chip.id), type: "art", position: { x: chip.x, y: chip.y }, draggable: false, selectable: false, connectable: false, focusable: false, zIndex: 1100, data: { svg: chipSvg({ ...chip, x: 0, y: 0 }, palette), w: 40, h: 15 } });
+      out.push({ id: chipId(chip.id), type: "art", position: { x: chip.x, y: chip.y }, draggable: false, selectable: false, connectable: false, focusable: false, zIndex: CHIP_Z, data: { svg: chipSvg({ ...chip, x: 0, y: 0 }, palette), w: 40, h: 15 } });
     }
     return out;
     // `iconsReady`: a card drawn before its provider's pack landed holds a stand-in glyph until then.
   }, [scene, palette, lens, sim, comps, findings, t, model.iconsReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [nodes, setNodes] = useState<ArchNode[]>(built);
-  useEffect(() => { setNodes(built); }, [built]);
+  // The new scene's nodes, keeping what React Flow measured and where a dragged card is now.
+  useEffect(() => { setNodes((prev) => carryOver(built, prev)); }, [built]);
 
   // A drop moves lines onto the live elbow until the next scene routes them again.
   useEffect(() => {
@@ -258,7 +271,9 @@ function CanvasArea({ model, palette, lens }: Props) {
       const isHot = hot.cards.has(n.id);
       const selected = picked.has(n.id);
       if (n.data.dim === dim && n.data.hot === isHot && !!n.selected === selected) return n;
-      return { ...n, selected, data: { ...n.data, dim, hot: isHot } };
+      // A picked card comes over its neighbours, as React Flow's own lifting did before the order was
+      // set by hand.
+      return { ...n, selected, zIndex: selected ? PICKED_CARD_Z : CARD_Z, data: { ...n.data, dim, hot: isHot } };
     }
     if (n.type === "zone") {
       const selected = picked.has(n.id);
@@ -282,9 +297,8 @@ function CanvasArea({ model, palette, lens }: Props) {
       if (hot.edges.has(e.index)) { color = palette.hot; width = Math.max(width, 2); marker = "hot"; }
       return {
         id: edgeId(e.index), source: e.from, target: e.to, type: "arch" as const,
-        // React Flow lifts an edge to its ends' z (cards are 1000); this takes it back under the cards
-        // and above the zones, the export's order.
-        zIndex: -100,
+        // Under the cards and above the zones, the export's order — see `EDGE_Z`.
+        zIndex: EDGE_Z,
         selected: selection?.kind === "edge" && selection.index === e.index,
         data: { edge: e, label: labelSvg(e, palette, text), width, color, dashed: async, marker, dim: hot.focus && !hot.edges.has(e.index) },
       };
@@ -351,12 +365,27 @@ function CanvasArea({ model, palette, lens }: Props) {
     useArchDragStore.getState().setMoving(ids);
   }, [zoneIds, descendants]);
 
+  /**
+   * Where a dragged node was let go, as a box on the canvas. From the node React Flow hands the drop —
+   * never from the canvas's own copy (`liveBox`), which in a controlled flow is a step behind until the
+   * last move's update lands: a quick drag read from it saved where the card had been, and the card
+   * jumped back there.
+   */
+  const droppedBox = useCallback((n: ArchNode): [number, number, number, number] | null => {
+    const live = liveBox(n.id);
+    const parent = n.parentId ? rf.getInternalNode(n.parentId)?.internals.positionAbsolute : { x: 0, y: 0 };
+    if (!parent) return live;
+    const w = n.measured?.width ?? n.width ?? live?.[2] ?? 0;
+    const h = n.measured?.height ?? n.height ?? live?.[3] ?? 0;
+    return [parent.x + n.position.x, parent.y + n.position.y, w, h];
+  }, [liveBox, rf]);
+
   const onNodeDragStop: OnNodeDrag<ArchNode> = useCallback((_, __, dragged) => {
     const before = useArchitectureStore.getState().draft?.text;
     const moves: Array<{ id: string; target: string | null; pos: Pos }> = [];
     for (const n of dragged) {
       if (n.id.startsWith("art:")) continue;
-      const box = liveBox(n.id);
+      const box = droppedBox(n);
       if (!box) continue;
       const exclude = new Set([n.id, ...(zoneIds.has(n.id) ? descendants(n.id) : [])]);
       const target = zoneAt(box[0] + box[2] / 2, box[1] + Math.min(box[3] / 2, 40), exclude);
@@ -365,7 +394,7 @@ function CanvasArea({ model, palette, lens }: Props) {
     if (moves.length) mutate((d) => moves.reduce((acc, m) => moveNode(acc, m.id, m.target, m.pos), d));
     if (useArchitectureStore.getState().draft?.text === before) useArchDragStore.getState().clear();
     else useArchDragStore.getState().settle();
-  }, [liveBox, zoneAt, relativeTo, zoneIds, descendants]);
+  }, [droppedBox, zoneAt, relativeTo, zoneIds, descendants]);
 
   const onConnect = useCallback((c: { source: string | null; target: string | null }) => {
     if (!c.source || !c.target || c.source === c.target) return;
@@ -558,7 +587,7 @@ function CanvasArea({ model, palette, lens }: Props) {
     <CanvasActionsContext.Provider value={actions}>
       <div ref={area} className="flex h-full min-h-0 min-w-0">
         <ArchLibrary narrow={narrow} />
-        <div ref={wrapper} className="arch-flow @container relative min-h-0 min-w-0 flex-1" style={vars} onKeyDown={onKeyDown} tabIndex={-1} data-tour="arch-canvas">
+        <div ref={wrapper} className={`arch-flow @container relative min-h-0 min-w-0 flex-1${connecting ? " is-connecting" : ""}`} style={vars} onKeyDown={onKeyDown} tabIndex={-1} data-tour="arch-canvas">
           <svg aria-hidden className="absolute h-0 w-0 overflow-hidden"><defs dangerouslySetInnerHTML={defs} /></svg>
           <ReactFlow<ArchNode, ArchEdgeT>
             nodes={shown}
@@ -571,6 +600,8 @@ function CanvasArea({ model, palette, lens }: Props) {
             onNodeDragStart={onNodeDragStart}
             onNodeDragStop={onNodeDragStop}
             onConnect={onConnect}
+            onConnectStart={() => setConnecting(true)}
+            onConnectEnd={() => setConnecting(false)}
             isValidConnection={isValidConnection}
             onNodeContextMenu={(event, node) => openNodeMenu(event, node.id)}
             onEdgeContextMenu={(event, edge) => openEdgeMenu(event, edge.id)}
@@ -578,6 +609,7 @@ function CanvasArea({ model, palette, lens }: Props) {
             onPaneClick={() => { setMenu(null); select(null); }}
             onMove={(_, v) => setZoom(v.zoom)}
             connectionMode={ConnectionMode.Loose}
+            zIndexMode="manual"
             colorMode={resolved === "dark" ? "dark" : "light"}
             deleteKeyCode={null}
             panOnScroll

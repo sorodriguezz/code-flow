@@ -74,7 +74,7 @@ describe("the settings catalog", () => {
   it("returns the panes of a section by id", () => {
     expect(tabsFor("tasks").map((tab) => tab.id)).toContain("git");
     expect(tabsFor("general").map((tab) => tab.id)).toContain("language");
-    expect(tabsFor("voice").map((tab) => tab.id)).toEqual(["devices", "models", "dictation", "meetings", "reading", "codi"]);
+    expect(tabsFor("voice").map((tab) => tab.id)).toEqual(["devices", "models", "dictation", "meetings", "reading"]);
   });
 
   it("files every section under one of the nav's four groups, in the groups' order", () => {
@@ -188,7 +188,7 @@ describe("searchSettings", () => {
     expect(searchSettings("tts", t).some((hit) => hit.section.id === "voice" && hit.tab?.id === "reading")).toBe(true);
     expect(searchSettings("speaker", t).some((hit) => hit.section.id === "voice" && hit.tab?.id === "devices")).toBe(true);
     expect(searchSettings("whisper", t).some((hit) => hit.section.id === "voice" && hit.tab?.id === "models")).toBe(true);
-    expect(searchSettings("jarvis", t).some((hit) => hit.section.id === "voice" && hit.tab?.id === "codi")).toBe(true);
+    expect(searchSettings("jarvis", t).some((hit) => hit.section.id === "codi" && hit.tab?.id === "listen")).toBe(true);
     expect(searchSettings("commit", t).some((hit) => hit.section.id === "tasks" && hit.tab?.id === "git")).toBe(true);
   });
 });

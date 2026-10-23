@@ -17,6 +17,8 @@ use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
+pub mod need;
+pub mod on_demand;
 pub mod said;
 
 tokio::task_local! {
@@ -98,6 +100,9 @@ pub enum SourceKind {
     Diff,
     Memory,
     Knowledge,
+    /// Nothing of the project was attached, and why (`need::Withheld`): the label is the reason's
+    /// code, which the interface words.
+    Withheld,
 }
 
 impl ContextSource {

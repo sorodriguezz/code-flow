@@ -115,7 +115,7 @@ fn run(rx: Receiver<super::recorder::LiveAudio>, config: Config, stop: Arc<Atomi
     let mut recent_system: VecDeque<Line> = VecDeque::new();
     let abort = AtomicBool::new(false);
     let mut prompt_tail = [String::new(), String::new()];
-    let mut detect = |samples: &[f32]| vad.speech(samples, vad::params());
+    let mut detect = |samples: &[f32]| vad.speech(samples);
 
     let transcribe = |queued: &Queued, tail: &str| -> Result<String, String> {
         let prompt = format!("{} {}", config.vocabulary.trim(), tail).trim().to_string();

@@ -68,6 +68,20 @@ pub struct Impact {
     pub callers_total: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub change: Option<ContractChange>,
+    /// The reference repository the callers are in (`crate::refrepos`); `None` for this one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+}
+
+/// A reference repository the blast radius also looks into — another code base the team keeps, where
+/// a contract this PR changes may be used too.
+#[derive(Debug, Clone)]
+pub struct Reference {
+    pub name: String,
+    /// The clone's folder.
+    pub root: String,
+    /// What it is for, in the user's words.
+    pub purpose: String,
 }
 
 /// Whether a name is worth looking for at all.
@@ -108,6 +122,7 @@ pub fn blast_radius(
     files: &[ChangedFile],
     scope: &ScopeConfig,
     cfg: &GraphConfig,
+    references: &[Reference],
 ) -> Vec<Impact> {
     if !cfg.enabled || files.is_empty() {
         return Vec::new();
@@ -153,6 +168,13 @@ pub fn blast_radius(
         }
     }
 
+    // The contracts this PR changes, for the reference repositories: a use there of a symbol whose
+    // body alone changed breaks nothing, so only a changed signature or a removal is looked for.
+    let contracts: Vec<(String, String, ContractChange)> = owner
+        .iter()
+        .filter_map(|(symbol, slot)| slot.as_ref().and_then(|(home, change)| change.clone().map(|c| (symbol.clone(), home.clone(), c))))
+        .collect();
+
     let mut out: Vec<Impact> = Vec::new();
     for (symbol, slot) in owner {
         let Some((home, change)) = slot else { continue };
@@ -172,12 +194,53 @@ pub fn blast_radius(
         callers.sort_by(|a, b| b.confirmed.cmp(&a.confirmed).then_with(|| a.file.cmp(&b.file)));
         let total = callers.len();
         callers.truncate(cfg.max_callers);
-        out.push(Impact { symbol, file: home, callers, callers_total: total, change });
+        out.push(Impact { symbol, file: home, callers, callers_total: total, change, repo: None });
     }
+    out.extend(reference_impacts(&contracts, references, scope, cfg));
     out.sort_by(|a, b| {
-        b.change.is_some().cmp(&a.change.is_some()).then_with(|| b.callers_total.cmp(&a.callers_total)).then_with(|| a.symbol.cmp(&b.symbol))
+        b.change
+            .is_some()
+            .cmp(&a.change.is_some())
+            .then_with(|| a.repo.is_some().cmp(&b.repo.is_some()))
+            .then_with(|| b.callers_total.cmp(&a.callers_total))
+            .then_with(|| a.symbol.cmp(&b.symbol))
     });
     out.truncate(cfg.max_symbols);
+    out
+}
+
+/// Where the reference repositories use the contracts this PR changes. By name only — no import can
+/// resolve from one repository into another — on each one's own map (its clone's working tree, which
+/// is its branch: nothing edits a reference repository).
+fn reference_impacts(contracts: &[(String, String, ContractChange)], references: &[Reference], scope: &ScopeConfig, cfg: &GraphConfig) -> Vec<Impact> {
+    let mut out = Vec::new();
+    if contracts.is_empty() {
+        return out;
+    }
+    for reference in references {
+        let Ok((map, _)) = crate::codemap::snapshot(&reference.root) else { continue };
+        for (symbol, home, change) in contracts {
+            let mut callers: Vec<Caller> = map
+                .foreign_uses(symbol, usize::MAX)
+                .into_iter()
+                .filter(|usage| super::plan::in_scope(&usage.path, scope))
+                .map(|usage| Caller { file: usage.path, line: usage.line as usize, signature: usage.signature, confirmed: false })
+                .collect();
+            if callers.is_empty() {
+                continue;
+            }
+            let total = callers.len();
+            callers.truncate(cfg.max_callers);
+            out.push(Impact {
+                symbol: symbol.clone(),
+                file: home.clone(),
+                callers,
+                callers_total: total,
+                change: Some(change.clone()),
+                repo: Some(reference.name.clone()),
+            });
+        }
+    }
     out
 }
 
@@ -190,36 +253,63 @@ pub fn block(impacts: &[Impact]) -> Option<String> {
     if impacts.is_empty() {
         return None;
     }
-    let mut out = String::from(
-        "\nOtros lugares del repositorio que usan los símbolos que toca este PR, según el mapa del \
-         repositorio (los imports se resolvieron: un archivo que solo tiene otro símbolo con el mismo \
-         nombre ya quedó fuera). Es una PISTA: confirma abriendo el archivo antes de reportar nada. \
-         Úsalo sobre todo para cambios de contrato — si el cambio rompe a alguno de estos, ese es un \
-         hallazgo.\n\n",
-    );
-    for impact in impacts {
-        out.push_str(&format!("- `{}` ({}) — {} referencia(s):\n", impact.symbol, impact.file, impact.callers_total));
-        match &impact.change {
-            Some(ContractChange::Signature { before, after }) => {
-                out.push_str(&format!("  ⚠ Cambió la firma: `{before}` → `{after}`\n"));
-            }
-            Some(ContractChange::Removed) => {
-                out.push_str("  ⚠ Este PR lo elimina o lo renombra, y estos archivos fuera del PR todavía lo usan:\n");
-            }
-            None => {}
+    let (here, elsewhere): (Vec<&Impact>, Vec<&Impact>) = impacts.iter().partition(|impact| impact.repo.is_none());
+    let mut out = String::new();
+    if !here.is_empty() {
+        out.push_str(
+            "\nOtros lugares del repositorio que usan los símbolos que toca este PR, según el mapa del \
+             repositorio (los imports se resolvieron: un archivo que solo tiene otro símbolo con el mismo \
+             nombre ya quedó fuera). Es una PISTA: confirma abriendo el archivo antes de reportar nada. \
+             Úsalo sobre todo para cambios de contrato — si el cambio rompe a alguno de estos, ese es un \
+             hallazgo.\n\n",
+        );
+        for impact in here {
+            out.push_str(&format!("- `{}` ({}) — {} referencia(s):\n", impact.symbol, impact.file, impact.callers_total));
+            push_change(&mut out, impact, "estos archivos fuera del PR todavía lo usan");
+            push_callers(&mut out, impact, true);
         }
-        for caller in &impact.callers {
-            let by_name = if caller.confirmed { "" } else { " (solo por nombre)" };
-            match caller.signature.is_empty() {
-                true => out.push_str(&format!("  - `{}:{}`{by_name}\n", caller.file, caller.line)),
-                false => out.push_str(&format!("  - `{}:{}` — {}{by_name}\n", caller.file, caller.line, caller.signature)),
-            }
-        }
-        if impact.callers_total > impact.callers.len() {
-            out.push_str(&format!("  - (+{} más)\n", impact.callers_total - impact.callers.len()));
+    }
+    if !elsewhere.is_empty() {
+        out.push_str(
+            "\nUsos en los repositorios de referencia (otros repositorios que el equipo mantiene como referencia) \
+             de los símbolos cuyo contrato cambia este PR. Encontrados SOLO POR NOMBRE — entre repositorios no se \
+             resuelven imports —: es una PISTA para revisar compatibilidad, no prueba de que algo se rompa. Si \
+             tienes las herramientas, confírmalo con read_reference_file antes de reportar.\n\n",
+        );
+        for impact in elsewhere {
+            let repo = impact.repo.as_deref().unwrap_or_default();
+            out.push_str(&format!("- `{}` ({}) — {} uso(s) en «{repo}»:\n", impact.symbol, impact.file, impact.callers_total));
+            push_change(&mut out, impact, "estos archivos de ese repositorio todavía lo nombran");
+            push_callers(&mut out, impact, false);
         }
     }
     Some(out)
+}
+
+fn push_change(out: &mut String, impact: &Impact, still_used: &str) {
+    match &impact.change {
+        Some(ContractChange::Signature { before, after }) => {
+            out.push_str(&format!("  ⚠ Cambió la firma: `{before}` → `{after}`\n"));
+        }
+        Some(ContractChange::Removed) => {
+            out.push_str(&format!("  ⚠ Este PR lo elimina o lo renombra, y {still_used}:\n"));
+        }
+        None => {}
+    }
+}
+
+/// `mark_by_name`: say which uses were found by name only — pointless where every one was.
+fn push_callers(out: &mut String, impact: &Impact, mark_by_name: bool) {
+    for caller in &impact.callers {
+        let by_name = if mark_by_name && !caller.confirmed { " (solo por nombre)" } else { "" };
+        match caller.signature.is_empty() {
+            true => out.push_str(&format!("  - `{}:{}`{by_name}\n", caller.file, caller.line)),
+            false => out.push_str(&format!("  - `{}:{}` — {}{by_name}\n", caller.file, caller.line, caller.signature)),
+        }
+    }
+    if impact.callers_total > impact.callers.len() {
+        out.push_str(&format!("  - (+{} más)\n", impact.callers_total - impact.callers.len()));
+    }
 }
 
 #[cfg(test)]
@@ -239,7 +329,7 @@ mod tests {
     #[test]
     fn a_disabled_graph_costs_nothing() {
         let cfg = GraphConfig { enabled: false, ..Default::default() };
-        let impacts = blast_radius("/nonexistent", "main", &[], &ScopeConfig::default(), &cfg);
+        let impacts = blast_radius("/nonexistent", "main", &[], &ScopeConfig::default(), &cfg, &[]);
         assert!(impacts.is_empty());
     }
 
@@ -247,7 +337,7 @@ mod tests {
     #[test]
     fn an_unreadable_repository_yields_no_hint_rather_than_an_error() {
         let file = changed("src/a.ts", "export function alpha() {}\n", &[1]);
-        let impacts = blast_radius("/definitely/not/a/repo", "main", &[file], &ScopeConfig::default(), &GraphConfig::default());
+        let impacts = blast_radius("/definitely/not/a/repo", "main", &[file], &ScopeConfig::default(), &GraphConfig::default(), &[]);
         assert!(impacts.is_empty());
     }
 
@@ -288,7 +378,7 @@ mod tests {
         let dir = repo();
         let head = "export function applyDiscount(price: number, percent: number) {\n  return price - price * percent / 100;\n}\n\nexport function formatPrice(p: number) {\n  return `$${p}`;\n}\n";
         let file = changed("src/pricing.ts", head, &[1, 2]);
-        let impacts = blast_radius(dir.to_str().unwrap(), "HEAD", &[file], &ScopeConfig::default(), &GraphConfig::default());
+        let impacts = blast_radius(dir.to_str().unwrap(), "HEAD", &[file], &ScopeConfig::default(), &GraphConfig::default(), &[]);
         assert_eq!(impacts.len(), 1, "{impacts:?}");
         let impact = &impacts[0];
         assert_eq!(impact.symbol, "applyDiscount");
@@ -299,13 +389,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A reference repository is looked into for the contracts the PR changes — and only those: a
+    /// symbol whose body alone changed breaks no consumer, wherever it lives.
+    #[test]
+    fn a_changed_contract_is_looked_for_in_the_reference_repositories() {
+        let dir = repo();
+        let consumer = std::env::temp_dir().join(format!("codeflow-review-ref-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(consumer.join("src")).unwrap();
+        std::fs::write(consumer.join("src/checkout.ts"), "import { applyDiscount } from '@acme/pricing';\nexport function pay() {\n  return applyDiscount(10);\n}\n").unwrap();
+        std::fs::write(consumer.join("src/view.ts"), "import { formatPrice } from '@acme/pricing';\nexport const v = formatPrice(1);\n").unwrap();
+        // The signature of applyDiscount changes; formatPrice is untouched.
+        let head = "export function applyDiscount(price: number, percent: number) {\n  return price;\n}\n\nexport function formatPrice(p: number) {\n  return `$${p}`;\n}\n";
+        let file = changed("src/pricing.ts", head, &[1]);
+        let references = [Reference { name: "tienda".into(), root: consumer.to_string_lossy().to_string(), purpose: String::new() }];
+        let impacts = blast_radius(dir.to_str().unwrap(), "HEAD", &[file], &ScopeConfig::default(), &GraphConfig::default(), &references);
+        let elsewhere: Vec<&Impact> = impacts.iter().filter(|i| i.repo.is_some()).collect();
+        assert_eq!(elsewhere.len(), 1, "{impacts:?}");
+        assert_eq!((elsewhere[0].symbol.as_str(), elsewhere[0].repo.as_deref()), ("applyDiscount", Some("tienda")));
+        assert_eq!(elsewhere[0].callers[0].file, "src/checkout.ts");
+        assert!(!elsewhere[0].callers[0].confirmed, "across repositories it is by name only");
+        assert!(impacts.iter().position(|i| i.repo.is_none()) < impacts.iter().position(|i| i.repo.is_some()), "this repository's own callers first");
+        let text = block(&impacts).unwrap();
+        assert!(text.contains("uso(s) en «tienda»") && text.contains("SOLO POR NOMBRE"), "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&consumer);
+    }
+
     #[test]
     fn a_removed_symbol_still_used_outside_the_pr_is_reported() {
         let dir = repo();
         let head = "export function applyDiscount(price: number) {\n  return price;\n}\n";
         let mut file = changed("src/pricing.ts", head, &[]);
         file.deletions = 4;
-        let impacts = blast_radius(dir.to_str().unwrap(), "HEAD", &[file], &ScopeConfig::default(), &GraphConfig::default());
+        let impacts = blast_radius(dir.to_str().unwrap(), "HEAD", &[file], &ScopeConfig::default(), &GraphConfig::default(), &[]);
         let removed = impacts.iter().find(|i| i.symbol == "formatPrice").expect("formatPrice was removed");
         assert_eq!(removed.change, Some(ContractChange::Removed));
         assert_eq!(removed.callers[0].file, "src/cart.ts");
@@ -333,6 +449,7 @@ mod tests {
             ],
             callers_total: 12,
             change: Some(ContractChange::Signature { before: "guardarPago(p)".into(), after: "guardarPago(p, opts)".into() }),
+            repo: None,
         }];
         let block = block(&impacts).expect("impacts produce a block");
         assert!(block.contains("guardarPago"));

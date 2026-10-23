@@ -517,6 +517,19 @@ windows = { version = "0.61", features = [
   "Win32_System_WinRT",
   "Foundation",
   "Security_Credentials_UI",
+  # Codi reading another app's window (`desktop::read`): UI Automation for its text, and when there
+  # is none, `PrintWindow` into memory and the system's OCR — bindings only.
+  "Win32_Foundation",
+  "Win32_UI_Accessibility",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_Graphics_Gdi",
+  "Win32_Storage_Xps",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
+  "Graphics_Imaging",
+  "Media_Ocr",
+  "Security_Cryptography",
+  "Storage_Streams",
 ] }
 windows-future = "0.2"
 # `GetProcessMemoryInfo` with `PROCESS_MEMORY_COUNTERS_EX2`, so the panel behind the status bar bills
@@ -578,6 +591,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 # microphone question, asked by «Dictar» before it opens the input (`dictation::permission`).
 # Already in the tree at this version (wry is built on it), so this compiles nothing new.
 block2 = "0.6"
+# Codi reading another app's window (`desktop::read`): the window list, the Accessibility tree and
+# their CFString/CFArray values. Already in the tree at this version (tao and cpal are built on it),
+# so naming it compiles nothing new.
+core-foundation = "0.10"
 # The universal-apple-darwin release build cross-compiles the x86_64 slice on an
 # aarch64 GitHub runner; git2's default OpenSSL backend then fails to find a
 # matching OpenSSL via pkg-config for the non-host target ("could not find

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { getSetting, setSetting } from "../lib/tauri/commands";
+import { codiHush, type CodiNarration } from "../lib/tauri/codiCommands";
 import { TOURS, type TourId, type TourStep } from "../lib/tour/steps";
 import { applyStage, captureAppState, restoreAppState, type AppSnapshot } from "../lib/tour/stage";
 
@@ -57,6 +58,18 @@ interface TourState {
   /** Where the app was before the tour started rearranging it. */
   snapshot: AppSnapshot | null;
   /**
+   * Codi says each step aloud and moves on by itself when it has said it (user, 2026-10-22: «que
+   * codi mientras vaya explicando el tour vaya pasando»). Asked for by Codi's `tour.start`, or by
+   * the card's speaker button.
+   */
+  narrated: boolean;
+  /** Narration is on but holds on this step: paused by the user, or talked over. */
+  narrationPaused: boolean;
+  /** Bumped to have the step said again (repeat, resume, arriving at it). */
+  narrationRound: number;
+  /** Why narration stopped by itself: Codi's sound is off, or its voice failed. */
+  narrationNote: "silent" | "failed" | null;
+  /**
    * Reads the flag, and — unless told otherwise — arms the post-install opening.
    *
    * `autoOpen: false` reads the flag and arms nothing. For the one case that outranks the tour: the
@@ -72,13 +85,21 @@ interface TourState {
   /** `firstRun` is set only by the post-install opening in `init`; every button that opens a
    * tour by hand leaves it false, and therefore ends without the confetti. `tour` defaults to the
    * main one, so the two callers that only ever want that one don't have to name it. */
-  start: (options?: { firstRun?: boolean; tour?: TourId }) => void;
+  start: (options?: { firstRun?: boolean; tour?: TourId; narrate?: boolean }) => void;
   next: () => void;
   back: () => void;
   goTo: (index: number) => void;
   /** Leaves without the confetti, and without walking the rest. */
   skip: () => void;
   endCelebration: () => void;
+  /** Narration on or off, from this step. Off stops the voice. */
+  setNarrated: (on: boolean) => void;
+  /** Holds on this step and stops the voice. */
+  pauseNarration: () => void;
+  /** Says this step again and goes on from it. */
+  resumeNarration: () => void;
+  /** How a step's narration ended, when it did not end by being said whole. */
+  narrationEnded: (how: Exclude<CodiNarration, "done">) => void;
 }
 
 export function tourLength(tourId: TourId): number {
@@ -97,6 +118,11 @@ function rememberSeen(): void {
   void setSetting(SEEN_KEY, "1").catch(() => {});
 }
 
+/** Stops what Codi is saying — a narrated tour that ends or pauses does not talk on. */
+function hush(): void {
+  void codiHush().catch(() => {});
+}
+
 export const useTourStore = create<TourState>((set, get) => ({
   active: false,
   tourId: "main",
@@ -105,6 +131,10 @@ export const useTourStore = create<TourState>((set, get) => ({
   firstRun: false,
   seen: null,
   snapshot: null,
+  narrated: false,
+  narrationPaused: false,
+  narrationRound: 0,
+  narrationNote: null,
 
   init: async (options) => {
     const seen = (await getSetting(SEEN_KEY).catch(() => null)) === "1";
@@ -142,14 +172,20 @@ export const useTourStore = create<TourState>((set, get) => ({
       celebrating: false,
       firstRun: options?.firstRun ?? false,
       snapshot,
+      narrated: options?.narrate ?? false,
+      narrationPaused: false,
+      narrationRound: get().narrationRound + 1,
+      narrationNote: null,
     });
   },
 
+  // Arriving at a step — by the buttons, the keys or Codi — is wanting to hear it: a paused
+  // narration takes up again there.
   goTo: (index) => {
     const steps = TOURS[get().tourId];
     const clamped = Math.min(Math.max(index, 0), steps.length - 1);
     applyStage(steps[clamped]?.stage);
-    set({ index: clamped });
+    set({ index: clamped, narrationPaused: false, narrationRound: get().narrationRound + 1 });
   },
 
   next: () => {
@@ -162,11 +198,14 @@ export const useTourStore = create<TourState>((set, get) => ({
     // that one — celebrate over it.
     if (snapshot) restoreAppState(snapshot);
     if (tourId === "main") rememberSeen();
+    if (get().narrated) hush();
     set({
       active: false,
       celebrating: firstRun,
       firstRun: false,
       snapshot: null,
+      narrated: false,
+      narrationPaused: false,
       ...(tourId === "main" ? { seen: true } : {}),
     });
   },
@@ -182,14 +221,36 @@ export const useTourStore = create<TourState>((set, get) => ({
     // Leaving an app tour says nothing about whether the app has been introduced, so it must not
     // retire the first-run opening of the main one.
     if (tourId === "main") rememberSeen();
+    if (get().narrated) hush();
     set({
       active: false,
       celebrating: false,
       firstRun: false,
       snapshot: null,
+      narrated: false,
+      narrationPaused: false,
       ...(tourId === "main" ? { seen: true } : {}),
     });
   },
 
   endCelebration: () => set({ celebrating: false }),
+
+  setNarrated: (on) => {
+    if (!on && get().narrated) hush();
+    set({ narrated: on, narrationPaused: false, narrationNote: null, narrationRound: get().narrationRound + 1 });
+  },
+
+  pauseNarration: () => {
+    if (!get().narrated || get().narrationPaused) return;
+    hush();
+    set({ narrationPaused: true });
+  },
+
+  resumeNarration: () => set({ narrated: true, narrationPaused: false, narrationNote: null, narrationRound: get().narrationRound + 1 }),
+
+  // Not hushed: what stopped it is already talking — the user's barge-in, or Codi answering them.
+  narrationEnded: (how) => {
+    if (how === "silent") set({ narrated: false, narrationPaused: false, narrationNote: "silent" });
+    else set({ narrationPaused: true, narrationNote: how === "failed" ? "failed" : null });
+  },
 }));

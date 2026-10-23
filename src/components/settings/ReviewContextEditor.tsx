@@ -6,6 +6,7 @@ import type { ReviewContext } from "../../types/domain";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { Checkbox } from "../common/Checkbox";
+import { Segmented } from "../common/Segmented";
 import { buttonClass } from "../common/Button";
 import { fieldClass } from "../common/recipes";
 
@@ -52,7 +53,7 @@ export function ReviewContextEditor() {
   const update = async (ctx: ReviewContext, patch: Partial<ReviewContext>) => {
     const next = { ...ctx, ...patch };
     setContexts((prev) => prev.map((c) => (c.id === ctx.id ? next : c)));
-    await upsertReviewContext(ctx.id, workspaceId, next.name, next.content, next.enabled);
+    await upsertReviewContext(ctx.id, workspaceId, next.name, next.content, next.enabled, next.on_demand ?? false);
   };
 
   const remove = async (ctx: ReviewContext) => {
@@ -122,6 +123,24 @@ export function ReviewContextEditor() {
                 >
                   <Trash2 size={14} />
                 </button>
+              </div>
+              {/* How the chats carry it: whole in every session, or listed for the model to read
+                  when a question needs it (`context::on_demand`). Reviews always read it whole. */}
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <span className="text-[12px] text-[var(--cf-text-muted)]">{t("settings.contextInChats")}</span>
+                <Segmented
+                  size="sm"
+                  layoutId={`review-context-chat-${selected.id}`}
+                  value={selected.on_demand ? "onDemand" : "always"}
+                  onChange={(mode) => update(selected, { on_demand: mode === "onDemand" })}
+                  options={[
+                    { value: "always", label: t("settings.contextAlways") },
+                    { value: "onDemand", label: t("settings.contextOnDemand") },
+                  ]}
+                />
+                {selected.on_demand && (
+                  <span className="basis-full text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("settings.contextOnDemandHint")}</span>
+                )}
               </div>
               <textarea
                 value={selected.content}

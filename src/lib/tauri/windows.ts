@@ -57,6 +57,9 @@ export const restoreSatellites = () => invoke<number>("restore_satellites");
  * `windows.rs` for the rest of what restoring actually involves.
  */
 export const showMainWindow = () => invoke<void>("show_main_window");
+/** A new question Codi asked the ask box for (`quick.open`), once — `null` when it asked for
+ *  nothing; `text` is the question's words when it was told them. */
+export const quickAskTakeDraft = () => invoke<{ text: string | null } | null>("quick_ask_take_draft");
 
 /**
  * Puts the native backdrop of the see-through window on or off — for the window that calls it, and

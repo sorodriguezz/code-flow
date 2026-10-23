@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { foldName, matchByName } from "./fuzzy";
+import { closestByName, foldName, matchByName } from "./fuzzy";
 
 /**
  * A spoken name against the names the sidebar shows. The rule that matters most is the last one:
@@ -61,5 +61,18 @@ describe("matchByName", () => {
     expect(match("")).toEqual({ kind: "none" });
     // Two letters off a three-letter name is a different word, not a slip.
     expect(match("wiki", ["web"])).toEqual({ kind: "none" });
+  });
+});
+
+describe("closestByName", () => {
+  const repos = ["api-pagos", "api-usuarios", "web", "facturacion"];
+  it("suggests the one name a slip most likely meant", () => {
+    expect(closestByName(repos, "api pagoz extra", (n) => n)).toBe(null);
+    expect(closestByName(repos, "facturasion", (n) => n)).toBe("facturacion");
+    expect(closestByName(repos, "apipagas", (n) => n)).toBe("api-pagos");
+  });
+  it("suggests nothing when two are as near, or the query is too short", () => {
+    expect(closestByName(["api-uno", "api-dos"], "api-tres", (n) => n)).toBe(null);
+    expect(closestByName(repos, "we", (n) => n)).toBe(null);
   });
 });

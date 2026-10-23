@@ -131,5 +131,8 @@ export const AI_TASKS: AiTaskDef[] = [
   // goes to this row's engine, with the app's UI actions as its only tools. Like `chat_title` it runs
   // on the engine's fast model unless this row names another — the user waits with the mic open.
   { key: "codi", labelKey: "task.codi", hintKey: "task.codiHint", area: "other", modelForKey: "task.codiModelFor" },
+  // Codi's research (`AiTask::CodiResearch`): questions about a repository's code, read from inside it
+  // in the background. Unset, the default engine's base model — not the fast one Codi's orders use.
+  { key: "codi_research", labelKey: "task.codiResearch", hintKey: "task.codiResearchHint", area: "other", modelForKey: "task.codiResearchModelFor" },
 ];
 

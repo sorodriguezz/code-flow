@@ -1,4 +1,5 @@
 import { useAgentsStore } from "../../state/agentsStore";
+import { useArchitectureViewStore, type Lens } from "../../state/architectureViewStore";
 import { useBenchStore } from "../../state/benchStore";
 import { useWorktreeViewStore, type ConsoleLayout } from "../../state/worktreeViewStore";
 import type { ApiSettingsTab } from "../../state/apiModalStore";
@@ -89,6 +90,15 @@ export interface TourStage {
   flowsExecutions?: boolean;
   /** The Flujos Programación pane. Default `false`. */
   flowsSchedule?: boolean;
+  /**
+   * Arquitectura's lens, for the steps about the lenses and about Decisiones. Applied only on the
+   * Arquitectura view, defaulting to `diagram` there — so a step that does not name one puts the
+   * Diagram lens back. Written straight onto the view store: `setLens` would persist it.
+   */
+  archLens?: Lens;
+  /** Arquitectura's side panel open (the lens's panel: the inspector on the Diagram lens). Default
+   *  `false` on that view, like the other panels. Only with a document open does it show. */
+  archPanel?: boolean;
   /** AI panel docked open. Default `false`. */
   ai?: boolean;
   /** The dock open on its terminal panel. Default `false`. */
@@ -131,6 +141,7 @@ export interface AppSnapshot {
   flowsPalette: { at: [number, number] | null } | null;
   flowsInspector: string | null;
   flowsPane: FlowPane;
+  arch: { lens: Lens; panelOpen: boolean; panelCollapsed: boolean };
 }
 
 /**
@@ -169,6 +180,7 @@ export function captureAppState(): AppSnapshot {
     flowsPalette: useFlowsStore.getState().palette,
     flowsInspector: useFlowRunsStore.getState().inspector,
     flowsPane: useFlowRunsStore.getState().pane,
+    arch: (({ lens, panelOpen, panelCollapsed }) => ({ lens, panelOpen, panelCollapsed }))(useArchitectureViewStore.getState()),
   };
 }
 
@@ -191,6 +203,7 @@ export function restoreAppState(snapshot: AppSnapshot): void {
   useDiagramsStore.setState({ aiOpen: snapshot.diagramsAiOpen });
   useFlowsStore.setState({ palette: snapshot.flowsPalette });
   useFlowRunsStore.setState({ inspector: snapshot.flowsInspector, pane: snapshot.flowsPane });
+  useArchitectureViewStore.setState(snapshot.arch);
 }
 
 /** The node a tour step opens the inspector on: the first that is not a trigger, else the first. */
@@ -243,4 +256,8 @@ export function applyStage(stage: TourStage | undefined): void {
     inspector: stage?.flowsInspector ? tourInspectorNode() : null,
     pane: stage?.flowsExecutions ? "executions" : stage?.flowsSchedule ? "schedule" : "editor",
   });
+  // Only on its own view: another tour's step must not change which lens Arquitectura opens on.
+  if (stage?.view === "architecture") {
+    useArchitectureViewStore.setState({ lens: stage.archLens ?? "diagram", panelOpen: stage.archPanel ?? false, panelCollapsed: false });
+  }
 }

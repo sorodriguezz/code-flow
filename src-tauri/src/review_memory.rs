@@ -19,6 +19,12 @@ pub struct MemoryFinding {
     pub id: String,
     /// `critical` | `warning` | `info`, derived from the finding's emoji (same buckets the UI uses).
     pub severity: String,
+    /// The severity itself — `Blocker` · `Crítico` · `Mayor` · `Menor` · `Info` — which the bucket
+    /// above cannot give back: `critical` is both a Blocker and a Crítico, and a gate that blocks on
+    /// Blocker alone must not mistake one for the other when a carried finding is rebuilt from here.
+    /// Empty on runs recorded before this was kept.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub severidad: String,
     pub tipo: String,
     pub categoria: String,
     pub subtitulo: String,
@@ -164,6 +170,64 @@ pub struct ReviewMeta {
     /// commit run instead of answering "nothing changed".
     #[serde(default)]
     pub incomplete: bool,
+    /// What the run spent, summed over its passes. Absent on runs recorded before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<RunCost>,
+}
+
+/// What one review spent: every pass's tokens summed, and the price when the engines said one.
+///
+/// The global meter (`ai_usage`) already records each pass, but by engine and task — "review-pr" —
+/// with nothing to say which review it was. This is that same usage, kept with the run it paid for.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct RunCost {
+    pub passes: usize,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    /// The sum of the prices the engines reported; `None` when not one of the passes reported a
+    /// price — an engine that never prints one is not free.
+    pub cost_usd: Option<f64>,
+    /// Passes that reported no usage at all (some CLIs do not): the totals above leave them out.
+    pub unreported: usize,
+    pub duration_ms: u64,
+}
+
+impl RunCost {
+    /// One more pass, with whatever it reported.
+    pub fn add(&mut self, usage: Option<&crate::ai::AiUsage>) {
+        self.passes += 1;
+        let Some(usage) = usage else {
+            self.unreported += 1;
+            return;
+        };
+        self.input_tokens += usage.input_tokens;
+        self.output_tokens += usage.output_tokens;
+        self.cache_read_tokens += usage.cache_read_tokens;
+        self.cache_write_tokens += usage.cache_write_tokens;
+        if let Some(cost) = usage.cost_usd {
+            self.cost_usd = Some(self.cost_usd.unwrap_or(0.0) + cost);
+        }
+    }
+
+    /// The one line the run's log ends with.
+    pub fn line(&self) -> String {
+        let tokens = |n: i64| if n >= 10_000 { format!("{}k", n / 1_000) } else { n.to_string() };
+        let mut out = format!(
+            "{} pasada(s) · {} tokens de entrada · {} de salida",
+            self.passes,
+            tokens(self.input_tokens + self.cache_read_tokens + self.cache_write_tokens),
+            tokens(self.output_tokens)
+        );
+        if let Some(cost) = self.cost_usd {
+            out.push_str(&format!(" · ≈ US${cost:.2}"));
+        }
+        if self.unreported > 0 {
+            out.push_str(&format!(" · {} sin informar", self.unreported));
+        }
+        out
+    }
 }
 
 /// The *kind* of defect a finding is, across runs: file + category, falling back to the subtitle
@@ -830,10 +894,33 @@ mod tests {
         }
     }
 
+    /// A review's cost is every pass summed; a price only when an engine gave one, and the passes
+    /// that said nothing counted apart rather than as free.
+    #[test]
+    fn a_review_cost_sums_its_passes_and_never_invents_a_price() {
+        let usage = |input: i64, output: i64, cost: Option<f64>| crate::ai::AiUsage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cost_usd: cost,
+        };
+        let mut cost = RunCost::default();
+        cost.add(Some(&usage(40_000, 1_500, None)));
+        assert_eq!(cost.cost_usd, None, "no engine said a price yet");
+        cost.add(Some(&usage(12_000, 800, Some(0.05))));
+        cost.add(Some(&usage(3_000, 200, Some(0.01))));
+        cost.add(None);
+        assert_eq!((cost.passes, cost.input_tokens, cost.output_tokens, cost.unreported), (4, 55_000, 2_500, 1));
+        assert!((cost.cost_usd.unwrap() - 0.06).abs() < 1e-9);
+        assert_eq!(cost.line(), "4 pasada(s) · 55k tokens de entrada · 2500 de salida · ≈ US$0.06 · 1 sin informar");
+    }
+
     fn finding(id: &str, estado: &str, categoria: &str) -> MemoryFinding {
         MemoryFinding {
             id: id.into(),
             severity: "critical".into(),
+            severidad: String::new(),
             tipo: "BUG".into(),
             categoria: categoria.into(),
             subtitulo: "algo".into(),

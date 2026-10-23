@@ -1937,6 +1937,11 @@ pub struct PrCommentThread {
     pub start_line: Option<i64>,
     pub end_line: Option<i64>,
     pub comments: Vec<PrThreadComment>,
+    /// Someone marked the conversation resolved on the host — a GitHub review thread's "Resolve
+    /// conversation", a resolved GitLab discussion. Azure DevOps and Bitbucket never list a resolved
+    /// thread at all, so for them this is always `false`. A review reads only the ones still open: a
+    /// settled conversation handed to the model as pending is one it answers again.
+    pub resolved: bool,
 }
 
 #[derive(Deserialize)]
@@ -2024,7 +2029,7 @@ pub async fn list_pr_comment_threads(
                 ),
                 None => (None, None, None),
             };
-            Some(PrCommentThread { id: t.id, file_path, start_line, end_line, comments })
+            Some(PrCommentThread { id: t.id, file_path, start_line, end_line, comments, resolved: false })
         })
         .collect())
 }

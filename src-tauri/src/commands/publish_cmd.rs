@@ -257,7 +257,7 @@ pub async fn publish_create(provider: String, account: String, owner: String, na
 // --------------------------------------------------------------------------------------- push
 
 /// The host part git matches the header against, and the Basic credential, for an account.
-fn push_credential(provider: &str, account: &str) -> Result<(String, String), String> {
+pub(crate) fn push_credential(provider: &str, account: &str) -> Result<(String, String), String> {
     let basic = |user: &str, secret: &str| format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{user}:{secret}")));
     Ok(match provider {
         "github" => (format!("https://{account}/"), basic("x-access-token", &github_token(account)?)),

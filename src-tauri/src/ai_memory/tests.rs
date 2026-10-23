@@ -102,6 +102,25 @@ fn only_approved_memories_of_the_right_scope_reach_a_model() {
     assert!(workspace_only.iter().all(|m| m.scope != "project"), "{workspace_only:?}");
 }
 
+/// A chat turn hands a memory over unasked only when it answers the question; a general question
+/// gets the standing rules alone.
+#[test]
+fn the_bar_decides_which_matches_go_with_a_question_and_standing_rules_always_do() {
+    let conn = db();
+    create(&conn, new(Scope::Project, Kind::Decision, "Base de datos", "Usamos SQLite, no PostgreSQL.", true)).unwrap();
+    create(&conn, new(Scope::Project, Kind::Fact, "Despliegue", "La base de staging se reinicia los lunes.", true)).unwrap();
+    create(&conn, new(Scope::Project, Kind::Convention, "Usar pnpm", "Nunca npm.", true)).unwrap();
+    let titles = |bar: Bar| {
+        let found = relevant_with(&conn, Some("w1"), Some("p1"), "¿qué base de datos usamos para los pedidos?", false, 2_000, bar).unwrap();
+        let mut titles: Vec<String> = found.into_iter().map(|m| m.title).collect();
+        titles.sort();
+        titles
+    };
+    assert_eq!(titles(Bar::Any), vec!["Base de datos", "Despliegue", "Usar pnpm"], "one shared word was enough");
+    assert_eq!(titles(Bar::Strong), vec!["Base de datos", "Usar pnpm"], "«base» alone does not answer the question");
+    assert_eq!(titles(Bar::Standing), vec!["Usar pnpm"]);
+}
+
 #[test]
 fn local_only_memories_stay_away_from_cloud_engines() {
     let conn = db();

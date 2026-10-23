@@ -63,12 +63,15 @@ pub struct KnowledgeOverview {
 }
 
 fn workspace_scope(conn: &rusqlite::Connection, workspace_id: &str) -> Result<Scope, String> {
-    let repos = crate::db::queries::list_projects(conn, workspace_id)
+    let mut repos: Vec<(String, String, PathBuf)> = crate::db::queries::list_projects(conn, workspace_id)
         .map_err(|e| e.to_string())?
         .into_iter()
         .filter(|p| !p.local_path.is_empty())
         .map(|p| (p.id, p.name, PathBuf::from(p.local_path)))
         .collect();
+    // The reference repositories switched on for the workspace — the local view, so the ones kept for
+    // the local model are listed too.
+    repos.extend(crate::refrepos::scope_entries(conn, workspace_id, false));
     let folders = knowledge::collections(conn, Some(workspace_id))
         .map_err(|e| e.to_string())?
         .into_iter()

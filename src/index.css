@@ -4080,6 +4080,17 @@ body.cf-dragging * {
   background: var(--cf-glass-solo-fill);
 }
 
+/* Codi's window is rounded (`windows::CODI_CORNER_RADIUS`, the same 16px): the page's sheet carries
+   the curve, and nothing past it is painted — the body would fill the corners back in square. */
+.cf-codi-shell {
+  border-radius: 16px;
+  border: 1px solid var(--cf-border);
+}
+html:has(.cf-codi-shell),
+html:has(.cf-codi-shell) body {
+  background: transparent;
+}
+
 /* Whatever floats without a floating panel's anatomy (below): every solid tone back. Mostly the
    `fixed` scrims dialogs are centred in, whose panel then sets its own. */
 :root[data-glass] :is(.cf-frame, .cf-sheet, .cf-glass-solo) :is(.fixed, [role="dialog"], [role="menu"], [aria-modal="true"]) {
@@ -5025,9 +5036,20 @@ svg.\-rotate-180 {
   opacity: 0;
   transition: opacity 0.12s ease;
 }
+/* A dot is 9px to look at and ~23px to hit: a press just beside it used to land on the card and start
+ * a drag instead of a line (user report, 2026-10-22: «no se puede tomar el punto»). The ring is the
+ * handle's own box, so React Flow takes a press on it as a press on the dot. */
+.arch-flow .arch-handle::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border-radius: 9999px;
+}
+/* While a line is being drawn every card shows its dots (`is-connecting`, set by the canvas), so the
+ * far end is something to aim at. */
 .arch-flow .react-flow__node-card:hover .arch-handle,
 .arch-flow .react-flow__node-card.selected .arch-handle,
-.arch-flow .react-flow__pane.connecting ~ * .arch-handle,
+.arch-flow.is-connecting .arch-handle,
 .arch-flow .connectingfrom,
 .arch-flow .connectingto {
   opacity: 1;

@@ -57,6 +57,20 @@ describe("validateParams", () => {
     expect(validateParams(schema, { app: "api requests" })).toEqual({ ok: true, params: { app: "api:requests" } });
   });
 
+  it("takes a value by the name a person gives it, when one value answers to it", () => {
+    // «abre la aplicación de base de datos»: a model wrote what it heard instead of the key.
+    const names = { app: { "api:requests": { es: ["peticiones", "cliente api"], en: ["requests"] }, notes: { es: ["notas"], en: ["notes"] } } };
+    expect(validateParams(schema, { app: "requests" })).toEqual({ ok: true, params: { app: "api:requests" } });
+    expect(validateParams(schema, { app: "Cliente API" }, names)).toEqual({ ok: true, params: { app: "api:requests" } });
+    expect(validateParams(schema, { app: "notas" }, names)).toEqual({ ok: true, params: { app: "notes" } });
+    expect(validateParams(schema, { app: "calendario" }, names).ok).toBe(false);
+    // A part, the words, a slipped letter: still one value.
+    expect(validateParams(schema, { app: "la app de notas" }, names)).toEqual({ ok: true, params: { app: "notes" } });
+    expect(validateParams(schema, { app: "peticion" }, names)).toEqual({ ok: true, params: { app: "api:requests" } });
+    expect(validateParams(schema, { app: "flujos" }, { app: { flows: { es: ["flujos"], en: ["flows"] } } })).toEqual({ ok: true, params: { app: "flows" } });
+    expect(validateParams(schema, { app: "flowz" })).toEqual({ ok: true, params: { app: "flows" } });
+  });
+
   it("refuses a value outside the enum, listing the enum", () => {
     const checked = validateParams(schema, { app: "calendar" });
     expect(checked).toMatchObject({ ok: false });
@@ -114,6 +128,24 @@ describe("runRequest", () => {
     expect(ran).toBe(false);
     expect(answer?.ok).toBe(false);
     expect(answer?.error).toMatch(/^app\.open: "app" must be one of/);
+  });
+
+  it("asks about a value it cannot place instead of only failing", async () => {
+    const names = { app: { "api:requests": { es: ["peticiones"], en: ["requests"] }, notes: { es: ["notas"], en: ["notes"] }, flows: { es: ["flujos"], en: ["flows"] } } };
+    registerAction({ ...action("app.open", async () => ({}), schema as Record<string, unknown>), vocabulary: names });
+    // One nearest: «¿quisiste decir…?», and a yes runs it with that value.
+    const near = (await runRequest({ id: "n", window: "main", action: "app.open", params: { app: "notitas" } }, "main")).answer;
+    expect(near?.ok).toBe(false);
+    expect(near?.say).toContain("notitas");
+    expect(near?.offer).toMatchObject({ action: "app.open", params: { app: "notes" } });
+    // Several answering: which one, nothing run on a yes.
+    const both = (await runRequest({ id: "b", window: "main", action: "app.open", params: { app: "s" } }, "main")).answer;
+    expect(both?.ok).toBe(false);
+    expect(both?.offer).toBeUndefined();
+    // Nothing near: the error alone, for the model's next try.
+    const none = (await runRequest({ id: "x", window: "main", action: "app.open", params: { app: "calendario" } }, "main")).answer;
+    expect(none).toMatchObject({ ok: false });
+    expect(none?.say).toBeUndefined();
   });
 
   it("hands the handler its checked params and returns result and say", async () => {

@@ -1289,6 +1289,7 @@ export const upsertReviewContext = (
   name: string,
   content: string,
   enabled: boolean,
+  onDemand = false,
 ) =>
   invoke<ReviewContext>("upsert_review_context", {
     id: id ?? null,
@@ -1296,6 +1297,7 @@ export const upsertReviewContext = (
     name,
     content,
     enabled,
+    onDemand,
   });
 
 export const deleteReviewContext = (id: string) => invoke<void>("delete_review_context", { id });

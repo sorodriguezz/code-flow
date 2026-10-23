@@ -37,6 +37,9 @@ const MIN_SPEECH_S: f32 = 0.25;
 /// An utterance this long is cut even without a pause — an order is never this long.
 const MAX_SPEECH_S: f32 = 20.0;
 
+/// Silero's window: 32 ms at 16 kHz.
+const WINDOW: usize = 512;
+
 mod offsets {
     pub const SIZE: usize = 88;
     pub const MODEL: usize = 0;
@@ -52,9 +55,22 @@ mod offsets {
 
 #[repr(C)]
 struct Segment {
-    _start: i32,
+    /// The sample it starts at, counted from the detector's creation.
+    start: i32,
     samples: *const f32,
     n: i32,
+}
+
+/// How a detector decides — Codi's own ([`Detector::new`]) or a meeting's, which reads whisper's
+/// parameters into this detector when whisper.cpp is not installed (`meetings::vad`).
+#[derive(Debug, Clone, Copy)]
+pub struct Tuning {
+    pub threshold: f32,
+    pub min_silence_s: f32,
+    pub min_speech_s: f32,
+    pub max_speech_s: f32,
+    /// The audio it holds while a stretch of speech is still open.
+    pub buffer_s: f32,
 }
 
 type CreateFn = unsafe extern "C" fn(*const u8, f32) -> *const c_void;
@@ -75,6 +91,7 @@ struct Api {
     destroy_segment: DestroySegmentFn,
     pop: DestroyFn,
     flush: DestroyFn,
+    reset: DestroyFn,
 }
 
 // SAFETY: plain C entry points; the library handle is only kept alive.
@@ -106,6 +123,7 @@ fn load(path: &Path) -> Result<Api, String> {
             destroy_segment: symbol!("SherpaOnnxDestroySpeechSegment", DestroySegmentFn),
             pop: symbol!("SherpaOnnxVoiceActivityDetectorPop", DestroyFn),
             flush: symbol!("SherpaOnnxVoiceActivityDetectorFlush", DestroyFn),
+            reset: symbol!("SherpaOnnxVoiceActivityDetectorReset", DestroyFn),
             _library: library,
         })
     }
@@ -137,6 +155,11 @@ impl Detector {
     /// `threshold`: how sure a 32 ms frame must be to count as speech — raised while Codi itself is
     /// speaking, so its own voice leaking from the speakers is less often taken for the user's.
     pub fn new(model: &Path, threshold: f32) -> Result<Detector, String> {
+        // Thirty seconds of buffer: more than any order, little memory.
+        Self::tuned(model, Tuning { threshold, min_silence_s: MIN_SILENCE_S, min_speech_s: MIN_SPEECH_S, max_speech_s: MAX_SPEECH_S, buffer_s: 30.0 })
+    }
+
+    pub fn tuned(model: &Path, tuning: Tuning) -> Result<Detector, String> {
         let api = api()?;
         let model = CString::new(model.to_string_lossy().as_bytes()).map_err(|_| "The model's path has a NUL byte".to_string())?;
         let provider = c"cpu";
@@ -145,21 +168,58 @@ impl Detector {
         let put_f32 = |buf: &mut [u8], at: usize, value: f32| buf[at..at + 4].copy_from_slice(&value.to_ne_bytes());
         let put_i32 = |buf: &mut [u8], at: usize, value: i32| buf[at..at + 4].copy_from_slice(&value.to_ne_bytes());
         put_ptr(&mut config, offsets::MODEL, model.as_ptr());
-        put_f32(&mut config, offsets::THRESHOLD, threshold.clamp(0.1, 0.95));
-        put_f32(&mut config, offsets::MIN_SILENCE, MIN_SILENCE_S);
-        put_f32(&mut config, offsets::MIN_SPEECH, MIN_SPEECH_S);
-        put_i32(&mut config, offsets::WINDOW, 512);
-        put_f32(&mut config, offsets::MAX_SPEECH, MAX_SPEECH_S);
+        put_f32(&mut config, offsets::THRESHOLD, tuning.threshold.clamp(0.1, 0.95));
+        put_f32(&mut config, offsets::MIN_SILENCE, tuning.min_silence_s);
+        put_f32(&mut config, offsets::MIN_SPEECH, tuning.min_speech_s);
+        put_i32(&mut config, offsets::WINDOW, WINDOW as i32);
+        put_f32(&mut config, offsets::MAX_SPEECH, tuning.max_speech_s);
         put_i32(&mut config, offsets::SAMPLE_RATE, 16_000);
         put_i32(&mut config, offsets::NUM_THREADS, 1);
         put_ptr(&mut config, offsets::PROVIDER, provider.as_ptr());
         // SAFETY: the buffer is the struct's size; its strings outlive the call, which copies them.
-        // Thirty seconds of buffer: more than any order, little memory.
-        let handle = unsafe { (api.create)(config.as_ptr(), 30.0) };
+        let handle = unsafe { (api.create)(config.as_ptr(), tuning.buffer_s) };
         if handle.is_null() {
             return Err(format!("The voice detector could not be loaded ({})", model.to_string_lossy()));
         }
         Ok(Detector { handle })
+    }
+
+    /// The stretches of `samples` somebody speaks in, as `(start_ms, end_ms)` within them — the
+    /// whole-buffer reading whisper.cpp's detector gives, for a meeting recorded without whisper.
+    /// The detector starts afresh (a reset counts samples from zero again): nothing of an earlier
+    /// buffer carries into this one.
+    ///
+    /// Fed one 32 ms window at a time, as a stream: the library dates a stretch's start back from
+    /// the end of what it was last handed, so a second handed whole put every start up to a second
+    /// late — measured, the first 0.67 s of a sentence cut off.
+    pub fn stretches(&mut self, samples: &[f32]) -> Result<Vec<(i64, i64)>, String> {
+        let api = api()?;
+        let mut found: Vec<(i64, i64)> = Vec::new();
+        // SAFETY: as in `push`; each segment is read before it is freed.
+        unsafe {
+            (api.reset)(self.handle);
+            let take = |found: &mut Vec<(i64, i64)>| {
+                while (api.empty)(self.handle) == 0 {
+                    let segment = (api.front)(self.handle);
+                    if !segment.is_null() {
+                        let s = &*segment;
+                        if s.n > 0 {
+                            let start = i64::from(s.start);
+                            found.push((start * 1000 / 16_000, (start + i64::from(s.n)) * 1000 / 16_000));
+                        }
+                        (api.destroy_segment)(segment);
+                    }
+                    (api.pop)(self.handle);
+                }
+            };
+            for block in samples.chunks(WINDOW) {
+                (api.accept)(self.handle, block.as_ptr(), block.len() as i32);
+                take(&mut found);
+            }
+            (api.flush)(self.handle);
+            take(&mut found);
+        }
+        Ok(found)
     }
 
     /// Feeds 16 kHz mono samples; the utterances that ended in them, oldest first.
@@ -220,6 +280,39 @@ impl Drop for Detector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `CODEFLOW_TEST_VAD=…` as below: the same buffer read twice by one detector gives the same
+    /// stretches, where the speech is — a second of silence in, the clip's length long.
+    #[test]
+    #[ignore]
+    fn a_whole_buffer_reads_the_same_every_time() {
+        let spec = std::env::var("CODEFLOW_TEST_VAD").expect("CODEFLOW_TEST_VAD=<library>|<model>|<wav>");
+        let parts: Vec<&str> = spec.split('|').collect();
+        load_library_for_test(Path::new(parts[0]));
+        let bytes = std::fs::read(parts[2]).unwrap();
+        let at = bytes.windows(4).position(|w| w == b"data").unwrap() + 8;
+        let speech: Vec<f32> = bytes[at..].chunks_exact(2).map(|p| f32::from(i16::from_le_bytes([p[0], p[1]])) / 32768.0).collect();
+        let mut audio = vec![0.0f32; 16_000];
+        audio.extend(&speech);
+        audio.extend(vec![0.0f32; 48_000]);
+        // A room's hiss, not digital silence: what a microphone records between words.
+        let mut seed = 7u32;
+        for sample in audio.iter_mut() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *sample += ((seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 0.004;
+        }
+        let tuning = Tuning { threshold: 0.5, min_silence_s: 0.5, min_speech_s: 0.25, max_speech_s: 28.0, buffer_s: 60.0 };
+        let mut detector = Detector::tuned(Path::new(parts[1]), tuning).unwrap();
+        let first = detector.stretches(&audio).unwrap();
+        let second = detector.stretches(&audio).unwrap();
+        eprintln!("{first:?}\n{second:?}");
+        assert_eq!(first, second);
+        assert!(!first.is_empty());
+        assert!((700..1_400).contains(&first[0].0), "{first:?}");
+        let last = first.last().unwrap().1;
+        let speech_ms = speech.len() as i64 * 1000 / 16_000;
+        assert!((last - 1_000 - speech_ms).abs() < 1_000, "{first:?}");
+    }
 
     /// The real library and model: `CODEFLOW_TEST_VAD=<library>|<silero_vad.onnx>|<wav>`. A clip of
     /// one sentence, padded with a second of silence on each side, comes out as one utterance about

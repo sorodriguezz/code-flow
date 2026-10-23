@@ -78,6 +78,7 @@ impl Finding {
                 Severity::Mayor => "warning".into(),
                 Severity::Menor | Severity::Info => "info".into(),
             },
+            severidad: self.severity.label().to_string(),
             tipo: self.tipo.label().to_string(),
             categoria: self.categoria.clone(),
             subtitulo: self.subtitulo.clone(),
@@ -105,6 +106,62 @@ impl Finding {
     /// Whether this finding counts toward the buckets, the ratings and the Quality Gate.
     pub fn is_active(&self) -> bool {
         matches!(self.estado.as_str(), "abierto" | "posteado")
+    }
+
+    /// A finding the memory carried forward without this run re-reading it — its file did not
+    /// change, or its reviewer failed — rebuilt in full so the report shows it and the gate counts it.
+    ///
+    /// The whole block comes from the newest earlier report that rendered it (`earlier`, newest
+    /// first): same id **and** same kind, since an id alone could have been renumbered onto another
+    /// finding. One no report holds any more is rebuilt from what the memory kept — no prose, but the
+    /// severity, the place and the subtitle, which is what the gate and the card need. Either way the
+    /// memory has the last word on the lifecycle: state, thread and the iterations it lived through.
+    pub fn recovered(memory: &MemoryFinding, earlier: &[Vec<Finding>]) -> Finding {
+        let kind = crate::review_memory::finding_identity(memory.archivo.as_deref(), &memory.categoria);
+        let rendered = earlier.iter().flatten().find(|f| {
+            f.id == memory.id && crate::review_memory::finding_identity(f.archivo.as_deref(), &f.categoria) == kind
+        });
+        let mut finding = match rendered {
+            Some(f) => f.clone(),
+            None => Finding {
+                id: String::new(),
+                severity: Severity::parse(&memory.severidad).unwrap_or(match memory.severity.as_str() {
+                    // Runs before the fine severity was kept: the bucket's least severe member, so a
+                    // gate that blocks on Crítico still fails on a carried `critical`.
+                    "critical" => Severity::Critico,
+                    "warning" => Severity::Mayor,
+                    _ => Severity::Menor,
+                }),
+                tipo: FindingType::parse(&memory.tipo).unwrap_or(FindingType::Bug),
+                categoria: memory.categoria.clone(),
+                subtitulo: memory.subtitulo.clone(),
+                archivo: None,
+                lineas: None,
+                por_que: String::new(),
+                sugerencia: String::new(),
+                ejemplo_lang: String::new(),
+                ejemplo_code: String::new(),
+                evidencia: String::new(),
+                reemplazo: None,
+                confianza: memory.confianza.map(|c| c.clamp(0, 100) as u8),
+                estado: String::new(),
+                thread_id: None,
+                introducido_en_iter: 0,
+                resuelto_en_iter: None,
+                motivo_descarte: None,
+                delta: None,
+            },
+        };
+        finding.id = memory.id.clone();
+        finding.archivo = memory.archivo.clone();
+        finding.lineas = memory.lineas.clone().or(finding.lineas);
+        finding.estado = memory.estado.clone();
+        finding.thread_id = memory.thread_id;
+        finding.introducido_en_iter = memory.introducido_en_iter;
+        finding.resuelto_en_iter = memory.resuelto_en_iter;
+        finding.motivo_descarte = memory.motivo_descarte.clone();
+        finding.delta = memory.delta.clone();
+        finding
     }
 }
 

@@ -597,6 +597,12 @@ struct RawNote {
     system: bool,
     #[serde(default)]
     position: Option<RawPosition>,
+    /// Whether the note can be resolved (a diff note, or a comment on a project that requires
+    /// resolution) and whether it is.
+    #[serde(default)]
+    resolvable: bool,
+    #[serde(default)]
+    resolved: bool,
 }
 
 #[derive(Deserialize)]
@@ -685,10 +691,19 @@ pub async fn list_pr_comment_threads(
             start_line,
             end_line,
             comments,
+            resolved: discussion_resolved(&discussion),
         });
     }
 
     Ok(threads)
+}
+
+/// A discussion is resolved when it has notes that can be resolved and every one of them is — GitLab
+/// resolves a discussion by resolving its notes. One that cannot be resolved at all (a plain comment
+/// on a project that does not ask for it) is never "resolved": it stays part of the conversation.
+fn discussion_resolved(discussion: &RawDiscussion) -> bool {
+    let mut resolvable = discussion.notes.iter().filter(|n| !n.system && n.resolvable).peekable();
+    resolvable.peek().is_some() && resolvable.all(|n| n.resolved)
 }
 
 /// Which discussion a note belongs to. GitLab addresses replies and resolution by discussion id (a
@@ -1195,6 +1210,21 @@ pub async fn pr_checks(host: &str, project: &str, iid: i64, token: &str) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A discussion is resolved when every note that can be resolved is; one that cannot be resolved
+    /// at all stays part of the conversation.
+    #[test]
+    fn a_discussion_is_resolved_only_when_its_resolvable_notes_all_are() {
+        let note = |resolvable: bool, resolved: bool, system: bool| -> serde_json::Value {
+            serde_json::json!({ "id": 1, "body": "x", "author": { "username": "ana" }, "created_at": "2026-10-01T10:00:00Z",
+                "system": system, "resolvable": resolvable, "resolved": resolved })
+        };
+        let discussion = |notes: Vec<serde_json::Value>| -> RawDiscussion { serde_json::from_value(serde_json::json!({ "id": "d", "notes": notes })).unwrap() };
+        assert!(discussion_resolved(&discussion(vec![note(true, true, false), note(true, true, false)])));
+        assert!(!discussion_resolved(&discussion(vec![note(true, true, false), note(true, false, false)])));
+        assert!(!discussion_resolved(&discussion(vec![note(false, false, false)])), "a plain comment cannot be resolved");
+        assert!(discussion_resolved(&discussion(vec![note(true, true, false), note(false, false, true)])), "system notes do not count");
+    }
 
     fn hosts() -> Vec<String> {
         vec!["gitlab.com".to_string(), "git.contoso.com".to_string()]

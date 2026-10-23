@@ -244,7 +244,7 @@ function StartStrip({ noteId, workspaceId }: { noteId: string; workspaceId: stri
         <button type="button" className={buttonClass({ variant: "ghost", size: "sm" })} onClick={() => useMeetingsStore.getState().setStartOpen(null)}>
           {t("common.cancel")}
         </button>
-        <button type="button" disabled={busy || !status?.engineInstalled} className={buttonClass({ variant: "primary", size: "sm" })} onClick={() => void start()}>
+        <button type="button" disabled={busy || !status?.canRecord} className={buttonClass({ variant: "primary", size: "sm" })} onClick={() => void start()}>
           <span className="h-2 w-2 rounded-full bg-[var(--cf-danger)]" aria-hidden />
           {t("meetings.start")}
         </button>
@@ -254,7 +254,7 @@ function StartStrip({ noteId, workspaceId }: { noteId: string; workspaceId: stri
         {kind === "virtual" && <MicCheck channel="system" />}
       </div>
       <p className="text-[11.5px] text-[var(--cf-text-muted)]">{modeHint[effective]}</p>
-      {!status?.engineInstalled && <p className="text-[11.5px] text-[var(--cf-warning)]">{t("meetings.needEngine")}</p>}
+      {!status?.canRecord && <p className="text-[11.5px] text-[var(--cf-warning)]">{t("meetings.needEngine")}</p>}
       {!settings.consentSeen && (
         <div className="flex items-center gap-2 text-[11.5px] text-[var(--cf-text-muted)]">
           <span className="min-w-0 flex-1">{t("meetings.consentHint")}</span>

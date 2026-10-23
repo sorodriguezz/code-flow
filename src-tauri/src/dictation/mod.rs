@@ -198,11 +198,13 @@ pub struct ModelStatus {
     pub translates: bool,
     pub licence: &'static str,
     /// What may pick it: `dictation`, `codi`, `meetingsLive`, `meetingsFinal`, `flows`. The final
-    /// pass of a meeting needs per-word times, which only whisper gives.
+    /// pass of a meeting needs per-word times: whisper's, or a transducer's (Parakeet) — not
+    /// Canary's, whose decoder gives none.
     pub features: &'static [&'static str],
 }
 
 const WHISPER_FEATURES: &[&str] = &["dictation", "codi", "meetingsLive", "meetingsFinal", "flows"];
+const TIMED_SHERPA_FEATURES: &[&str] = &["dictation", "codi", "meetingsLive", "meetingsFinal", "flows"];
 const SHERPA_FEATURES: &[&str] = &["dictation", "codi", "meetingsLive", "flows"];
 
 pub fn status() -> Status {
@@ -242,7 +244,7 @@ pub fn status() -> Status {
             languages: model.languages,
             translates: model.translates,
             licence: model.licence,
-            features: SHERPA_FEATURES,
+            features: if crate::asr::recognizer::times_words(model) { TIMED_SHERPA_FEATURES } else { SHERPA_FEATURES },
         }
     });
     Status {

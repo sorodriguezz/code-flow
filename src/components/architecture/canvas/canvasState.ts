@@ -25,6 +25,39 @@ export const useArchDragStore = create<DragState>((set) => ({
   clear: () => set({ moving: new Set(), settling: false }),
 }));
 
+/** What `carryOver` reads of a React Flow node. */
+interface Carried {
+  id: string;
+  position: { x: number; y: number };
+  measured?: { width?: number; height?: number };
+  dragging?: boolean;
+}
+
+/**
+ * The nodes a new scene brings, with what React Flow already learned of the ones on the canvas.
+ *
+ * - **Their measured size.** A node handed over without `measured` makes React Flow forget where its
+ *   dots are and measure it again. WebKit (the app's webview on macOS) never gets round to it, so
+ *   after the first edit no line was drawn (an edge needs both ends' dots) and no dot could be grabbed.
+ *   A size that really changed is still measured: the node stays observed, and its new box fires.
+ * - **Where a node being dragged is now.** A scene that lands mid-drag (the previous drop's, say) would
+ *   otherwise throw the card back to the document's place under the pointer.
+ */
+export function carryOver<N extends Carried>(next: N[], prev: readonly N[]): N[] {
+  const before = new Map(prev.map((n) => [n.id, n]));
+  return next.map((n) => {
+    const old = before.get(n.id);
+    if (!old || (!old.measured && !old.dragging)) return n;
+    const kept: N = { ...n };
+    if (old.measured) kept.measured = old.measured;
+    if (old.dragging) {
+      kept.position = old.position;
+      kept.dragging = true;
+    }
+    return kept;
+  });
+}
+
 /** Something from the component library, on its way to the canvas. */
 export type LibraryItem =
   | { kind: "component"; icon: string; name: string; type?: string; category: Category }

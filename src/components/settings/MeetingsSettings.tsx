@@ -55,7 +55,7 @@ export function MeetingsSettings() {
   if (!status.supported) return <p className="text-[12px] text-[var(--cf-text-muted)]">{t("meetings.settings.unsupported")}</p>;
 
   const installed = status.models.filter((m) => m.installed);
-  // Parakeet and Canary write the live text; the final pass needs whisper's per-word times.
+  // The final pass needs each word's time: whisper and Parakeet give it, Canary does not (`features`).
   const modelOptions = (auto: string, feature: "meetingsLive" | "meetingsFinal") => [
     { value: "", label: auto },
     ...installed.filter((m) => m.features.includes(feature)).map((m) => ({ value: m.id, label: m.label })),

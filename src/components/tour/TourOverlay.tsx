@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeft, ArrowRight, PartyPopper, X } from "lucide-react";
+import { ArrowLeft, ArrowRight, Pause, PartyPopper, Play, Volume2, X } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { tourLength, tourStep, useTourStore } from "../../state/tourStore";
 import { chordLabel } from "../../lib/keys";
@@ -9,6 +9,7 @@ import type { TourPlacement } from "../../lib/tour/steps";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { chipClass } from "../common/recipes";
 import { Confetti } from "./Confetti";
+import { useTourNarration } from "./useTourNarration";
 
 interface Box {
   top: number;
@@ -225,6 +226,31 @@ function Arrow({ side, at }: { side: Exclude<Side, null>; at: number }) {
  * writes state when the rectangle actually moved is right in all three, and costs a comparison per
  * frame for as long as the tour is up.
  */
+/** The card's speaker: have Codi explain the tour aloud, hold it on this step, or go on. */
+function NarrationButton({ narrated, paused }: { narrated: boolean; paused: boolean }) {
+  const t = useT();
+  const label = !narrated ? t("tour.narrate") : paused ? t("tour.narrationResume") : t("tour.narrationPause");
+  const onClick = () => {
+    const tour = useTourStore.getState();
+    if (!narrated) tour.setNarrated(true);
+    else if (paused) tour.resumeNarration();
+    else tour.pauseNarration();
+  };
+  return (
+    // `title` rather than the app's tooltip: that one is drawn beneath this layer.
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      aria-pressed={narrated && !paused}
+      className={iconButtonClass({ size: "xs", active: narrated && !paused })}
+    >
+      {!narrated ? <Volume2 size={14} /> : paused ? <Play size={14} /> : <Pause size={14} />}
+    </button>
+  );
+}
+
 export function TourOverlay() {
   const active = useTourStore((s) => s.active);
   const celebrating = useTourStore((s) => s.celebrating);
@@ -234,7 +260,11 @@ export function TourOverlay() {
   const back = useTourStore((s) => s.back);
   const skip = useTourStore((s) => s.skip);
   const endCelebration = useTourStore((s) => s.endCelebration);
+  const narrated = useTourStore((s) => s.narrated);
+  const narrationPaused = useTourStore((s) => s.narrationPaused);
+  const narrationNote = useTourStore((s) => s.narrationNote);
   const t = useT();
+  useTourNarration();
 
   const total = tourLength(tourId);
   const step = tourStep(tourId, index);
@@ -425,6 +455,8 @@ export function TourOverlay() {
             <span className="ml-auto text-[11px] tabular-nums text-[var(--cf-text-muted)]">
               {t("tour.stepOf", { n: index + 1, total })}
             </span>
+            {/* Codi saying the card aloud and turning the page: off, on, or held on this step. */}
+            <NarrationButton narrated={narrated} paused={narrationPaused} />
             {/* `title` rather than the app's tooltip: that one is drawn beneath this layer. */}
             <button
               type="button"
@@ -453,6 +485,8 @@ export function TourOverlay() {
                 Windows — so no card ever spells out both and leaves the reader to pick. */}
             {inlineMarks(t(step.bodyKey, step.chord ? { key: chordLabel(step.chord) } : undefined))}
           </p>
+
+          {narrationNote && <p className="mt-2 text-[11.5px] text-[var(--cf-warning)]">{t(narrationNote === "silent" ? "tour.narrationSilent" : "tour.narrationFailed")}</p>}
 
           {/* Scaled, not sized: stepping moves the fill with a transform, so the bar costs no layout. */}
           <div className="mt-3.5 h-[3px] w-full overflow-hidden rounded-full bg-[var(--cf-press)]">

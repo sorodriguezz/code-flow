@@ -20,6 +20,7 @@
 
 import {
   AlignLeft,
+  Monitor,
   AppWindow,
   AudioLines,
   AudioWaveform,
@@ -267,9 +268,6 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "dictation", labelKey: "dictation.title", hintKey: "dictation.hint", icon: Mic, searchKey: "settings.searchTermsDictation" },
       { id: "meetings", labelKey: "meetings.settings.title", hintKey: "meetings.settings.hint", icon: AudioLines, searchKey: "meetings.settings.searchTerms" },
       { id: "reading", labelKey: "speech.title", hintKey: "speech.hint", icon: Volume2, searchKey: "settings.searchTermsReading" },
-      // The voice assistant, last: it listens with what «Modelos» downloads and speaks with what the
-      // reading aloud is set to, unless it is given a voice of its own here.
-      { id: "codi", labelKey: "codi.settings.title", hintKey: "codi.settings.hint", icon: Speech, searchKey: "codi.settings.searchTerms" },
     ],
   },
   {
@@ -514,6 +512,20 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     ],
   },
   {
+    // Other code bases cloned as memory for the AI surfaces (2026-10-22). Global, beside the AI
+    // section rather than inside it: a list the user manages, not a setting of one engine.
+    id: "references",
+    labelKey: "refrepos.title",
+    icon: FolderGit2,
+    group: "ai",
+    color: "#9333ea",
+    tabs: [
+      { id: "repos", labelKey: "refrepos.tabRepos", hintKey: "refrepos.tabReposHint", icon: FolderGit2, searchKey: "refrepos.searchTerms" },
+      { id: "use", labelKey: "refrepos.tabUse", hintKey: "refrepos.tabUseHint", icon: SlidersHorizontal },
+    ],
+    searchKey: "refrepos.searchTerms",
+  },
+  {
     // A section of its own since 2026-10-09, one pane per area of the app — it used to be one list
     // of twenty-five rows inside the AI section. The search box in every pane still searches all.
     id: "tasks",
@@ -532,6 +544,24 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "other", labelKey: "task.areaOther", icon: Workflow, searchKey: "settings.searchTermsTasksOther" },
     ],
     searchKey: "settings.searchTermsTasks",
+  },
+  {
+    // Codi, the voice assistant: a section of its own under IA since 2026-10-22 (it was the last pane
+    // of «Voz y sonido») — it listens with what «Voz y sonido › Modelos» downloads and speaks with
+    // the reading aloud's voice unless it has its own, and it keeps growing.
+    id: "codi",
+    labelKey: "codi.settings.title",
+    icon: Speech,
+    group: "ai",
+    color: "#6366f1",
+    tabs: [
+      { id: "listen", labelKey: "codi.settings.listenBlock", icon: Mic, searchKey: "codi.settings.searchTerms" },
+      { id: "brain", labelKey: "codi.settings.brainBlock", icon: Brain, searchKey: "codi.settings.searchTermsBrain" },
+      { id: "voice", labelKey: "codi.settings.voiceBlock", hintKey: "codi.settings.voiceHint", icon: Volume2 },
+      { id: "desktop", labelKey: "codi.settings.desktopBlock", icon: Monitor, searchKey: "codi.settings.searchTermsDesktop" },
+      { id: "routines", labelKey: "codi.routines.block", hintKey: "codi.routines.hint", icon: ListChecks, searchKey: "codi.settings.searchTermsRoutines" },
+      { id: "privacy", labelKey: "codi.settings.privacyTab", icon: ShieldCheck, searchKey: "codi.settings.searchTermsPrivacy" },
+    ],
   },
   {
     id: "review",
@@ -672,6 +702,7 @@ export const SELF_SCROLLING_SECTIONS = new Set<SettingsSectionId>([
   "keybindings",
   "notifications",
   "voice",
+  "codi",
   "backup",
   "projects",
   "editor",
@@ -679,6 +710,7 @@ export const SELF_SCROLLING_SECTIONS = new Set<SettingsSectionId>([
   "git",
   "azure",
   "claude",
+  "references",
   "tasks",
   "review",
   "tools",

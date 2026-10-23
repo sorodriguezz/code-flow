@@ -6,6 +6,7 @@ import { useLayoutStore } from "../../state/layoutStore";
 import { useWindowStore } from "../../state/windowStore";
 import { useNotificationStore } from "../../state/notificationStore";
 import { useEditorStatusStore } from "../../state/editorStatusStore";
+import { tourLength, useTourStore } from "../../state/tourStore";
 import { deriveRunning, useServicesStore } from "../../state/servicesStore";
 import { translate } from "../../state/languageStore";
 import { SETTINGS_SECTIONS, tabsFor } from "../settingsCatalog";
@@ -15,6 +16,7 @@ import { WINDOW } from "../windowIdentity";
 import { accessibleName, isPrivateControl, isTextField } from "./dom";
 import { aiPanelTab, DOCK_LABEL, viewName } from "./actions/navigation";
 import { appName, defineAction, params, windowKind } from "./actions/shared";
+import { tourName } from "./actions/tours";
 import type { CodiAction } from "./registry";
 
 /**
@@ -50,6 +52,9 @@ export interface UiStateSnapshot {
   dock?: string;
   sidebarCollapsed?: true;
   modals?: string[];
+  /** A guided tour is up: which, the step on screen (1-based) of how many, and whether Codi is
+   *  explaining it. */
+  tour?: { id: string; step: number; of: number; narrated?: true };
   editor?: { path: string; line: number };
   unsaved?: number;
   focus?: { label: string; ai?: true; editor?: true; private?: true };
@@ -93,7 +98,8 @@ function focusInfo(): UiStateSnapshot["focus"] {
 function openModals(): string[] {
   if (typeof document !== "undefined") {
     return [...document.querySelectorAll("[role='dialog'][aria-modal='true'], dialog[open]")]
-      .filter((dialog) => dialog.getClientRects().length > 0)
+      // The tour's own card is said as the tour (`tour`), not as a dialog.
+      .filter((dialog) => dialog.getClientRects().length > 0 && dialog.getAttribute("aria-labelledby") !== "cf-tour-title")
       .map((dialog) => accessibleName(dialog) || "dialog")
       .slice(0, 3);
   }
@@ -167,6 +173,10 @@ export function readUiState(): Omit<UiStateSnapshot, "summary"> {
   if (WINDOW.main && useLayoutStore.getState().flags.sidebarCollapsed) snapshot.sidebarCollapsed = true;
   const modals = openModals();
   if (modals.length) snapshot.modals = modals;
+  const tour = useTourStore.getState();
+  if (WINDOW.main && tour.active) {
+    snapshot.tour = { id: tour.tourId, step: tour.index + 1, of: tourLength(tour.tourId), ...(tour.narrated ? { narrated: true as const } : {}) };
+  }
   const caret = useEditorStatusStore.getState().status;
   if (caret && (ui.activeView === "editor" || kind === "file")) snapshot.editor = { path: caret.path, line: caret.line };
   const unsaved = collectUnsaved().length;
@@ -224,6 +234,7 @@ export function summarize(state: Omit<UiStateSnapshot, "summary">): string {
       .join(" › ");
     around.push(translate("codi.state.settings", { name }));
   }
+  if (state.tour) around.push(translate("codi.state.tour", { name: tourName(state.tour.id as Parameters<typeof tourName>[0]), n: state.tour.step, total: state.tour.of }));
   if (state.modals?.length) around.push(translate("codi.state.modal", { name: state.modals[0] }));
   if (state.aiPanel) around.push(translate("codi.state.aiPanel", { tab: state.aiPanel.tab }));
   if (state.dock) around.push(translate("codi.state.dock", { name: translate(DOCK_LABEL[state.dock as keyof typeof DOCK_LABEL] ?? "tabbar.terminal") }));

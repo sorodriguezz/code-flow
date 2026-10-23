@@ -27,7 +27,9 @@ export type ContextSourceKind =
   | "mention"
   | "diff"
   | "memory"
-  | "knowledge";
+  | "knowledge"
+  /** Nothing of the project went with the question; `label` is why (`context::need::Withheld`). */
+  | "withheld";
 
 export interface ContextSource {
   kind: ContextSourceKind;

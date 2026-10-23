@@ -278,7 +278,7 @@ fn configured_ssh_command(cwd: Option<&str>) -> Option<String> {
 }
 
 /// The environment every run gets — see the module note.
-fn network_env(cwd: Option<&str>) -> Vec<(&'static str, String)> {
+pub(crate) fn network_env(cwd: Option<&str>) -> Vec<(&'static str, String)> {
     let mut env = vec![("GIT_TERMINAL_PROMPT", "0".to_string())];
     let configured = std::env::var("GIT_SSH_COMMAND")
         .ok()

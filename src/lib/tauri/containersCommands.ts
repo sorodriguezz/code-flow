@@ -77,6 +77,9 @@ export const containersText = (args: {
 
 export const containersContainerDetail = (runtime: string, context: string | null, id: string, running: boolean) =>
   invoke<ContainerSummary>("containers_container_detail", { runtime, context, id, running });
+/** The last `lines` of a container's log, credentials redacted. */
+export const containersLogsTail = (runtime: string, context: string | null, id: string, lines: number) =>
+  invoke<string>("containers_logs_tail", { runtime, context, id, lines });
 
 export const containersNamespaces = (runtime: string, context: string | null) =>
   invoke<string[]>("containers_namespaces", { runtime, context });

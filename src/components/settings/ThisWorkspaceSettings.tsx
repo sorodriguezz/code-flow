@@ -4,6 +4,7 @@ import { Skeleton } from "../common/Skeleton";
 import { AI_PROMPTS } from "../../lib/aiPrompts";
 import { defaultWorkspacePrompt, getWorkspaceIdentity, getWorkspacePrompt, listWorkspaceSkills } from "../../lib/tauri/commands";
 import { mcpList } from "../../lib/tauri/mcpCommands";
+import { referenceReposForWorkspace } from "../../lib/tauri/refreposCommands";
 import type { SettingsSectionId } from "../../state/uiStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -27,6 +28,8 @@ interface Facts {
   prompts: string[];
   mcp: string[];
   skills: string[];
+  /** The reference repositories switched on here — global, but each one picks its workspaces. */
+  references: string[];
 }
 
 export function ThisWorkspaceSettings() {
@@ -59,7 +62,8 @@ export function ThisWorkspaceSettings() {
       ),
       mcpList(workspaceId).catch(() => []),
       listWorkspaceSkills(workspaceId).catch(() => []),
-    ]).then(([identity, prompts, servers, skills]) => {
+      referenceReposForWorkspace(workspaceId).catch(() => []),
+    ]).then(([identity, prompts, servers, skills, references]) => {
       if (!live) return;
       setFacts({
         workspaceId,
@@ -67,6 +71,7 @@ export function ThisWorkspaceSettings() {
         prompts: prompts.filter((label): label is string => !!label),
         mcp: servers.filter((server) => server.scope === "workspace").map((server) => server.name),
         skills: skills.map((skill) => skill.skill_name),
+        references: (references ?? []).filter((r) => r.enabled).map((r) => r.name),
       });
     });
     return () => {
@@ -133,6 +138,12 @@ export function ThisWorkspaceSettings() {
       value: facts.skills.length ? list(facts.skills) : t("thisWorkspace.none"),
       custom: facts.skills.length > 0,
       to: ["tools", "skills"],
+    },
+    {
+      label: t("refrepos.title"),
+      value: facts.references.length ? list(facts.references) : t("thisWorkspace.none"),
+      custom: facts.references.length > 0,
+      to: ["references", "repos"],
     },
   ];
 

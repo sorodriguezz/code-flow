@@ -21,6 +21,7 @@ import {
   viewVocabulary,
 } from "../vocabulary";
 import { APP_KEYS, appName, defineAction, oneOf, params, requireProject, requireWorkspace, say, text } from "./shared";
+import { stepTour } from "./tours";
 
 /**
  * Going places: rail apps, the repository's tabs, Settings, the AI panel, the dock, the sidebar, the
@@ -369,13 +370,14 @@ export function navigationActions(): CodiAction[] {
 
     defineAction({
       id: "nav.back",
-      title: { en: "Go back to where this window was before (⌥←).", es: "Vuelve a donde estaba esta ventana antes (⌥←)." },
+      title: { en: "Go back to where this window was before (⌥←) — or, while a tour is up, its previous step.", es: "Vuelve a donde estaba esta ventana antes (⌥←), o, con un tour abierto, a su paso anterior." },
       aliases: { es: ["atras", "vuelve atras", "volver atras", "regresa", "ve atras", "anterior", "vuelve"], en: ["back", "go back", "previous"] },
       params: params(),
       risk: "navigate",
       where: "main",
-      frequent: true,
       run: async () => {
+        // While a tour is up, «atrás» is its previous step — said, not announced.
+        if (stepTour("back")) return { result: { tourStep: true }, say: "" };
         goHistory("back");
         return { result: { view: useUiStore.getState().activeView }, say: say("codi.say.wentBack") };
       },
@@ -383,12 +385,14 @@ export function navigationActions(): CodiAction[] {
 
     defineAction({
       id: "nav.forward",
-      title: { en: "Go forward again after going back (⌥→).", es: "Avanza de nuevo después de volver (⌥→)." },
+      title: { en: "Go forward again after going back (⌥→) — or, while a tour is up, its next step.", es: "Avanza de nuevo después de volver (⌥→), o, con un tour abierto, a su paso siguiente." },
       aliases: { es: ["adelante", "avanza", "ve adelante", "siguiente"], en: ["forward", "go forward", "next"] },
       params: params(),
       risk: "navigate",
       where: "main",
       run: async () => {
+        // While a tour is up, «siguiente» is its next step.
+        if (stepTour("next")) return { result: { tourStep: true }, say: "" };
         goHistory("forward");
         return { result: { view: useUiStore.getState().activeView }, say: say("codi.say.wentForward") };
       },
@@ -428,7 +432,7 @@ export function dockActions(views: DockView[]): CodiAction[] {
         en: "Show a panel of the bottom dock: the terminals, the containers or the services.",
         es: "Muestra un panel del dock inferior: las terminales, los contenedores o los servicios.",
       },
-      aliases: { es: ["abre", "muestra", "abre la", "muestra la", "abre los", "muestra los"], en: ["open", "show", "open the", "show the"] },
+      aliases: { es: ["abre", "muestra", "abre la", "muestra la", "abre los", "muestra los", "abreme", "muestrame", "muestrame la", "muestrame los", "ve a"], en: ["open", "show", "open the", "show the", "show me", "show me the"] },
       get vocabulary() {
         return { view: dockVocabulary(views) };
       },

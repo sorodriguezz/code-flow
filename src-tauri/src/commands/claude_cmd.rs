@@ -195,6 +195,12 @@ pub(crate) enum AiTask {
     /// [`AiTask::ChatTitle`] it runs on the engine's fast model unless the row names another — every
     /// second of it is a second the user waits with the microphone open.
     Codi,
+    /// Codi's research — «¿qué base de datos usa api-pagos?», «explícame el proyecto» — answered from
+    /// inside the repository, read-only (`crate::codi::research`). Its own row rather than
+    /// [`AiTask::Codi`]'s: that one wants the fastest model because the user waits with the
+    /// microphone open, this one runs in the background and is only as good as the model reading
+    /// the code — so, unset, it runs on the default engine's base model, not its fast one.
+    CodiResearch,
 }
 
 impl AiTask {
@@ -204,7 +210,7 @@ impl AiTask {
     /// variant without adding it here fails the build. That matters because the one reader —
     /// [`routed_providers`] — is deciding what *not* to do, and a task missing from this list would
     /// silently make its engine invisible to the quota panel rather than produce an obvious error.
-    pub(crate) const ALL: [AiTask; 28] = [
+    pub(crate) const ALL: [AiTask; 29] = [
         AiTask::Commit,
         AiTask::Analyze,
         AiTask::Review,
@@ -233,6 +239,7 @@ impl AiTask {
         AiTask::Skills,
         AiTask::Architecture,
         AiTask::Codi,
+        AiTask::CodiResearch,
     ];
 
     /// The settings-key fragment for this task: `ai_provider_{key}` and `{provider}_{key}_model`.
@@ -268,6 +275,7 @@ impl AiTask {
             AiTask::Skills => "skills",
             AiTask::Architecture => "architecture",
             AiTask::Codi => "codi",
+            AiTask::CodiResearch => "codi_research",
         }
     }
 }
@@ -1283,11 +1291,12 @@ pub async fn send_chat_message(
 
     let _ = sync_skills_into_project(&skills, &workspace_id, &project.local_path);
 
-    let mut enabled_contexts: Vec<(String, String)> = contexts
-        .into_iter()
-        .filter(|c| c.enabled)
-        .map(|c| (c.name, c.content))
-        .collect();
+    // Whether this turn's engine can fetch what it is not handed — the knowledge, the memories, a
+    // context — with tools (`context::need::reaches_tools`). A read-only Gemini or Grok run cannot.
+    let reaches_tools = crate::context::need::reaches_tools(&config.provider, analysis);
+    // The workspace's contexts: a conversation lists the on-demand ones for the model to read when
+    // it needs them (`context::on_demand`); a story's or a hybrid run's step is handed every one.
+    let mut enabled_contexts = crate::context::on_demand::for_chat(contexts, step.is_none() && reaches_tools);
     // The active agent's own instructions go first, so the role frames the whole turn.
     if let Some(prompt) = agent_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
         enabled_contexts.insert(0, ("Agent".to_string(), prompt.to_string()));
@@ -1355,6 +1364,9 @@ pub async fn send_chat_message(
     // to a resumed session only when it does not already hold them (`context::said`).
     let said_key = conversation_id.clone().unwrap_or_else(|| format!("panel:{project_id}"));
     let mut said = crate::context::said::Blocks::new(&said_key, session_id.as_deref().filter(|_| config.engine.resumes_sessions()));
+    // The question's judgement (`context::need`), for a conversation: what goes with it, and — for the
+    // in-process agent, which reads it inside the run — whether the project's map and passages do.
+    let mut turn: Option<crate::context::need::Turn> = None;
     // A conversation, not a story's or a hybrid task's step: how long to answer, and how to ask the
     // user something back — `ai::chat_turn_rules`.
     if step.is_none() {
@@ -1372,10 +1384,12 @@ pub async fn send_chat_message(
         let cloud = config.provider != crate::local_agent::PROVIDER_ID;
         let scrub = |text: String| if cloud { crate::secret_scan::redact(&text).0 } else { text };
         // Notes cited as `[[Título]]`, read in full under the knowledge rules.
+        let mut noted = false;
         if let Ok(conn) = db.0.lock() {
             if let Some((note, sources)) = ai::note_mention_note(&conn, Some(&workspace_id), &asked, cloud) {
                 engine_message.push_str(&note);
                 context_sources.extend(sources);
+                noted = true;
             }
         }
         let diffs = scrub(special_mention_notes(&asked, &project.local_path));
@@ -1387,6 +1401,31 @@ pub async fn send_chat_message(
         let editor_note = scrub(editor_note);
         engine_message.push_str(said.say("editor", &editor_note));
         context_sources.extend(editor_sources);
+        // Whether this question needs the project attached at all (`context::need`): a follow-up or
+        // a general question goes with the standing rules alone, and the model keeps its tools. Not
+        // judged for a command to the CLI, which is sent as typed.
+        let selected = editor.selection.as_ref().is_some_and(|selection| !selection.text.trim().is_empty());
+        let pointed = !mentioned.is_empty() || noted || !diffs.is_empty() || selected || !attachments.is_empty();
+        turn = if super::chat_cmd::is_cli_command(&asked) {
+            None
+        } else {
+            db.0.lock().ok().map(|conn| {
+                let map = crate::codemap::snapshot_if_built(&project.local_path);
+                crate::context::need::judge(
+                    crate::context::need::Mode::read(&conn),
+                    &asked,
+                    crate::context::need::Signals {
+                        pointed,
+                        declared: |name: &str| map.as_ref().is_some_and(|map| map.declares(name)),
+                        vocabulary: || {
+                            crate::knowledge::scope_for_repo(&conn, &project.local_path, cloud)
+                                .is_some_and(|scope| crate::knowledge::shares_vocabulary(&conn, &scope, &asked))
+                        },
+                    },
+                )
+            })
+        };
+        let push = turn.as_ref().map_or(crate::context::need::Push::All, |turn| turn.push_for(reaches_tools));
         // Memories the user approved for this project (`crate::ai_memory`) — a cloud engine gets only
         // the ones not marked local-only — and a "recuerda que…" in the question becomes one.
         if let Ok(conn) = db.0.lock() {
@@ -1408,7 +1447,9 @@ pub async fn send_chat_message(
                     learned_outcome = Some(outcome);
                 }
             }
-            if let Ok(found) = crate::ai_memory::relevant(&conn, Some(&workspace_id), Some(&project_id), &asked, cloud, MEMORY_NOTE_CHARS) {
+            if let Ok(found) =
+                crate::ai_memory::relevant_with(&conn, Some(&workspace_id), Some(&project_id), &asked, cloud, MEMORY_NOTE_CHARS, push.memories())
+            {
                 if let Some((note, sources)) = crate::ai_memory::note(&found) {
                     engine_message.push_str(said.say("memories", &note));
                     context_sources.extend(sources);
@@ -1416,14 +1457,19 @@ pub async fn send_chat_message(
             }
         }
         // A read-only Gemini or Grok run refuses MCP tools, so it cannot call `search_knowledge`:
-        // the best passages ride the question instead (`knowledge::prompt_note`).
-        if analysis && matches!(config.provider.as_str(), "gemini" | "grok") {
+        // the passages that clear the bar ride the question instead (`knowledge::prompt_note`) —
+        // unless it is a follow-up, which the conversation answers.
+        if analysis && matches!(config.provider.as_str(), "gemini" | "grok") && push.attaches() {
             if let Ok(conn) = db.0.lock() {
-                if let Some((note, sources)) = crate::knowledge::prompt_note(&conn, &project.local_path, &asked) {
+                if let Some((note, sources)) = crate::knowledge::prompt_note(&conn, &project.local_path, &asked, push == crate::context::need::Push::Relevant) {
                     engine_message.push_str(&note);
                     context_sources.extend(sources);
                 }
             }
+        }
+        // «Contexto usado» says so when nothing of the project went, and why.
+        if let Some(source) = turn.as_ref().and_then(|turn| turn.withheld_source(reaches_tools)) {
+            context_sources.push(source);
         }
         if plan {
             engine_message.push_str(ai::PLAN_MODE_NOTE);
@@ -1447,7 +1493,7 @@ pub async fn send_chat_message(
                     context_sources.extend(sources);
                 }
             }
-            if let Some((note, sources)) = crate::knowledge::prompt_note(&conn, &project.local_path, &asked) {
+            if let Some((note, sources)) = crate::knowledge::prompt_note(&conn, &project.local_path, &asked, false) {
                 engine_message.push_str(&note);
                 context_sources.extend(sources);
             }
@@ -1499,7 +1545,7 @@ pub async fn send_chat_message(
     // Kept for the title run below; `app` moves into the run's scope.
     let title_app = app.clone();
     let unsaved = crate::context::unsaved_in(&editor, std::path::Path::new(&project.local_path));
-    let (result, trace) = ai_runs::scoped_with_trace(app, run_id, crate::context::with_unsaved(unsaved, async {
+    let (result, trace) = ai_runs::scoped_with_trace(app, run_id, crate::context::with_unsaved(unsaved, crate::context::need::within(turn, async {
         ai::chat_with_repo(
             &*config.engine,
             &config.binary,
@@ -1525,7 +1571,7 @@ pub async fn send_chat_message(
             effort.as_deref().map(str::trim).filter(|e| ai::effort::valid(e)),
         )
         .await
-    }))
+    })))
     .await;
     let response_time_ms = started.elapsed().as_millis() as i64;
     // Kept, with the files it differs in, when the turn changed something — the per-turn review

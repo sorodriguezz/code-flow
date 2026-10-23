@@ -1076,11 +1076,62 @@ pub async fn list_pr_comment_threads(
     let root = api_root(host);
     let review_url = format!("{root}/repos/{owner}/{repo}/pulls/{pr_number}/comments?per_page=100");
     let review_comments: Vec<RawReviewComment> = get_all_pages(&root, &review_url, token).await?;
-    Ok(group_comment_threads(
+    let has_review_threads = !review_comments.is_empty();
+    let mut threads = group_comment_threads(
         review_comments,
         get_all_pages(&root, &format!("{root}/repos/{owner}/{repo}/issues/{pr_number}/comments?per_page=100"), token)
             .await?,
-    ))
+    );
+    // Which review threads are resolved is not in the REST list at all — only GraphQL knows. One
+    // query per page of threads, and only when there are review threads to ask about.
+    if has_review_threads {
+        let resolved = resolved_thread_roots(host, owner, repo, pr_number, token).await;
+        for thread in threads.iter_mut().filter(|t| t.file_path.is_some()) {
+            thread.resolved = resolved.contains(&thread.id);
+        }
+    }
+    Ok(threads)
+}
+
+/// The root comments of the review threads somebody marked resolved, keyed like
+/// [`group_comment_threads`] keys a thread (its root comment's id). Best effort: a GraphQL failure —
+/// an old Enterprise server, a token without the scope — leaves every thread open, which is how all
+/// of them were read before this existed.
+async fn resolved_thread_roots(host: &str, owner: &str, repo: &str, pr_number: i64, token: &str) -> std::collections::HashSet<i64> {
+    const QUERY: &str = "query($owner: String!, $repo: String!, $number: Int!, $after: String) { \
+        repository(owner: $owner, name: $repo) { pullRequest(number: $number) { \
+        reviewThreads(first: 100, after: $after) { pageInfo { hasNextPage endCursor } \
+        nodes { isResolved comments(first: 1) { nodes { databaseId } } } } } } }";
+    let mut resolved = std::collections::HashSet::new();
+    let mut after: Option<String> = None;
+    for _ in 0..MAX_PAGES {
+        let Ok(data) =
+            graphql(host, token, QUERY, serde_json::json!({ "owner": owner, "repo": repo, "number": pr_number, "after": after })).await
+        else {
+            break;
+        };
+        resolved.extend(resolved_roots_of(&data));
+        let page = &data["repository"]["pullRequest"]["reviewThreads"]["pageInfo"];
+        if page["hasNextPage"].as_bool() != Some(true) {
+            break;
+        }
+        after = page["endCursor"].as_str().map(str::to_string);
+    }
+    resolved
+}
+
+/// One page of `reviewThreads`: the root comment id of each resolved thread.
+fn resolved_roots_of(data: &serde_json::Value) -> Vec<i64> {
+    data["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+        .as_array()
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter(|thread| thread["isResolved"].as_bool() == Some(true))
+                .filter_map(|thread| thread["comments"]["nodes"][0]["databaseId"].as_i64())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Inline review comments grouped into threads by their reply chain, followed by the conversation's
@@ -1114,6 +1165,7 @@ fn group_comment_threads(review_comments: Vec<RawReviewComment>, issue_comments:
                         start_line: c.start_line.or(c.line),
                         end_line: c.line,
                         comments: vec![comment],
+                        resolved: false,
                     },
                 );
             }
@@ -1138,6 +1190,8 @@ fn group_comment_threads(review_comments: Vec<RawReviewComment>, issue_comments:
                 content,
                 published_date: c.created_at,
             }],
+            // A conversation comment has no thread to resolve.
+            resolved: false,
         });
     }
 
@@ -1461,6 +1515,19 @@ pub async fn pr_checks(host: &str, owner: &str, repo: &str, number: i64, token: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The REST list cannot say which review threads are resolved; GraphQL's answer is read back
+    /// as the root comment ids the threads are keyed by.
+    #[test]
+    fn resolved_review_threads_are_named_by_their_root_comment() {
+        let page = serde_json::json!({ "repository": { "pullRequest": { "reviewThreads": { "nodes": [
+            { "isResolved": true, "comments": { "nodes": [{ "databaseId": 11 }] } },
+            { "isResolved": false, "comments": { "nodes": [{ "databaseId": 12 }] } },
+            { "isResolved": true, "comments": { "nodes": [] } },
+        ] } } } });
+        assert_eq!(resolved_roots_of(&page), vec![11]);
+        assert!(resolved_roots_of(&serde_json::json!({})).is_empty(), "an answer without threads resolves nothing");
+    }
 
     /// A pull request as `GET /repos/{owner}/{repo}/pulls/{n}` answers it, trimmed to what is read.
     fn raw_pull(extra: serde_json::Value) -> RawPull {

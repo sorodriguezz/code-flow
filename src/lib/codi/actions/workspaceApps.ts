@@ -1,21 +1,30 @@
 import { useWorkspaceStore } from "../../../state/workspaceStore";
 import { useUiStore } from "../../../state/uiStore";
-import { CodiError, type CodiAction } from "../registry";
+import { CodiError, type CodiAction, type CodiOutcome } from "../registry";
 import { literal } from "../vocabulary";
 import { askInChatApp } from "./text";
 import {
+  afterColon,
+  answerOrTell,
   appName,
   defineAction,
   flag,
   oneOf,
   optionalText,
+  outOfSight,
   params,
   pickByName,
   requireWorkspace,
   say,
   showAppHere,
+  showOffer,
+  showParam,
+  spokenDuration,
   spokenList,
+  spokenReason,
+  tellWhenDone,
   text,
+  watchStore,
 } from "./shared";
 
 /**
@@ -25,6 +34,11 @@ import {
  * (the stores are the size of their apps, and stay out of the catalogue's chunk), and goes through the
  * store's own verbs — the same ones the app's buttons call — so a flow run by voice asks for its form
  * or its trust exactly as one run with the mouse does.
+ *
+ * A flow's run and an agent's task are work, not places: out of sight (Settings › Codi › «Trabajar en
+ * segundo plano», or «sin abrir») neither app opens, and how the work ended is said — within the turn
+ * when it is quick, told when it lands otherwise. What needs the app (a run's form, its trust
+ * question) is said and offered to be opened.
  */
 
 async function flows() {
@@ -111,33 +125,46 @@ function flowActions(): CodiAction[] {
     defineAction({
       id: "flow.run",
       title: {
-        en: "Run a flow now, by name (loose match) — as its Run button does: a flow that asks for input shows its form, one with someone else's commands asks to be trusted first.",
-        es: "Ejecuta un flujo ahora, por nombre (coincidencia flexible), como su botón Ejecutar: si pide datos muestra su formulario, y si trae comandos de otra persona pide confianza antes.",
+        en: "Run a flow now, by name (loose match), and say how it ended — without opening Flujos unless show is true. As its Run button: a flow that asks for input or for trust says so, and opening it is offered.",
+        es: "Ejecuta un flujo ahora, por nombre (coincidencia flexible), y dice cómo terminó, sin abrir Flujos salvo que show sea true. Como su botón Ejecutar: si pide datos o confianza lo dice y ofrece abrirlo.",
       },
       aliases: {
         es: ["ejecuta el flujo", "corre el flujo", "lanza el flujo", "dispara el flujo", "ejecuta la automatizacion", "arranca el flujo"],
         en: ["run the flow", "start the flow", "trigger the flow", "run the automation", "fire the flow"],
       },
-      params: params({ name: text("The flow's name, as said.") }, ["name"]),
+      params: params({ name: text("The flow's name, as said."), show: showParam }, ["name"]),
       risk: "write",
       where: "app:flows",
       frequent: true,
-      run: async ({ name }) => {
+      run: async ({ name, show }) => {
         const store = await flows();
         const flow = pickByName(store.getState().flows, String(name), (f) => f.name, "flow");
-        const { useFlowRunsStore } = await import("../../../state/flowRunsStore");
+        const { useFlowRunsStore, ensureFlowRunEvents } = await import("../../../state/flowRunsStore");
+        // The run's end arrives as an event, which a window listens for once Flujos has been opened —
+        // or now, for a run nobody watches on screen.
+        ensureFlowRunEvents();
         if (useFlowRunsStore.getState().current[flow.id]?.run?.status === "running") {
           return { result: { flow: flow.name, already: true }, say: say("codi.say.flowAlreadyRunning", { name: flow.name }) };
         }
-        const run = await useFlowRunsStore.getState().start(flow.id, { kind: "full" });
-        if (run) return { result: { flow: flow.name, run: run.id, status: run.status }, say: say("codi.say.flowStarted", { name: flow.name }) };
-        const runs = useFlowRunsStore.getState();
-        if (runs.formPrompt?.flowId === flow.id || runs.trustPrompt?.flowId === flow.id) {
-          // The form and the trust question are drawn by the Flujos view: put it on screen with the
-          // flow, so the question the run is waiting on is in front of the user.
+        const quiet = await outOfSight(show);
+        if (!quiet) {
           showAppHere("flows");
           void store.getState().openFlow(flow.id);
+        }
+        const run = await useFlowRunsStore.getState().start(flow.id, { kind: "full" });
+        if (run) return followRun(flow.id, flow.name, run.id);
+        const runs = useFlowRunsStore.getState();
+        if (runs.formPrompt?.flowId === flow.id || runs.trustPrompt?.flowId === flow.id) {
           const asks = runs.formPrompt?.flowId === flow.id ? "form" : "trust";
+          // The form and the trust question are drawn by the Flujos view: on screen they are in front of
+          // the user already; out of sight, opening it is asked.
+          if (quiet) {
+            throw new CodiError(
+              `${flow.name} waits for its ${asks === "form" ? "form" : "trust question"}, which Flujos shows`,
+              say(asks === "form" ? "codi.say.flowNeedsFormAsk" : "codi.say.flowNeedsTrustAsk", { name: flow.name }),
+              { action: "flow.open", params: { name: flow.name } },
+            );
+          }
           return {
             result: { flow: flow.name, waitingFor: asks },
             say: say(asks === "form" ? "codi.say.flowNeedsForm" : "codi.say.flowNeedsTrust", { name: flow.name }),
@@ -147,6 +174,34 @@ function flowActions(): CodiAction[] {
       },
     }),
   ];
+}
+
+/** How a run ended — said within the turn when it is quick, told when it lands otherwise. A failure is
+ *  said with its reason and offers to open the flow. */
+function followRun(flowId: string, name: string, runId: string): Promise<CodiOutcome> {
+  const work = (async (): Promise<CodiOutcome> => {
+    const { useFlowRunsStore } = await import("../../../state/flowRunsStore");
+    const ended = await watchStore(useFlowRunsStore, (state) => {
+      const run = state.current[flowId]?.run;
+      return run && run.id === runId && run.status !== "running" && run.status !== "waiting" ? run : undefined;
+    });
+    if (!ended) return { result: { flow: name, run: runId, running: true } };
+    const ms = ended.durationMs ?? (ended.finishedAt ? Date.parse(ended.finishedAt) - Date.parse(ended.startedAt) : 0);
+    if (ended.status === "success") {
+      return { result: { flow: name, run: runId, status: ended.status, ms }, say: say("codi.say.flowFinished", { name, time: spokenDuration(Math.max(0, ms)) }) };
+    }
+    if (ended.status === "canceled") return { result: { flow: name, run: runId, status: ended.status }, say: say("codi.say.flowStopped", { name }) };
+    throw new CodiError(
+      `${name} ended ${ended.status}: ${ended.error}`,
+      say("codi.say.flowFailedWhy", { name, reason: spokenReason(ended.error || ended.status) }),
+      { action: "flow.open", params: { name } },
+    );
+  })();
+  return answerOrTell(work, {
+    source: `flow:${flowId}`,
+    still: { result: { flow: name, run: runId, running: true }, say: say("codi.say.flowStartedTell", { name }) },
+    failed: (error) => say("codi.say.flowFailedWhy", { name, reason: spokenReason(error) }),
+  });
 }
 
 /** The formats a new diagram can be, by the names the Diagramas menu gives them. */
@@ -330,13 +385,14 @@ function agentActions(): CodiAction[] {
           prompt: text("What the agent should do."),
           agent: optionalText("The agent's name. Left out: the first runnable one."),
           repo: optionalText("The repository's name. Left out: the one open in this window."),
+          show: showParam,
         },
         ["prompt"],
       ),
       risk: "write",
       where: "app:agents",
       frequent: true,
-      run: async ({ prompt, agent, repo }) => {
+      run: async ({ prompt, agent, repo, show }) => {
         const store = await agents();
         const { isRunnableAgent } = await import("../../../state/agentsStore");
         const runnable = store.getState().roster.filter(isRunnableAgent);
@@ -348,21 +404,52 @@ function agentActions(): CodiAction[] {
           ? pickByName(projects, String(repo), (p) => p.name, "repository")
           : (ws.activeProject() ?? (projects.length === 1 ? projects[0] : null));
         if (!project) throw new CodiError("say which repository the task is for (repo)", say("codi.say.whichRepo"));
-        showAppHere("agents");
+        const quiet = await outOfSight(show);
+        if (!quiet) showAppHere("agents");
         const goal = String(prompt);
         const task = await store.getState().create({ projectId: project.id, agent: chosen, goal });
         // What the dialog does next: the first turn, unless the one-agent-per-repository guard says
         // no — the task stays, selected, with its goal and a Run button.
         const started = store.getState().send(task.id, goal);
+        // Out of sight, its turn's end is told — a turn takes minutes, so nothing waits for it.
+        if (started && quiet) {
+          tellWhenDone(`agent:${task.id}`, followTask(task.id, chosen.name, task.title), (error) =>
+            say("codi.say.agentFailed", { name: chosen.name, title: task.title, reason: afterColon(error) }),
+          );
+        }
         return {
           result: { task: task.title, agent: chosen.name, repo: project.name, started },
           say: started
-            ? say("codi.say.agentStarted", { name: chosen.name, repo: project.name })
+            ? say(quiet ? "codi.say.agentStartedTell" : "codi.say.agentStarted", { name: chosen.name, repo: project.name })
             : say("codi.say.agentQueued", { name: chosen.name, repo: project.name }),
         };
       },
     }),
   ];
+}
+
+/** How an agent's turn ended: done, waiting for an answer, or stopped — followed through the store the
+ *  Agentes view reads. A turn that waits offers to show the task (selected by then). */
+async function followTask(taskId: string, agent: string, title: string): Promise<CodiOutcome | null> {
+  const { useAgentsStore } = await import("../../../state/agentsStore");
+  let seenRunning = false;
+  const ended = await watchStore(useAgentsStore, (state) => {
+    const task = state.tasks.find((t) => t.id === taskId);
+    if (!task) return undefined;
+    if (task.status === "running") {
+      seenRunning = true;
+      return undefined;
+    }
+    return seenRunning || task.status === "done" || task.status === "error" || task.status === "cancelled" ? task : undefined;
+  });
+  if (!ended) return null;
+  if (ended.status === "error") throw new CodiError(`${agent}'s task ${title} failed`, say("codi.say.agentFailed", { name: agent, title, reason: "" }));
+  if (ended.status === "cancelled") return { say: say("codi.say.agentStopped", { name: agent, title }) };
+  void useAgentsStore.getState().select(taskId);
+  return {
+    say: say(ended.status === "done" ? "codi.say.agentDone" : "codi.say.agentWaiting", { name: agent, title }),
+    offer: showOffer("app.open", { app: "agents" }),
+  };
 }
 
 function chatActions(): CodiAction[] {

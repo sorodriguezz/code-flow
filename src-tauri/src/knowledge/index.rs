@@ -660,7 +660,7 @@ pub fn fts_query(question: &str) -> Option<String> {
 /// Words that match everything and say nothing — Spanish and English, the two languages the app
 /// is used in. Function words only: they also count against the relevance floor
 /// (`knowledge::relevant`), where "which" or "its" would make a question look longer than it is.
-const STOPWORDS: &[&str] = &[
+pub(crate) const STOPWORDS: &[&str] = &[
     "the", "and", "for", "what", "how", "why", "does", "this", "that", "with", "from", "are", "is", "of", "to", "in", "on", "it",
     "which", "its", "they", "their", "them", "there", "these", "those", "was", "were", "has", "have", "had", "can", "will", "would",
     "should", "could", "into", "than", "then", "when", "where", "who", "whom", "whose", "you", "your", "our", "we", "not", "but",
@@ -697,20 +697,49 @@ pub fn fold(word: &str) -> String {
 /// Which of `terms` a hit contains, by the prefix rule the FTS query uses. A `snake_case` term is
 /// the run of its parts, as the tokenizer splits it.
 pub fn matched_terms<'a>(terms: &'a [Term], hit: &Hit) -> Vec<&'a Term> {
-    let words = folded_words(&format!("{} {} {}", hit.title, hit.heading, hit.text));
+    matched_in(terms, &format!("{} {} {}", hit.title, hit.heading, hit.text), false)
+}
+
+/// Which of `terms` `text` contains. `stems`: a long plain word counts by its first six letters, so
+/// "validación" finds "validamos" and "registro" "registrar" — Spanish conjugates where the FTS
+/// query's prefix rule cannot follow.
+fn matched_in<'a>(terms: &'a [Term], text: &str, stems: bool) -> Vec<&'a Term> {
+    let words = folded_words(text);
     terms
         .iter()
         .filter(|term| {
             let parts: Vec<String> = term.word.split('_').filter(|p| !p.is_empty()).map(fold).collect();
             match parts.as_slice() {
                 [] => false,
-                [only] => words.iter().any(|w| w.starts_with(only.as_str())),
+                [only] => {
+                    let wanted: String = if stems && !term.code_like { only.chars().take(STEM_CHARS).collect() } else { only.clone() };
+                    words.iter().any(|w| w.starts_with(wanted.as_str()))
+                }
                 parts => words.windows(parts.len()).any(|run| {
                     run.iter().zip(parts).enumerate().all(|(i, (w, p))| if i + 1 == parts.len() { w.starts_with(p.as_str()) } else { w == p })
                 }),
             }
         })
         .collect()
+}
+
+/// The letters a plain word is matched by in [`covers`].
+const STEM_CHARS: usize = 6;
+
+/// Whether `text` answers to the question's `terms` well enough to be put in front of a model that
+/// did not ask for it: every word of a one- or two-word question, half of a longer one (two at
+/// least), or one word that looks like code. Stricter than the search's own floor
+/// (`knowledge::relevant`), which only has to keep a result worth listing to a model that searched.
+pub fn covers(terms: &[Term], text: &str) -> bool {
+    if terms.is_empty() {
+        return false;
+    }
+    let matched = matched_in(terms, text, true);
+    if matched.iter().any(|t| t.code_like) {
+        return true;
+    }
+    let needed = if terms.len() <= 2 { terms.len() } else { 2.max(terms.len().div_ceil(2)) };
+    matched.len() >= needed
 }
 
 fn placeholders(n: usize, from: usize) -> String {
@@ -1042,6 +1071,18 @@ mod tests {
         };
         let matched: Vec<&str> = matched_terms(&terms, &hit).iter().map(|t| t.word.as_str()).collect();
         assert_eq!(matched, vec!["días", "guarda", "apply_discount"], "accents fold and prefixes match, as in the FTS");
+    }
+
+    #[test]
+    fn a_passage_covers_a_question_by_most_of_its_words_or_one_that_looks_like_code() {
+        let terms = query_terms("¿cómo validamos el formulario de registro?");
+        assert!(covers(&terms, "La validación del formulario usa zod; el registro manda un correo."), "stems follow Spanish conjugation");
+        assert!(!covers(&terms, "El formulario de contacto tiene tres campos."), "one word of three is not the question");
+        assert!(covers(&query_terms("¿qué hace cartTotal?"), "export function cartTotal(items) {"), "one word that looks like code is enough");
+        let two = query_terms("login flujo");
+        assert!(!covers(&two, "El login usa OAuth."), "a two-word question needs both");
+        assert!(covers(&two, "El flujo de login usa OAuth."));
+        assert!(!covers(&[], "anything"));
     }
 
     #[test]

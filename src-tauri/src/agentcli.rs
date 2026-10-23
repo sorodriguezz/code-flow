@@ -280,6 +280,7 @@ async fn interface(request: &Request, app: &AppHandle) -> Reply {
                             ok: result.ok,
                             say: result.say.clone(),
                             error: result.error.clone(),
+                            spoken: false,
                         });
                     }
                     let text = ui::result_text(&result);

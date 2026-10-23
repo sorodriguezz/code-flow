@@ -90,12 +90,16 @@ export type SettingsSectionId =
   /** What listens and what speaks: microphone, speaker, Whisper models and voices, dictation,
    *  meetings and the reading aloud. Out of the AI section, where three of its panes used to sit. */
   | "voice"
+  /** Codi, the voice assistant: listening, thinking, its voice, the desktop, routines, privacy. */
+  | "codi"
   /** Which engine does each AI action and what it is told — a section of its own, one pane per area. */
   | "tasks"
   /** Skills and MCP servers: what a model may use beside reading and writing code. */
   | "tools"
   /** The database client's drivers, which otherwise live only inside «Orígenes de datos». */
   | "databases"
+  /** Reference repositories: other code bases cloned as memory for the AI surfaces. */
+  | "references"
   | "api";
 
 /**

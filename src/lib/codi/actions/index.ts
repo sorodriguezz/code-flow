@@ -12,6 +12,8 @@ import { apiActions, dbActions } from "./data";
 import { workspaceAppActions, workspaceAppActionsFor } from "./workspaceApps";
 import { devopsActions } from "./devops";
 import { uiActions } from "./ui";
+import { tourActions } from "./tours";
+import { researchActions } from "./research";
 
 /**
  * Which actions a window registers — the whole catalogue in the main window, and in an island only
@@ -28,6 +30,8 @@ export function catalogueFor(identity: WindowIdentity): CodiAction[] {
     return [
       ...uiActions(),
       ...navigationActions(),
+      // The tours run in the main window, where their overlay is.
+      ...tourActions(),
       ...workspaceActions(),
       ...repoActions(),
       ...branchActions(),
@@ -44,6 +48,9 @@ export function catalogueFor(identity: WindowIdentity): CodiAction[] {
       ...dbActions(),
       ...workspaceAppActions(),
       ...devopsActions(),
+      ...researchActions(),
+      // Outside CodeFlow — other apps, the web, the routines, the quick ask — the backend runs itself
+      // (`codi::native`): they work whatever window is or is not on screen.
     ];
   }
   const spec = identity.satellite;

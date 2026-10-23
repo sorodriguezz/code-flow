@@ -379,6 +379,9 @@ pub struct Status {
     pub supported: bool,
     /// The whisper library «Dictar» installs.
     pub engine_installed: bool,
+    /// A meeting can be recorded: something finds the speech (whisper.cpp, or sherpa-onnx with
+    /// Parakeet). Which model writes it is checked on the way in (`MEETINGS_NO_MODEL`).
+    pub can_record: bool,
     pub vad_installed: bool,
     pub voices_installed: bool,
     pub voices_supported: bool,
@@ -394,6 +397,7 @@ pub fn status() -> Status {
     Status {
         supported: cfg!(any(target_os = "macos", windows)) && dictation.supported,
         engine_installed: dictation.engine_installed,
+        can_record: vad::available(),
         vad_installed: vad_model_path().is_file(),
         voices_installed: voices_installed(),
         voices_supported: SHERPA.is_some(),
@@ -415,11 +419,35 @@ pub fn pick_model(chosen: &str, live: bool) -> Option<&'static crate::dictation:
 }
 
 /// The model the live text is written with: a whisper one, or Parakeet / Canary (`crate::asr`).
-/// The final pass is always whisper's — it lines words up with speakers by their times.
 #[derive(Debug, Clone, Copy)]
 pub enum LiveModel {
     Whisper(&'static crate::dictation::WhisperModel),
     Sherpa(&'static crate::asr::AsrModel),
+}
+
+/// The model the final pass writes with: whisper, or a sherpa-onnx one that times its words
+/// (Parakeet) — the pass gives each word to the person speaking at its moment, so a model that
+/// does not say when a word was spoken (Canary) cannot write it. Until 2026-10-22 it was whisper
+/// only, and a machine with only Parakeet could not record at all (user report).
+#[derive(Debug, Clone, Copy)]
+pub enum FinalModel {
+    Whisper(&'static crate::dictation::WhisperModel),
+    Sherpa(&'static crate::asr::AsrModel),
+}
+
+/// [`pick_model`] for the final pass, where the chosen model may also be Parakeet — and
+/// «automático» takes Parakeet when no whisper model is in.
+pub fn pick_final_model(chosen: &str) -> Option<FinalModel> {
+    use crate::asr;
+    let chosen = chosen.trim();
+    let timed = |m: &&'static asr::AsrModel| asr::usable(m) && asr::recognizer::times_words(m);
+    if let Some(model) = asr::model(chosen).filter(timed) {
+        return Some(FinalModel::Sherpa(model));
+    }
+    if let Some(model) = pick_model(chosen, false) {
+        return Some(FinalModel::Whisper(model));
+    }
+    asr::MODELS.iter().find(timed).map(FinalModel::Sherpa)
 }
 
 /// [`pick_model`] for the live text, where the chosen model may also be a sherpa-onnx one — and

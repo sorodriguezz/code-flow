@@ -26,6 +26,7 @@ pub mod git_ops;
 pub mod bitbucket_cmd;
 pub mod github_cmd;
 pub mod publish_cmd;
+pub mod refrepos_cmd;
 pub mod gitlab_cmd;
 pub mod notes_cmd;
 pub mod notebook_cmd;

@@ -38,7 +38,7 @@ import { pushErrorToast } from "./toastStore";
  *
  * Per window, like every store: the Codi window draws all of it; the main window reads `state.mic`
  * for its title-bar button, the status bar's «Codi escucha» and the announcer branch in
- * `speechStore`; Settings › Voz y sonido › Codi reads and writes the settings half. The runtime
+ * `speechStore`; Settings › IA › Codi reads and writes the settings half. The runtime
  * itself is the backend's — every action here is a command, and what comes back arrives as an event
  * every window hears.
  */
@@ -50,6 +50,10 @@ export const CODI_KEYS = {
   brain: "codi_brain",
   voiceEs: "codi_voice_es",
   voiceEn: "codi_voice_en",
+  remember: "codi_remember",
+  background: "codi_background",
+  atLogin: "codi_at_login",
+  readApps: "codi_read_apps",
 } as const;
 
 export type CodiMode = CodiState["mode"];
@@ -65,9 +69,20 @@ export interface CodiSettings {
   /** A downloaded voice per language, `""` = the reading aloud's. */
   voiceEs: string;
   voiceEn: string;
+  /** Whether a session that ends leaves a recollection for the next (`codi::recollections`). */
+  remember: "on" | "off";
+  /** Whether work (a flow, a request, a query, a note…) is done without opening its screen
+   *  (`lib/codi/actions/shared.outOfSight`). */
+  background: "on" | "off";
+  /** Whether a launch at login opens Codi in its corner, listening, with the main window kept in
+   *  the background (`lib.rs::codi_at_login`). */
+  atLogin: "on" | "off";
+  /** Whether Codi reads other apps' windows, and whether what it reads may reach the provider
+   *  (`on`) or stays with the local model (`local`) — `codi::read_apps_mode`. */
+  readApps: "on" | "local" | "off";
 }
 
-const DEFAULT_SETTINGS: CodiSettings = { listenModel: "", mode: "wake", wakeWords: "", brain: "tiers", voiceEs: "", voiceEn: "" };
+const DEFAULT_SETTINGS: CodiSettings = { listenModel: "", mode: "wake", wakeWords: "", brain: "tiers", voiceEs: "", voiceEn: "", remember: "on", background: "on", atLogin: "off", readApps: "on" };
 
 /** How many of each the window keeps — more than it draws. */
 export const HEARD_KEPT = 6;
@@ -261,6 +276,10 @@ export const useCodiStore = create<CodiStore>((set, get) => ({
           brain: brain(stored[CODI_KEYS.brain]),
           voiceEs: stored[CODI_KEYS.voiceEs] ?? "",
           voiceEn: stored[CODI_KEYS.voiceEn] ?? "",
+          remember: stored[CODI_KEYS.remember]?.trim() === "off" ? "off" : "on",
+          background: stored[CODI_KEYS.background]?.trim() === "off" ? "off" : "on",
+          atLogin: stored[CODI_KEYS.atLogin]?.trim() === "on" ? "on" : "off",
+          readApps: stored[CODI_KEYS.readApps]?.trim() === "off" ? "off" : stored[CODI_KEYS.readApps]?.trim() === "local" ? "local" : "on",
         },
       });
     } catch {

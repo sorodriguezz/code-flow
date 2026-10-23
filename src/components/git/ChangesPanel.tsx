@@ -332,11 +332,19 @@ function FileRow({
       {/* 22px squares edge to edge (`actionButtonClass`), and the strip keeps the clicks that land
           on it — the rounded corners' slivers included — so no pixel among the actions belongs to
           the row and opens the diff. `-my-0.5` lets the squares use the row's padding and keeps it
-          26px. Shown on hover, while one of them runs, and while one has keyboard focus. */}
+          26px. Shown on hover, while one of them runs, and while one has keyboard focus.
+
+          Hidden, it takes no width at all — not even the row's gap (`-ml-2`) — so the path runs to
+          the row's edge (user report, 2026-10-22: a blank strip at the end of every row, in both
+          lists and in the editor's Changes). On hover the path gives the room back by truncating,
+          as a list in VS Code does. Collapsed rather than `display: none`, so Tab still reaches the
+          buttons and `focus-within` opens the strip. */}
       <span
         onClick={(e) => e.stopPropagation()}
         className={`-my-0.5 flex shrink-0 items-center ${
-          actions.some((a) => a.pending) ? "opacity-100" : "opacity-0 focus-within:opacity-100 group-hover:opacity-100"
+          actions.some((a) => a.pending)
+            ? "opacity-100"
+            : "-ml-2 w-0 overflow-hidden opacity-0 focus-within:ml-0 focus-within:w-auto focus-within:overflow-visible focus-within:opacity-100 group-hover:ml-0 group-hover:w-auto group-hover:overflow-visible group-hover:opacity-100"
         }`}
       >
         {actions.map((action, i) => (

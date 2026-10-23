@@ -255,14 +255,15 @@ pub struct Fit {
 
 /// The recommendations for a class. Parakeet for anything spoken short (it is the fastest and the
 /// one that hears «Codi» best everywhere); whisper turbo for the written word where the GPU makes it
-/// cheap; Parakeet again on a PC, where turbo takes seconds an order on the CPU.
+/// cheap; Parakeet again on a PC, where turbo takes seconds an order on the CPU — and, since it
+/// times its words (2026-10-22), for a meeting's final pass where whisper would crawl.
 pub fn picks(class: Class, ram_gb: f64, sherpa: bool) -> Picks {
     let (codi, dictation, live, last, translate) = match (class, sherpa) {
         (_, false) => ("small", "small", "base", "small", "large"),
         (Class::Apple, true) if ram_gb >= 15.0 => ("parakeet", "turbo", "parakeet", "turbo", "canary"),
         (Class::Apple, true) => ("parakeet", "small", "parakeet", "small", "canary"),
-        (Class::Pc, true) => ("parakeet", "parakeet", "parakeet", "small", "canary"),
-        (Class::Modest, true) => ("parakeet", "parakeet", "parakeet", "base", "canary"),
+        (Class::Pc, true) => ("parakeet", "parakeet", "parakeet", "parakeet", "canary"),
+        (Class::Modest, true) => ("parakeet", "parakeet", "parakeet", "parakeet", "canary"),
     };
     // Kokoro where its first sentence starts within about a second; Piper, seven times faster, on
     // the four-core laptop.

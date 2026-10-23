@@ -866,7 +866,7 @@ export default function App() {
             );
             break;
           case "open-settings":
-            // Codi's window asking for one of its panes («Voz y sonido › Codi», from its mode chip).
+            // Codi's window asking for one of its panes («IA › Codi», from its mode chip).
             // It has already brought this window forward (`showMainWindow`); this opens the pane.
             if (message.to !== WINDOW.label) break;
             useUiStore.getState().openSettingsAt(message.section, message.tab);

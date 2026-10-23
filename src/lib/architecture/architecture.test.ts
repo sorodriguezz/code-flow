@@ -94,6 +94,27 @@ describe("text edits", () => {
 });
 
 describe("layout", () => {
+  it("has no edge: a card placed up and left of the origin stays there, and the export frames it", () => {
+    const doc = templateDoc(TEMPLATE_IDS[0], "en", "2026-10-21");
+    const first = Object.keys(doc.components ?? {})[0];
+    const placed: ArchDoc = { ...doc, positions: { ...(doc.positions ?? {}), [first]: { x: -400, y: -300 } } };
+    const scene = layoutDoc(placed, resolveComponents(placed), { env: "prd", metaLabels: META });
+    const card = scene.cards.find((c) => c.id === first)!;
+    expect(card.box[0]).toBe(-400);
+    expect(card.box[1]).toBe(-300);
+    expect(scene.left).toBeLessThanOrEqual(-400 - 44);
+    expect(scene.top).toBeLessThanOrEqual(-300 - 36);
+    for (const c of scene.cards) {
+      expect(c.box[0] + c.box[2]).toBeLessThanOrEqual(scene.left + scene.width);
+      expect(c.box[1] + c.box[3]).toBeLessThanOrEqual(scene.top + scene.height);
+    }
+    const svg = renderSvg(scene, { palette: LIGHT_PALETTE, missingLabel: "?" });
+    expect(svg).toMatch(new RegExp(`viewBox="${scene.left} ${scene.top} `));
+    // Nothing placed there: the board starts at the origin, as it always did.
+    const plain = layoutDoc(doc, resolveComponents(doc), { env: "prd", metaLabels: META });
+    if (!Object.values(doc.positions ?? {}).some((p) => p.x < 44 || p.y < 36)) expect([plain.left, plain.top]).toEqual([0, 0]);
+  });
+
   for (const id of TEMPLATE_IDS) {
     it(`places ${id} without overlaps and inside its zones`, () => {
       const doc = templateDoc(id, "en", "2026-10-21");

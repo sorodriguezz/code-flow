@@ -323,7 +323,6 @@ const editorSave = defineAction({
   params: params({ all: flag("Every unsaved tab of the repository.") }),
   risk: "write",
   where: "any",
-  frequent: true,
   run: async ({ all }) => {
     const view = useUiStore.getState().activeView;
     if (view !== "editor" && !(view === "api" && all !== true)) {

@@ -44,6 +44,7 @@ import {
   type PrTarget,
 } from "../../lib/prTarget";
 import { tallyPublish } from "../../lib/prOutcomes";
+import { runCostLine } from "../../lib/runCost";
 import {
   buildFixpack,
   formatDecisionComment,
@@ -1103,6 +1104,13 @@ export function PrDocument({
                     <p className="flex items-center gap-2 text-[12px] text-[var(--cf-success)]">
                       <CheckCheck size={14} className="shrink-0" />
                       {t("pr.allResolved", { n: runMemory?.resolved.length ?? 0 })}
+                    </p>
+                  )}
+                  {/* What this run spent — kept with the run, where the global meter can only say
+                      "review-pr" without which review it was. */}
+                  {runMemory?.cost && (
+                    <p className="text-[11px] tabular-nums text-[var(--cf-text-muted)]" title={t("pr.costHint")}>
+                      {t("pr.costTitle")}: {runCostLine(runMemory.cost, t)}
                     </p>
                   )}
                   {findings.length > 0 && activeParsed && (

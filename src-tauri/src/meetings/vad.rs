@@ -1,5 +1,6 @@
-//! Where people speak: whisper.cpp's Silero detector over a channel, and the two ways a meeting
-//! cuts what it finds — into pieces for the final pass, and into utterances as they end, live.
+//! Where people speak: Silero's detector over a channel — whisper.cpp's, or sherpa-onnx's on a
+//! machine that listens with Parakeet and has no whisper (2026-10-22) — and the two ways a meeting
+//! cuts what it finds: into pieces for the final pass, and into utterances as they end, live.
 //!
 //! **Never hand whisper a silence.** It does not answer "nothing": it invents. In Spanish the
 //! classic is «Subtítulos realizados por la comunidad de Amara.org», a line from the subtitles it was
@@ -18,11 +19,58 @@ pub const PIECE_MS: i64 = 28_000;
 /// Stretches closer than this are one piece: a breath is not a turn.
 const JOIN_GAP_MS: i64 = 1_200;
 
-pub fn load(path: &Path, threads: i32) -> Result<Vad, String> {
-    if !path.is_file() {
-        return Err("The voice detector is not installed — Settings › Voice & sound › Meetings".into());
+/// The detector a meeting reads with: whisper.cpp's when whisper is installed (what meetings were
+/// measured with), else sherpa-onnx's over the same model in ONNX.
+pub enum Detector {
+    Whisper(Vad),
+    Sherpa(crate::codi::vad::Detector),
+}
+
+impl Detector {
+    /// The stretches of `samples` (16 kHz mono) somebody speaks in, as `(start_ms, end_ms)`.
+    pub fn speech(&mut self, samples: &[f32]) -> Result<Vec<(i64, i64)>, String> {
+        match self {
+            Detector::Whisper(vad) => vad.speech(samples, params()),
+            Detector::Sherpa(detector) => Ok(pad(&detector.stretches(samples)?, samples_to_ms(samples.len()))),
+        }
     }
-    Vad::load(path, threads.min(2))
+}
+
+/// [`params`] read into sherpa's detector, which has no padding of its own ([`pad`] adds it).
+const SHERPA_TUNING: crate::codi::vad::Tuning = crate::codi::vad::Tuning { threshold: 0.5, min_silence_s: 0.5, min_speech_s: 0.25, max_speech_s: PIECE_MS as f32 / 1000.0, buffer_s: 60.0 };
+/// whisper's `speech_pad_ms`: so the first and last syllables survive.
+const PAD_MS: i64 = 120;
+
+/// `stretches` widened by [`PAD_MS`] on each side, within `0..total_ms`, those that come to touch
+/// joined.
+fn pad(stretches: &[(i64, i64)], total_ms: i64) -> Vec<(i64, i64)> {
+    let mut out: Vec<(i64, i64)> = Vec::new();
+    for &(start, end) in stretches {
+        let (start, end) = ((start - PAD_MS).max(0), (end + PAD_MS).min(total_ms));
+        match out.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => out.push((start, end)),
+        }
+    }
+    out
+}
+
+/// Whether a meeting can find speech on this machine: whisper.cpp with its model, or sherpa-onnx
+/// (the model is fetched on the way into a meeting).
+pub fn available() -> bool {
+    crate::dictation::engine_library().is_some() || crate::meetings::sherpa_library().is_some()
+}
+
+/// The detector, whisper's (`path`, its model) when whisper is installed, else sherpa's.
+pub fn load(path: &Path, threads: i32) -> Result<Detector, String> {
+    if crate::dictation::engine_library().is_some() && path.is_file() {
+        return Vad::load(path, threads.min(2)).map(Detector::Whisper);
+    }
+    let onnx = crate::codi::vad::model_path();
+    if crate::meetings::sherpa_library().is_some() && onnx.is_file() {
+        return crate::codi::vad::Detector::tuned(&onnx, SHERPA_TUNING).map(Detector::Sherpa);
+    }
+    Err("The voice detector is not installed — Settings › Voice & sound › Meetings".into())
 }
 
 /// The parameters a meeting uses: a pause of half a second ends speech; a stretch never runs past
@@ -153,7 +201,7 @@ impl Cutter {
 
 /// The speech stretches of a whole channel, read a window at a time so a two-hour channel never
 /// sits in memory whole. Windows overlap by a few seconds and stretches are stitched across them.
-pub fn channel_speech(vad: &mut Vad, meeting: &Path, channel: super::audio::Channel, mut progress: impl FnMut(f32)) -> Result<Vec<(i64, i64)>, String> {
+pub fn channel_speech(vad: &mut Detector, meeting: &Path, channel: super::audio::Channel, mut progress: impl FnMut(f32)) -> Result<Vec<(i64, i64)>, String> {
     const WINDOW_MS: i64 = 300_000;
     let total = super::audio::channel_ms(meeting, channel).max(1);
     let mut reader = super::audio::ChannelReader::open(meeting, channel);
@@ -164,7 +212,7 @@ pub fn channel_speech(vad: &mut Vad, meeting: &Path, channel: super::audio::Chan
         if block.is_empty() {
             break;
         }
-        for (start, end) in vad.speech(&block, params())? {
+        for (start, end) in vad.speech(&block)? {
             let (start, end) = (base + start, base + end);
             match found.last_mut() {
                 // A stretch cut by the window's edge continues in the next one.
@@ -181,6 +229,12 @@ pub fn channel_speech(vad: &mut Vad, meeting: &Path, channel: super::audio::Chan
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sherpas_stretches_are_padded_like_whispers() {
+        assert_eq!(pad(&[(50, 1_000), (1_150, 2_000), (5_000, 9_950)], 10_000), vec![(0, 2_120), (4_880, 10_000)]);
+        assert!(pad(&[], 1_000).is_empty());
+    }
 
     #[test]
     fn neighbours_join_until_a_piece_is_full() {

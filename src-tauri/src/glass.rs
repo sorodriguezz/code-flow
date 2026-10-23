@@ -204,8 +204,14 @@ fn backdrop(window: &WebviewWindow, enabled: bool) {
     // Every `apply_vibrancy` adds a view and `clear_vibrancy` removes one: clear them all, whatever
     // put them there.
     while let Ok(true) = clear_vibrancy(window) {}
-    let radius = if enabled { BLUR_RADIUS } else { 0 };
-    if window_blur(window, radius) || !enabled {
+    if !enabled {
+        window_blur(window, 0);
+        return;
+    }
+    // A rounded window (Codi's) takes the effect view, which rounds with it: the window server's
+    // blur covers the window's whole rectangle and would leave its corners frosted.
+    let rounded = (window.label() == crate::windows::codi_label()).then_some(crate::windows::CODI_CORNER_RADIUS);
+    if rounded.is_none() && window_blur(window, BLUR_RADIUS) {
         return;
     }
     // `Active` rather than following the window's focus: a window that turns grey and opaque every
@@ -214,10 +220,43 @@ fn backdrop(window: &WebviewWindow, enabled: bool) {
         window,
         NSVisualEffectMaterial::HudWindow,
         Some(NSVisualEffectState::Active),
-        None,
+        rounded,
     ) {
         crate::applog::info(&format!("window: vibrancy refused — {e:?}"));
     }
+}
+
+/// Rounds a frameless window's corners, `radius` points: its content view clips to them, and the
+/// shadow is redrawn around the new shape. Elsewhere the page's own rounding is the whole of it — a
+/// transparent window shows nothing past the sheet.
+pub fn round_corners(window: &WebviewWindow, radius: f64) {
+    #[cfg(target_os = "macos")]
+    {
+        let target = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            use objc2::runtime::AnyObject;
+            let Ok(ns_window) = target.ns_window() else { return };
+            let ns_window = ns_window.cast::<AnyObject>();
+            // SAFETY: `ns_window` is this window's live `NSWindow`, used on the main thread; its
+            // content view is an `NSView`, layer-backed once `wantsLayer` is set, and every call
+            // below is a plain setter on those two.
+            unsafe {
+                let view: *mut AnyObject = objc2::msg_send![ns_window, contentView];
+                if view.is_null() {
+                    return;
+                }
+                let _: () = objc2::msg_send![view, setWantsLayer: true];
+                let layer: *mut AnyObject = objc2::msg_send![view, layer];
+                if !layer.is_null() {
+                    let _: () = objc2::msg_send![layer, setCornerRadius: radius];
+                    let _: () = objc2::msg_send![layer, setMasksToBounds: true];
+                }
+                let _: () = objc2::msg_send![ns_window, invalidateShadow];
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, radius);
 }
 
 /// Sets the window server's blur behind `window`; `0` takes it off. Whether it took.

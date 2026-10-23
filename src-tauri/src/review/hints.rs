@@ -137,6 +137,7 @@ mod tests {
         MemoryFinding {
             id: id.into(),
             severity: "warning".into(),
+            severidad: String::new(),
             tipo: "Bug".into(),
             categoria: categoria.into(),
             subtitulo: "algo".into(),

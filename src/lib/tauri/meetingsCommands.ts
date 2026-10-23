@@ -88,6 +88,8 @@ export interface Voice {
 export interface MeetingsStatus {
   supported: boolean;
   engineInstalled: boolean;
+  /** Something finds the speech: whisper.cpp, or sherpa-onnx with Parakeet. */
+  canRecord: boolean;
   vadInstalled: boolean;
   voicesInstalled: boolean;
   voicesSupported: boolean;

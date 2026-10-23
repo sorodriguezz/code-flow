@@ -67,6 +67,10 @@ pub struct ActionSpec {
     /// For a param, for each of its enum values, the names a user says for it.
     #[serde(default)]
     pub vocabulary: Option<HashMap<String, HashMap<String, Words>>>,
+    /// How a *question* names it — «cómo funciona», "how does" — for the few actions that answer
+    /// one by acting (a tour explains an app). The router takes a question only through these.
+    #[serde(default)]
+    pub questions: Option<Words>,
     /// JSON Schema of the params (an object schema).
     pub params: Value,
     pub risk: Risk,
@@ -104,6 +108,23 @@ pub struct ActResult {
     pub say: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
+    /// What the action proposes: instead, having not done what was asked but knowing what was
+    /// probably meant («no está en este workspace, pero sí en Clientes» — its `say` is the
+    /// question); or next, having done it («¿analizo el registro?» — the offer's own `question`).
+    /// Asked as a yes or no, and run on a yes.
+    #[serde(default)]
+    pub offer: Option<Offer>,
+}
+
+/// An action another proposes, with its params. A failed action asks it with its `say`; one that
+/// worked says what it found and then asks `question` («¿Quieres que analice el registro?»).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Offer {
+    pub action: String,
+    #[serde(default)]
+    pub params: Value,
+    #[serde(default)]
+    pub question: Option<String>,
 }
 
 /// Every window's actions, by its label. Main's are the catalogue; an island's add the ones only it
@@ -134,11 +155,16 @@ pub fn forget(window: &str) {
     }
 }
 
-/// Every action once, main's first.
+/// Every action once: the backend's own (`super::native`, which need no window), then main's, then
+/// the islands'.
 pub fn specs() -> Vec<ActionSpec> {
-    let Ok(held) = catalogue().lock() else { return Vec::new() };
     let mut seen = std::collections::HashSet::new();
     let mut all = Vec::new();
+    for spec in super::native::specs() {
+        seen.insert(spec.id.clone());
+        all.push(spec);
+    }
+    let Ok(held) = catalogue().lock() else { return all };
     let mut windows: Vec<&String> = held.keys().collect();
     windows.sort_by_key(|label| (label.as_str() != "main", label.as_str()));
     for window in windows {
@@ -231,7 +257,17 @@ pub async fn act(app: &AppHandle, action: &str, params: Value, asker: Asker, con
             return Ok(ActResult { ok: false, error: Some("The user said no".into()), ..ActResult::default() });
         }
     }
+    // The backend's own: no window runs them, so none has to be there.
+    if spec.place == super::native::PLACE {
+        if let Some(result) = super::native::run(app, &spec.id, &params).await {
+            return Ok(result);
+        }
+    }
     let window = window_for(app, &spec);
+    if window == "main" && shows_something(&spec, &params) && crate::MAIN_AWAY.load(Ordering::Relaxed) {
+        // The main window was closed and Codi kept going: what is asked to be seen brings it back.
+        crate::tray::show_main_window(app);
+    }
     let mut params = params;
     if spec.risk == Risk::Destructive {
         // The window's own guard (a destructive-looking button pressed through `ui.press`) reads it.
@@ -258,11 +294,20 @@ pub async fn act(app: &AppHandle, action: &str, params: Value, asker: Asker, con
     Ok(answered)
 }
 
+/// Whether running `spec` puts something on screen: a navigation, or a job asked to be shown.
+fn shows_something(spec: &ActionSpec, params: &Value) -> bool {
+    spec.risk == Risk::Navigate || params.get("show").and_then(Value::as_bool) == Some(true)
+}
+
 /// What every window shows right now, main first — and one summary line each, which is what goes
 /// at the end of an engine's prompt.
 pub async fn state(app: &AppHandle) -> Value {
+    // Only windows that registered can answer: a main window that has not (hidden since login, its
+    // page not run yet) would cost the whole timeout for nothing.
+    let registered: std::collections::HashSet<String> = catalogue().lock().map(|held| held.keys().cloned().collect()).unwrap_or_default();
     let mut windows = vec!["main".to_string()];
     windows.extend(crate::windows::satellite_labels(&app.state::<crate::windows::SatelliteRegistry>()));
+    windows.retain(|window| registered.contains(window));
     let mut shown = Vec::new();
     let mut summary = Vec::new();
     for window in windows {
@@ -348,20 +393,42 @@ pub fn generic_tools() -> Vec<(&'static str, &'static str, Value)> {
     ]
 }
 
-/// `ui_actions` narrowed to an area.
+/// `ui_actions` narrowed to an area — the id's first part, singular or plural alike: `containers`
+/// is `containers.list` and `container.why` both (an engine asking for one missed the other).
 pub fn actions_text(lang: &str, area: &str) -> String {
-    let area = area.trim().trim_end_matches('.');
-    catalogue_text(lang).lines().filter(|line| area.is_empty() || line.starts_with(&format!("{area}."))).collect::<Vec<_>>().join("\n")
+    let area = area.trim().trim_end_matches('.').to_lowercase();
+    let stem = area.trim_end_matches('s');
+    catalogue_text(lang)
+        .lines()
+        .filter(|line| {
+            let own = line.split(['.', ' ']).next().unwrap_or_default();
+            area.is_empty() || own == area || own.trim_end_matches('s') == stem
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Turns a window's answer into what an engine reads back.
 pub fn result_text(result: &ActResult) -> String {
     if result.ok {
-        match (&result.say, &result.result) {
+        let done = match (&result.say, &result.result) {
             (_, Some(value)) if !value.is_null() => format!("ok: {value}"),
             (Some(said), _) => format!("ok: {said}"),
             _ => "ok".into(),
+        };
+        // The next step it recommends: the engine may offer it, and acts on a yes.
+        match (&result.offer, result.offer.as_ref().and_then(|o| o.question.as_deref()).filter(|q| !q.trim().is_empty())) {
+            (Some(offer), Some(question)) => format!("{done}. You may ask the user «{question}»; on a yes, call ui_act with action {} and params {}", offer.action, offer.params),
+            _ => done,
         }
+    } else if let (Some(offer), Some(question)) = (&result.offer, result.say.as_deref().filter(|q| !q.trim().is_empty())) {
+        // What the user probably meant: the engine asks, and acts on a yes.
+        format!(
+            "failed: {}. Ask the user «{question}»; on a yes, call ui_act with action {} and params {}",
+            result.error.clone().unwrap_or_else(|| "no reason given".into()),
+            offer.action,
+            offer.params
+        )
     } else {
         format!("failed: {}", result.error.clone().unwrap_or_else(|| "no reason given".into()))
     }
@@ -377,6 +444,7 @@ mod tests {
             title: Title { es: format!("es {id}"), en: format!("en {id}") },
             aliases: None,
             vocabulary: None,
+            questions: None,
             params: json!({ "type": "object", "properties": { "app": { "type": "string", "enum": ["flows", "notes"] } }, "required": ["app"] }),
             risk,
             place: place.into(),
@@ -388,7 +456,9 @@ mod tests {
     fn the_catalogue_puts_main_first_and_lists_each_action_once() {
         register("sat-app-notes", vec![spec("notes.create", Risk::Write, "app:notes"), spec("app.open", Risk::Navigate, "any")]);
         register("main", vec![spec("app.open", Risk::Navigate, "main"), spec("git.push", Risk::Destructive, "main")]);
-        let all = specs();
+        // The backend's own come first and need no window; the windows' follow.
+        let native = super::super::native::specs().len();
+        let all: Vec<ActionSpec> = specs().into_iter().skip(native).collect();
         let ids: Vec<&str> = all.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["app.open", "git.push", "notes.create"]);
         assert_eq!(all[0].place, "main", "main's copy wins");
@@ -415,6 +485,14 @@ mod tests {
     fn results_read_back_short() {
         assert_eq!(result_text(&ActResult { ok: true, say: Some("Listo".into()), ..Default::default() }), "ok: Listo");
         assert_eq!(result_text(&ActResult { ok: false, error: Some("nope".into()), ..Default::default() }), "failed: nope");
+        let offered = ActResult {
+            ok: false,
+            error: Some("not in this workspace".into()),
+            say: Some("¿Lo abro?".into()),
+            offer: Some(Offer { action: "repo.switch".into(), params: json!({ "name": "api-pagos", "workspace": "Clientes" }), question: None }),
+            ..Default::default()
+        };
+        assert!(result_text(&offered).contains("Ask the user «¿Lo abro?»; on a yes, call ui_act with action repo.switch"));
         assert_eq!(result_text(&ActResult { ok: true, result: Some(json!({ "repo": "api" })), ..Default::default() }), "ok: {\"repo\":\"api\"}");
     }
 }

@@ -33,7 +33,7 @@ export function uiActions(): CodiAction[] {
       params: params(),
       risk: "navigate",
       where: "any",
-      frequent: true,
+      // Said plainly («deshaz»), the router takes it: its typed tool went to knowledge.ask.
       run: async () => {
         if (!(await undoNavigation())) {
           throw new CodiError("nothing to undo — Codi has not moved this window yet", say("codi.say.nothingToUndo"));

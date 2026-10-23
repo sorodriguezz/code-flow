@@ -3,11 +3,13 @@ import { FolderPlus, Loader2, RefreshCw, Search, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { buttonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
+import { Segmented } from "../common/Segmented";
 import { chipClass, fieldClass } from "../common/recipes";
 import { ModelDownloadRow } from "./localModelRow";
 import { useT } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useKnowledgeStore } from "../../state/knowledgeStore";
+import { useChatContextModeStore, type ChatContextMode } from "../../state/chatContextModeStore";
 import { useUiStore } from "../../state/uiStore";
 import { useConfirmStore } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -57,6 +59,39 @@ function StatusLine({ status, documents = false }: { status: KnowledgeStatus; do
  * only" so cloud engines never see them. The semantic model is optional — without one, search is
  * exact words plus the code map.
  */
+const CONTEXT_MODE_HINT: Record<ChatContextMode, TranslationKey> = {
+  auto: "knowledge.autoContextAutoHint",
+  always: "knowledge.autoContextAlwaysHint",
+  tools: "knowledge.autoContextToolsHint",
+};
+
+/**
+ * What the chats attach to a question besides the question (`context::need`) — global, like the
+ * answer length, so it is shown with or without a workspace open.
+ */
+function ChatContextModePicker() {
+  const t = useT();
+  const { mode, pick } = useChatContextModeStore();
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[12px] text-[var(--cf-text-muted)]">{t("knowledge.autoContext")}</span>
+      <Segmented
+        size="sm"
+        layoutId="knowledge-chat-context-mode"
+        value={mode}
+        onChange={(next) => void pick(next)}
+        className="self-start"
+        options={[
+          { value: "auto", label: t("knowledge.autoContextAuto") },
+          { value: "always", label: t("knowledge.autoContextAlways") },
+          { value: "tools", label: t("knowledge.autoContextTools") },
+        ]}
+      />
+      <span className="text-[11px] leading-snug text-[var(--cf-text-muted)]">{t(CONTEXT_MODE_HINT[mode])}</span>
+    </div>
+  );
+}
+
 export function AiKnowledgeSettings() {
   const t = useT();
   const ask = useConfirmStore((s) => s.ask);
@@ -72,7 +107,12 @@ export function AiKnowledgeSettings() {
   }, [workspaceId, load]);
 
   if (!workspaceId || !overview) {
-    return <span className="text-[12px] text-[var(--cf-text-muted)]">{t("knowledge.noWorkspace")}</span>;
+    return (
+      <div className="flex flex-col gap-4">
+        <ChatContextModePicker />
+        <span className="text-[12px] text-[var(--cf-text-muted)]">{t("knowledge.noWorkspace")}</span>
+      </div>
+    );
   }
 
   const activeModel = overview.embedSetting ?? overview.embedModels.find((m) => m.installed)?.id ?? null;
@@ -99,6 +139,7 @@ export function AiKnowledgeSettings() {
 
   return (
     <div className="flex flex-col gap-4">
+      <ChatContextModePicker />
       <label className="flex items-start gap-2 text-[12px] text-[var(--cf-text)]">
         <Checkbox checked={overview.cloudAllowed} onChange={(value) => void setCloud(value)} className="mt-[1px]" />
         <span>
@@ -165,7 +206,11 @@ export function AiKnowledgeSettings() {
           {overview.repos.map((repo) => (
             <div key={repo.projectId} className="flex flex-col border-b border-[var(--cf-border)] px-3 py-1.5 last:border-b-0">
               <span className="flex min-w-0 items-center gap-2">
-                <span className={chipClass("neutral")}>{t("knowledge.repo")}</span>
+                {/* A reference repository (`ref:<id>`, Settings › Repositorios de referencia) is
+                    searched beside the workspace's own and named for what it is. */}
+                <span className={chipClass(repo.projectId.startsWith("ref:") ? "info" : "neutral")}>
+                  {repo.projectId.startsWith("ref:") ? t("knowledge.reference") : t("knowledge.repo")}
+                </span>
                 <span className="min-w-0 truncate text-[12px] text-[var(--cf-text)]">{repo.name}</span>
               </span>
               <StatusLine status={repo.status} />

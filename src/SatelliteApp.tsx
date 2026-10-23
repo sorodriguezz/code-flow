@@ -607,7 +607,7 @@ export default function SatelliteApp() {
   // window has no other way out — and the body waits for `ready`.
   if (spec && kind === "codi") {
     return (
-      <div className="cf-glass-solo flex h-screen flex-col overflow-hidden">
+      <div className="cf-codi-shell cf-glass-solo flex h-screen flex-col overflow-hidden">
         <ErrorBoundary resetKey={spec.refId}>
           <Suspense fallback={<ViewSkeleton />}>
             <CodiWindow ready={ready} />

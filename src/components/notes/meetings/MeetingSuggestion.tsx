@@ -65,11 +65,12 @@ async function takeNotes(app: string) {
   await takeNotesHere(app);
 }
 
-/** Creates the meeting's note in this window's Notes and starts recording into it. */
-export async function takeNotesHere(app: string) {
+/** Creates the meeting's note in this window's Notes and starts recording into it. `show: false` (Codi
+ *  working out of sight) leaves the screen as it is: the meeting bar says it is recording. */
+export async function takeNotesHere(app: string, opts: { show?: boolean } = {}) {
   const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
   if (!workspaceId) return;
-  if (isMainWindow()) useUiStore.getState().setActiveView("notes");
+  if (isMainWindow() && opts.show !== false) useUiStore.getState().setActiveView("notes");
   const notes = useNotesStore.getState();
   if (notes.workspaceId !== workspaceId) await notes.setWorkspace(workspaceId);
   const bookName = translate("meetings.bookName");

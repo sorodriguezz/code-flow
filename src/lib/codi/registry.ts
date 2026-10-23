@@ -1,5 +1,7 @@
-import type { CodiActionSpec, CodiActRequest, CodiActResult } from "../tauri/codiCommands";
-import { foldName } from "./fuzzy";
+import type { CodiActionSpec, CodiActRequest, CodiActResult, CodiOffer } from "../tauri/codiCommands";
+import { closestByName, foldName, matchByName } from "./fuzzy";
+import { say, spokenChoice } from "./say";
+import { useLanguageStore } from "../../state/languageStore";
 
 /**
  * The catalogue of what «Codi» can do in this window, and the one place a request is checked and run.
@@ -42,7 +44,9 @@ export interface CodiContext {
 export interface CodiOutcome {
   /** Short JSON for the engine: what changed, or the data asked for. */
   result?: unknown;
-  /** The sentence Codi says, in the app's language, when this action alone answers the order. */
+  /** The sentence Codi says, in the app's language, when this action alone answers the order.
+   *  `""` when the action speaks for itself (a tour's narration): nothing, not even «Listo», is
+   *  said over it. */
   say?: string;
   /**
    * Runs once the answer has been sent. For an action that ends this window — sending an island
@@ -51,19 +55,30 @@ export interface CodiOutcome {
   after?: () => void;
   /** The request was handed to the window that should run it, which answers it; this one must not. */
   forwarded?: boolean;
+  /** The next step it recommends, asked after `say` with its `question` and run on a yes
+   *  (`codi::brain`) — «…se quedó sin memoria. ¿Analizo el registro?». */
+  offer?: CodiOffer & { question: string };
 }
 
 export type CodiAction = CodiActionSpec & {
   run(params: Record<string, unknown>, ctx: CodiContext): Promise<CodiOutcome>;
 };
 
-/** A failure with something worth saying about it. `message` is for the engine, `say` for the user. */
+/**
+ * A failure with something worth saying about it. `message` is for the engine, `say` for the user.
+ *
+ * With an `offer`, `say` is a question — «No encontré api-pagos aquí, pero está en Clientes. ¿Lo
+ * abro?» — and a yes runs the offered action (`codi::brain`): what the user probably meant is asked,
+ * never assumed (user, 2026-10-22).
+ */
 export class CodiError extends Error {
   readonly say?: string;
-  constructor(message: string, say?: string) {
+  readonly offer?: CodiOffer;
+  constructor(message: string, say?: string, offer?: CodiOffer) {
     super(message);
     this.name = "CodiError";
     this.say = say;
+    this.offer = offer;
   }
 }
 
@@ -153,13 +168,89 @@ function coerce(value: unknown, schema: ParamSchema): { value: unknown } | { err
   return { value: v };
 }
 
+type SpokenNames = Record<string, { es: string[]; en: string[] }>;
+
+/** What an enum value is called: itself, itself without its prefix (`database` for
+ *  `api:database`), and the names the action's vocabulary gives it. */
+function enumEntries(options: readonly string[], names: SpokenNames | undefined): { option: string; name: string }[] {
+  return options.flatMap((option) =>
+    [option, option.slice(option.lastIndexOf(":") + 1), ...(names?.[option]?.es ?? []), ...(names?.[option]?.en ?? [])].map((name) => ({ option, name })),
+  );
+}
+
+type EnumReading = { kind: "match"; option: string } | { kind: "ambiguous"; options: string[] } | { kind: "near"; option: string } | { kind: "none" };
+
+/**
+ * Which enum value `raw` names, the way a person or a model names it — `"database"`, «la de bases de
+ * datos», `"notas"`, `"flujoss"` — by the same tiers repositories are found by ([`matchByName`]:
+ * exact, every word, a part, a slip of a letter or two). Several values answering is `ambiguous`;
+ * none, but one clearly nearest ([`closestByName`]), is `near` — asked, never taken.
+ */
+function readEnum(raw: string, options: readonly string[], names: SpokenNames | undefined): EnumReading {
+  const entries = enumEntries(options, names);
+  const found = matchByName(entries, raw, (entry) => entry.name);
+  const distinct = (list: readonly { option: string }[]) => [...new Set(list.map((entry) => entry.option))];
+  if (found.kind === "match") return { kind: "match", option: found.item.option };
+  if (found.kind === "ambiguous") {
+    const answering = distinct(found.candidates);
+    return answering.length === 1 ? { kind: "match", option: answering[0] } : { kind: "ambiguous", options: answering };
+  }
+  const near = closestByName(entries, raw, (entry) => entry.name);
+  return near ? { kind: "near", option: near.option } : { kind: "none" };
+}
+
+/** `raw` as the one enum value it names, when it names exactly one; else as it came, for
+ *  [`coerce`] to refuse. */
+function spokenValue(raw: unknown, schema: ParamSchema, names: SpokenNames | undefined): unknown {
+  if (typeof raw !== "string" || !schema.enum || schema.enum.includes(raw)) return raw;
+  const reading = readEnum(raw, schema.enum.map(String), names);
+  return reading.kind === "match" ? reading.option : raw;
+}
+
+/** How Codi says an enum value: its first name in the app's language, else the value. */
+function spokenOption(option: string, names: SpokenNames | undefined): string {
+  const language = useLanguageStore.getState().language === "es" ? "es" : "en";
+  return names?.[option]?.[language]?.[0] ?? option;
+}
+
+/**
+ * For params that failed only on a value nobody could place: the question to ask instead of an
+ * error — «¿Cuál: notas o flujos?» when several answer, «¿Quisiste decir Bases de datos?» when one is
+ * nearest, a yes to which runs the action with it (not a destructive one: see below). `null` when
+ * there is nothing to ask.
+ */
+export function askAboutParams(
+  action: Pick<CodiAction, "id" | "params" | "vocabulary" | "risk">,
+  params: Record<string, unknown>,
+): { say: string; offer?: CodiOffer & { question: string } } | null {
+  const properties = (action.params as ParamSchema).properties ?? {};
+  for (const [key, schema] of Object.entries(properties)) {
+    const raw = params[key];
+    if (typeof raw !== "string" || !raw.trim() || !schema.enum || schema.enum.includes(raw)) continue;
+    const names = action.vocabulary?.[key];
+    const reading = readEnum(raw, schema.enum.map(String), names);
+    if (reading.kind === "ambiguous") {
+      return { say: say("codi.say.whichOne", { list: spokenChoice(reading.options.map((option) => spokenOption(option, names))) }) };
+    }
+    if (reading.kind === "near") {
+      const question = say("codi.say.didYouMean", { name: raw, guess: spokenOption(reading.option, names) });
+      // A yes to an offer runs it as confirmed (`codi::brain`), and «¿quisiste decir notas?» is no
+      // confirmation of something destructive: that one is only asked, and ordered again.
+      if (action.risk === "destructive") return { say: question };
+      return { say: question, offer: { action: action.id, params: { ...params, [key]: reading.option }, question } };
+    }
+    return null;
+  }
+  return null;
+}
+
 export type Validated = { ok: true; params: Record<string, unknown> } | { ok: false; error: string };
 
 /**
  * `params` checked against an action's object schema — required keys, types, enum membership —
  * and repaired where the repair has exactly one reading. See the module note.
  */
-export function validateParams(schema: ParamSchema, params: unknown): Validated {
+export function validateParams(schema: ParamSchema, params: unknown, vocabulary?: CodiActionSpec["vocabulary"]): Validated {
   const given: Record<string, unknown> =
     params && typeof params === "object" && !Array.isArray(params) ? (params as Record<string, unknown>) : {};
   if (params !== undefined && params !== null && given !== params) {
@@ -180,7 +271,7 @@ export function validateParams(schema: ParamSchema, params: unknown): Validated 
       if (required.has(key)) problems.push(`missing "${key}" (${kindOf(keySchema)})`);
       continue;
     }
-    const one = coerce(raw, keySchema);
+    const one = coerce(spokenValue(raw, keySchema, vocabulary?.[key]), keySchema);
     if ("error" in one) problems.push(`"${key}" ${one.error}`);
     else out[key] = one.value;
   }
@@ -283,8 +374,12 @@ function remember(before: unknown): void {
 export async function runRequest(request: CodiActRequest, window: string): Promise<RunOutcome> {
   const action = actions.get(request.action);
   if (!action) return { answer: { id: request.id, ok: false, error: "unknown action" } };
-  const checked = validateParams(action.params as ParamSchema, request.params);
-  if (!checked.ok) return { answer: { id: request.id, ok: false, error: `${action.id}: ${checked.error}` } };
+  const checked = validateParams(action.params as ParamSchema, request.params, action.vocabulary);
+  if (!checked.ok) {
+    const given = request.params && typeof request.params === "object" ? request.params : {};
+    const asked = askAboutParams(action, given);
+    return { answer: { id: request.id, ok: false, error: `${action.id}: ${checked.error}`, ...(asked ?? {}) } };
+  }
   const recorded = action.risk === "navigate" && action.id !== "nav.undo";
   const before = recorded && screenHistory ? screenHistory.capture() : undefined;
   try {
@@ -296,7 +391,8 @@ export async function runRequest(request: CodiActRequest, window: string): Promi
         id: request.id,
         ok: true,
         ...(outcome.result !== undefined ? { result: outcome.result } : {}),
-        ...(outcome.say ? { say: outcome.say } : {}),
+        ...(outcome.say !== undefined ? { say: outcome.say } : {}),
+        ...(outcome.offer ? { offer: outcome.offer } : {}),
       },
       after: outcome.after,
     };
@@ -307,6 +403,7 @@ export async function runRequest(request: CodiActRequest, window: string): Promi
         ok: false,
         error: messageOf(error),
         ...(error instanceof CodiError && error.say ? { say: error.say } : {}),
+        ...(error instanceof CodiError && error.say && error.offer ? { offer: error.offer } : {}),
       },
     };
   }

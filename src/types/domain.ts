@@ -388,6 +388,8 @@ export interface ReviewContext {
   content: string;
   enabled: boolean;
   created_at: string;
+  /** The chats list it and the model reads it when needed (`context::on_demand`); reviews always read it whole. */
+  on_demand?: boolean;
 }
 
 /** A saved PR-review run as listed in the memory manager (slim projection, no heavy text). */
@@ -407,6 +409,8 @@ export interface ReviewRunSummary {
 export interface SavedFinding {
   id: string;
   severity: string;
+  /** The fine severity (`Blocker` · `Crítico` · `Mayor` · `Menor` · `Info`); absent on older runs. */
+  severidad?: string;
   tipo: string;
   categoria: string;
   subtitulo: string;
@@ -972,6 +976,8 @@ export interface PrCommentThread {
   start_line: number | null;
   end_line: number | null;
   comments: PrThreadComment[];
+  /** Resolved on the host (GitHub, GitLab). Azure DevOps and Bitbucket never list a resolved one. */
+  resolved?: boolean;
 }
 
 export interface GitProgressEvent {

@@ -43,6 +43,7 @@ mod containers;
 mod dap;
 mod datasource;
 mod db;
+mod desktop;
 mod debugger;
 mod dictation;
 mod evals;
@@ -85,6 +86,7 @@ mod paths;
 mod architecture;
 mod power;
 mod pr_link;
+mod refrepos;
 mod prettier;
 mod proc;
 mod provider_skills;
@@ -157,6 +159,21 @@ fn launched_in_background(app: &tauri::AppHandle) -> bool {
     let db = app.state::<db::Db>();
     let Ok(conn) = db.0.lock() else { return false };
     db::queries::get_setting(&conn, "flows_background_at_login").ok().flatten().as_deref() == Some("1")
+        || db::queries::get_setting(&conn, codi::keys::AT_LOGIN).ok().flatten().as_deref() == Some("on")
+}
+
+/// Whether this launch at login opens Codi — in its corner, listening — with the main window kept
+/// in the background (the user, 2026-10-22: «que Codi se inicie por sí solo al encender el PC»).
+fn codi_at_login(app: &tauri::AppHandle) -> bool {
+    std::env::args().any(|arg| arg == AUTOSTARTED_FLAG)
+        && app
+            .state::<db::Db>()
+            .0
+            .lock()
+            .ok()
+            .and_then(|conn| db::queries::get_setting(&conn, codi::keys::AT_LOGIN).ok().flatten())
+            .as_deref()
+            == Some("on")
 }
 
 /// Hides the window for the "keep running in the background" close path.
@@ -637,6 +654,25 @@ pub fn run() {
             // back to where the last session left it does not happen in front of the user, and
             // this is what ends that — a `?` above it would leave the app running with no window.
             window_state::restore_with(app.handle(), !launched_in_background(app.handle()));
+            if launched_in_background(app.handle()) {
+                // Hidden from the start is away: what Codi opens brings it back (`codi::ui::act`).
+                MAIN_AWAY.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if codi_at_login(app.handle()) {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = windows::open_codi(handle.clone()).await {
+                        applog::warn(&format!("codi: could not open at login: {error}"));
+                        return;
+                    }
+                    let worker = handle.clone();
+                    match tokio::task::spawn_blocking(move || codi::start(&worker)).await {
+                        Ok(Err(error)) => applog::warn(&format!("codi: the microphone did not open at login: {error}")),
+                        Err(error) => applog::warn(&format!("codi: the microphone did not open at login: {error}")),
+                        Ok(Ok(_)) => {}
+                    }
+                });
+            }
             // From here the frontend has ~30 s to say it rendered; a release whose window never comes
             // up is then offered an update from Rust, since its own update check never ran.
             boot_guard::arm_watchdog(app.handle());
@@ -645,6 +681,9 @@ pub fn run() {
             // reopening them at launch turned out to be the wrong idea twice over. See
             // `windows::SatelliteRegistry::parked`.
             windows::forget_persisted_desk(app.handle());
+            // A screenshot Codi read another app from is deleted as it is read; one an interrupted
+            // read left behind goes now. See `desktop::read`.
+            desktop::read::sweep_at_launch();
             // The quick-ask chord, bound for this session from whatever the user last chose.
             //
             // Logged rather than returned, and only here: a `?` on this would mean an accelerator
@@ -719,7 +758,21 @@ pub fn run() {
                         .unwrap_or_default();
                     // Same guard as the sandboxes: an unreadable table is not "no projects".
                     if !projects.is_empty() {
-                        codemap::sweep_cache(&projects.iter().map(|(_, path)| path.clone()).collect::<Vec<_>>());
+                        // The reference repositories' clones keep their maps too: they are mapped
+                        // like projects, and nothing else would keep their caches from ageing out.
+                        let references: Vec<String> = handle
+                            .state::<db::Db>()
+                            .0
+                            .lock()
+                            .ok()
+                            .and_then(|conn| refrepos::list(&conn).ok())
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|r| r.path().to_string_lossy().to_string())
+                            .collect();
+                        let mut roots: Vec<String> = projects.iter().map(|(_, path)| path.clone()).collect();
+                        roots.extend(references);
+                        codemap::sweep_cache(&roots);
                         review::checkout::sweep(&projects.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>());
                     }
                     localai::models::sweep_partials();
@@ -727,6 +780,8 @@ pub fn run() {
             }
             // Retention and vacuum for the database, a minute after launch and daily after.
             db::housekeeping::start(&app.handle());
+            // The reference repositories' schedule: each one updated on its own interval.
+            refrepos::spawn(app.handle().clone());
             tray::setup(&app.handle())?;
             // The usage meter's way to the database. Set here because `setup` is the only place
             // with an `AppHandle`, and the recording point is deep inside `ai::run`, where threading
@@ -800,6 +855,10 @@ pub fn run() {
             ) {
                 window_state::record(window);
             }
+            // Codi's window opens where it was left (`windows::codi_spot`).
+            if matches!(event, tauri::WindowEvent::Moved(_)) && window.label() == windows::codi_label() {
+                windows::remember_codi_spot(window);
+            }
             #[cfg(windows)]
             if matches!(event, tauri::WindowEvent::Resized(_)) {
                 follow_minimize(window);
@@ -837,6 +896,11 @@ pub fn run() {
                     // the main window about where the app is going. See `tray::close_action`.
                     match tray::close_action(app) {
                         tray::CloseAction::Hide => put_main_away(app),
+                        // Codi open keeps the app: it drives the main window, which goes on running
+                        // hidden while the user talks to it. Quitting is still the tray's and ⌘Q's.
+                        tray::CloseAction::Quit if app.get_webview_window(&windows::codi_label()).is_some() => {
+                            put_main_away(app)
+                        }
                         tray::CloseAction::Quit => quit_guard::request_quit(app),
                         tray::CloseAction::Notice => {
                             let _ = tauri::Emitter::emit_to(app, "main", "app:close-notice", ());
@@ -1125,6 +1189,7 @@ sharded_invoke_handler! {
         commands::containers_cmd::containers_text,
         commands::containers_cmd::containers_analyze_logs,
         commands::containers_cmd::containers_container_detail,
+        commands::containers_cmd::containers_logs_tail,
         commands::containers_cmd::containers_namespaces,
         commands::containers_cmd::containers_reach,
         commands::containers_cmd::containers_apply,
@@ -2111,7 +2176,27 @@ sharded_invoke_handler! {
         commands::codi_cmd::codi_order,
         commands::codi_cmd::codi_confirm,
         commands::codi_cmd::codi_hush,
+        commands::codi_cmd::codi_narrate,
+        commands::codi_cmd::codi_research,
+        commands::codi_cmd::codi_know,
+        commands::codi_cmd::codi_explain,
+        commands::codi_cmd::codi_explain_pipeline,
         commands::codi_cmd::codi_announce,
+        commands::codi_cmd::codi_tell,
+        commands::codi_cmd::codi_run_command,
+        commands::codi_cmd::codi_window_to_corner,
+        commands::codi_cmd::codi_set_at_login,
+        windows::quick_ask_take_draft,
+        commands::codi_cmd::codi_routines,
+        commands::codi_cmd::codi_set_routines,
+        commands::codi_cmd::codi_run_routine,
+        commands::codi_cmd::desktop_permissions,
+        commands::codi_cmd::desktop_ask_permission,
+        commands::codi_cmd::codi_forget_all,
+        commands::codi_cmd::codi_recollections,
+        commands::codi_cmd::codi_forget,
+        commands::codi_cmd::codi_installed_apps,
+        commands::codi_cmd::codi_action_catalog,
         commands::codi_cmd::codi_prepare,
         commands::codi_cmd::codi_register_actions,
         commands::codi_cmd::codi_act_result,
@@ -2202,6 +2287,15 @@ sharded_invoke_handler! {
         commands::knowledge_cmd::knowledge_set_embed_model,
         commands::knowledge_cmd::knowledge_reindex,
         commands::knowledge_cmd::knowledge_search,
+        commands::refrepos_cmd::reference_repos_list,
+        commands::refrepos_cmd::reference_repos_branches,
+        commands::refrepos_cmd::reference_repo_add,
+        commands::refrepos_cmd::reference_repo_update,
+        commands::refrepos_cmd::reference_repo_pull,
+        commands::refrepos_cmd::reference_repo_set_branch,
+        commands::refrepos_cmd::reference_repo_reindex,
+        commands::refrepos_cmd::reference_repo_remove,
+        commands::refrepos_cmd::reference_repos_for_workspace,
         commands::knowledge_cmd::knowledge_download_model,
         commands::knowledge_cmd::knowledge_cancel_download,
         commands::knowledge_cmd::knowledge_delete_model,

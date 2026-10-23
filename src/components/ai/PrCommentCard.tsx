@@ -14,6 +14,7 @@ import { pushErrorToast } from "../../state/toastStore";
 import { notify, type NotificationTarget } from "../../state/notificationStore";
 import { useAiPanelStore } from "../../state/aiPanelStore";
 import { useT } from "../../state/languageStore";
+import { chipClass } from "../common/recipes";
 import { InlineMarkdown, ResolveWithAiButton, ResolvedChip, useResolveWithAi } from "./FindingCard";
 
 /** Shimmer placeholder shown while a PR's existing comment threads are being fetched, so the
@@ -213,6 +214,9 @@ export function PrCommentCard({
             </p>
           )}
         </div>
+        {/* Resolved on the host: still listed, so the conversation reads whole, but the review leaves it
+            out of what it answers. */}
+        {thread.resolved && !resolution && <span className={chipClass("ok", "mt-0.5")}>{t("pr.threadResolvedOnHost")}</span>}
         {resolution && <ResolvedChip />}
         {open ? (
           <ChevronDown size={14} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />

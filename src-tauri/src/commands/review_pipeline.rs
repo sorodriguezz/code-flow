@@ -141,6 +141,8 @@ pub struct PipelineOutcome {
     pub unlocated_unread: bool,
     /// What the checks between the reviewers and the report did.
     pub checking: Checking,
+    /// What the run spent, every pass summed.
+    pub cost: crate::review_memory::RunCost,
 }
 
 /// A review that stopped before spending anything, because the plan says it probably should not run.
@@ -175,6 +177,8 @@ pub struct ReviewRequest<'a> {
     pub changed_since: Option<Vec<String>>,
     /// Whether the human already said "review it anyway" to a skip that asks.
     pub force: bool,
+    /// What the passes spent so far — every pass adds to it, the concurrent ones included.
+    pub cost: std::sync::Mutex<crate::review_memory::RunCost>,
 }
 
 fn log(line: &str) {
@@ -263,11 +267,18 @@ async fn run_pass(request: &ReviewRequest<'_>, prompt: &str, payload: &str, labe
         Ok(run) => {
             let count = merge::parse(&run.text).len();
             log(&format!("✔ {label} · {count} hallazgo(s)"));
+            if let Ok(mut cost) = request.cost.lock() {
+                cost.add(run.usage.as_ref());
+            }
             Ok(Reply { text: run.text, model: run.model, failed: None })
         }
         Err(e) if e.starts_with(ai_runs::CANCELLED_MARKER) => Err(e),
         Err(e) => {
             log(&format!("✘ {label} · falló: {e}"));
+            // A pass that failed may well have spent something — but it said nothing to count.
+            if let Ok(mut cost) = request.cost.lock() {
+                cost.add(None);
+            }
             Ok(Reply { text: String::new(), model: None, failed: Some(e) })
         }
     }
@@ -310,6 +321,7 @@ pub async fn run(
     request: ReviewRequest<'_>,
     diff_files: &[git::diff::FileDiffInfo],
 ) -> Result<Pipeline, String> {
+    let started = std::time::Instant::now();
     let contract = request.contract.clone();
 
     // 1. What each changed file is: its content on the PR's side, the lines it moved, its symbols.
@@ -368,21 +380,26 @@ pub async fn run(
     let impacts = {
         let mut touched = plan.files.clone();
         touched.extend(plan.deleted.iter().cloned());
-        let (repo, target, scope, cfg) = (
+        let (repo, target, scope, cfg, references) = (
             request.repo_path.to_string(),
             request.target_ref.to_string(),
             request.engine.scope.clone(),
             request.engine.graph.clone(),
+            request.inputs.references.clone(),
         );
-        tokio::task::spawn_blocking(move || graph::blast_radius(&repo, &target, &touched, &scope, &cfg)).await.unwrap_or_default()
+        tokio::task::spawn_blocking(move || graph::blast_radius(&repo, &target, &touched, &scope, &cfg, &references)).await.unwrap_or_default()
     };
-    if !impacts.is_empty() {
-        let contracts = impacts.iter().filter(|impact| impact.change.is_some()).count();
+    let in_references = impacts.iter().filter(|impact| impact.repo.is_some()).count();
+    if impacts.len() > in_references {
+        let contracts = impacts.iter().filter(|impact| impact.repo.is_none() && impact.change.is_some()).count();
         log(&format!(
             "  {} símbolo(s) con referencias fuera del PR{}",
-            impacts.len(),
+            impacts.len() - in_references,
             if contracts > 0 { format!(" · {contracts} con cambio de firma o eliminados") } else { String::new() }
         ));
+    }
+    if in_references > 0 {
+        log(&format!("  {in_references} contrato(s) que cambian también se usan en repositorios de referencia"));
     }
     if !request.inputs.hints.is_empty() {
         log(&format!("  {} pista(s) históricas sobre estos archivos", request.inputs.hints.len()));
@@ -687,6 +704,11 @@ pub async fn run(
     log(&format!("▶ {} hallazgo(s) tras consolidar y verificar", findings.len()));
 
     let unlocated_unread = !unreviewed.is_empty() || failed_passes.iter().any(|p| p == "pase cruzado");
+    let mut cost = request.cost.lock().map(|cost| cost.clone()).unwrap_or_default();
+    cost.duration_ms = started.elapsed().as_millis() as u64;
+    if cost.passes > 0 {
+        log(&format!("💸 {}", cost.line()));
+    }
     Ok(Pipeline::Reviewed(Box::new(PipelineOutcome {
         findings,
         narrative,
@@ -698,6 +720,7 @@ pub async fn run(
         failed_passes,
         unlocated_unread,
         checking,
+        cost,
     })))
 }
 
@@ -914,7 +937,7 @@ mod tests {
 
     #[test]
     fn a_group_hears_about_its_own_impacts_and_the_first_one_about_the_orphans() {
-        let impact = |file: &str| Impact { symbol: "s".into(), file: file.into(), callers: vec![], callers_total: 0, change: None };
+        let impact = |file: &str| Impact { symbol: "s".into(), file: file.into(), callers: vec![], callers_total: 0, change: None, repo: None };
         let all = vec![impact("src/a.ts"), impact("src/b.ts"), impact("src/gone.ts")];
         let reviewed = vec!["src/a.ts".to_string(), "src/b.ts".to_string()];
         let mine = vec!["src/a.ts".to_string()];
@@ -1038,6 +1061,7 @@ mod pipeline_tests {
             contract,
             changed_since: None,
             force: false,
+            cost: Default::default(),
         }
     }
 

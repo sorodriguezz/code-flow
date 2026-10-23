@@ -1,4 +1,4 @@
-/** Pure helpers of «Voz y sonido › Codi», kept apart so they test without the app's stores. */
+/** Pure helpers of «IA › Codi», kept apart so they test without the app's stores. */
 
 /** «Codi, jarvis ,, compu» → «jarvis, compu»: its own name is always heard, the rest once each. */
 export function tidyNames(raw: string): string {

@@ -1,5 +1,6 @@
-//! «Medir este equipo»: how long whisper takes here for one utterance, per installed model — what
-//! «Automático» picks a mode from.
+//! «Medir este equipo»: how long one utterance takes here, per installed model — whisper's and
+//! sherpa-onnx's (Parakeet, Canary) — what «Automático» picks a mode from. Until 2026-10-22 only
+//! whisper was measured, and a machine with only Parakeet could not be measured at all (user report).
 //!
 //! **An utterance, not a second of audio.** whisper's encoder always works on a 30-second window, so
 //! a five-second utterance costs nearly what thirty seconds do. The live text keeps up when one
@@ -47,7 +48,8 @@ fn clip(seconds: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Measures every installed model up to `small` (turbo is never a live model).
+/// Measures every installed model the live text can use: whisper's up to `small` (turbo is never a
+/// live model), and every usable sherpa-onnx one.
 pub fn measure(threads: i32) -> Result<Measured, String> {
     super::lower_priority();
     let abort = AtomicBool::new(false);
@@ -65,15 +67,42 @@ pub fn measure(threads: i32) -> Result<Measured, String> {
         per.push((model.id.to_string(), started.elapsed().as_millis() as u64));
     }
     engine::unload_slot(&engine::MEETINGS);
+    for model in crate::asr::MODELS.iter().filter(|m| crate::asr::usable(m)) {
+        crate::asr::transcribe(&crate::asr::MEETINGS, model, &clip(1), "es", "es", None)?;
+        let started = Instant::now();
+        crate::asr::transcribe(&crate::asr::MEETINGS, model, &utterance, "es", "es", None)?;
+        per.push((model.id.to_string(), started.elapsed().as_millis() as u64));
+    }
+    crate::asr::recognizer::unload(&crate::asr::MEETINGS);
     if per.is_empty() {
-        return Err("Download a Whisper model first — Settings › Voice & sound › Models".into());
+        return Err("Download a transcription model first (Whisper or Parakeet) — Settings › Voice & sound › Models".into());
     }
     let (recommended, live_model) = recommend(&per);
     Ok(Measured { measured_at: chrono::Utc::now().to_rfc3339(), threads, per_utterance_ms: per, recommended: recommended.into(), live_model })
 }
 
-/// The mode and live model a measurement points to.
+/// The mode and live model a measurement points to: the highest mode any measured model reaches —
+/// whisper's by its rules, a sherpa-onnx model by its own time — and on a tie the sherpa-onnx one,
+/// which costs a fraction of whisper's while the call runs.
 pub fn recommend(per: &[(String, u64)]) -> (&'static str, String) {
+    let rank = |mode: &str| ["light", "balanced", "full"].iter().position(|m| *m == mode).unwrap_or(0);
+    let sherpa = per
+        .iter()
+        .filter(|(id, _)| crate::asr::model(id).is_some())
+        .min_by_key(|(_, ms)| *ms)
+        .map(|(id, ms)| (if *ms <= COMFORTABLE_MS { "full" } else if *ms <= KEEPS_UP_MS { "balanced" } else { "light" }, id.clone()));
+    let whispers: Vec<(String, u64)> = per.iter().filter(|(id, _)| crate::asr::model(id).is_none()).cloned().collect();
+    let whisper = (!whispers.is_empty()).then(|| recommend_whisper(&whispers));
+    match (sherpa, whisper) {
+        (Some(sherpa), Some(whisper)) if rank(whisper.0) > rank(sherpa.0) => whisper,
+        (Some(sherpa), _) => sherpa,
+        (None, Some(whisper)) => whisper,
+        (None, None) => ("light", String::new()),
+    }
+}
+
+/// [`recommend`] among whisper's models: *full* needs `small` comfortably fast.
+fn recommend_whisper(per: &[(String, u64)]) -> (&'static str, String) {
     let time = |id: &str| per.iter().find(|(m, _)| m == id).map(|(_, ms)| *ms);
     if time("small").is_some_and(|ms| ms <= COMFORTABLE_MS) {
         return ("full", "small".into());
@@ -98,5 +127,16 @@ mod tests {
         assert_eq!(recommend(&middling), ("balanced", "base".into()));
         let slow = vec![("tiny".to_string(), 4_000)];
         assert_eq!(recommend(&slow).0, "light");
+    }
+
+    #[test]
+    fn parakeet_is_measured_and_wins_where_it_keeps_up() {
+        assert_eq!(recommend(&[("parakeet".to_string(), 400)]), ("full", "parakeet".into()), "a machine with Parakeet alone");
+        let mixed = vec![("tiny".to_string(), 1_200), ("small".to_string(), 5_000), ("parakeet".to_string(), 700)];
+        assert_eq!(recommend(&mixed), ("full", "parakeet".into()));
+        let both_balanced = vec![("base".to_string(), 2_000), ("parakeet".to_string(), 2_400)];
+        assert_eq!(recommend(&both_balanced), ("balanced", "parakeet".into()), "a tie goes to the cheaper one");
+        let whisper_better = vec![("small".to_string(), 900), ("parakeet".to_string(), 2_000)];
+        assert_eq!(recommend(&whisper_better), ("full", "small".into()));
     }
 }

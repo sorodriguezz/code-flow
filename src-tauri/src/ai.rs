@@ -1392,6 +1392,15 @@ pub mod task {
     pub const SPOKEN_SUMMARY: &str = "spoken-summary";
     /// «Codi»'s turns that its own router and the local model could not run.
     pub const CODI: &str = "codi";
+    /// A question Codi was asked about a repository's code, answered from inside it, read-only —
+    /// see [`super::codi_research`].
+    pub const CODI_RESEARCH: &str = "codi-research";
+    /// Codi's fast answer: a question answered from passages the knowledge index found, text only —
+    /// see `codi::research::know`.
+    pub const CODI_ANSWER: &str = "codi-answer";
+    /// What Codi read off the web or off another app's window, answered aloud — see
+    /// `codi::web::answer`.
+    pub const CODI_READ: &str = "codi-read";
     /// The API client's assistant — see [`super::api_assist`].
     pub const API_EXPLAIN: &str = "api-explain";
     pub const API_TESTS: &str = "api-tests";
@@ -2932,6 +2941,8 @@ const GROUNDING_TASKS: &[&str] = &[
     task::REPO_DIAGRAM,
     task::PIPELINE_ANALYZE,
     task::LOGS_ANALYZE,
+    task::CODI_RESEARCH,
+    task::CODI_READ,
 ];
 
 async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Result<AiRun, String> {
@@ -5750,6 +5761,37 @@ pub async fn codi_turn(
     inv.app_mcp = vec![server];
     let run = run(engine, binary, inv).await?;
     Ok(strip_wrapper_fence(&run.text))
+}
+
+/// Codi's research: a question about a repository's code («¿qué base de datos usa?», «¿cómo funciona
+/// el controlador de pagos?») answered from inside it — `cwd` is the repository, the run is
+/// read-only (the engine's read tools, and the repository map's queries: `GROUNDING_TASKS`), and
+/// what comes back is said aloud, so `system` asks for a few plain sentences.
+pub async fn codi_research(engine: &dyn AiEngine, binary: &str, model: &str, system: &str, question: &str, cwd: &str) -> Result<String, String> {
+    let tools = engine.read_only_tools();
+    let mut inv = AiInvocation::new(question, "");
+    inv.system_prompt = Some(system);
+    inv.model = model;
+    inv.allowed_tools = &tools;
+    inv.cwd = Some(cwd);
+    inv.read_only = true;
+    inv.task = task::CODI_RESEARCH;
+    Ok(strip_wrapper_fence(&run(engine, binary, inv).await?.text))
+}
+
+/// Codi explaining a piece of text it was asked about — a container's log, «¿por qué se cayó?» —
+/// in a few sentences to be said aloud. Text only and read-only: the material is stdin, never a
+/// folder, and credentials are taken out of it before a cloud engine sees it.
+pub async fn codi_explain(engine: &dyn AiEngine, binary: &str, model: &str, system: &str, question: &str, material: &str, task: &'static str) -> Result<String, String> {
+    let (material, _) = crate::ci::head_and_tail(material, MAX_LOGS_CHARS);
+    let material = if engine.in_process() { material } else { crate::secret_scan::redact(&material).0 };
+    let mut inv = AiInvocation::new(question, &material);
+    inv.system_prompt = Some(system);
+    inv.model = model;
+    inv.read_only = true;
+    inv.text_only = true;
+    inv.task = task;
+    Ok(strip_wrapper_fence(&run(engine, binary, inv).await?.text))
 }
 
 /// Drafts a pull-request description from the diff between two branches, with the active engine.

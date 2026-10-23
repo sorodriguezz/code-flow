@@ -175,11 +175,11 @@ function PhaseLine() {
   );
 }
 
-/** Opens Settings › Voz y sonido › Codi in the main window, the only one with a Settings screen. */
+/** Opens Settings › IA › Codi in the main window, the only one with a Settings screen. */
 function openCodiSettings(): void {
   void showMainWindow()
     .catch(() => {})
-    .then(() => sendTo(MAIN_LABEL, { kind: "open-settings", to: MAIN_LABEL, section: "voice", tab: "codi" }))
+    .then(() => sendTo(MAIN_LABEL, { kind: "open-settings", to: MAIN_LABEL, section: "codi", tab: "listen" }))
     .catch(() => {});
 }
 

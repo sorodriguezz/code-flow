@@ -1147,7 +1147,7 @@ pub async fn review_pr_from_link(
 
     // The conversation already open on the PR, same as the project-backed review — minus the
     // memory half, which a link session never has (nothing is saved for a PR with no project).
-    let open_threads = match &target {
+    let mut open_threads = match &target {
         crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
             github::list_pr_comment_threads(host, owner, repo, *number, &credential).await.unwrap_or_default()
         }
@@ -1163,6 +1163,8 @@ pub async fn review_pr_from_link(
             ado::list_pr_comment_threads(org, project, repo, *number, &credential).await.unwrap_or_default()
         }
     };
+    // A conversation somebody already resolved is not pending: handed over, it gets answered again.
+    open_threads.retain(|thread| !thread.resolved);
     // A link session keeps no memory, so there is no "last run" to mark comments as newer than.
     if let Some(block) = crate::review::context::pending_comments_block(&[], &open_threads, None, crate::review::context::Audience::All) {
         enabled_contexts.push(("Conversación abierta en el PR".to_string(), block));
@@ -2110,7 +2112,7 @@ pub async fn review_pull_request(
     //
     // The signed-in user's own name comes along for the same reason the thread ids do: publishing a
     // review, closing a thread and recording a decision all write to this pull request as them.
-    let (open_threads, me) = match &link {
+    let (mut open_threads, me) = match &link {
         LinkedRepo::Azure { org, project: ado_project, repo_id } => match pat_for_org(org) {
             Ok(pat) => (
                 ado::list_pr_comment_threads(org, ado_project, repo_id, pr_id, &pat).await.unwrap_or_default(),
@@ -2144,6 +2146,10 @@ pub async fn review_pull_request(
             Err(_) => (Vec::new(), None),
         },
     };
+    // What the PR still has open. Azure and Bitbucket never list a resolved thread; GitHub and GitLab
+    // do, and a conversation somebody resolved — handed to the reviewers as pending — got answered
+    // again, and a reply in it counted as "something new to review".
+    open_threads.retain(|thread| !thread.resolved);
     let ours: std::collections::HashSet<i64> = remembered.iter().filter_map(|f| f.thread_id).collect();
     let new_comments = comments_since(&open_threads, last_run_at.as_deref(), &ours, me.as_deref());
 
@@ -2185,6 +2191,17 @@ pub async fn review_pull_request(
         Ok(conn) => review_pipeline::hints_for(&conn, &workspace_id, &repo, pr_id, &touched),
         Err(_) => Vec::new(),
     };
+    // The reference repositories the workspace switched on: where the blast radius also looks for
+    // the contracts this PR changes, and — for a reviewer with the tools to consult them — named in
+    // its context. A cloud engine never hears of one kept for the local model only.
+    let references: Vec<crate::review::graph::Reference> = match db.0.lock() {
+        Ok(conn) if crate::refrepos::for_review(&conn) => crate::refrepos::enabled_for(&conn, &workspace_id, !config.engine.in_process())
+            .into_iter()
+            .map(|r| crate::review::graph::Reference { name: r.name.clone(), root: r.path().to_string_lossy().to_string(), purpose: r.purpose })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let references_reachable = config.engine.in_process() || matches!(config.engine.id(), "claude" | "codex" | "opencode" | "cline");
 
     let mut enabled_contexts: Vec<(String, String)> = contexts
         .into_iter()
@@ -2218,6 +2235,8 @@ pub async fn review_pull_request(
         hints,
         checks: None,
         conventions,
+        references,
+        references_reachable,
     });
     let credential = link_credential(&link).ok();
 
@@ -2272,6 +2291,7 @@ pub async fn review_pull_request(
             contract: contract.clone(),
             changed_since: changed_files.clone(),
             force,
+            cost: Default::default(),
         };
         review_pipeline::run(request, &diff_files).await
     })
@@ -2457,6 +2477,30 @@ fn finalize_review(
         finding.delta = stored.delta.clone();
         stored.comentario_md = render::comment_markdown(finding, &pr.provider);
     }
+
+    // The active findings carried forward without being re-read — their file did not change in this
+    // re-review, or their reviewer failed — still stand, so they go back into the report and into the
+    // gate. They used to stay only in the memory: the report a person reads (and the gate it shows)
+    // went quiet about a Blocker just because nobody touched its file again.
+    let carried_from = findings.len();
+    let carried: Vec<usize> = (carried_from..remembered.len()).filter(|&i| remembered[i].is_active()).collect();
+    if !carried.is_empty() {
+        let earlier: Vec<Vec<crate::review::merge::Finding>> =
+            queries::review_reports_for_pr(conn, &project.id, pr.id, repo)
+                .unwrap_or_default()
+                .iter()
+                .map(|md| crate::review::merge::parse(md))
+                .collect();
+        for i in carried {
+            let finding = crate::review::merge::Finding::recovered(&remembered[i], &earlier);
+            // A run recorded before comment bodies were kept can be published from the phone again.
+            if remembered[i].comentario_md.is_empty() {
+                remembered[i].comentario_md = render::comment_markdown(&finding, &pr.provider);
+            }
+            findings.push(finding);
+        }
+    }
+    let carried_count = findings.len() - carried_from;
     crate::review::merge::sort(&mut findings);
 
     let plan = &outcome.plan;
@@ -2476,6 +2520,7 @@ fn finalize_review(
             unreviewed: &outcome.unreviewed,
             failed_passes: &outcome.failed_passes,
             checking: outcome.checking,
+            carried: carried_count,
         },
     );
 
@@ -2524,6 +2569,8 @@ fn finalize_review(
         quality_gate: render::passes_gate(&findings, blocking),
         workers: outcome.workers,
         incomplete: !outcome.unreviewed.is_empty() || !outcome.failed_passes.is_empty(),
+        // Nothing to say for a run whose passes never reached an engine.
+        cost: (outcome.cost.passes > 0).then(|| outcome.cost.clone()),
     };
 
     let meta_json = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
@@ -2659,6 +2706,17 @@ fn already_published(finding: &crate::review_memory::MemoryFinding, iter: Option
     iter.is_some() && finding.publicado_en_iter == iter
 }
 
+/// Whether a resolved finding's thread already heard that it was resolved — written to in the
+/// iteration that resolved it or any later one.
+///
+/// A resolved finding is carried forward by every later run, and `already_published` only compares
+/// against the *current* iteration: without this the thread got a fresh "resuelto en la iteración
+/// N" on every publish after the fix, one per iteration, for as long as the pull request lived.
+fn resolution_announced(finding: &crate::review_memory::MemoryFinding) -> bool {
+    finding.estado == "resuelto"
+        && matches!((finding.publicado_en_iter, finding.resuelto_en_iter), (Some(written), Some(resolved)) if written >= resolved)
+}
+
 /// Records on the stored finding what a publish did to it: the thread it opened (and whether that is
 /// a general comment), and the iteration it was written in.
 fn record_published(
@@ -2728,7 +2786,7 @@ pub async fn post_pr_review_comment(
 fn resolved_closures(findings: &[crate::review_memory::MemoryFinding], iter: usize, items: &[PostFindingItem]) -> Vec<PostFindingItem> {
     findings
         .iter()
-        .filter(|f| f.estado == "resuelto" && f.thread_id.is_some() && !already_published(f, Some(iter)))
+        .filter(|f| f.estado == "resuelto" && f.thread_id.is_some() && !already_published(f, Some(iter)) && !resolution_announced(f))
         .filter(|f| !items.iter().any(|item| item.id.as_deref() == Some(f.id.as_str())))
         .map(|f| PostFindingItem {
             id: Some(f.id.clone()),
@@ -3059,7 +3117,7 @@ async fn publish_to_host(
             claimed[k] = true;
         }
         let id = idx.map(|k| findings[k].id.clone()).or_else(|| item.id.clone());
-        let step = if idx.is_some_and(|k| already_published(&findings[k], iter)) {
+        let step = if idx.is_some_and(|k| already_published(&findings[k], iter) || resolution_announced(&findings[k])) {
             Step::Skip
         } else if let Some((thread, general)) = idx.and_then(|k| findings[k].thread_id.map(|t| (t, findings[k].hilo_general))) {
             Step::FollowUp { thread, general }
@@ -3154,7 +3212,9 @@ async fn publish_to_host(
                 let k = idx.expect("a thread comes from a stored finding");
                 let resolved = findings[k].estado == "resuelto";
                 let about = (*general && !azure).then_some(findings[k].id.as_str());
-                let text = follow_up_text(azure, resolved, iter.unwrap_or(1), &today, about);
+                // A fix announced a run late still names the iteration that fixed it.
+                let when = if resolved { findings[k].resuelto_en_iter.or(iter) } else { iter };
+                let text = follow_up_text(azure, resolved, when.unwrap_or(1), &today, about);
                 match host.follow_up(pr_id, *thread, &text, *general).await {
                     Ok(()) => {
                         record_published(&mut findings[k], iter, None);
@@ -3617,6 +3677,7 @@ mod tests {
                     published_date: (*published).to_string(),
                 })
                 .collect(),
+            resolved: false,
         }
     }
 
@@ -3769,6 +3830,7 @@ mod tests {
             start_line: None,
             end_line: None,
             comments: vec![ado::PrThreadComment { author: author.into(), content: content.into(), published_date: at.into() }],
+            resolved: false,
         }
     }
 
@@ -3806,6 +3868,34 @@ mod tests {
         assert!(resolved_closures(&findings, 1, &[]).iter().all(|c| c.id.as_deref() != Some("F-001")), "already written this iteration");
         let explicit = vec![PostFindingItem { id: Some("F-002".into()), file: None, category: String::new(), content: String::new(), location: None }];
         assert_eq!(resolved_closures(&findings, 2, &explicit).len(), 1, "the caller already sent F-002");
+    }
+
+    /// A fix is announced on its thread once: every later run carries the resolved finding forward,
+    /// and each later publish used to post "resuelto en la iteración N" on it again.
+    #[test]
+    fn a_resolution_is_announced_once_for_the_life_of_the_pull_request() {
+        let resolved_in = |iter: usize, written: Option<usize>| {
+            let mut f = stored("F-001", "resuelto", Some(11));
+            f.resuelto_en_iter = Some(iter);
+            f.publicado_en_iter = written;
+            f
+        };
+        // Announced in the iteration that fixed it: no later iteration speaks again.
+        let announced = vec![resolved_in(2, Some(2))];
+        assert!(resolution_announced(&announced[0]));
+        assert!(resolved_closures(&announced, 3, &[]).is_empty());
+        assert!(resolved_closures(&announced, 7, &[]).is_empty());
+        // Fixed in 2 but its thread last heard from us in 1 (nobody published in 2): still owed.
+        let owed = vec![resolved_in(2, Some(1))];
+        assert!(!resolution_announced(&owed[0]));
+        assert_eq!(resolved_closures(&owed, 3, &[]).len(), 1);
+        // Runs saved before the iteration was tracked keep the old behaviour rather than going silent.
+        assert!(!resolution_announced(&stored("F-002", "resuelto", Some(12))));
+        // Only a resolved finding can have been announced as one.
+        let mut open = stored("F-003", "posteado", Some(13));
+        open.resuelto_en_iter = Some(1);
+        open.publicado_en_iter = Some(2);
+        assert!(!resolution_announced(&open));
     }
 
     fn project_with(columns: &[(&str, &str)]) -> Project {

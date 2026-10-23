@@ -41,6 +41,7 @@ use tokio::sync::watch;
 
 use crate::ai::{task, AiEngine, AiInvocation, AiRun, AiUsage, ModelListing};
 use crate::ai_runs::{self, RunCtx};
+use crate::context::need::Push;
 use crate::hybrid::config::{self, Settings};
 use crate::hybrid::local_llm::{self, BackendKind, ChatRequest, ConverseRequest, Finish};
 use crate::hybrid::{budget, runtime};
@@ -623,7 +624,8 @@ fn memory_budget(input_budget: u64) -> usize {
 /// the block a run carries, with how many they are. The block is empty when `already` — the message
 /// as its caller built it — carries them: a repository chat's turn appends them for every engine
 /// (`claude_cmd`), and twice is a sixth of a small window spent on a repeat.
-fn memories_for(root: &str, question: &str, budget_chars: usize, already: &str) -> (String, usize) {
+/// `bar`: how well a memory that is not a standing rule must match (`context::need::Push::memories`).
+fn memories_for(root: &str, question: &str, budget_chars: usize, already: &str, bar: crate::ai_memory::Bar) -> (String, usize) {
     if budget_chars < 200 {
         return (String::new(), 0);
     }
@@ -634,7 +636,7 @@ fn memories_for(root: &str, question: &str, budget_chars: usize, already: &str) 
             .map(|p| p.workspace_id.clone())
             .filter(|ws| !ws.is_empty())
             .or_else(|| crate::workspace_chat::workspace_of_dir(conn, root));
-        let found = crate::ai_memory::relevant(conn, workspace.as_deref(), project.as_ref().map(|p| p.id.as_str()), question, false, budget_chars)
+        let found = crate::ai_memory::relevant_with(conn, workspace.as_deref(), project.as_ref().map(|p| p.id.as_str()), question, false, budget_chars, bar)
             .unwrap_or_default();
         let Some((note, _)) = crate::ai_memory::note(&found) else { return (String::new(), 0) };
         (if carries_note(already, &note) { String::new() } else { note }, found.len())
@@ -661,8 +663,11 @@ async fn text(session: &Session, inv: &AiInvocation<'_>, ctx: &Option<RunCtx>, c
     // The memories of the project the run is in — what a CLI's model gets in its chat message, and
     // this engine's one-shot tasks (a commit message, a description, a review without a checkout)
     // never did. In the system prompt, where the cut below cannot reach them.
+    // A chat turn's judgement (`context::need`) says how well a memory must match; this mode has no
+    // tools to fetch one with.
+    let bar = crate::context::need::current().map_or(crate::ai_memory::Bar::Any, |turn| turn.push_for(false).memories());
     let memories = match inv.cwd {
-        Some(root) if !NO_MEMORY_TASKS.contains(&inv.task) => memories_for(root, &memory_question(inv), memory_budget(session.budget.input as u64), &asked).0,
+        Some(root) if !NO_MEMORY_TASKS.contains(&inv.task) => memories_for(root, &memory_question(inv), memory_budget(session.budget.input as u64), &asked, bar).0,
         _ => String::new(),
     };
     let caller = join_system(inv.system_prompt.unwrap_or_default(), None, &memories);
@@ -831,11 +836,17 @@ fn map_budget(input_budget: u64) -> usize {
 /// `skills`: a list of the project's skills follows.
 fn agent_system(grants: Grants, offered: &[&str], listed: bool, grounding: bool, skills: bool) -> String {
     let map = offered.contains(&"find_symbol");
-    let look = match (listed, map) {
-        (true, true) => "- Look before you answer. The project's files are listed below with what each one declares. find_symbol tells you where a function or class is defined, find_usages which files use it, outline what a file declares with its line numbers; then read_file the part you need (search and find_files help with anything else). Never guess what a file contains.\n",
-        (true, false) => "- Look before you answer. The project's files are listed below; use read_file on the relevant ones (search and find_files help in large projects). Never guess what a file contains.\n",
-        (false, true) => "- Look before you answer. The material you were given names the files that matter: open them with read_file (find_symbol finds where a function it names is declared, search finds a text). Never guess what a file contains.\n",
-        (false, false) => "- Look before you answer. The material you were given names the files that matter: open them with read_file (search finds a text). Never guess what a file contains.\n",
+    // A conversation is also asked general questions and follow-ups, which need no file at all; a
+    // task's request is always about the project. And a conversation's turn may come without the
+    // listing (`context::need`), so it is told where the files are instead.
+    let conversation = grants.reach > Reach::Project;
+    let files = match (listed, map, conversation) {
+        (true, true, _) => "The project's files are listed below with what each one declares. find_symbol tells you where a function or class is defined, find_usages which files use it, outline what a file declares with its line numbers; then read_file the part you need (search and find_files help with anything else).",
+        (true, false, _) => "The project's files are listed below; use read_file on the relevant ones (search and find_files help in large projects).",
+        (false, true, true) => "find_files and list_files show the project's files, find_symbol where a function or class is declared, outline what a file declares; then read_file the part you need (search finds a text).",
+        (false, false, true) => "find_files and list_files show the project's files; then read_file the part you need (search finds a text).",
+        (false, true, false) => "The material you were given names the files that matter: open them with read_file (find_symbol finds where a function it names is declared, search finds a text).",
+        (false, false, false) => "The material you were given names the files that matter: open them with read_file (search finds a text).",
     };
     let mut system = String::from(
         "You are CodeFlow's built-in coding agent, running on this computer with a local model. \
@@ -843,10 +854,21 @@ You work inside one project folder; every path you use is relative to it.\n\
 Write your replies in the same language as the user's request.\n\n\
 How to work:\n",
     );
-    system.push_str(look);
-    system.push_str("- For questions about why or how the project does something, or what was decided, call search_knowledge first: it searches the documentation, the decisions and the notes.\n");
+    if conversation {
+        system.push_str(&format!("- When the request is about this project, look before you answer. {files} Never guess what a file contains.\n"));
+        system.push_str("- A general programming question, or a follow-up the conversation already answers, needs no tools: answer it directly.\n");
+    } else {
+        system.push_str(&format!("- Look before you answer. {files} Never guess what a file contains.\n"));
+    }
+    system.push_str("- When a question turns on why or how the project does something, or what was decided, and what you have read does not say, call search_knowledge: it searches the documentation, the decisions and the notes.\n");
+    if offered.contains(&"read_context") {
+        system.push_str("- Some of the workspace's contexts are listed by name in the request instead of included: read_context reads one when the request needs it.\n");
+    }
     if offered.contains(&"read_note") {
         system.push_str("- A passage cited as note:… is one of the user's notes; read_note opens it whole when the passage is not enough.\n");
+    }
+    if offered.contains(&"reference_repos") {
+        system.push_str("- The user also keeps reference repositories (reference_repos lists them): other code bases to compare with, such as a team template. search_knowledge searches them too; pass repo to find_symbol, find_usages or outline to look in one, and read_reference_file to read one of their files. Never edit them.\n");
     }
     if skills {
         system.push_str("- The project's skills are listed below: reusable instructions for tasks like this one. When one applies, read its SKILL.md with read_file and follow it before improvising.\n");
@@ -894,7 +916,15 @@ async fn agent(
     }
     let root = inv.cwd.unwrap_or_default();
     let grounding = GROUNDING_TASKS.contains(&inv.task);
-    let listed = lists_the_project(inv.task);
+    // A chat turn's judgement (`context::need`): whether the project's map and passages go with it,
+    // and how well a memory must match. Any other run attaches what it always did.
+    let turn = crate::context::need::current();
+    let push = turn.as_ref().map_or(Push::All, |turn| turn.push_for(true));
+    let listed = lists_the_project(inv.task) && push.attaches();
+    // What the passages and memories are matched with: the user's own words when a chat says them —
+    // its message carries the rules, the editor's state and the memories after them.
+    let question = turn.as_ref().map(|turn| turn.question.clone()).filter(|q| !q.trim().is_empty());
+    let asks_for_work = turn.as_ref().map_or(true, |turn| turn.about_the_project());
     let asked = user_message(inv);
     // The memories first: how many of them the message carries decides whether `recall` is offered,
     // and the budget they get comes out of the same window the tools and the map share.
@@ -902,7 +932,8 @@ async fn agent(
     let (memories, memory_count) = if NO_MEMORY_TASKS.contains(&inv.task) {
         (String::new(), 0)
     } else {
-        memories_for(root, &memory_question(inv), memory_budget(rough_input), &asked)
+        let matched = question.clone().unwrap_or_else(|| memory_question(inv));
+        memories_for(root, &matched, memory_budget(rough_input), &asked, push.memories())
     };
     let toolbox = tools::Toolbox::new(root, grants)?.with_model(&session.live.model).with_given_memories(memory_count);
     log(ctx, json!({ "event": "note", "text": format!("access {}", toolbox.level().as_str()) }));
@@ -933,15 +964,22 @@ async fn agent(
     let system = join_system(&agent_system(toolbox.grants(), &offered, listed, grounding, !skills.is_empty()), inv.system_prompt, &more.join("\n\n"));
     // Retrieval before the first step: the passages of the project's knowledge closest to the
     // request ride the first message (`crate::knowledge`), cut to a sixth of the budget. A small
-    // model answers from what it is shown far more reliably than it decides to go and look.
+    // model answers from what it is shown far more reliably than it decides to go and look — which is
+    // why it is the judgement, not the model, that decides: a turn about the project gets the ones
+    // that clear the bar, a general question or a follow-up none.
     let mut asked = asked;
-    if let Ok(passages) = crate::knowledge::tool_answer(root, inv.prompt, 4, false).await {
-        let room = ((input_budget / 6) as f64 * budget::CHARS_PER_TOKEN) as usize;
-        if !passages.contains("No matches") && passages.chars().count() <= room {
-            log(ctx, json!({ "event": "note", "text": "knowledge passages attached" }));
-            asked.push_str("\n\nPassages from the project's knowledge that may answer this (open the files to confirm before relying on them):\n");
-            asked.push_str(&passages);
+    if push.attaches() {
+        let search = question.as_deref().unwrap_or(inv.prompt);
+        if let Some(passages) = crate::knowledge::prompt_passages(root, search, 4, push == Push::Relevant).await {
+            let room = ((input_budget / 6) as f64 * budget::CHARS_PER_TOKEN) as usize;
+            if passages.chars().count() <= room {
+                log(ctx, json!({ "event": "note", "text": "knowledge passages attached" }));
+                asked.push_str("\n\nPassages from the project's knowledge that may answer this (open the files to confirm before relying on them):\n");
+                asked.push_str(&passages);
+            }
         }
+    } else {
+        log(ctx, json!({ "event": "note", "text": "nothing of the project attached: the request does not need it (the tools can still fetch it)" }));
     }
     let (user, dropped) = fit_user(&asked, input_budget as u32, budget::estimate_tokens(&system));
     if dropped > 0 {
@@ -1053,7 +1091,9 @@ async fn agent(
             }
             // Asked to change files, and answered with the corrected code instead of applying it —
             // the 7B's other way of stopping short (one live run in three pasted the whole file).
-            let unapplied = toolbox.grants().write && changed_files == 0 && !last_step;
+            // Not for a general question or a follow-up (`context::need`): a code sample there is the
+            // answer, and a reminder would push the model into edits nobody asked for.
+            let unapplied = toolbox.grants().write && changed_files == 0 && !last_step && asks_for_work;
             if unapplied && answer.contains("```") && code_nudges < 1 {
                 code_nudges += 1;
                 log(ctx, json!({ "event": "text", "text": answer }));
@@ -1462,6 +1502,21 @@ mod tests {
         assert!(skilled.contains("SKILL.md") && skilled.contains("read_note"));
         assert!(skilled.contains("exactly the format the task asks"), "a judging run answers in its task's format");
         assert!(skilled.contains("material you were given names the files"), "no listing follows");
+        assert!(!skilled.contains("general programming question"), "a task's request is always about the project");
+    }
+
+    /// A conversation is told that a general question needs no tools, and — when its turn came
+    /// without the listing — where the files are, rather than that "the material" names them.
+    #[test]
+    fn a_conversation_looks_only_when_the_request_is_about_the_project() {
+        let chat = Grants { write: true, run: false, reach: Reach::Act };
+        let listed = agent_system(chat, &["find_symbol", "search_knowledge", "read_file", "read_context"], true, false, false);
+        assert!(listed.contains("When the request is about this project, look before you answer. The project's files are listed below"), "{listed}");
+        assert!(listed.contains("needs no tools: answer it directly"));
+        assert!(listed.contains("read_context reads one"));
+        let unlisted = agent_system(chat, &["find_symbol", "search_knowledge", "read_file"], false, false, false);
+        assert!(unlisted.contains("find_files and list_files show the project's files"), "{unlisted}");
+        assert!(!unlisted.contains("material you were given") && !unlisted.contains("read_context"));
     }
 
     #[test]

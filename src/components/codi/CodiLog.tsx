@@ -1,4 +1,4 @@
-import { Check, Megaphone, ShieldQuestion, Square, X } from "lucide-react";
+import { Check, FileSearch, Megaphone, ShieldQuestion, Square, X } from "lucide-react";
 import { Button } from "../common/Button";
 import { chipClass } from "../common/recipes";
 import type { CodiHeard, CodiTurn } from "../../lib/tauri/codiCommands";
@@ -124,15 +124,32 @@ export function CodiActionLog() {
       {entries.length === 0 && <p className="px-0.5 text-[11.5px] text-[var(--cf-text-muted)]">{t("codi.window.logEmpty")}</p>}
       {entries.map((entry) =>
         entry.kind === "announce" ? (
-          <div key={`a-${entry.at}-${entry.said.text}`} className="flex items-start gap-2 rounded-lg bg-[var(--cf-sunken)] px-2.5 py-2">
-            <Megaphone size={12} className="mt-[3px] shrink-0 text-[var(--cf-text-muted)]" />
-            <p className="min-w-0 flex-1 break-words text-[12px] text-[var(--cf-text)]">{entry.said.text}</p>
-          </div>
+          <AnnouncedRow key={`a-${entry.at}-${entry.said.text}`} said={entry.said} t={t} />
         ) : (
           <TurnRow key={`t-${entry.turn.id}`} turn={entry.turn} language={language} t={t} />
         ),
       )}
     </section>
+  );
+}
+
+/** Something said without being a turn's answer: a notification, or what Codi went to find out
+ *  in the background (`research:<repo>`, `log:<container>`), which is labelled with what it is about. */
+function AnnouncedRow({ said, t }: { said: AnnouncedLine; t: ReturnType<typeof useT> }) {
+  const [kind, about] = said.source.includes(":") ? [said.source.slice(0, said.source.indexOf(":")), said.source.slice(said.source.indexOf(":") + 1)] : [said.source, ""];
+  const found = kind === "research" || kind === "log";
+  return (
+    <div className="flex items-start gap-2 rounded-lg bg-[var(--cf-sunken)] px-2.5 py-2">
+      {found ? (
+        <FileSearch size={12} className="mt-[3px] shrink-0 text-[var(--cf-accent)]" />
+      ) : (
+        <Megaphone size={12} className="mt-[3px] shrink-0 text-[var(--cf-text-muted)]" />
+      )}
+      <div className="min-w-0 flex-1">
+        {found && about && <p className="text-[10.5px] font-medium text-[var(--cf-text-muted)]">{t("codi.window.about", { name: about })}</p>}
+        <p className="break-words text-[12px] text-[var(--cf-text)]">{said.text}</p>
+      </div>
+    </div>
   );
 }
 
@@ -155,7 +172,7 @@ function TurnRow({ turn, language, t }: { turn: TurnLine; language: string; t: R
               )}
               <span className="min-w-0 flex-1 break-words">
                 <span className={acted.ok ? "text-[var(--cf-text)]" : "text-[var(--cf-danger)]"}>
-                  {acted.ok ? (acted.say ?? acted.action) : (acted.error ?? acted.say ?? acted.action)}
+                  {acted.ok ? acted.say || acted.action : acted.error || acted.say || acted.action}
                 </span>
                 <span className="ml-1.5 font-mono text-[10.5px] text-[var(--cf-text-faint)]">{acted.action}</span>
               </span>

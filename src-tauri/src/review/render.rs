@@ -68,6 +68,10 @@ pub struct ReportContext<'a> {
     pub failed_passes: &'a [String],
     /// How the findings were checked before landing here — see [`Checking`].
     pub checking: Checking,
+    /// Active findings in the report that this run did not re-read: carried from an earlier one
+    /// because their file did not change (or their reviewer failed). Said once, so a re-review that
+    /// read three files does not look as if it found what it only kept.
+    pub carried: usize,
 }
 
 /// What the checks between the reviewers and the report did, for the one line that says so.
@@ -309,6 +313,12 @@ pub fn review_markdown(findings: &[Finding], ctx: &ReportContext) -> String {
         out.push_str(&format!("🔎 Verificación: {}\n", parts.join(" · ")));
     }
 
+    if ctx.carried > 0 {
+        out.push_str(&format!(
+            "↪️ {} hallazgo(s) se mantienen de la revisión anterior: su archivo no se volvió a revisar en esta.\n",
+            ctx.carried
+        ));
+    }
     if !ctx.degraded.is_empty() {
         out.push_str(&format!(
             "ℹ️ Contexto recortado por presupuesto en: {}. Si algo de ahí importa, vuelve a revisarlo con más nivel.\n",
@@ -361,6 +371,7 @@ mod tests {
             unreviewed: &[],
             failed_passes: &[],
             checking: Checking::default(),
+            carried: 0,
         }
     }
 
@@ -552,6 +563,58 @@ mod tests {
         };
         let md = review_markdown(&[], &context);
         assert!(md.contains("🔎 Verificación: 3 verificado(s), 1 refutado(s) · 2 descartado(s)"));
+    }
+
+    /// The re-review bug: a Blocker on a file the re-review did not touch was kept in the memory but
+    /// left out of the report and of the gate, which then read PASSED. Rebuilt from the report that
+    /// rendered it, it is back in both — with its prose, and with the memory's lifecycle.
+    #[test]
+    fn a_carried_blocker_is_in_the_report_and_fails_the_gate() {
+        let earlier_md = "### 🚨 [Blocker · Vulnerabilidad] sql-injection · F-002\n\nSQL armado con concatenación\n\n📍 Ubicación: src/repo.ts:40-44\n\n💭 Por qué: el id llega del request.\n\n💡 Sugerencia: parametriza la consulta.\n\n🎯 Confianza: 90\n\n---\n\n";
+        let earlier = vec![parse(earlier_md)];
+        let memory: crate::review_memory::MemoryFinding = serde_json::from_value(serde_json::json!({
+            "id": "F-002", "severity": "critical", "severidad": "Blocker", "tipo": "Vulnerabilidad",
+            "categoria": "sql-injection", "subtitulo": "SQL armado con concatenación", "archivo": "src/repo.ts",
+            "lineas": "41-45", "confianza": 90, "estado": "posteado", "thread_id": 77,
+            "introducido_en_iter": 1, "delta": "persiste"
+        }))
+        .unwrap();
+        let carried = Finding::recovered(&memory, &earlier);
+        assert_eq!(carried.severity, Severity::Blocker);
+        assert_eq!(carried.por_que, "el id llega del request.", "the prose comes back from the report that had it");
+        assert_eq!(carried.lineas.as_deref(), Some("41-45"), "the memory's place wins");
+        assert_eq!((carried.estado.as_str(), carried.thread_id), ("posteado", Some(77)));
+
+        let c = contract("completo");
+        let blocking = [Severity::Blocker];
+        let context = ReportContext { carried: 1, ..ctx(&c, &blocking, "") };
+        let md = review_markdown(std::slice::from_ref(&carried), &context);
+        assert!(md.contains("❌ FAILED"), "{md}");
+        assert!(md.contains("sql-injection · F-002"));
+        assert!(md.contains("↪️ 1 hallazgo(s) se mantienen de la revisión anterior"));
+        assert!(!passes_gate(&[carried], &blocking));
+    }
+
+    /// One no earlier report holds is still rebuilt from the memory, and its severity is never
+    /// downgraded past what the gate blocks on.
+    #[test]
+    fn a_carried_finding_no_report_holds_keeps_its_severity_and_place() {
+        let memory = |severidad: &str| -> crate::review_memory::MemoryFinding {
+            serde_json::from_value(serde_json::json!({
+                "id": "F-004", "severity": "critical", "severidad": severidad, "tipo": "Bug",
+                "categoria": "null-dereference", "subtitulo": "saldo sin validar", "archivo": "src/pago.ts",
+                "lineas": "12", "estado": "abierto", "introducido_en_iter": 2
+            }))
+            .unwrap()
+        };
+        let rebuilt = Finding::recovered(&memory("Blocker"), &[]);
+        assert_eq!((rebuilt.severity, rebuilt.subtitulo.as_str()), (Severity::Blocker, "saldo sin validar"));
+        assert_eq!((rebuilt.archivo.as_deref(), rebuilt.lineas.as_deref()), (Some("src/pago.ts"), Some("12")));
+        // A run from before the fine severity was kept: `critical` reads as Crítico, still blocking.
+        assert_eq!(Finding::recovered(&memory(""), &[]).severity, Severity::Critico);
+        // Another finding that happens to hold the same id in an older report is not borrowed.
+        let other = vec![parse("### ⚠️ [Mayor · Code Smell] dead-code · F-004\n\notra cosa\n\n📍 Ubicación: src/otro.ts:3\n\n---\n\n")];
+        assert_eq!(Finding::recovered(&memory("Blocker"), &other).categoria, "null-dereference");
     }
 
     /// A replacement becomes a one-click suggestion only where the host has one and the comment

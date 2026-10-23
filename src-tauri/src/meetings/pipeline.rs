@@ -28,7 +28,10 @@ use super::vad;
 use super::CloudSettings;
 
 pub enum Transcriber {
+    /// whisper.cpp, with this model file.
     Local { model: PathBuf },
+    /// A sherpa-onnx model that times its words (Parakeet).
+    Sherpa { model: &'static crate::asr::AsrModel },
     Cloud { settings: CloudSettings, key: String },
 }
 
@@ -135,6 +138,11 @@ pub fn run(job: &Job, host: &dyn Host) -> Result<Outcome, String> {
                         let segments = engine::segments(&engine::MEETINGS, model, &samples, &options, host.abort_flag())?;
                         transcript::words_from(&segments, start)
                     }
+                    // No prompt: a transducer has no previous text or vocabulary to be steered by.
+                    Transcriber::Sherpa { model } => crate::asr::recognizer::transcribe_timed(&crate::asr::MEETINGS, model, &samples, &job.language, &job.language)?
+                        .into_iter()
+                        .map(|w| Word { start_ms: w.start_ms + start, end_ms: w.end_ms + start, text: w.text })
+                        .collect(),
                     Transcriber::Cloud { settings, key } => {
                         let words = tauri::async_runtime::block_on(super::cloud::transcribe(settings, key, &samples, &job.language, &prompt))?;
                         words.into_iter().map(|w| Word { start_ms: w.start_ms + start, end_ms: w.end_ms + start, ..w }).collect()
@@ -148,9 +156,11 @@ pub fn run(job: &Job, host: &dyn Host) -> Result<Outcome, String> {
             }
             words.insert(*channel, found);
         }
-        if let Transcriber::Local { .. } = transcriber {
-            // A laptop does not keep a few hundred megabytes resident for a job that has ended.
-            engine::unload_slot(&engine::MEETINGS);
+        // A laptop does not keep a few hundred megabytes resident for a job that has ended.
+        match transcriber {
+            Transcriber::Local { .. } => engine::unload_slot(&engine::MEETINGS),
+            Transcriber::Sherpa { .. } => crate::asr::recognizer::unload(&crate::asr::MEETINGS),
+            Transcriber::Cloud { .. } => {}
         }
     }
 
@@ -484,6 +494,64 @@ mod tests {
         fn abort_flag(&self) -> &AtomicBool {
             &self.0
         }
+    }
+
+    /// The whole pass with Parakeet and sherpa's detector, as on a machine with no whisper — the
+    /// models installed in this user's app folder, and `CODEFLOW_TEST_MEETING_PARAKEET=<wav>`.
+    #[test]
+    #[ignore]
+    fn a_meeting_without_whisper_is_written_by_parakeet() {
+        let wav = std::env::var("CODEFLOW_TEST_MEETING_PARAKEET").expect("CODEFLOW_TEST_MEETING_PARAKEET=<wav>");
+        let parakeet = crate::asr::model("parakeet").filter(|m| crate::asr::usable(m)).expect("Parakeet installed");
+        let dir = std::env::temp_dir().join(format!("cf-meeting-parakeet-{}", uuid::Uuid::new_v4()));
+        // `afconvert` pads its header out to 4 KB: the samples start at the `data` chunk.
+        let bytes = std::fs::read(&wav).unwrap();
+        let at = bytes.windows(4).position(|w| w == b"data").expect("a data chunk") + 8;
+        let speech: Vec<f32> = bytes[at..].chunks_exact(2).map(|p| f32::from(i16::from_le_bytes([p[0], p[1]])) / 32768.0).collect();
+        // Two turns with a pause between them, in a room's hiss.
+        let mut samples = vec![0.0f32; 16_000];
+        samples.extend(&speech);
+        samples.extend(vec![0.0f32; 40_000]);
+        samples.extend(&speech);
+        samples.extend(vec![0.0f32; 16_000]);
+        let mut seed = 11u32;
+        for sample in samples.iter_mut() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *sample += ((seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5) * 0.004;
+        }
+        let mut writer = audio::ChunkWriter::open(&dir, Channel::Mic).unwrap();
+        writer.push(&samples).unwrap();
+        writer.finish().unwrap();
+        let job = Job {
+            dir: dir.clone(),
+            // whisper's model, absent here: the detector falls to sherpa's.
+            vad_model: dir.join("no-whisper-vad.bin"),
+            embedding_model: PathBuf::new(),
+            // A room meeting, as `meetings_cmd` builds it: the microphone is the separated channel.
+            channels: vec![Channel::Mic],
+            separate: vec![Channel::Mic],
+            transcribe: Some(Transcriber::Sherpa { model: parakeet }),
+            live_lines: Vec::new(),
+            language: "es".into(),
+            threads: 4,
+            vocabulary: String::new(),
+            speakers_hint: 0,
+            voices: Vec::new(),
+            diarize: false,
+        };
+        let started = std::time::Instant::now();
+        let outcome = run(&job, &Quiet(AtomicBool::new(false))).unwrap();
+        eprintln!("{} ms for {} ms of audio", started.elapsed().as_millis(), outcome.duration_ms);
+        for line in &outcome.lines {
+            eprintln!("[{:>6}–{:>6}] {:>3}: {}", line.start_ms, line.end_ms, line.speaker, line.text);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = outcome.lines.iter().map(|l| l.text.to_lowercase()).collect::<Vec<_>>().join(" ");
+        assert_eq!(text.matches("presupuesto").count(), 2, "both turns written: {text}");
+        assert!(text.starts_with("hola"), "the first word is not cut off: {text}");
+        let first = &outcome.lines[0];
+        assert!((800..1_400).contains(&first.start_ms), "the line starts where the speech does: {}", first.start_ms);
+        assert!(outcome.lines.iter().any(|l| l.start_ms > 12_000), "the second turn sits after the pause");
     }
 
     /// The whole pass on a real recording, with the real libraries:

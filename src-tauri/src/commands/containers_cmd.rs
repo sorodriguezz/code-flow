@@ -85,6 +85,20 @@ pub async fn containers_container_detail(runtime: String, context: Option<String
     Ok(summary)
 }
 
+/// The last `lines` of a container's log, credentials redacted — what Codi reads to say why one
+/// stopped, without opening the panel.
+#[tauri::command]
+pub async fn containers_logs_tail(runtime: String, context: Option<String>, id: String, lines: u32) -> Result<String, String> {
+    let target = engine::Target { runtime, context };
+    let args = vec!["logs".to_string(), "--tail".into(), lines.clamp(1, 2_000).to_string(), id];
+    let output = target.run_owned(args, std::time::Duration::from_secs(30)).await?;
+    if !output.ok() {
+        return Err(output.complaint());
+    }
+    // A container's stdout and stderr both go to its log; the CLI hands them back apart.
+    Ok(crate::secret_scan::redact(&format!("{}{}", output.stdout, output.stderr)).0)
+}
+
 #[tauri::command]
 pub async fn containers_namespaces(runtime: String, context: Option<String>) -> Result<Vec<String>, String> {
     if runtime == "kubernetes" {

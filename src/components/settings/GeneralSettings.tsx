@@ -12,7 +12,7 @@ import {
   type KeepAwakeMode,
   type KeepAwakeStatus,
 } from "../../lib/tauri/windows";
-import { FolderOpen, GraduationCap, Loader2, LogOut, Trash2 } from "lucide-react";
+import { FolderOpen, GraduationCap, Loader2, LogOut, Speech, Trash2 } from "lucide-react";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { Segmented } from "../common/Segmented";
 import { Tooltip } from "../common/Tooltip";
@@ -399,6 +399,19 @@ export function GeneralSettings() {
                 ))}
               </div>
               <p className="mt-2 text-[11px] text-[var(--cf-text-muted)]">{t("tour.settingsAppsHint")}</p>
+
+              {/* Codi is no app on the rail — a window of its own — so its tour has a row of its own. */}
+              <button
+                type="button"
+                onClick={() => launch("codi")}
+                className={buttonClass({ variant: "secondary", size: "lg", className: "mt-4 w-full justify-start" })}
+              >
+                <Speech size={14} className="shrink-0 text-[var(--cf-text-muted)]" />
+                {t("tour.codiRow")}
+                <span className="ml-auto shrink-0 text-[11px] font-normal tabular-nums text-[var(--cf-text-muted)]">
+                  {t("tour.stepCount", { n: tourLength("codi") })}
+                </span>
+              </button>
             </>
           )}
 

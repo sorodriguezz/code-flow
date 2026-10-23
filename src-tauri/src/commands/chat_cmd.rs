@@ -1371,9 +1371,14 @@ pub async fn chat_send(
             let workspace_contexts =
                 queries::list_review_contexts(&conn, &conversation.workspace_id)
                     .map_err(|e| e.to_string())?;
-            contexts.extend(
-                workspace_contexts.into_iter().filter(|c| c.enabled).map(|c| (c.name, c.content)),
-            );
+            // The on-demand ones are listed for the model to read when it needs them, where the
+            // engine can call the reader (`context::on_demand`).
+            let tools = if workspace_scope {
+                crate::context::need::reaches_workspace_tools(&config.provider)
+            } else {
+                crate::context::need::reaches_tools(&config.provider, plan)
+            };
+            contexts.extend(crate::context::on_demand::for_chat(workspace_contexts, tools));
         }
         // The chain this chat was opened to carry on, when it was opened from one: all of it, once
         // per session.
@@ -1652,6 +1657,9 @@ pub async fn chat_send(
     // The blocks below that are not this turn's own — rules, the workspace's state, memories — are
     // said to a resumed session only when it does not already hold them (`context::said`).
     let mut said = crate::context::said::Blocks::new(&conversation_id, session_id.as_deref().filter(|_| config.engine.resumes_sessions()));
+    // The question's judgement (`context::need`), for a workspace chat: what goes with it, and — for
+    // the in-process agent, which reads it inside the run — whether passages do.
+    let mut judgement: Option<crate::context::need::Turn> = None;
     let mut engine_message = match caveman.as_deref() {
         Some(rules) => format!("{message}\n\n{rules}"),
         None => message.clone(),
@@ -1671,10 +1679,12 @@ pub async fn chat_send(
     }
     // Notes cited as `[[Título]]`, read in full under the knowledge rules. These chats run on CLI
     // engines — or on the local one, which may see a local-only book.
+    let mut noted = false;
     if let Ok(conn) = db.0.lock() {
         let cloud = config.provider != crate::local_agent::PROVIDER_ID;
         if let Some((note, _)) = ai::note_mention_note(&conn, Some(&conversation.workspace_id), &asked, cloud) {
             engine_message.push_str(&note);
+            noted = true;
         }
     }
     // Who else is working in this conversation's repository right now, if it has one — the same
@@ -1696,9 +1706,33 @@ pub async fn chat_send(
         // `@repo/path` in the question: the engine is told to read them, as the repository chat's.
         let named: Vec<(String, String)> =
             ws_repos.iter().filter(|repo| repo.on_disk).map(|repo| (repo.name.clone(), repo.path.clone())).collect();
-        if let Some(note) = ai::workspace_mention_note(&ai::workspace_mentioned_paths(&asked, &named)) {
+        let mentioned = ai::workspace_mentioned_paths(&asked, &named);
+        if let Some(note) = ai::workspace_mention_note(&mentioned) {
             engine_message.push_str(&note);
         }
+        // Whether this question needs the workspace attached at all (`context::need`): a follow-up
+        // or a general question goes with the standing rules alone.
+        if !is_cli_command {
+            let pointed = !mentioned.is_empty() || noted || !attachments.is_empty();
+            judgement = db.0.lock().ok().map(|conn| {
+                let maps: Vec<_> = named.iter().filter_map(|(_, path)| crate::codemap::snapshot_if_built(path)).collect();
+                crate::context::need::judge(
+                    crate::context::need::Mode::read(&conn),
+                    &asked,
+                    crate::context::need::Signals {
+                        pointed,
+                        declared: |name: &str| maps.iter().any(|map| map.declares(name)),
+                        vocabulary: || {
+                            crate::knowledge::scope_for_workspace(&conn, &conversation.workspace_id, true)
+                                .is_some_and(|scope| crate::knowledge::shares_vocabulary(&conn, &scope, &asked))
+                        },
+                    },
+                )
+            });
+        }
+        let push = judgement
+            .as_ref()
+            .map_or(crate::context::need::Push::All, |turn| turn.push_for(crate::context::need::reaches_workspace_tools(&config.provider)));
         // The workspace's and the global memories the user approved (`crate::ai_memory`). This chat
         // runs on CLI engines, so the local-only ones stay out. A "recuerda que…" in the question
         // becomes one first — of the workspace, since this chat speaks for all its repositories —
@@ -1720,14 +1754,16 @@ pub async fn chat_send(
                     learned_outcome = Some(outcome);
                 }
             }
-            if let Ok(found) = crate::ai_memory::relevant(&conn, Some(&conversation.workspace_id), None, &asked, true, 3_000) {
+            if let Ok(found) = crate::ai_memory::relevant_with(&conn, Some(&conversation.workspace_id), None, &asked, true, 3_000, push.memories()) {
                 if let Some((note, _)) = crate::ai_memory::note(&found) {
                     engine_message.push_str(said.say("memories", &note));
                 }
             }
-            // Agy and Grok take no server here: the passages that best match the question ride it.
-            if matches!(config.provider.as_str(), "gemini" | "grok") {
-                if let Some((note, _)) = crate::knowledge::workspace_prompt_note(&conn, &conversation.workspace_id, &asked) {
+            // Agy and Grok take no server here: the passages that clear the bar ride the question —
+            // unless it is a follow-up, which the conversation answers.
+            if matches!(config.provider.as_str(), "gemini" | "grok") && push.attaches() {
+                let strict = push == crate::context::need::Push::Relevant;
+                if let Some((note, _)) = crate::knowledge::workspace_prompt_note(&conn, &conversation.workspace_id, &asked, strict) {
                     engine_message.push_str(&note);
                 }
             }
@@ -1769,7 +1805,7 @@ pub async fn chat_send(
         ws_extra_dirs.iter().map(|path| (path.clone(), checkpoint_before(path, "chat"))).collect();
     // Kept for the title run below; `app` moves into the run's scope.
     let title_app = app.clone();
-    let (result, trace) = ai_runs::scoped_with_trace(app, run_id, async {
+    let (result, trace) = ai_runs::scoped_with_trace(app, run_id, crate::context::need::within(judgement, async {
         ai::chat_turn(
             &*config.engine,
             &config.binary,
@@ -1798,7 +1834,7 @@ pub async fn chat_send(
             },
         )
         .await
-    })
+    }))
     .await;
     let response_time_ms = started.elapsed().as_millis() as i64;
     if let Some(project) = project.as_ref() {

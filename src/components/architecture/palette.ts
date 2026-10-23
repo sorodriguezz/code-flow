@@ -47,6 +47,16 @@ export function themePalette(): ArchPalette {
   };
 }
 
+/**
+ * `next`, or `prev` itself when nothing in it changed. Any write to `<html>`'s style or class fires the
+ * observer below, and a new palette object rebuilds every node on the canvas — mid-drag, that put the
+ * card back where the document had it.
+ */
+export function samePalette(prev: ArchPalette, next: ArchPalette): ArchPalette {
+  const keys = Object.keys(next) as Array<keyof ArchPalette>;
+  return keys.length === Object.keys(prev).length && keys.every((key) => prev[key] === next[key]) ? prev : next;
+}
+
 /** The palette, re-read whenever the theme or the accent changes. */
 export function useThemePalette(): ArchPalette {
   const [palette, setPalette] = useState(themePalette);
@@ -55,7 +65,7 @@ export function useThemePalette(): ArchPalette {
     let frame = 0;
     const update = () => {
       cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => setPalette(themePalette()));
+      frame = requestAnimationFrame(() => setPalette((prev) => samePalette(prev, themePalette())));
     };
     const observer = new MutationObserver(update);
     observer.observe(root, { attributes: true, attributeFilter: ["data-theme", "style", "class"] });

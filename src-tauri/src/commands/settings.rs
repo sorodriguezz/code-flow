@@ -726,9 +726,10 @@ pub fn upsert_review_context(
     name: String,
     content: String,
     enabled: bool,
+    on_demand: Option<bool>,
 ) -> Result<ReviewContext, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::upsert_review_context(&conn, id, &workspace_id, &name, &content, enabled).map_err(|e| e.to_string())
+    queries::upsert_review_context(&conn, id, &workspace_id, &name, &content, enabled, on_demand.unwrap_or(false)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

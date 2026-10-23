@@ -749,6 +749,31 @@ const IN_SCOPE: &str = "m.status = 'approved'
 /// question may see: a cap over every memory of every project once let fifty matches elsewhere
 /// crowd the one in this repository out. Ties go to the memory used more, then more recently.
 pub fn relevant(conn: &Connection, workspace_id: Option<&str>, project_id: Option<&str>, question: &str, cloud: bool, budget: usize) -> rusqlite::Result<Vec<Memory>> {
+    relevant_with(conn, workspace_id, project_id, question, cloud, budget, Bar::Any)
+}
+
+/// How well a memory that is not a standing rule must match a question to go with it unasked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bar {
+    /// Any word in common — [`relevant`], and what a model asking `recall` gets.
+    Any,
+    /// Most of the question's words, or one that looks like code (`knowledge::index::covers`): a
+    /// chat turn about the project (`context::need`).
+    Strong,
+    /// None: the preferences and conventions alone, which hold for every question.
+    Standing,
+}
+
+/// [`relevant`] under `bar`.
+pub fn relevant_with(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    project_id: Option<&str>,
+    question: &str,
+    cloud: bool,
+    budget: usize,
+    bar: Bar,
+) -> rusqlite::Result<Vec<Memory>> {
     expire(conn)?;
     let at = now();
     let mut stmt = conn.prepare(&format!("{} WHERE {IN_SCOPE}", select_sql()))?;
@@ -788,8 +813,14 @@ pub fn relevant(conn: &Connection, workspace_id: Option<&str>, project_id: Optio
     sorted.sort_by_key(rank);
     let mut out = Vec::new();
     let mut used = 0;
+    let terms = crate::knowledge::index::query_terms(question);
     for memory in sorted {
-        let is_match = matched.contains(&memory.id);
+        let is_match = matched.contains(&memory.id)
+            && match bar {
+                Bar::Any => true,
+                Bar::Strong => crate::knowledge::index::covers(&terms, &format!("{} {}", memory.title, memory.body)),
+                Bar::Standing => false,
+            };
         if !is_match && memory.kind != "preference" && memory.kind != "convention" {
             continue;
         }

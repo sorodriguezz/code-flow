@@ -302,7 +302,7 @@ pub struct PackageWeight {
 /// this, and a package this deep is pathological either way.
 const MAX_DEPTH: usize = 24;
 
-fn directory_size(path: &Path, depth: usize) -> (u64, u32) {
+pub(crate) fn directory_size(path: &Path, depth: usize) -> (u64, u32) {
     if depth > MAX_DEPTH {
         return (0, 0);
     }

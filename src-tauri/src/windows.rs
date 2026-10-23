@@ -183,7 +183,7 @@ impl SatelliteRegistry {
         let mut plan = PutAway::default();
         if let Ok(held) = self.open.lock() {
             let mut desk: Vec<&SatelliteInfo> =
-                held.values().filter(|info| info.kind != SatelliteKind::Quick).collect();
+                held.values().filter(|info| !matches!(info.kind, SatelliteKind::Quick | SatelliteKind::Codi)).collect();
             // A stable order, so the windows come back in the same one every time.
             desk.sort_by(|a, b| a.label.cmp(&b.label));
             for info in desk {
@@ -495,6 +495,11 @@ pub fn focus_satellite(app: AppHandle, label: String) -> Result<(), String> {
 ///
 /// It is still closed on quit: the process going takes every window with it, which is the real
 /// lifetime this window is scoped to.
+///
+/// Codi's window stays for the same reason (the user, 2026-10-22: «que Codi se pueda seguir ocupando
+/// a pesar que la app principal se haya cerrado»): it is driven by voice from wherever the user is,
+/// and the main window it drives keeps running hidden — what it opens brings the window back
+/// (`codi::ui::act`).
 pub fn close_all<R: Runtime>(app: &AppHandle<R>) {
     let plan = app.state::<SatelliteRegistry>().put_away();
     if !plan.close.is_empty() || !plan.hide.is_empty() {
@@ -823,9 +828,116 @@ pub async fn open_quick_ask(app: AppHandle) -> Result<String, String> {
 /// The one «Codi» window's id.
 pub const CODI_REF_ID: &str = "codi";
 
+/// The label of Codi's window.
+pub fn codi_label() -> String {
+    label_for(SatelliteKind::Codi, CODI_REF_ID)
+}
+
+/// Codi's window size, in points.
+const CODI_SIZE: (f64, f64) = (380.0, 560.0);
+/// How far from the screen's edges it opens in its corner, in points.
+const CODI_MARGIN: f64 = 16.0;
+/// Where Codi's window was last left, `x,y` in points — so it opens there again.
+pub const CODI_POSITION_KEY: &str = "codi_window_position";
+
+/// Where Codi's window opens: where the user last left it, while that is still on a screen; else
+/// the top-right corner of the screen under the pointer (the user, 2026-10-22: «apareciendo en la
+/// esquina superior derecha»), clear of the menu bar and the taskbar.
+fn codi_spot<R: Runtime>(app: &AppHandle<R>) -> Option<(f64, f64)> {
+    let stored = app
+        .try_state::<crate::db::Db>()
+        .and_then(|db| db.0.lock().ok().and_then(|conn| crate::db::queries::get_setting(&conn, CODI_POSITION_KEY).ok().flatten()));
+    let monitors = app.available_monitors().unwrap_or_default();
+    if let Some((x, y)) = stored.as_deref().and_then(parse_spot) {
+        let on_a_screen = monitors.iter().any(|monitor| {
+            let scale = monitor.scale_factor();
+            let area = monitor.work_area();
+            let (left, top) = (area.position.x as f64 / scale, area.position.y as f64 / scale);
+            let (width, height) = (area.size.width as f64 / scale, area.size.height as f64 / scale);
+            // Its top strip (what drags it) has to be reachable.
+            x + 80.0 <= left + width && x + CODI_SIZE.0 - 80.0 >= left && y >= top - 4.0 && y + 40.0 <= top + height
+        });
+        if on_a_screen {
+            return Some((x, y));
+        }
+    }
+    let monitor = app
+        .cursor_position()
+        .ok()
+        .and_then(|at| app.monitor_from_point(at.x, at.y).ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten())?;
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    let right = (area.position.x as f64 + area.size.width as f64) / scale;
+    let top = area.position.y as f64 / scale;
+    Some(corner(right, top))
+}
+
+/// Forgets where Codi's window was left and puts it back in its corner, if it is open.
+pub fn codi_to_corner(app: &AppHandle) {
+    if let Some(db) = app.try_state::<crate::db::Db>() {
+        if let Ok(conn) = db.0.lock() {
+            let _ = crate::db::queries::set_setting(&conn, CODI_POSITION_KEY, "");
+        }
+    }
+    if let (Some(window), Some((x, y))) = (app.get_webview_window(&codi_label()), codi_spot(app)) {
+        let _ = window.set_position(tauri::LogicalPosition::new(x, y));
+    }
+}
+
+/// The top-right corner of a work area whose right edge and top are given, in points.
+fn corner(right: f64, top: f64) -> (f64, f64) {
+    (right - CODI_SIZE.0 - CODI_MARGIN, top + CODI_MARGIN)
+}
+
+fn parse_spot(raw: &str) -> Option<(f64, f64)> {
+    let (x, y) = raw.split_once(',')?;
+    let (x, y) = (x.trim().parse::<f64>().ok()?, y.trim().parse::<f64>().ok()?);
+    (x.is_finite() && y.is_finite()).then_some((x, y))
+}
+
+/// Notes where Codi's window was moved to. Every move of a drag arrives here, so nothing is written
+/// until it has been still for a second: one writer thread at a time, which writes the last spot.
+pub fn remember_codi_spot(window: &tauri::Window) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PENDING: Mutex<Option<(String, std::time::Instant)>> = Mutex::new(None);
+    static WRITER: AtomicBool = AtomicBool::new(false);
+    if !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false) {
+        return;
+    }
+    let (Ok(position), Ok(scale)) = (window.outer_position(), window.scale_factor()) else { return };
+    if let Ok(mut pending) = PENDING.lock() {
+        *pending = Some((format!("{:.0},{:.0}", position.x as f64 / scale, position.y as f64 / scale), std::time::Instant::now()));
+    }
+    if WRITER.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let app = window.app_handle().clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let settled = PENDING.lock().ok().and_then(|mut pending| match pending.as_ref() {
+            Some((_, at)) if at.elapsed() >= std::time::Duration::from_secs(1) => pending.take().map(|(spot, _)| spot),
+            _ => None,
+        });
+        if let Some(spot) = settled {
+            if let Some(db) = app.try_state::<crate::db::Db>() {
+                if let Ok(conn) = db.0.lock() {
+                    let _ = crate::db::queries::set_setting(&conn, CODI_POSITION_KEY, &spot);
+                }
+            }
+            WRITER.store(false, Ordering::SeqCst);
+            return;
+        }
+    });
+}
+
+/// How round Codi's window is, in points. A frameless window has square corners of its own; the
+/// page rounds its sheet by the same amount (`.cf-codi-shell`), the platform clips the rest.
+pub const CODI_CORNER_RADIUS: f64 = 16.0;
+
 /// Opens Codi's window, or brings it forward: small, on top of whatever the user is working in, on
 /// every desktop. Built like the ask box ([`open_quick_ask`]), claimed before it is built for the
-/// same reason; unlike it, it goes with the desk (`close_all`), and closing it stops Codi.
+/// same reason; like it, it outlives the desk (`close_all`), and closing it stops Codi.
 pub async fn open_codi(app: AppHandle) -> Result<String, String> {
     let label = label_for(SatelliteKind::Codi, CODI_REF_ID);
     if let Some(existing) = app.get_webview_window(&label) {
@@ -848,9 +960,8 @@ pub async fn open_codi(app: AppHandle) -> Result<String, String> {
         .enable_clipboard_access()
         .transparent(true)
         .title("Codi")
-        .inner_size(380.0, 560.0)
+        .inner_size(CODI_SIZE.0, CODI_SIZE.1)
         .min_inner_size(300.0, 300.0)
-        .center()
         .always_on_top(true)
         .decorations(false)
         .resizable(true);
@@ -858,11 +969,18 @@ pub async fn open_codi(app: AppHandle) -> Result<String, String> {
     {
         builder = builder.visible_on_all_workspaces(true);
     }
+    builder = match codi_spot(&app) {
+        Some((x, y)) => builder.position(x, y),
+        None => builder.center(),
+    };
     if let Some(script) = crate::glass::init_script(&look) {
         builder = builder.initialization_script(script);
     }
     match builder.build() {
-        Ok(window) => crate::glass::on_create(&window, &look),
+        Ok(window) => {
+            crate::glass::round_corners(&window, CODI_CORNER_RADIUS);
+            crate::glass::on_create(&window, &look);
+        }
         Err(e) => {
             if let Ok(mut held) = registry.open.lock() {
                 held.remove(&label);
@@ -872,6 +990,29 @@ pub async fn open_codi(app: AppHandle) -> Result<String, String> {
     }
     announce(&app);
     Ok(label)
+}
+
+/// What Codi asked the ask box to start with (`quick.open`): taken once by the box, on its first
+/// mount or on `quick-ask:codi`.
+static QUICK_DRAFT: Mutex<Option<Option<String>>> = Mutex::new(None);
+
+/// The box Codi opens is a new one, with `draft` written in it when given.
+pub fn set_quick_ask_draft(draft: Option<String>) {
+    if let Ok(mut slot) = QUICK_DRAFT.lock() {
+        *slot = Some(draft);
+    }
+}
+
+/// A new question Codi asked the ask box for, and its words when it was told them.
+#[derive(Serialize)]
+pub struct QuickDraft {
+    text: Option<String>,
+}
+
+/// What Codi left for the ask box, once — `None` when Codi asked for nothing.
+#[tauri::command]
+pub fn quick_ask_take_draft() -> Option<QuickDraft> {
+    QUICK_DRAFT.lock().ok().and_then(|mut slot| slot.take()).map(|text| QuickDraft { text })
 }
 
 /// What the hotkey, the tray item and the frontend all call. See [`open_quick_ask`].
@@ -1096,19 +1237,20 @@ mod tests {
     const NOTES: (&str, SatelliteKind, &str) = ("sat-app-notes", SatelliteKind::App, "notes");
     const REPO: (&str, SatelliteKind, &str) = ("sat-repo-p1", SatelliteKind::Repo, "p1");
     const ASK: (&str, SatelliteKind, &str) = ("sat-quick-ask", SatelliteKind::Quick, QUICK_REF_ID);
+    const CODI: (&str, SatelliteKind, &str) = ("sat-codi-codi", SatelliteKind::Codi, CODI_REF_ID);
 
     /// **The regression.** `close_all` closed the windows and parked nothing, so the tray restore
     /// always found an empty list — the only test filled `parked` by hand. Through `close_all` now,
     /// and the restore's drain after it.
     #[test]
     fn putting_the_desk_away_parks_it_for_the_restore() {
-        let app = desk(&[NOTES, REPO, ASK]);
+        let app = desk(&[NOTES, REPO, ASK, CODI]);
         close_all(app.handle());
 
         let registry = app.state::<SatelliteRegistry>();
         let parked = registry.take_parked();
         let labels: Vec<&str> = parked.iter().map(|p| p.info.label.as_str()).collect();
-        assert_eq!(labels, ["sat-app-notes", "sat-repo-p1"], "the ask box is never put away");
+        assert_eq!(labels, ["sat-app-notes", "sat-repo-p1"], "neither the ask box nor Codi is put away");
         assert!(parked.iter().all(|p| !p.hidden));
         // Drained: a second `app:foreground` — alt-tabbing back after already restoring — must not
         // reopen what the user has closed since.

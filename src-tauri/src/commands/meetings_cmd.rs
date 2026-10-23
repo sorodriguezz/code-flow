@@ -240,6 +240,14 @@ async fn install(app: &AppHandle, item: &str, cancel: &CancellationToken) -> Res
             emit_download(app, "vad", "done", model.size, model.size, None);
             Ok(())
         }
+        "vad-onnx" => {
+            let model = crate::codi::vad::MODEL;
+            download::fetch(model.url, model.size, model.sha256, &crate::codi::vad::model_path(), cancel, |done, total| emit_download(app, "vad", "downloading", done, total, None))
+                .await
+                .map_err(|e| settle(app, "vad", e))?;
+            emit_download(app, "vad", "done", model.size, model.size, None);
+            Ok(())
+        }
         "voices" => {
             let spec = meetings::SHERPA.ok_or("Voice separation is not available on this platform")?;
             let model = meetings::EMBEDDING_MODEL;
@@ -443,10 +451,16 @@ pub async fn meetings_start(
         if state.active.lock().map_err(db_err)?.is_some() {
             return Err("A meeting is already being recorded".into());
         }
-        if !meetings::vad_model_path().is_file() {
-            // Under a megabyte: fetched on the spot rather than sending the user to Settings.
+        // The detector, under a megabyte: fetched on the spot rather than sending the user to
+        // Settings — whisper's when whisper is in, else the one sherpa-onnx runs (`meetings::vad`).
+        if crate::dictation::engine_library().is_some() || meetings::sherpa_library().is_none() {
+            if !meetings::vad_model_path().is_file() {
+                let cancel = CancellationToken::new();
+                install(&app, "vad", &cancel).await?;
+            }
+        } else if !crate::codi::vad::model_path().is_file() {
             let cancel = CancellationToken::new();
-            install(&app, "vad", &cancel).await?;
+            install(&app, "vad-onnx", &cancel).await?;
         }
         let (settings, local_only, resolved) = {
             let db = app.state::<Db>();
@@ -465,7 +479,7 @@ pub async fn meetings_start(
             return Err("MEETINGS_NO_CLOUD_KEY".into());
         }
         let live_model = meetings::pick_live_model(&settings.live_model);
-        if !cloud && meetings::pick_model(&settings.final_model, false).is_none() {
+        if !cloud && meetings::pick_final_model(&settings.final_model).is_none() {
             return Err("MEETINGS_NO_MODEL".into());
         }
         // Without a live model (or with the cloud and no key), the text waits for the end.
@@ -1038,8 +1052,10 @@ async fn process(app: &AppHandle, request: JobRequest, control: Arc<JobControl>)
         Some(pipeline::Transcriber::Cloud { settings: settings.cloud_settings.clone(), key })
     } else {
         let preferred = if mode == Mode::Full && settings.final_model.trim().is_empty() { "turbo" } else { settings.final_model.as_str() };
-        let model = meetings::pick_model(preferred, false).ok_or("MEETINGS_NO_MODEL")?;
-        Some(pipeline::Transcriber::Local { model: crate::dictation::model_path(model) })
+        match meetings::pick_final_model(preferred).ok_or("MEETINGS_NO_MODEL")? {
+            meetings::FinalModel::Whisper(model) => Some(pipeline::Transcriber::Local { model: crate::dictation::model_path(model) }),
+            meetings::FinalModel::Sherpa(model) => Some(pipeline::Transcriber::Sherpa { model }),
+        }
     };
     let live_lines: Vec<transcript::Line> = has_live
         .iter()

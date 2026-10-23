@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ArrowUpRight, MessagesSquare, X } from "lucide-react";
 import { ChatComposer } from "./ChatComposer";
@@ -15,6 +15,7 @@ import { useT } from "../../state/languageStore";
 import { useUiStore } from "../../state/uiStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
 import { openConversationInApp } from "../../lib/chatBridge";
+import { quickAskTakeDraft } from "../../lib/tauri/windows";
 
 /** The bubble a turn-in-flight is drawn into. Module-level so the memoised bubble is not handed a
  *  fresh object on every chunk. */
@@ -86,6 +87,8 @@ export function QuickAskWindow() {
   const session = useConversationStore(
     (s) => (conversationId ? s.byConversation[conversationId] : undefined) ?? EMPTY_CONVERSATION,
   );
+  const sendingRef = useRef(false);
+  sendingRef.current = session.sending;
 
   /** The files the last answer produced, resolved against the live listing — the same join
    *  `ChatTranscript` does, for the same reason. A turn asked from here can write files like any
@@ -116,6 +119,29 @@ export function QuickAskWindow() {
   useEffect(() => {
     init();
   }, [init]);
+
+  /**
+   * «Codi, nueva consulta rápida» (user, 2026-10-22): Codi opens the box for a new question, with its
+   * words already written when it was told them — the user sends it. Taken on mount (a box Codi
+   * just built) and on `quick-ask:codi` (one that was already open). A turn still running keeps its
+   * conversation on screen.
+   */
+  useEffect(() => {
+    const take = () =>
+      void quickAskTakeDraft()
+        .then((asked) => {
+          if (!asked) return;
+          if (!sendingRef.current) setConversationId(null);
+          setDraft(asked.text ?? "");
+          useUiStore.setState((s) => ({ chatComposerFocus: s.chatComposerFocus + 1 }));
+        })
+        .catch(() => {});
+    take();
+    const unlisten = getCurrentWindow().listen("quick-ask:codi", take);
+    return () => {
+      void unlisten.then((off) => off()).catch(() => {});
+    };
+  }, []);
 
   /**
    * The caret goes in the box, every time the box appears.

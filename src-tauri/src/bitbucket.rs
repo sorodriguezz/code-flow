@@ -998,6 +998,8 @@ fn group_threads(comments: Vec<RawComment>) -> Vec<PrCommentThread> {
                 start_line: start,
                 end_line: end,
                 comments: Vec::new(),
+                // Resolved ones are left out above: what reaches here is open.
+                resolved: false,
             }
         });
         entry.comments.push(PrThreadComment {

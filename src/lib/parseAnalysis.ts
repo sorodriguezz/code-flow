@@ -364,6 +364,22 @@ export interface SummaryMemory {
   gatePolicy?: string[];
   /** The lens numbers this run's contract applied (its frozen `level_contract.lenses`). */
   lenses?: number[];
+  /** What the run spent (`review_memory::RunCost`); absent on runs recorded before it was kept. */
+  cost?: RunCost;
+}
+
+/** What one review spent, every pass summed — `review_memory::RunCost`, as stored in the run's meta. */
+export interface RunCost {
+  passes: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  /** Only when an engine reported a price; `null` is "not said", never free. */
+  cost_usd: number | null;
+  /** Passes that reported no usage at all. */
+  unreported: number;
+  duration_ms: number;
 }
 
 /** The built-in lens catalog, by number — the short names the summary prints for a run's frozen
@@ -581,6 +597,25 @@ export function summaryMemoryOf(run: Pick<ReviewRunDetail, "findings" | "meta" |
     deletions: typeof meta.deletions === "number" ? meta.deletions : 0,
     gatePolicy: Array.isArray(meta.quality_gate_policy) ? (meta.quality_gate_policy as unknown[]).filter((s): s is string => typeof s === "string") : undefined,
     lenses: lensesOf(meta.level_contract),
+    cost: runCostOf(meta.cost),
+  };
+}
+
+/** A run's stored cost, or `undefined` for one that predates it (or whose shape is not one). */
+function runCostOf(raw: unknown): RunCost | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const cost = raw as Partial<RunCost>;
+  if (typeof cost.passes !== "number" || cost.passes <= 0) return undefined;
+  const num = (n: unknown) => (typeof n === "number" ? n : 0);
+  return {
+    passes: cost.passes,
+    input_tokens: num(cost.input_tokens),
+    output_tokens: num(cost.output_tokens),
+    cache_read_tokens: num(cost.cache_read_tokens),
+    cache_write_tokens: num(cost.cache_write_tokens),
+    cost_usd: typeof cost.cost_usd === "number" ? cost.cost_usd : null,
+    unreported: num(cost.unreported),
+    duration_ms: num(cost.duration_ms),
   };
 }
 
