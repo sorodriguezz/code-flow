@@ -4,7 +4,6 @@ import { pushErrorToast, useToastStore } from "./toastStore";
 import { useJobsStore } from "./jobsStore";
 import { useLanguageStore } from "./languageStore";
 import { usePrWatchStore } from "./prWatchStore";
-import { useTicketStore } from "./ticketStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { tabsOfProject, useAiPanelStore, type LinkPrSession } from "./aiPanelStore";
 import { translations } from "../lib/i18n/translations";
@@ -13,6 +12,14 @@ import { targetKey, targetPrKey, type PrTarget } from "../lib/prTarget";
 import { parseMergeRefusal } from "../lib/prOutcomes";
 import type { MergeChoice, PrDecision, PrListScope, PublishOutcome, PullRequestSummary } from "../types/domain";
 import type { PrAction, PostFindingItem } from "../lib/tauri/commands";
+
+/**
+ * The ticket store, loaded when a PR is created or merged rather than with this one. It reaches the
+ * agents' and chains' stores, whose listeners would otherwise start in every window — and in every
+ * test — that merely reads pull requests (CI, 2026-10-24: «window is not defined» from
+ * `chainStore` in the reviewer's tests).
+ */
+const tickets = () => import("./ticketStore").then((module) => module.useTicketStore);
 
 export type { LinkPrSession };
 
@@ -514,7 +521,7 @@ export const usePrStore = create<PrState>((set, get) => ({
       if (warning) pushErrorToast(translate("pr.mergeWarning", { error: warning }));
       usePrWatchStore.getState().reconcile(watchWorkspaceId, busyKey, pr, get().decisionByPr[busyKey] ?? "none");
       // Merged here: its ticket, if the branch was started from one, moves to done.
-      if (merged && target.kind === "project") void useTicketStore.getState().onPrMerged(target.projectId, pr.source_branch);
+      if (merged && target.kind === "project") void tickets().then((store) => store.getState().onPrMerged(target.projectId, pr.source_branch));
       if (target.kind === "project") void get().loadPullRequests(target.projectId);
       return true;
     } catch (e) {
@@ -541,7 +548,7 @@ export const usePrStore = create<PrState>((set, get) => ({
     await get().loadPullRequests(projectId);
     useToastStore.getState().pushToast(translate("createPr.created"), "success");
     // A branch started from a ticket: the PR is recorded on the link and the ticket moves to review.
-    void useTicketStore.getState().onPrCreated(projectId, input.sourceBranch, pr);
+    void tickets().then((store) => store.getState().onPrCreated(projectId, input.sourceBranch, pr));
     return pr;
   },
 }));
