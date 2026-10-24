@@ -7,7 +7,7 @@ import { useWorkspaceStore } from "../../../state/workspaceStore";
 import { ChatModelPicker } from "../../ai/ChatModelPicker";
 import { buttonClass } from "../../common/Button";
 import { Checkbox } from "../../common/Checkbox";
-import { fieldClass } from "../../common/recipes";
+import { DateField } from "../../common/DateField";
 import { Select } from "../../common/Select";
 import { ThinkingOrb } from "../../common/ThinkingOrb";
 import { copyForSlack, copyForTeams, exportSummary, generateIntoNote } from "./actions";
@@ -152,11 +152,11 @@ function WorklogModal({ onClose }: { onClose: () => void }) {
               <div className="flex gap-2">
                 <label className="flex-1">
                   <span className={label}>{t("worklog.from")}</span>
-                  <input type="date" value={from} max={to} onChange={(event) => setFrom(event.target.value)} className={fieldClass({ className: "w-full" })} />
+                  <DateField value={from} max={to} onChange={setFrom} ariaLabel={t("worklog.from")} className="w-full" />
                 </label>
                 <label className="flex-1">
                   <span className={label}>{t("worklog.to")}</span>
-                  <input type="date" value={to} min={from} onChange={(event) => setTo(event.target.value)} className={fieldClass({ className: "w-full" })} />
+                  <DateField value={to} min={from} onChange={setTo} ariaLabel={t("worklog.to")} className="w-full" />
                 </label>
               </div>
             )}

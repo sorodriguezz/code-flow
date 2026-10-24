@@ -11,12 +11,13 @@
  */
 
 import { Fragment, useEffect, useMemo, useState } from "react";
-import { ChevronRight, ExternalLink, GitPullRequest, Loader2, RefreshCw, Search } from "lucide-react";
+import { Check, ChevronRight, ClipboardCopy, ExternalLink, GitPullRequest, Loader2, RefreshCw, Search } from "lucide-react";
 import { useDepsStore } from "../../state/depsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT, type Translate } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { openExternalUrl } from "../../lib/tauri/commands";
+import { writeClipboardText } from "../../lib/clipboard";
 import type { DepsAdvisory, DepsEcosystem, DepsProgress, DepsReport, DepsRow, DepsSeverity, DepsUpdateKind } from "../../lib/tauri/depsCommands";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { Project } from "../../types/domain";
@@ -36,6 +37,7 @@ import {
   rowId,
   summarize,
   toUpdateItem,
+  transitiveAsText,
   worstSeverity,
   type RowFilters,
   type SelectionPreset,
@@ -367,8 +369,11 @@ function RepoView({ project, report, onUpdate }: { project: Project; report: Dep
       </table>
 
       {report && report.transitive.length > 0 && (
-        <div className="mt-3 px-3">
-          <p className="mb-1 text-[12px] font-medium text-[var(--cf-text)]">{t("deps.transitiveTitle", { n: report.transitive.length })}</p>
+        <div className="mt-3 select-text px-3">
+          <div className="mb-1 flex items-center gap-2">
+            <p className="text-[12px] font-medium text-[var(--cf-text)]">{t("deps.transitiveTitle", { n: report.transitive.length })}</p>
+            <CopyTransitiveButton items={report.transitive} />
+          </div>
           <p className="mb-1.5 text-[11px] text-[var(--cf-text-muted)]">{t("deps.transitiveHint")}</p>
           <ul className="space-y-1">
             {report.transitive.map((tv) => (
@@ -382,6 +387,30 @@ function RepoView({ project, report, onUpdate }: { project: Project; report: Dep
         </div>
       )}
     </>
+  );
+}
+
+function CopyTransitiveButton({ items }: { items: DepsReport["transitive"] }) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const id = window.setTimeout(() => setCopied(false), 1500);
+    return () => window.clearTimeout(id);
+  }, [copied]);
+  return (
+    <button
+      type="button"
+      className={buttonClass({ variant: "ghost", size: "sm" })}
+      onClick={() =>
+        void writeClipboardText(transitiveAsText(items))
+          .then(() => setCopied(true))
+          .catch((e) => pushErrorToast(String(e)))
+      }
+    >
+      {copied ? <Check size={12} /> : <ClipboardCopy size={12} />}
+      {copied ? t("common.copied") : t("deps.copyTransitive")}
+    </button>
   );
 }
 

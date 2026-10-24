@@ -843,7 +843,7 @@ pub fn keyvault_read_import_file(path: String) -> Result<String, String> {
     // up by suffix rather than by exact name so a re-zipped folder (`Export.1pux/export.data`)
     // still works — the same tolerance `find_skill_root` has, and for the same reason.
     let name = (0..archive.len())
-        .filter_map(|index| archive.by_index(index).ok().map(|entry| entry.name().to_string()))
+        .filter_map(|index| archive.by_index(index).ok().and_then(|entry| entry.name().ok().map(|name| name.into_owned())))
         .find(|entry| entry == "export.data" || entry.ends_with("/export.data"))
         .ok_or_else(|| {
             "That .1pux has no `export.data` in it, so there is nothing to read. Export again from \

@@ -295,7 +295,7 @@ fn read_zip_within(path: &Path, only: Option<&str>, part_cap: u64, total_cap: u6
     let mut total = 0u64;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| NodeError::failed(e.to_string()))?;
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(|e| NodeError::failed(e.to_string()))?.into_owned();
         if only.is_some_and(|wanted| wanted != name) {
             continue;
         }

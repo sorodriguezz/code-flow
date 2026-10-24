@@ -1,7 +1,7 @@
 {
   "name": "codeflow",
   "private": true,
-  "version": "2.6.0",
+  "version": "2.6.1",
   "type": "module",
   "packageManager": "pnpm@11.5.0",
   "scripts": {
@@ -32,6 +32,7 @@
     "@iconify-json/logos": "^1.2.17",
     "@iconify-json/vscode-icons": "^1.2.91",
     "@monaco-editor/react": "^4.7.0",
+    "@noble/post-quantum": "0.7.1",
     "@novnc/novnc": "^1.7.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.2",
@@ -73,6 +74,6 @@
     "tailwindcss": "^4.3.3",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.12"
   }
 }

@@ -1038,9 +1038,9 @@ fn unzip_within(archive: &Path, into: &Path, mut budget: Budget) -> Result<Vec<P
         for index in 0..zip.len() {
             let mut entry = zip.by_index(index).map_err(|e| e.to_string())?;
             let Some(relative) = entry.enclosed_name() else {
-                return Err(format!("The archive holds an unsafe path: {}", entry.name()));
+                return Err(format!("The archive holds an unsafe path: {}", String::from_utf8_lossy(entry.name_raw())));
             };
-            let name = entry.name().to_string();
+            let name = entry.name().map_err(|e| e.to_string())?.into_owned();
             budget.admit(&name, Some(entry.size()))?;
             let target = into.join(relative);
             if entry.is_dir() {

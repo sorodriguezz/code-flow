@@ -2,6 +2,7 @@
  *  a field that edits the document as you type. */
 import { useEffect, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import { fieldClass } from "../../common/recipes";
+import { DateField } from "../../common/DateField";
 import { useArchitectureViewStore } from "../../../state/architectureViewStore";
 import type { ResolvedComponents } from "../../../lib/architecture/types";
 
@@ -66,7 +67,9 @@ export function Field({ label, value, onCommit, mono, multiline, type = "text", 
   return (
     <label className="grid gap-1 text-[11px] font-medium text-[var(--cf-text-muted)]">
       {label}
-      {multiline ? (
+      {type === "date" ? (
+        <DateField size="sm" clearable value={draft} onChange={(v) => { setDraft(v); onCommit(v); }} ariaLabel={label} placeholder={placeholder} className="w-full" />
+      ) : multiline ? (
         <textarea {...common} rows={3} className="min-h-[54px] resize-y rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 py-1.5 text-[12.5px] leading-[1.4] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]" />
       ) : (
         <input {...common} type={type} className={fieldClass({ size: "sm", className: `w-full ${mono ? "font-mono text-[11.5px]" : ""}` })} />

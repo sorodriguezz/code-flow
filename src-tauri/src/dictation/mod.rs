@@ -300,7 +300,7 @@ pub fn unpack_engine(spec: &EngineSpec, archive: &Path, dest: &Path) -> Result<(
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(|e| format!("The engine archive is damaged: {e}"))?.into_owned();
         let Some(target) = kept_name(spec, &name) else { continue };
         let mut out = std::fs::File::create(staging.join(&target)).map_err(|e| format!("Couldn't write {target}: {e}"))?;
         std::io::copy(&mut entry, &mut out).map_err(|e| format!("Couldn't unpack {target}: {e}"))?;

@@ -208,7 +208,9 @@ hex = "0.4"
 # (`dictation::engine`). Already in the tree through other crates; this is the same 0.7.
 libloading = "0.7"
 rand = "0.9"
-rumqttc = "0.24"
+# Without its default `use-rustls`, which turns on tokio-rustls's default and with it aws-lc-rs (a C
+# build): the ring provider `lib.rs` installs is the one TLS uses here.
+rumqttc = { version = "0.25", default-features = false, features = ["use-rustls-no-provider"] }
 
 # ---------------- Full backup ----------------
 # The whole-install backup is sealed in Rust rather than in the webview: the payload is the entire
@@ -231,7 +233,7 @@ flate2 = "1"
 # SQLite and libgit2. A `.skill` is a plain deflate zip, which is also what every tool that produces
 # one writes. The crate is already in the lockfile as a transitive dependency, so this adds a name
 # to the manifest rather than a build.
-zip = { version = "4", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 # The Java runtime the JDBC drivers run on is downloaded on first use (`datasource::drivers`), and
 # Adoptium ships it as a `.zip` for Windows — the crate above — and a `.tar.gz` for macOS: this, over
 # `flate2`. Already in the lockfile, so it adds a name to the manifest rather than a build.
@@ -243,8 +245,8 @@ tar = "0.4"
 yaml-rust2 = "0.13"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 quick-xml = "0.41"
-calamine = { version = "0.36", features = ["dates"] }
-rust_xlsxwriter = "0.99"
+calamine = { version = "0.37", features = ["dates"] }
+rust_xlsxwriter = "0.101"
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1", "tokio1-rustls", "rustls-native-certs", "ring"] }
 # Wipes the derived key and the decrypted plaintext once they've served their purpose, so a
 # passphrase-derived key doesn't linger in freed memory for the rest of the session.

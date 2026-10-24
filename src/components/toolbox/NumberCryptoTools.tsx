@@ -56,16 +56,54 @@ export function BaseTool() {
   );
 }
 
+/** The units the size is typed in, picked beside the number rather than typed after it. */
+const BYTE_UNITS = ["B", "kB", "MB", "GB", "TB", "KiB", "MiB", "GiB", "TiB", "bit", "kbit", "Mbit", "Gbit"].map((u) => ({ value: u, label: u }));
+
+/** `1.5 GiB` as typed before the unit had its own selector: the number and the unit apart. */
+function splitByteInput(text: string): { number: string; unit: string } | null {
+  const m = /^\s*([\d.,_]+)\s*([a-zA-Z]+)\s*$/.exec(text);
+  if (!m) return null;
+  const unit = BYTE_UNITS.find((u) => u.value.toLowerCase() === m[2].toLowerCase())?.value;
+  return unit ? { number: m[1], unit } : null;
+}
+
 export function BytesTool() {
   const t = useT();
-  const [input, setInput] = useToolField("bytes", "input", "1.5 GiB");
-  const parsed = useMemo(() => attempt(() => parseByteSize(input)), [input]);
+  const [stored, setInput] = useToolField("bytes", "input", "1.5");
+  const [unit, setUnit] = useToolField("bytes", "unit", "GiB");
+  // A size saved with its unit in the text («1.5 GiB») opens as the number with that unit picked.
+  const legacy = splitByteInput(stored);
+  const input = legacy?.number ?? stored;
+  const shownUnit = legacy?.unit ?? unit;
+  const parsed = useMemo(() => {
+    if (!input.trim()) return { value: null, error: null };
+    const result = attempt(() => parseByteSize(`${input} ${shownUnit}`));
+    return result.error ? { value: null, error: t("toolbox.bytes.notNumber") } : result;
+  }, [input, shownUnit, t]);
   const fmt = (v: number) => (v >= 1e15 || (v > 0 && v < 1e-6) ? v.toExponential(4) : Number(v.toPrecision(10)).toLocaleString(undefined, { maximumFractionDigits: 6 }));
   return (
     <>
       <OptionsRow>
-        <input className={`${smallInput} h-[30px] w-64 font-mono text-[13px]`} value={input} spellCheck={false} onChange={(e) => setInput(e.target.value)} />
-        <span className="text-[11.5px] text-[var(--cf-text-faint)]">1.5 GiB · 200MB · 8 Mbit · 1048576</span>
+        <input
+          className={`${smallInput} h-[30px] w-48 font-mono text-[13px]`}
+          value={input}
+          inputMode="decimal"
+          spellCheck={false}
+          placeholder="1.5"
+          onChange={(e) => {
+            setInput(e.target.value);
+            if (legacy) setUnit(legacy.unit);
+          }}
+        />
+        <Select
+          size="compact"
+          value={shownUnit}
+          onChange={(next) => {
+            setUnit(next);
+            if (legacy) setInput(legacy.number);
+          }}
+          options={BYTE_UNITS}
+        />
       </OptionsRow>
       <ErrorLine error={parsed.error} />
       {parsed.value !== null ? (

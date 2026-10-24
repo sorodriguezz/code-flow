@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { claimTimes, decodeJwt, signHmacJwt, tokenStatus, verifyJwt } from "./jwt";
+import { claimTimes, decodeJwt, generateExample, generateKeyPair, JWT_ALGS, publicKeyFromPrivate, signHmacJwt, signJwt, tokenStatus, verifyJwt } from "./jwt";
 import { toPem } from "./asn1";
 import { CERT_PEM } from "./__fixtures__/cert";
 
@@ -78,5 +78,35 @@ describe("signHmacJwt", () => {
     const d = decodeJwt(token);
     expect(d.header).toMatchObject({ alg: "HS384", kid: "k1", typ: "JWT" });
     expect(await verifyJwt(token, "s3cret")).toBe(true);
+  });
+});
+
+describe("every algorithm jwt.io offers", () => {
+  for (const alg of JWT_ALGS.filter((a) => a !== "none")) {
+    it(`${alg}: the example verifies with its key, and a tampered one does not`, async () => {
+      const { token, key } = await generateExample(alg);
+      expect(decodeJwt(token).header).toMatchObject({ alg, typ: "JWT" });
+      expect(await verifyJwt(token, key)).toBe(true);
+      const tampered = token.replace(/\.[^.]+\./, `.${Buffer.from('{"sub":"x"}').toString("base64url")}.`);
+      expect(await verifyJwt(tampered, key)).toBe(false);
+    });
+  }
+  it("none is unsigned", async () => {
+    const { token, key } = await generateExample("none");
+    expect(token.endsWith(".")).toBe(true);
+    expect(key).toBe("");
+  });
+  it("the public key derived from a private key verifies what it signed", async () => {
+    for (const alg of ["RS256", "ES384", "PS512", "Ed25519", "ML-DSA-65"]) {
+      const pair = await generateKeyPair(alg);
+      const token = await signJwt({ a: 1 }, alg, pair.privateKey);
+      expect(await verifyJwt(token, await publicKeyFromPrivate(alg, pair.privateKey))).toBe(true);
+    }
+  });
+  it("says when the key belongs to another algorithm", async () => {
+    const ec = await generateKeyPair("ES256");
+    await expect(signJwt({}, "RS256", ec.privateKey)).rejects.toThrow(/does not fit RS256/);
+    const ml = await generateKeyPair("ML-DSA-44");
+    await expect(signJwt({}, "ML-DSA-87", ml.privateKey)).rejects.toThrow(/ML-DSA-87/);
   });
 });

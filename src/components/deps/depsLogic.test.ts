@@ -9,6 +9,7 @@ import {
   rowId,
   summarize,
   toUpdateItem,
+  transitiveAsText,
   vulnerableTarget,
   worstSeverity,
 } from "./depsLogic";
@@ -133,5 +134,29 @@ describe("depsLogic", () => {
     expect(first.cells.p2.severity).toBe("medium");
     expect(second.repos).toBe(2);
     expect(second.cells.p3.behind).toBe(true);
+  });
+});
+
+describe("transitiveAsText", () => {
+  it("writes one heading per package and one line per advisory, CVE alias first", () => {
+    const text = transitiveAsText([
+      {
+        ecosystem: "npm",
+        name: "left-pad",
+        version: "1.2.0",
+        lockfile: "pnpm-lock.yaml",
+        advisories: [
+          advisory({ id: "GHSA-1", aliases: ["CVE-2026-1"], summary: "Bad thing", url: "https://example.com/a" }),
+          advisory({ id: "GHSA-2", severity: "unknown", score: null, fixed: null, summary: "Other", url: "https://example.com/b" }),
+        ],
+      },
+    ]);
+    expect(text).toBe(
+      [
+        "left-pad 1.2.0 (pnpm-lock.yaml)",
+        "  - [high 7.5] CVE-2026-1: Bad thing (fixed in 1.2.5) https://example.com/a",
+        "  - [unknown] GHSA-2: Other https://example.com/b",
+      ].join("\n"),
+    );
   });
 });

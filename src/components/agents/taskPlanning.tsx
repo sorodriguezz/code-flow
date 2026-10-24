@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Archive, ArchiveRestore, CalendarClock, Coins, Flag, Tag } from "lucide-react";
 import { Select } from "../common/Select";
 import { chipClass, fieldClass } from "../common/recipes";
+import { DateField } from "../common/DateField";
 import { Tooltip } from "../common/Tooltip";
 import type { MenuItem } from "../common/ContextMenu";
 import { ThinkingOrb } from "../common/ThinkingOrb";
@@ -125,11 +126,14 @@ export function TaskPlanningBar({ task }: { task: AgentTask }) {
       <Tooltip label={t("agents.dueHint")}>
         <label className="flex shrink-0 items-center gap-1">
           <CalendarClock size={13} className={due?.overdue ? "text-[var(--cf-danger)]" : undefined} />
-          <input
-            type="date"
+          <DateField
+            size="sm"
+            clearable
             value={task.due_date ?? ""}
-            onChange={(e) => void setPlanning(task.id, { dueDate: e.target.value })}
-            className={fieldClass({ size: "sm", className: `w-[132px] ${due?.overdue ? "text-[var(--cf-danger)]" : ""}` })}
+            onChange={(v) => void setPlanning(task.id, { dueDate: v })}
+            ariaLabel={t("agents.dueHint")}
+            placeholder={t("dateField.none")}
+            className={`w-[150px] ${due?.overdue ? "text-[var(--cf-danger)]" : ""}`}
           />
         </label>
       </Tooltip>

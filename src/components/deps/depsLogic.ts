@@ -10,6 +10,7 @@ import type {
   DepsReport,
   DepsRow,
   DepsSeverity,
+  DepsTransitiveVuln,
   DepsUpdateItem,
   DepsUpdateKind,
 } from "../../lib/tauri/depsCommands";
@@ -71,6 +72,25 @@ export function summarize(report: DepsReport | null | undefined): DepsSummary {
     }
   }
   return out;
+}
+
+/**
+ * The transitive list as plain text, for the clipboard: one heading per package, one line per
+ * advisory with its severity, id, summary, fix and link. English severity words on purpose — what
+ * gets pasted is usually an issue, a ticket or a prompt, not the app's own screen.
+ */
+export function transitiveAsText(items: DepsTransitiveVuln[]): string {
+  return items
+    .map((tv) => {
+      const lines = tv.advisories.map((a) => {
+        const id = a.aliases.find((x) => x.startsWith("CVE-")) ?? a.id;
+        const sev = a.score != null ? `${a.severity} ${a.score.toFixed(1)}` : a.severity;
+        const fix = a.fixed ? ` (fixed in ${a.fixed})` : "";
+        return `  - [${sev}] ${id}: ${a.summary}${fix} ${a.url}`.trimEnd();
+      });
+      return [`${tv.name} ${tv.version} (${tv.lockfile})`, ...lines].join("\n");
+    })
+    .join("\n");
 }
 
 export type UpdateFilter = "all" | "outdated" | "major" | "minor" | "patch";

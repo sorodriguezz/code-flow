@@ -1,6 +1,7 @@
 /** «Tiempo»: Unix timestamps, date arithmetic, cron and ISO-8601 durations. */
-import { useEffect, useMemo, useState } from "react";
-import { Plus, X } from "lucide-react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { ArrowLeftRight, Plus, X } from "lucide-react";
+import { DateField } from "../common/DateField";
 import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
 import { buttonClass, iconButtonClass } from "../common/Button";
@@ -120,56 +121,107 @@ const DURATION_FIELDS: (keyof DurationParts)[] = ["years", "months", "weeks", "d
 
 const localInput = (d: Date) => toLocalIso(d).slice(0, 19);
 
+/** One of the two calculators: a titled card with its inputs on top and the answer below. */
+function CalcCard({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="flex flex-col gap-3 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] p-4">
+      <h3 className="text-[12px] font-semibold uppercase tracking-wide text-[var(--cf-text-muted)]">{title}</h3>
+      {children}
+    </section>
+  );
+}
+
+/** The answer, big — the one line each card exists to give. */
+function Headline({ main, sub }: { main: string; sub?: string }) {
+  return (
+    <div className="rounded-lg bg-[color-mix(in_oklab,var(--cf-accent)_8%,transparent)] px-4 py-3">
+      <div className="select-text text-[20px] font-semibold tabular-nums text-[var(--cf-text)]">{main}</div>
+      {sub ? <div className="mt-0.5 select-text text-[12.5px] text-[var(--cf-text-muted)]">{sub}</div> : null}
+    </div>
+  );
+}
+
 export function DateCalcTool() {
   const t = useT();
+  const language = useLanguageStore((s) => s.language);
   const [from, setFrom] = useToolField("date-calc", "from", localInput(new Date()));
   const [to, setTo] = useToolField("date-calc", "to", localInput(new Date(Date.now() + 30 * 86400000)));
+  const [base, setBase] = useToolField("date-calc", "base", localInput(new Date()));
   const [dur, setDur] = useToolField<DurationParts>("date-calc", "dur", { ...EMPTY_DURATION, days: 30 });
   const [sign, setSign] = useToolField<1 | -1>("date-calc", "sign", 1);
   const a = new Date(from);
   const b = new Date(to);
+  const start = new Date(base);
   const valid = !Number.isNaN(a.getTime()) && !Number.isNaN(b.getTime());
   const diff = valid ? dateDiff(a, b) : null;
-  const added = !Number.isNaN(a.getTime()) ? addDuration(a, dur, sign) : null;
+  const added = !Number.isNaN(start.getTime()) ? addDuration(start, dur, sign) : null;
+  const locale = language === "es" ? "es" : "en";
+  const longDate = (d: Date) => `${d.toLocaleDateString(locale, { weekday: "long", day: "numeric", month: "long", year: "numeric" })} · ${toLocalIso(d).slice(11, 19)}`;
+  // Whole days up top; the hours left over are in the breakdown under it.
+  const days = diff ? Math.floor(Math.abs(diff.totalDays)) : 0;
+  const durationText = DURATION_FIELDS.filter((f) => dur[f]).map((f) => `${dur[f]} ${t(`toolbox.duration.${f}`).toLowerCase()}`).join(", ");
   return (
-    <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 xl:grid-cols-2">
-      <div className="flex min-h-0 flex-col gap-3">
-        <OptionsRow>
-          <Labeled label={t("toolbox.from")}>
-            <input type="datetime-local" step={1} className={`${smallInput} h-[30px]`} value={from} onChange={(e) => setFrom(e.target.value)} />
-          </Labeled>
-          <Labeled label={t("toolbox.to")}>
-            <input type="datetime-local" step={1} className={`${smallInput} h-[30px]`} value={to} onChange={(e) => setTo(e.target.value)} />
-          </Labeled>
-        </OptionsRow>
+    <div className="grid min-h-0 flex-1 grid-cols-1 content-start items-start gap-4 overflow-auto xl:grid-cols-2">
+      <CalcCard title={t("toolbox.date.between")}>
+        <div className="flex flex-wrap items-center gap-2">
+          <DateField withTime value={from} onChange={setFrom} ariaLabel={t("toolbox.from")} />
+          <button type="button" className={iconButtonClass({ size: "sm" })} aria-label={t("toolbox.date.swap")} title={t("toolbox.date.swap")} onClick={() => { setFrom(to); setTo(from); }}>
+            <ArrowLeftRight size={14} />
+          </button>
+          <DateField withTime value={to} onChange={setTo} ariaLabel={t("toolbox.to")} />
+        </div>
         {diff ? (
-          <FactTable
-            rows={[
-              [t("toolbox.date.difference"), `${diff.negative ? "−" : ""}${t("toolbox.date.calendar", { y: diff.years, m: diff.months, d: diff.days })} ${String(diff.hours).padStart(2, "0")}:${String(diff.minutes).padStart(2, "0")}:${String(diff.seconds).padStart(2, "0")}`],
-              [t("toolbox.date.totalDays"), (Math.round(diff.totalDays * 1000) / 1000).toLocaleString()],
-              [t("toolbox.date.totalHours"), (Math.round((diff.totalSeconds / 3600) * 100) / 100).toLocaleString()],
-              [t("toolbox.date.totalSeconds"), diff.totalSeconds.toLocaleString()],
-              [t("toolbox.date.businessDays"), diff.businessDays.toLocaleString()],
-              ["ISO 8601", formatIsoDuration({ ...EMPTY_DURATION, years: diff.years, months: diff.months, days: diff.days, hours: diff.hours, minutes: diff.minutes, seconds: diff.seconds }, diff.negative)],
-            ]}
-          />
+          <>
+            <Headline
+              main={`${diff.negative ? "−" : ""}${t("toolbox.date.daysCount", { n: days.toLocaleString(locale) })}`}
+              sub={`${diff.negative ? "−" : ""}${t("toolbox.date.calendar", { y: diff.years, m: diff.months, d: diff.days })} ${String(diff.hours).padStart(2, "0")}:${String(diff.minutes).padStart(2, "0")}:${String(diff.seconds).padStart(2, "0")}`}
+            />
+            <FactTable
+              className="shrink-0"
+              rows={[
+                [t("toolbox.date.businessDays"), diff.businessDays.toLocaleString(locale)],
+                [t("toolbox.date.totalHours"), (Math.round((diff.totalSeconds / 3600) * 100) / 100).toLocaleString(locale)],
+                [t("toolbox.date.totalSeconds"), diff.totalSeconds.toLocaleString(locale)],
+                ["ISO 8601", formatIsoDuration({ ...EMPTY_DURATION, years: diff.years, months: diff.months, days: diff.days, hours: diff.hours, minutes: diff.minutes, seconds: diff.seconds }, diff.negative)],
+              ]}
+            />
+          </>
         ) : null}
-      </div>
-      <div className="flex min-h-0 flex-col gap-3">
-        <OptionsRow>
+      </CalcCard>
+      <CalcCard title={t("toolbox.date.shift")}>
+        <div className="flex flex-wrap items-center gap-2">
+          <DateField withTime value={base} onChange={setBase} ariaLabel={t("toolbox.date.baseDate")} />
           <Segmented layoutId="toolbox-date-sign" size="sm" value={sign === 1 ? "add" : "sub"} onChange={(v) => setSign(v === "add" ? 1 : -1)} options={[{ value: "add", label: t("toolbox.date.add") }, { value: "sub", label: t("toolbox.date.subtract") }]} />
-          <span className="text-[12px] text-[var(--cf-text-muted)]">{t("toolbox.date.toFrom")}</span>
-        </OptionsRow>
+        </div>
         <div className="grid grid-cols-4 gap-2">
           {DURATION_FIELDS.map((f) => (
             <label key={f} className="flex flex-col gap-1 text-[11.5px] text-[var(--cf-text-muted)]">
               {t(`toolbox.duration.${f}`)}
-              <input type="number" className={smallInput} value={dur[f]} onChange={(e) => setDur({ ...dur, [f]: Number(e.target.value) || 0 })} />
+              <input
+                type="number"
+                min={0}
+                max={f === "years" ? 9999 : undefined}
+                className={`${smallInput} h-[30px] tabular-nums ${dur[f] ? "" : "text-[var(--cf-text-faint)]"}`}
+                value={dur[f]}
+                onFocus={(e) => e.currentTarget.select()}
+                onChange={(e) => setDur({ ...dur, [f]: Math.min(f === "years" ? 9999 : 1e9, Math.max(0, Math.trunc(Number(e.target.value)) || 0)) })}
+              />
             </label>
           ))}
+          <button type="button" className="self-end rounded-md px-2 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]" onClick={() => setDur({ ...EMPTY_DURATION })}>
+            {t("toolbox.date.clear")}
+          </button>
         </div>
-        {added ? <FactTable rows={[[t("toolbox.date.result"), toLocalIso(added)], ["ISO (UTC)", added.toISOString()], [t("toolbox.timestamp.seconds"), String(Math.floor(added.getTime() / 1000))]]} /> : null}
-      </div>
+        {added ? (
+          <>
+            <Headline main={longDate(added)} sub={durationText ? `${sign === 1 ? "+" : "−"} ${durationText}` : undefined} />
+            <FactTable className="shrink-0" rows={[["ISO", toLocalIso(added)], ["ISO (UTC)", added.toISOString()], [t("toolbox.timestamp.seconds"), String(Math.floor(added.getTime() / 1000))]]} />
+            <button type="button" className="self-start text-[12px] text-[var(--cf-accent)] hover:underline" onClick={() => setTo(localInput(added))}>
+              {t("toolbox.date.useAsTo")}
+            </button>
+          </>
+        ) : null}
+      </CalcCard>
     </div>
   );
 }

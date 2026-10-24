@@ -17,8 +17,8 @@ component's own licence wins — which is what section 6 says.
 
 | What ships | Count |
 |---|---|
-| npm packages (production tree) | 351 resolved versions of 319 packages |
-| Rust crates (resolved for macOS and Windows) | 878 resolved versions of 772 crates |
+| npm packages (production tree) | 350 resolved versions of 321 packages |
+| Rust crates (resolved for macOS and Windows) | 878 resolved versions of 773 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
 | Fonts | 11 |
@@ -180,7 +180,7 @@ macOS's zlib, and on Windows the CNG cryptography libssh2 uses in place of OpenS
 | Lilita One | 1.002 | MIT | headings on whiteboards | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Lilita`) | Copyright (c) 2011 Juan Montoreano (juan@remolacha.biz), with Reserved Font Names "Lilita One" |
 | Assistant | 3.000 | OFL-1.1 | the whiteboard editor's own controls | inside `@excalidraw/excalidraw` 0.18.1 (`dist/prod/fonts/Assistant/Assistant-Regular.woff2`) | Copyright 2020 The Assistant Project Authors (https://github.com/hafontia/Assistant). Copyright 2010 The Source Sans Pro Authors (https://github.com/adobe-fonts/source-sans-pro), with Reserved Font Name 'Source'. Source is a trademark of Adobe Systems Incorporated in the United States and/or other countries. |
 | codicon | 1.15 | MIT | the editor's own icons | inside `monaco-editor` 0.57.0 (`esm/vs/base/browser/ui/codicons/codicon/codicon.ttf`) | — |
-| KaTeX_Main | 1.1 | OFL-1.1 | formulas in notes (and the rest of KaTeX's families) | inside `katex` 0.16.47 (`dist/fonts/KaTeX_Main-Regular.ttf`) | Copyright (c) 2009-2010 Design Science, Inc.; Copyright (c) 2014-2018 Khan Academy |
+| KaTeX_Main | 1.1 | OFL-1.1 | formulas in notes (and the rest of KaTeX's families) | inside `katex` 0.19.0 (`dist/fonts/KaTeX_Main-Regular.ttf`) | Copyright (c) 2009-2010 Design Science, Inc.; Copyright (c) 2014-2018 Khan Academy |
 
 Each OFL font carries its copyright notice and licence in its own metadata, which is where the
 SIL Open Font License allows them to travel; they are repeated here.
@@ -290,7 +290,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### MIT — 238 packages
+### MIT — 240 packages
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -316,8 +316,10 @@ because there the order carries meaning.
 | `@mermaid-js/parser` | 0.6.3, 1.2.1 | MIT | <https://github.com/mermaid-js/mermaid/tree/develop/packages/mermaid/parser> |
 | `@monaco-editor/loader` | 1.7.0 | MIT | <https://github.com/suren-atoyan/monaco-loader> |
 | `@monaco-editor/react` | 4.7.0 | MIT | <https://github.com/suren-atoyan/monaco-react> |
-| `@noble/ciphers` | 1.3.0 | MIT | <https://paulmillr.com/noble> |
-| `@noble/hashes` | 1.8.0 | MIT | <https://paulmillr.com/noble> |
+| `@noble/ciphers` | 1.3.0, 2.4.0 | MIT | <https://paulmillr.com/noble> |
+| `@noble/curves` | 2.4.0 | MIT | <https://paulmillr.com/noble> |
+| `@noble/hashes` | 1.8.0, 2.4.0 | MIT | <https://paulmillr.com/noble> |
+| `@noble/post-quantum` | 0.7.1 | MIT | <https://paulmillr.com/noble> |
 | `@radix-ui/primitive` | 1.0.0, 1.1.1 | MIT | <https://radix-ui.com/primitives> |
 | `@radix-ui/react-arrow` | 1.1.2 | MIT | <https://radix-ui.com/primitives> |
 | `@radix-ui/react-collection` | 1.0.1 | MIT | <https://radix-ui.com/primitives> |
@@ -404,7 +406,7 @@ because there the order carries meaning.
 | `classcat` | 5.0.5 | MIT | <https://github.com/jorgebucaran/classcat> |
 | `clone` | 2.1.2 | MIT | <https://github.com/pvorb/node-clone> |
 | `clsx` | 1.1.1 | MIT | <https://github.com/lukeed/clsx> |
-| `commander` | 15.0.0, 2.20.3, 7.2.0, 8.3.0 | MIT | <https://github.com/tj/commander.js> |
+| `commander` | 15.0.0, 2.20.3, 7.2.0 | MIT | <https://github.com/tj/commander.js> |
 | `cose-base` | 1.0.3, 2.2.0 | MIT | <https://github.com/iVis-at-Bilkent/cose-base> |
 | `cross-env` | 7.0.3 | MIT | <https://github.com/kentcdodds/cross-env> |
 | `cross-spawn` | 7.0.6 | MIT | <https://github.com/moxystudio/node-cross-spawn> |
@@ -445,13 +447,13 @@ because there the order carries meaning.
 | `is-url` | 1.2.4 | MIT | <https://github.com/segmentio/is-url> |
 | `jotai` | 2.11.0 | MIT | <https://github.com/pmndrs/jotai> |
 | `jotai-scope` | 0.7.2 | MIT | <https://github.com/jotaijs/jotai-scope> |
-| `katex` | 0.16.47, 0.19.0 | MIT | <https://katex.org> |
+| `katex` | 0.19.0 | MIT | <https://katex.org> |
 | `khroma` | 2.1.0 | MIT | <https://github.com/fabiospampinato/khroma> |
 | `langium` | 3.3.1 | MIT | <https://langium.org> |
 | `layout-base` | 1.0.2, 2.0.1 | MIT | <https://github.com/iVis-at-Bilkent/layout-base> |
 | `linebreak` | 1.1.0 | MIT | <https://github.com/devongovett/linebreaker> |
 | `lodash` | 4.18.1 | MIT | <https://lodash.com> |
-| `lodash-es` | 4.17.21, 4.18.1 | MIT | <https://lodash.com/custom-builds> |
+| `lodash-es` | 4.18.1 | MIT | <https://lodash.com/custom-builds> |
 | `lodash.debounce` | 4.0.8 | MIT | <https://lodash.com> |
 | `lodash.throttle` | 4.1.1 | MIT | <https://lodash.com> |
 | `luxon` | 3.7.2 | MIT | <https://github.com/moment/luxon> |
@@ -461,7 +463,7 @@ because there the order carries meaning.
 | `motion-dom` | 12.42.2 | MIT | <https://github.com/motiondivision/motion> |
 | `motion-utils` | 12.39.0 | MIT | <https://github.com/motiondivision/motion> |
 | `multimath` | 2.0.0 | MIT | <https://github.com/nodeca/multimath> |
-| `nanoid` | 3.3.3, 4.0.2 | MIT | <https://github.com/ai/nanoid> |
+| `nanoid` | 3.3.20, 5.1.16 | MIT | <https://github.com/ai/nanoid> |
 | `nearley` | 2.20.1 | MIT | <https://github.com/hardmath123/nearley> |
 | `normalize-path` | 3.0.0 | MIT | <https://github.com/jonschlinkert/normalize-path> |
 | `object-assign` | 4.1.1 | MIT | <https://github.com/sindresorhus/object-assign> |
@@ -609,7 +611,7 @@ because there the order carries meaning.
 | `ieee754` | 1.2.1 | BSD-3-Clause | <https://github.com/feross/ieee754> |
 | `moo` | 0.5.3 | BSD-3-Clause | <https://github.com/tjvr/moo> |
 | `rw` | 1.3.3 | BSD-3-Clause | <https://github.com/mbostock/rw> |
-| `source-map-js` | 1.2.1 | BSD-3-Clause | <https://github.com/7rulnik/source-map-js> |
+| `source-map-js` | 1.2.2 | BSD-3-Clause | <https://github.com/7rulnik/source-map-js> |
 
 ### Apache-2.0 OR MIT — 6 packages
 
@@ -647,7 +649,7 @@ because there the order carries meaning.
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
-| `dompurify` | 3.4.12, 3.4.15, 3.4.17 | Apache-2.0 OR MPL-2.0 | <https://github.com/cure53/DOMPurify> |
+| `dompurify` | 3.4.17 | Apache-2.0 OR MPL-2.0 | <https://github.com/cure53/DOMPurify> |
 
 ### BlueOak-1.0.0 — 1 package
 
@@ -692,7 +694,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### Apache-2.0 OR MIT — 447 crates
+### Apache-2.0 OR MIT — 448 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -779,14 +781,14 @@ because there the order carries meaning.
 | `critical-section` | 1.2.0 | Apache-2.0 OR MIT | <https://github.com/rust-embedded/critical-section> |
 | `crossbeam-channel` | 0.5.16 | Apache-2.0 OR MIT | <https://github.com/crossbeam-rs/crossbeam> |
 | `crossbeam-deque` | 0.8.8 | Apache-2.0 OR MIT | <https://github.com/crossbeam-rs/crossbeam> |
-| `crossbeam-epoch` | 0.9.18 | Apache-2.0 OR MIT | <https://github.com/crossbeam-rs/crossbeam> |
+| `crossbeam-epoch` | 0.9.21 | Apache-2.0 OR MIT | <https://github.com/crossbeam-rs/crossbeam> |
 | `crossbeam-queue` | 0.3.14 | Apache-2.0 OR MIT | <https://github.com/crossbeam-rs/crossbeam> |
 | `crossbeam-utils` | 0.8.22 | Apache-2.0 OR MIT | <https://github.com/crossbeam-rs/crossbeam> |
 | `crypto-common` | 0.1.7, 0.2.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/traits> |
 | `ctor` | 0.8.0 | Apache-2.0 OR MIT | <https://github.com/mmastrac/rust-ctor> |
 | `ctor-proc-macro` | 0.0.7 | Apache-2.0 OR MIT | <https://github.com/mmastrac/rust-ctor> |
 | `ctr` | 0.10.1, 0.9.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/block-modes> |
-| `ctutils` | 0.4.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
+| `ctutils` | 0.4.5 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `curve25519-dalek-derive` | 0.1.1 | Apache-2.0 OR MIT | <https://github.com/dalek-cryptography/curve25519-dalek> |
 | `dasp_sample` | 0.11.0 | Apache-2.0 OR MIT | <https://github.com/rustaudio/sample> |
 | `dbl` | 0.5.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
@@ -825,7 +827,7 @@ because there the order carries meaning.
 | `erased-serde` | 0.4.10 | Apache-2.0 OR MIT | <https://github.com/dtolnay/erased-serde> |
 | `errno` | 0.3.14 | Apache-2.0 OR MIT | <https://github.com/lambda-fairy/rust-errno> |
 | `euclid` | 0.20.14 | Apache-2.0 OR MIT | <https://github.com/servo/euclid> |
-| `event-listener` | 2.5.3, 5.4.1 | Apache-2.0 OR MIT | <https://github.com/smol-rs/event-listener> |
+| `event-listener` | 2.5.3, 5.4.2 | Apache-2.0 OR MIT | <https://github.com/smol-rs/event-listener> |
 | `event-listener-strategy` | 0.5.4 | Apache-2.0 OR MIT | <https://github.com/smol-rs/event-listener-strategy> |
 | `fallible-iterator` | 0.2.0, 0.3.0 | Apache-2.0 OR MIT | <https://github.com/sfackler/rust-fallible-iterator> |
 | `fallible-streaming-iterator` | 0.1.9 | Apache-2.0 OR MIT | <https://github.com/sfackler/fallible-streaming-iterator> |
@@ -834,6 +836,7 @@ because there the order carries meaning.
 | `fdeflate` | 0.3.7 | Apache-2.0 OR MIT | <https://github.com/image-rs/fdeflate> |
 | `filetime` | 0.2.29 | Apache-2.0 OR MIT | <https://github.com/alexcrichton/filetime> |
 | `find-msvc-tools` | 0.1.9 | Apache-2.0 OR MIT | <https://github.com/rust-lang/cc-rs> |
+| `fixedbitset` | 0.5.7 | Apache-2.0 OR MIT | <https://github.com/petgraph/fixedbitset> |
 | `flate2` | 1.1.9 | Apache-2.0 OR MIT | <https://github.com/rust-lang/flate2-rs> |
 | `flume` | 0.11.1, 0.12.0 | Apache-2.0 OR MIT | <https://github.com/zesterer/flume> |
 | `fnv` | 1.0.7 | Apache-2.0 OR MIT | <https://github.com/servo/rust-fnv> |
@@ -972,7 +975,7 @@ because there the order carries meaning.
 | `qrcode` | 0.14.1 | Apache-2.0 OR MIT | <https://github.com/kennytm/qrcode-rust> |
 | `quick-error` | 2.0.1 | Apache-2.0 OR MIT | <http://github.com/tailhook/quick-error> |
 | `quinn` | 0.11.11 | Apache-2.0 OR MIT | <https://github.com/quinn-rs/quinn> |
-| `quinn-proto` | 0.11.16 | Apache-2.0 OR MIT | <https://github.com/quinn-rs/quinn> |
+| `quinn-proto` | 0.11.19 | Apache-2.0 OR MIT | <https://github.com/quinn-rs/quinn> |
 | `quinn-udp` | 0.5.15 | Apache-2.0 OR MIT | <https://github.com/quinn-rs/quinn> |
 | `quote` | 1.0.47 | Apache-2.0 OR MIT | <https://github.com/dtolnay/quote> |
 | `rand` | 0.10.2, 0.8.8, 0.9.5 | Apache-2.0 OR MIT | <https://github.com/rust-random/rand> |
@@ -994,7 +997,7 @@ because there the order carries meaning.
 | `resolv-conf` | 0.7.6 | Apache-2.0 OR MIT | <https://github.com/hickory-dns/resolv-conf> |
 | `rsasl` | 2.3.1 | Apache-2.0 OR MIT | <https://codeberg.org/dequbed/rsasl> |
 | `rskafka` | 0.6.0 | Apache-2.0 OR MIT | <https://github.com/influxdata/rskafka> |
-| `rust_xlsxwriter` | 0.99.1 | Apache-2.0 OR MIT | <https://github.com/jmcnamara/rust_xlsxwriter> |
+| `rust_xlsxwriter` | 0.101.0 | Apache-2.0 OR MIT | <https://github.com/jmcnamara/rust_xlsxwriter> |
 | `rustc-hash` | 2.1.3 | Apache-2.0 OR MIT | <https://github.com/rust-lang/rustc-hash> |
 | `rustc_version` | 0.4.1 | Apache-2.0 OR MIT | <https://github.com/djc/rustc-version-rs> |
 | `rusticata-macros` | 4.1.0 | Apache-2.0 OR MIT | <https://github.com/rusticata/rusticata-macros> |
@@ -1079,7 +1082,7 @@ because there the order carries meaning.
 | `tls_codec` | 0.4.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats> |
 | `tls_codec_derive` | 0.4.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/formats> |
 | `tokio-postgres` | 0.7.18 | Apache-2.0 OR MIT | <https://github.com/rust-postgres/rust-postgres> |
-| `tokio-rustls` | 0.24.1, 0.25.0, 0.26.4 | Apache-2.0 OR MIT | <https://github.com/rustls/tokio-rustls> |
+| `tokio-rustls` | 0.24.1, 0.26.4 | Apache-2.0 OR MIT | <https://github.com/rustls/tokio-rustls> |
 | `toml` | 0.9.12+spec-1.1.0, 1.1.3+spec-1.1.0 | Apache-2.0 OR MIT | <https://github.com/toml-rs/toml> |
 | `toml_datetime` | 0.7.5+spec-1.1.0, 1.1.1+spec-1.1.0 | Apache-2.0 OR MIT | <https://github.com/toml-rs/toml> |
 | `toml_edit` | 0.25.13+spec-1.1.0 | Apache-2.0 OR MIT | <https://github.com/toml-rs/toml> |
@@ -1159,7 +1162,7 @@ because there the order carries meaning.
 | `block2` | 0.6.2 | MIT | <https://github.com/madsmtm/objc2> |
 | `bson` | 2.15.0 | MIT | <https://github.com/mongodb/bson-rust> |
 | `bytes` | 1.12.1 | MIT | <https://github.com/tokio-rs/bytes> |
-| `calamine` | 0.36.1 | MIT | <https://github.com/tafia/calamine> |
+| `calamine` | 0.37.0 | MIT | <https://github.com/tafia/calamine> |
 | `cargo_metadata` | 0.19.2 | MIT | <https://github.com/oli-obk/cargo_metadata> |
 | `cfb` | 0.14.0, 0.7.3 | MIT | <https://github.com/mdsteele/rust-cfb> |
 | `cfg_aliases` | 0.2.2 | MIT | <https://github.com/katharostech/cfg_aliases> |
@@ -1187,7 +1190,7 @@ because there the order carries meaning.
 | `fsevent-sys` | 4.1.0 | MIT | <https://github.com/octplane/fsevent-rust/tree/master/fsevent-sys> |
 | `funty` | 2.0.0 | MIT | <https://github.com/myrrlyn/funty> |
 | `generic-array` | 0.14.7 | MIT | <https://github.com/fizyk20/generic-array> |
-| `h2` | 0.4.15 | MIT | <https://github.com/hyperium/h2> |
+| `h2` | 0.4.20 | MIT | <https://github.com/hyperium/h2> |
 | `hostname` | 0.4.2 | MIT | <https://github.com/djc/hostname> |
 | `http-body` | 1.1.0 | MIT | <https://github.com/hyperium/http-body> |
 | `http-body-util` | 0.1.4 | MIT | <https://github.com/hyperium/http-body> |
@@ -1247,7 +1250,7 @@ because there the order carries meaning.
 | `pretty-hex` | 0.3.0 | MIT | <https://github.com/wolandr/pretty-hex> |
 | `pulldown-cmark` | 0.13.4 | MIT | <https://github.com/raphlinus/pulldown-cmark> |
 | `pulldown-cmark-escape` | 0.11.0 | MIT | <https://github.com/raphlinus/pulldown-cmark> |
-| `quick-xml` | 0.41.0 | MIT | <https://github.com/tafia/quick-xml> |
+| `quick-xml` | 0.41.0, 0.42.0 | MIT | <https://github.com/tafia/quick-xml> |
 | `radium` | 0.7.0 | MIT | <https://github.com/bitvecto-rs/radium> |
 | `referencing` | 0.58.5 | MIT | <https://github.com/Stranger6667/jsonschema> |
 | `rfd` | 0.16.0 | MIT | <https://github.com/PolyMeilex/rfd> |
@@ -1319,7 +1322,7 @@ because there the order carries meaning.
 | `winreg` | 0.10.1, 0.55.0 | MIT | <https://github.com/gentoo90/winreg-rs> |
 | `wyz` | 0.5.1 | MIT | <https://github.com/myrrlyn/wyz> |
 | `zeromq` | 0.6.0 | MIT | <https://github.com/zeromq/zmq.rs> |
-| `zip` | 4.6.1, 8.6.0 | MIT | <https://github.com/zip-rs/zip2> |
+| `zip` | 4.6.1, 8.6.0, 9.0.5 | MIT | <https://github.com/zip-rs/zip2> |
 | `zmij` | 1.0.23 | MIT | <https://github.com/dtolnay/zmij> |
 
 ### Apache-2.0 — 27 crates
@@ -1344,7 +1347,7 @@ because there the order carries meaning.
 | `prost` | 0.14.4 | Apache-2.0 | <https://github.com/tokio-rs/prost> |
 | `prost-derive` | 0.14.4 | Apache-2.0 | <https://github.com/tokio-rs/prost> |
 | `prost-types` | 0.14.4 | Apache-2.0 | <https://github.com/tokio-rs/prost> |
-| `rumqttc` | 0.24.0 | Apache-2.0 | <https://github.com/bytebeamio/rumqtt> |
+| `rumqttc` | 0.25.1 | Apache-2.0 | <https://github.com/bytebeamio/rumqtt> |
 | `russh-sftp` | 2.4.0 | Apache-2.0 | <https://github.com/AspectUnk/russh-sftp> |
 | `saa` | 5.6.2 | Apache-2.0 | <https://codeberg.org/wvwwvwwv/synchronous-and-asynchronous> |
 | `scc` | 3.8.8 | Apache-2.0 | <https://codeberg.org/wvwwvwwv/scalable-concurrent-containers> |
@@ -1475,8 +1478,8 @@ because there the order carries meaning.
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
 | `hyper-rustls` | 0.27.9 | Apache-2.0 OR ISC OR MIT | <https://github.com/rustls/hyper-rustls> |
-| `rustls` | 0.21.12, 0.22.4, 0.23.42 | Apache-2.0 OR ISC OR MIT | <https://github.com/rustls/rustls> |
-| `rustls-native-certs` | 0.6.3, 0.7.3, 0.8.4 | Apache-2.0 OR ISC OR MIT | <https://github.com/rustls/rustls-native-certs> |
+| `rustls` | 0.21.12, 0.23.46 | Apache-2.0 OR ISC OR MIT | <https://github.com/rustls/rustls> |
+| `rustls-native-certs` | 0.6.3, 0.8.4 | Apache-2.0 OR ISC OR MIT | <https://github.com/rustls/rustls-native-certs> |
 | `rustls-pemfile` | 1.0.4, 2.2.0 | Apache-2.0 OR ISC OR MIT | <https://github.com/rustls/pemfile> |
 | `sct` | 0.7.1 | Apache-2.0 OR ISC OR MIT | <https://github.com/rustls/sct.rs> |
 
@@ -1485,7 +1488,7 @@ because there the order carries meaning.
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
 | `libloading` | 0.7.4 | ISC | <https://github.com/nagisa/rust_libloading> |
-| `rustls-webpki` | 0.101.7, 0.102.8, 0.103.13 | ISC | <https://github.com/rustls/webpki> |
+| `rustls-webpki` | 0.101.7, 0.102.8, 0.103.16 | ISC | <https://github.com/rustls/webpki> |
 | `starship-battery` | 0.11.1 | ISC | <https://github.com/starship/rust-battery> |
 | `untrusted` | 0.9.0 | ISC | <https://github.com/briansmith/untrusted> |
 
@@ -1624,7 +1627,7 @@ because there the order carries meaning.
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
-| `webpki-roots` | 1.0.9 | CDLA-Permissive-2.0 | <https://github.com/rustls/webpki-roots> |
+| `webpki-roots` | 1.0.11 | CDLA-Permissive-2.0 | <https://github.com/rustls/webpki-roots> |
 
 ### MIT AND BSD-3-Clause — 1 crate
 

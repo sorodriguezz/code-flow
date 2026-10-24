@@ -249,7 +249,7 @@ pub(super) fn unpack(bytes: &[u8], parent: &Path, archive_root: &str, folder: &s
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|e| e.to_string())?;
         let Some(relative) = entry.enclosed_name() else {
-            return Err(format!("Refusing an unsafe path in the archive: {}", entry.name()));
+            return Err(format!("Refusing an unsafe path in the archive: {}", String::from_utf8_lossy(entry.name_raw())));
         };
         let Ok(inside) = relative.strip_prefix(expected) else {
             return Err(format!("Unexpected path in the archive: {}", relative.display()));

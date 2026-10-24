@@ -1,10 +1,11 @@
 /** «Generadores»: ids, passwords, hashes, HMAC, QR codes, fake data and RUTs. */
-import { useMemo, useRef, useState } from "react";
-import { CheckCircle2, FileUp, RefreshCw, XCircle } from "lucide-react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
+import { CheckCircle2, FileDown, FileUp, ImageDown, RefreshCw, XCircle } from "lucide-react";
 import qrcode from "qrcode-generator";
 import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
-import { buttonClass } from "../common/Button";
+import { buttonClass, iconButtonClass } from "../common/Button";
+import { Tooltip } from "../common/Tooltip";
 import { chipClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
 import { useToolField } from "../../state/toolboxStore";
@@ -26,9 +27,10 @@ import {
 } from "../../lib/toolbox/ids";
 import { digest, formatDigest, hmac, HASH_ALGORITHMS, type HashAlgorithm, type ShaAlgorithm } from "../../lib/toolbox/hash";
 import { base64ToBytes, hexToBytes, utf8 } from "../../lib/toolbox/encoding";
-import { FAKE_FIELDS, fakeRecords, formatRut, randomRut, validateRut, type FakeField } from "../../lib/toolbox/fake";
+import { FAKE_FIELDS, fakeRecords, formatRut, randomRut, rutCheckDigit, validateRut, type FakeField } from "../../lib/toolbox/fake";
 import { jsonToCsv } from "../../lib/toolbox/csv";
 import { toLocalIso } from "../../lib/toolbox/time";
+import { saveBytes } from "../../lib/diagrams/exportFile";
 import { CopyButton, FactTable, Labeled, OptionsRow, PaneHead, paneClass, smallInput, Split, TextPane, useAsyncResult } from "./kit";
 import { CheckLabel } from "./EncodeTools";
 
@@ -312,6 +314,31 @@ export function HmacTool() {
   );
 }
 
+/** The QR's SVG drawn onto a canvas, `size` px a side; `crispEdges` keeps the modules sharp. */
+async function qrPng(svg: string, size = 1024): Promise<Uint8Array> {
+  const img = new Image();
+  img.src = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+  await img.decode();
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(img, 0, 0, size, size);
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+  if (!blob) throw new Error("PNG");
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+function SaveButton({ label, icon, disabled, onSave }: { label: string; icon: ReactNode; disabled: boolean; onSave: () => Promise<unknown> }) {
+  return (
+    <Tooltip label={label}>
+      <button type="button" disabled={disabled} aria-label={label} className={iconButtonClass({ size: "xs" })} onClick={() => void onSave()}>
+        {icon}
+      </button>
+    </Tooltip>
+  );
+}
+
 export function QrTool() {
   const t = useT();
   const [input, setInput] = useToolField("qr", "input", "https://example.com");
@@ -342,6 +369,8 @@ export function QrTool() {
         <TextPane label={t("toolbox.qr.content")} value={input} onChange={setInput} error={svg.error} placeholder="WIFI:T:WPA;S:MiRed;P:clave;;" />
         <div className={paneClass}>
           <PaneHead label="QR">
+            <SaveButton label={t("toolbox.qr.savePng")} icon={<ImageDown size={13} />} disabled={!svg.value} onSave={async () => saveBytes(await qrPng(svg.value), "png", "qr")} />
+            <SaveButton label={t("toolbox.qr.saveSvg")} icon={<FileDown size={13} />} disabled={!svg.value} onSave={() => saveBytes(utf8(svg.value), "svg", "qr")} />
             <CopyButton text={svg.value} label={t("toolbox.qr.copySvg")} />
           </PaneHead>
           <div className="flex min-h-0 flex-1 items-center justify-center p-4">
@@ -406,32 +435,38 @@ export function RutTool() {
   const [count, setCount] = useToolField("rut", "count", 10);
   const [again, setAgain] = useState(0);
   const lines = input.split(/\r?\n/).filter((l) => l.trim());
+  // Digits with no dash are ambiguous: «19074499» may be 1.907.449-9 or the body of 19.074.499-K.
+  // Read as a full RUT when its last digit checks out, otherwise as a body to complete.
+  const checks = lines.map((line) => {
+    const r = validateRut(line);
+    const bare = line.trim().replace(/\./g, "");
+    const dv = !r.valid && /^\d{1,9}$/.test(bare) ? rutCheckDigit(bare) : "";
+    return { line, r, dv, full: r.valid ? r.formatted : dv ? formatRut(bare) : "" };
+  });
   const generated = useMemo(() => Array.from({ length: Math.min(Math.max(1, count), 1000) }, () => randomRut(Math.random, 5_000_000, 25_000_000, dots)).join("\n"), [count, dots, again]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 xl:grid-cols-2">
       <div className="flex min-h-0 flex-col gap-3">
         <TextPane className="max-h-56" label={t("toolbox.rut.validate")} value={input} onChange={setInput} placeholder={"12.345.678-5\n76086428-5\n11111111"} />
         <div className={`${paneClass} flex-1`}>
+          <PaneHead label={t("toolbox.rut.results")}>
+            <CopyButton text={checks.map((c) => c.full).filter(Boolean).join("\n")} label={t("toolbox.rut.copyFull")} />
+          </PaneHead>
           <div className="min-h-0 flex-1 overflow-auto">
-            {lines.map((line, i) => {
-              const r = validateRut(line);
-              const body = line.replace(/[^\dkK]/g, "");
-              const onlyBody = !r.formatted && /^\d{1,9}$/.test(body);
-              return (
-                <div key={i} className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5 text-[12.5px]">
-                  <span className="min-w-0 flex-1 truncate font-mono">{line.trim()}</span>
-                  {r.valid ? (
-                    <span className={chipClass("ok")}><CheckCircle2 size={12} />{r.formatted}</span>
-                  ) : onlyBody ? (
-                    <span className={chipClass("info")}>{t("toolbox.rut.dvIs", { dv: formatRut(body) })}</span>
-                  ) : r.formatted ? (
-                    <span className={chipClass("bad")}><XCircle size={12} />{t("toolbox.rut.expected", { dv: r.expected })}</span>
-                  ) : (
-                    <span className={chipClass("bad")}>{t("toolbox.rut.malformed")}</span>
-                  )}
-                </div>
-              );
-            })}
+            {checks.map(({ line, r, dv, full }, i) => (
+              <div key={i} className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5 text-[12.5px]">
+                <span className="min-w-0 flex-1 truncate font-mono">{line.trim()}</span>
+                {r.valid ? (
+                  <span className={chipClass("ok")}><CheckCircle2 size={12} />{r.formatted}</span>
+                ) : dv ? (
+                  <span className={chipClass("info")}>{t("toolbox.rut.dvIs", { dv, rut: full })}</span>
+                ) : r.formatted ? (
+                  <span className={chipClass("bad")}><XCircle size={12} />{t("toolbox.rut.expected", { dv: r.expected })}</span>
+                ) : (
+                  <span className={chipClass("bad")}>{t("toolbox.rut.malformed")}</span>
+                )}
+              </div>
+            ))}
           </div>
         </div>
       </div>

@@ -877,7 +877,7 @@ mod tests {
         let mut buffer = std::io::Cursor::new(Vec::new());
         {
             let mut zip = zip::ZipWriter::new(&mut buffer);
-            let options: zip::write::FileOptions<'_, ()> =
+            let options: zip::write::FileOptions<'_, '_, ()> =
                 zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
             for (name, body) in entries {
                 if name.ends_with('/') {

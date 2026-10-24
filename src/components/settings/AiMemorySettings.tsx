@@ -4,6 +4,7 @@ import { buttonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { chipClass, fieldClass } from "../common/recipes";
+import { DateField } from "../common/DateField";
 import { useT } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
@@ -180,12 +181,14 @@ function FieldsRow({
       </div>
       <label className="flex items-center gap-1 text-[12px] text-[var(--cf-text-muted)]">
         {t("memory.expires")}
-        <input
-          type="date"
+        <DateField
+          size="sm"
+          clearable
           value={value.expires}
-          onChange={(e) => onChange({ ...value, expires: e.target.value })}
-          aria-label={t("memory.expires")}
-          className={fieldClass({ size: "sm", className: "w-[132px]" })}
+          onChange={(expires) => onChange({ ...value, expires })}
+          ariaLabel={t("memory.expires")}
+          placeholder={t("dateField.none")}
+          className="w-[150px]"
         />
       </label>
       <ReplaceSelect workspaceId={workspaceId} exclude={exclude} value={value.supersedes} currentTitle={currentTitle} onChange={(supersedes) => onChange({ ...value, supersedes })} />

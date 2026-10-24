@@ -847,7 +847,7 @@ fn check_workbook_within(path: &std::path::Path, max_parts: usize, part_cap: u64
     let mut total = 0u64;
     for index in 0..archive.len() {
         let mut part = archive.by_index(index).map_err(|e| e.to_string())?;
-        let name = part.name().to_string();
+        let name = part.name().map_err(|e| e.to_string())?.into_owned();
         let budget = part_cap.min(total_cap - total);
         let inflated = std::io::copy(&mut part.by_ref().take(budget + 1), &mut std::io::sink()).map_err(|e| format!("{name}: {e}"))?;
         if inflated > budget {
