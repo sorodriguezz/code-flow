@@ -433,7 +433,7 @@ export function WorkspaceChat({
           <SquarePen size={12} />
         </button>
       </div>
-      <div ref={scrollRef} onScroll={onScroll} tabIndex={-1} onContextMenu={textMenu.onText} className="relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none">
+      <div ref={scrollRef} onScroll={onScroll} tabIndex={-1} onContextMenu={textMenu.onText} className="cf-paper-scroll relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none">
         {exportMenu && (
           <ContextMenu
             x={exportMenu.x}

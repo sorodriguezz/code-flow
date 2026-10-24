@@ -442,7 +442,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
 
   if (isUser) {
     return (
-      <div className="cf-paper group space-y-1">
+      <div className="group space-y-1">
         <div
           // Selectable as a bubble: a user's own turn renders as a bare string, and would otherwise
           // be the one kind of message you couldn't quote back. `wrap-anywhere`: a pasted log or
@@ -513,7 +513,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
           <OutputBar conversationId={outputs.conversationId} files={outputs.files} label={false} />
         </div>
       )}
-      <div className="cf-paper flex items-center gap-1.5">
+      <div className="flex items-center gap-1.5">
         {stampRow}
         {controls}
       </div>
@@ -593,7 +593,7 @@ function AssistantAvatar({
     : null;
 
   const mark = (
-    <span className={`cf-paper flex ${box} shrink-0 items-center justify-center`}>
+    <span className={`flex ${box} shrink-0 items-center justify-center`}>
       {speaking ? (
         <ThinkingOrb size={reading ? "card" : "md"} activity={SPEAKING} />
       ) : settling ? (

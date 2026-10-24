@@ -4379,49 +4379,64 @@ html:has(.cf-codi-shell) body {
   background-color: color-mix(in oklab, var(--cf-bg-solid, var(--cf-bg)) 80%, transparent);
 }
 
-/* The chat's transcript at Full only (user, 2026-10-23: «como que es un rollo de papel metiéndose
-   bajo la barra»): a block crossing the top or bottom edge of the scroller tips back from the edge
-   it is passing under, as paper bends round a roller — the answer's blocks one by one, so a long
-   reply curls line by line, not as a slab. Driven by the scroll position itself (a view timeline),
-   so it costs no script and runs both ways, up and down.
+/* The chats' transcripts at Full only (user, 2026-10-23: «como que es un rollo de papel metiéndose
+   bajo la barra»; 2026-10-24: «no tan así … solo como los últimos 5 px»): what scrolls rolls under
+   the top and bottom edges as paper round a roller — only a ~5px band at each edge, never a whole
+   block tilting, so a tall message reads as paper, not as a panel.
 
-   Each animation covers only its edge's crossing (`entry`, `exit`) and fills nothing: a block wholly
-   in view carries no transform at all — nothing for a fixed popover inside it to be trapped by.
-   `transform` and not `rotate`: these blocks take no other transform, and the perspective has to
-   live on the block, since one on the scroller would trap every fixed descendant. */
-@supports (animation-timeline: view()) {
-  :root[data-motion="full"] .cf-paper-scroll :is(.cf-chat-reading > *, .cf-paper) {
+   A mask on the scroller, so nothing inside carries a transform. The ramp follows the roller's
+   curve (steep at the very edge, flat where the paper is still on top), and each band opens only
+   when there is something past that edge: a scroll timeline grows the top band over the first
+   24px of scroll and closes the bottom one over the last 24px. A transcript too short to scroll
+   has an inactive timeline, so both bands stay at 0 and nothing is masked. */
+@property --cf-roll-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --cf-roll-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@supports (animation-timeline: scroll()) {
+  :root[data-motion="full"] .cf-paper-scroll {
+    --cf-roll-mask: linear-gradient(
+      to bottom,
+      transparent 0,
+      rgb(0 0 0 / 0.45) calc(var(--cf-roll-top) * 0.35),
+      rgb(0 0 0 / 0.85) calc(var(--cf-roll-top) * 0.7),
+      #000 var(--cf-roll-top),
+      #000 calc(100% - var(--cf-roll-bottom)),
+      rgb(0 0 0 / 0.85) calc(100% - var(--cf-roll-bottom) * 0.7),
+      rgb(0 0 0 / 0.45) calc(100% - var(--cf-roll-bottom) * 0.35),
+      transparent 100%
+    );
+    -webkit-mask-image: var(--cf-roll-mask);
+    mask-image: var(--cf-roll-mask);
     animation:
-      cf-paper-from-below linear none,
-      cf-paper-under-top linear none;
-    animation-timeline: view(), view();
+      cf-roll-top linear both,
+      cf-roll-bottom linear both;
+    animation-timeline: scroll(self), scroll(self);
     animation-range:
-      entry 0% entry 100%,
-      exit 0% exit 100%;
+      0px 24px,
+      calc(100% - 24px) 100%;
   }
 }
-@keyframes cf-paper-from-below {
+@keyframes cf-roll-top {
   from {
-    transform-origin: 50% 0%;
-    transform: perspective(640px) rotateX(-58deg) scale(0.96);
-    opacity: 0.2;
+    --cf-roll-top: 0px;
   }
   to {
-    transform-origin: 50% 0%;
-    transform: perspective(640px) rotateX(0deg) scale(1);
-    opacity: 1;
+    --cf-roll-top: 5px;
   }
 }
-@keyframes cf-paper-under-top {
+@keyframes cf-roll-bottom {
   from {
-    transform-origin: 50% 100%;
-    transform: perspective(640px) rotateX(0deg) scale(1);
-    opacity: 1;
+    --cf-roll-bottom: 5px;
   }
   to {
-    transform-origin: 50% 100%;
-    transform: perspective(640px) rotateX(58deg) scale(0.96);
-    opacity: 0.2;
+    --cf-roll-bottom: 0px;
   }
 }
 
