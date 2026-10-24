@@ -2532,6 +2532,18 @@ const AI_USAGE: &[ParamSpec] = &[
     p("includeQuota", Kind::Boolean, "true").literal(),
 ];
 
+/// «Resumen de trabajo»: the daily standup or the weekly report of the user's work (`crate::worklog`)
+/// — written by `engine` (left automatic: the Notes row's) or as the plain list, and kept as a note
+/// when asked. Never posted anywhere (user, 2026-10-23: «sin publicarlo solo»).
+const WORKLOG: &[ParamSpec] = &[
+    p("worklogPeriod", select(&["previousWorkday", "today", "thisWeek", "lastWeek"]), "\"previousWorkday\"").literal(),
+    p("worklogFormat", select(&["formatAuto", "standup", "weeklyReport"]), "\"formatAuto\"").literal(),
+    p("worklogScope", select(&["thisWorkspace", "allWorkspaces"]), "\"thisWorkspace\"").literal(),
+    p("worklogWriter", select(&["writeWithAi", "plainList"]), "\"writeWithAi\"").literal(),
+    ENGINE.when("worklogWriter", &["writeWithAi"]),
+    p("worklogSaveNote", Kind::Boolean, "true").literal(),
+];
+
 /// «Procesos y puertos».
 const PROCESS: &[ParamSpec] = &[
     p("processOp", select(&["listPorts", "whoUsesPort", "freePort", "listProcesses", "killProcess", "systemInfo"]), "\"whoUsesPort\"").literal(),
@@ -2697,6 +2709,7 @@ pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
         "app.diagram" => DIAGRAM,
         "app.story" => STORY,
         "app.aiUsage" => AI_USAGE,
+        "app.worklog" => WORKLOG,
         "app.process" => PROCESS,
         "app.runData" => RUN_DATA,
         "trigger.feed" => FEED_TRIGGER,

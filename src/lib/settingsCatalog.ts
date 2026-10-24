@@ -305,6 +305,8 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "current", labelKey: "settings.tabThisWorkspace", hintKey: "settings.thisWorkspaceHint", icon: Layers, searchKey: "settings.searchTermsThisWorkspace" },
       // «Abrir en …»: the app's editor, the workspace's, each repository's.
       { id: "externalEditor", labelKey: "externalEditor.title", hintKey: "externalEditor.hint", icon: Code2, searchKey: "externalEditor.searchTerms" },
+      // «Entorno»: which env files every repository's «Entorno» reads, and the folders it skips.
+      { id: "repoEnv", labelKey: "env.settings.title", hintKey: "env.settings.hint", icon: Braces, searchKey: "env.settings.searchTerms" },
     ],
   },
   {
@@ -656,6 +658,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "sonarqube", labelKey: "reviewer.paneSonar", hintKey: "reviewer.paneSonarHint", icon: Server, searchKey: "settings.searchTermsReviewerSonar" },
       { id: "rules", labelKey: "reviewer.paneRules", hintKey: "reviewer.paneRulesHint", icon: ListChecks, searchKey: "settings.searchTermsReviewerRules" },
       { id: "servers", labelKey: "reviewer.paneServers", hintKey: "reviewer.paneServersHint", icon: Cloud, searchKey: "settings.searchTermsReviewerServers" },
+      { id: "dependencies", labelKey: "deps.paneTitle", hintKey: "deps.paneHint", icon: PackagePlus, searchKey: "deps.searchTerms" },
     ],
   },
   {

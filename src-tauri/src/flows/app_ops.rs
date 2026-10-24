@@ -245,6 +245,7 @@ pub(super) async fn call(host: &AppHost, op: &str, args: Value, cancel: Cancella
         "diagram.save" | "diagram.read" => diagram_op(host, op, &args),
         "story.review" | "doc.generate" | "doc.publish" => story_op(host, op, &args, cancel).await,
         "ai.usage" => ai_usage(host, &args),
+        "worklog.generate" => crate::worklog::run::flow_op(&host.app, &host.workspace_id, &args).await,
         "run.data" => {
             // Redacted like the run's files: these fields are searchable in Ejecuciones, travel to
             // «Otro flujo terminó» flows and go into backups.

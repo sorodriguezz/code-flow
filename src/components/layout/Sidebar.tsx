@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { AnimatePresence, LayoutGroup, motion } from "framer-motion";
 import { ActiveMarker, ActivePill, useSlide } from "../common/ActivePill";
 import {
@@ -106,12 +106,13 @@ import {
   useProjectArrangement,
 } from "./sidebarExtras";
 import { useRepoSummaryPolling, useRepoSummaryStore } from "../../state/repoSummaryStore";
-import { sectionsOf, useSidebarLayout, useSidebarLayoutStore } from "../../state/sidebarLayoutStore";
+import { sectionsOf, useSidebarLayout, useSidebarLayoutStore, type SidebarSection } from "../../state/sidebarLayoutStore";
 import { ConnectAdoModal } from "./ConnectAdoModal";
 import { ConnectGithubModal } from "./ConnectGithubModal";
 import { ConnectGitlabModal } from "./ConnectGitlabModal";
 import { ConnectBitbucketModal } from "./ConnectBitbucketModal";
 import { CreatePrModal } from "./CreatePrModal";
+import { TicketChip } from "../agents/tickets/TicketChip";
 import { StashDiffModal } from "./StashDiffModal";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -256,13 +257,13 @@ const PR_SECTIONS: { key: string; labelKey: TranslationKey; defaultOpen?: boolea
  * panel with no projects in it would otherwise be a dead end.
  */
 function CollapsedProjects({
-  projects,
+  sections,
   onAdd,
   onReorder,
   onDropAt,
 }: {
   /** In panel order — pinned first, then each group, then the rest. */
-  projects: Project[];
+  sections: SidebarSection[];
   onAdd: () => void;
   onReorder: (from: number, to: number) => void;
   /** Let go over another workspace: moves the repository there instead of reordering. */
@@ -300,17 +301,41 @@ function CollapsedProjects({
       {/* The chip's own colour, repeated in the tooltip. Folded down to 24px squares the projects
           are told apart by colour alone, so the label that names one should be carrying the same
           colour the eye followed to ask. */}
-      {projects.map((project, at) => (
-        <CollapsedProjectChip
-          key={project.id}
-          project={project}
-          at={at}
-          drag={drag}
-          reorder={reorder}
-          activeProjectId={activeProjectId}
-          onSelect={setActiveProject}
-        />
-      ))}
+      {(() => {
+        // Slots run over every chip in drawing order, groups or not — the hold finds them by
+        // `data-reorder` wherever they sit, so wrapping a group's chips moves none of them.
+        let at = 0;
+        const chip = (project: Project) => (
+          <CollapsedProjectChip
+            key={project.id}
+            project={project}
+            at={at++}
+            drag={drag}
+            reorder={reorder}
+            activeProjectId={activeProjectId}
+            onSelect={setActiveProject}
+          />
+        );
+        return sections.map((section) => {
+          if (section.kind !== "group") return section.projects.map(chip);
+          if (section.projects.length === 0) return null;
+          // Folded, a group has no header to say where it starts and ends: its chips are wrapped
+          // in a see-through band of the group's colour instead, round the chips and nothing else
+          // (user, 2026-10-23: «que visualmente se envuelvan los grupos con un color»). 5px of band,
+          // so the active chip's ring, 4px out, stays inside it.
+          return (
+            <div
+              key={section.group.id}
+              role="group"
+              aria-label={section.group.name}
+              className="flex flex-col items-center gap-1.5 rounded-[11px] p-[5px]"
+              style={groupBandStyle(section.group.id)}
+            >
+              {section.projects.map(chip)}
+            </div>
+          );
+        });
+      })()}
       <Tooltip side="right" label={t("sidebar.addProject")}>
         <button
           onClick={onAdd}
@@ -347,6 +372,20 @@ function CollapsedProjects({
       </Tooltip>
     </div>
   );
+}
+
+/** The hues a group's band is tinted from — one per group, kept by its id. */
+const GROUP_TINTS = ["#3b82f6", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#84cc16"];
+
+/** A group's see-through band, folded or not: a tint of its hue and a hairline of the same. */
+function groupBandStyle(groupId: string): CSSProperties {
+  let hash = 0;
+  for (const char of groupId) hash = (hash * 31 + char.charCodeAt(0)) | 0;
+  const tint = GROUP_TINTS[Math.abs(hash) % GROUP_TINTS.length];
+  return {
+    background: `color-mix(in oklab, ${tint} 14%, transparent)`,
+    boxShadow: `inset 0 0 0 1px color-mix(in oklab, ${tint} 34%, transparent)`,
+  };
 }
 
 /**
@@ -2012,6 +2051,7 @@ function ProjectRow({
             >
               <span className="min-w-0 flex-1 truncate font-medium">{project.name}</span>
             </button>
+            <TicketChip project={project} isActive={isActive} />
             <ProjectBadges project={project} isActive={isActive} />
           </>
         )}
@@ -2870,7 +2910,7 @@ export function Sidebar() {
             // the 50px with it.
             <div className="cf-panel-in min-h-0 flex-1 overflow-y-auto px-0.5 pb-3 pt-1">
               <CollapsedProjects
-                projects={ordered}
+                sections={sections}
                 onAdd={handleAddProject}
                 onReorder={(from, to) => moveInList(ordered, from, to)}
                 onDropAt={dropOnWorkspace(ordered)}
@@ -2981,8 +3021,21 @@ export function Sidebar() {
                             <div className="mx-1 my-1.5 h-px bg-[var(--cf-border)]" />
                           )}
                           {!folded &&
-                            rows.map((project) => (
-                              <ProjectRow key={project.id} project={project} at={slot++} reorder={reorder} canReorder={!needle} />
+                            (section.kind === "group" && rows.length > 0 ? (
+                              // The same band the folded rail wraps a group's chips in, round its
+                              // rows only — the header stays outside, on the panel.
+                              <div
+                                className="space-y-0.5 rounded-[10px] p-[3px]"
+                                style={groupBandStyle(section.group.id)}
+                              >
+                                {rows.map((project) => (
+                                  <ProjectRow key={project.id} project={project} at={slot++} reorder={reorder} canReorder={!needle} />
+                                ))}
+                              </div>
+                            ) : (
+                              rows.map((project) => (
+                                <ProjectRow key={project.id} project={project} at={slot++} reorder={reorder} canReorder={!needle} />
+                              ))
                             ))}
                         </div>
                       );

@@ -855,6 +855,8 @@ export const aiQuotaStatus = (trigger: QuotaTrigger = "poll") =>
  * desktop — which the UI draws nothing for. A native read: no subprocess, so unlike the AI quota
  * this one is safe to poll on a timer. */
 export const powerStatus = () => invoke<PowerStatus | null>("power_status");
+/** The battery-saving level, 0–3, for what saves in the backend (`powerSaveStore`). */
+export const powerSaveSet = (level: number) => invoke<void>("power_save_set", { level });
 
 /** CPU, memory and disk for the machine, plus this app's own share of the first two. One refresh
  * behind both halves, so the bar and its panel always describe the same instant. Runs off the main

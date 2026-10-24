@@ -1671,7 +1671,9 @@ async fn detect_tick(app: &AppHandle) {
     .unwrap_or(false);
     let state = app.state::<MeetingsState>();
     let recording = state.active.lock().map(|a| a.is_some()).unwrap_or(true);
-    if !enabled || recording || !meetings::status().supported {
+    // Battery saving from Fuerte: no looking for calls every five seconds. A meeting recorded by hand
+    // is unaffected.
+    if !enabled || recording || crate::power::saving(2) || !meetings::status().supported {
         if let Ok(mut announced) = state.announced.lock() {
             announced.clear();
         }

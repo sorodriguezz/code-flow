@@ -3188,9 +3188,15 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
               >
                 <GitBranch size={16} />
                 {/* Only while shut — which is the only state this rail has. Open, the panel itself
-                    is the count, and a badge over it would be the same number twice. */}
+                    is the count, and a badge over it would be the same number twice. The number, in
+                    the yellow the tab bar's «Cambios» counts in, not a dot that only says «some». */}
                 {uncommittedCount > 0 && (
-                  <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-[var(--cf-accent-fill)]" />
+                  <span
+                    title={t("tabbar.uncommittedCount", { n: uncommittedCount })}
+                    className="absolute -right-1 -top-0.5 flex h-[15px] min-w-[15px] items-center justify-center rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_22%,var(--cf-surface))] px-1 text-[10px] font-semibold leading-none tabular-nums text-[var(--cf-warning)]"
+                  >
+                    {uncommittedCount > 99 ? "99+" : uncommittedCount}
+                  </span>
                 )}
               </button>
             </Tooltip>

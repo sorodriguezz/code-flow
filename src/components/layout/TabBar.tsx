@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from "react";
-import { ChevronRight, Code2, FolderGit2, GitBranch, History, Layers, Network, Route, ShieldCheck, type LucideIcon } from "lucide-react";
+import { ChevronRight, Code2, FolderGit2, GitBranch, History, Layers, Network, Route, ShieldCheck, SquareAsterisk, type LucideIcon } from "lucide-react";
 import { REPO_VIEWS, useUiStore, type MainView } from "../../state/uiStore";
 import { useRepoStore } from "../../state/repoStore";
 import { pipelinesAvailable, useVcsConnectionsStore } from "../../state/vcsConnectionsStore";
@@ -48,6 +48,9 @@ const REVIEWER_TAB: Tab = {
 
 /** The repository map, after the Revisor (which the user placed right after Editor). */
 const CODEMAP_TAB: Tab = { id: "codemap", labelKey: "tabbar.codemap", icon: Network, shortcut: "view.codemap" };
+
+/** «Entorno», after the map: the repository's env files compared (user, 2026-10-23). */
+const ENV_TAB: Tab = { id: "env", labelKey: "tabbar.env", icon: SquareAsterisk, shortcut: "view.env" };
 
 
 /**
@@ -160,6 +163,7 @@ export function ChromeScope() {
       ...TABS,
       ...(reviewerEnabled ? [REVIEWER_TAB] : []),
       CODEMAP_TAB,
+      ENV_TAB,
       ...(pipelinesAvailable(project, connections) ? [PIPELINES_TAB] : []),
     ];
     return (

@@ -35,6 +35,7 @@ import {
   useElapsed,
 } from "./serviceBits";
 import { buttonClass } from "../common/Button";
+import { ServiceEnvChip } from "../env/ServiceEnvChip";
 
 /**
  * One service, on the right of the dock: what it is doing, why, where it listens, and everything it
@@ -245,6 +246,7 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
           <FolderOpen size={11} className="shrink-0" />
           <span className="truncate">{where}</span>
         </span>
+        <ServiceEnvChip service={service} />
         {deps.length > 0 && (
           <span className="flex min-w-0 shrink-[3] items-center gap-1.5" title={deps.join(", ")}>
             <Hourglass size={11} className="shrink-0" />

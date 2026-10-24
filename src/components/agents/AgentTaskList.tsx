@@ -52,6 +52,7 @@ import type { AgentProject, AgentTask } from "../../types/domain";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { agentName } from "./agentName";
 import { PriorityFlag, planningMenuItems, planningMeta } from "./taskPlanning";
+import { TicketsSection } from "./tickets/TicketsSection";
 
 const GROUPINGS: { id: TaskGrouping; labelKey: TranslationKey }[] = [
   { id: "tree", labelKey: "agents.groupTree" },
@@ -469,6 +470,9 @@ export function AgentTaskList({
             </section>
           ))
         )}
+        {/* The tree's last section: the tickets assigned to you, where most tasks start from
+            (user, 2026-10-23). Drawn even before there is any task. */}
+        {!loading && groupBy === "tree" && !showArchived && <TicketsSection query={query} />}
       </div>
 
       {/* Out of the way at the foot, and only once something has been archived. */}

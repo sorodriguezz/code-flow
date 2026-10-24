@@ -295,6 +295,8 @@ pub async fn start(
     // Restarting is the common case (the user reopened the project, or the server died), so an
     // id that is already taken is replaced rather than refused.
     stop(session_id).await;
+    spawn_sleeper(app.clone());
+    used(session_id);
 
     let mut child = crate::proc::command(command)
         .args(args)
@@ -552,16 +554,82 @@ fn handle_notification(app: &AppHandle, session_id: &str, method: &str, message:
 
 pub async fn request(session_id: &str, method: &str, params: Value) -> Result<Value, String> {
     let session = session(session_id).ok_or_else(|| format!("no language server '{session_id}'"))?;
+    used(session_id);
     session.request(method, params).await
 }
 
 pub fn notify(session_id: &str, method: &str, params: Value) -> Result<(), String> {
     let session = session(session_id).ok_or_else(|| format!("no language server '{session_id}'"))?;
+    used(session_id);
     session.notify(method, params);
     Ok(())
 }
 
+/// When the editor last asked each server something — what battery saving's idle stop reads.
+fn last_used() -> &'static Mutex<HashMap<String, std::time::Instant>> {
+    static LAST: std::sync::OnceLock<Mutex<HashMap<String, std::time::Instant>>> = std::sync::OnceLock::new();
+    LAST.get_or_init(Mutex::default)
+}
+
+fn used(session_id: &str) {
+    if let Ok(mut last) = last_used().lock() {
+        last.insert(session_id.to_string(), std::time::Instant::now());
+    }
+}
+
+/// How long a project's servers may go unasked before battery saving at Máximo closes them.
+const SLEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The projects whose every server has gone [`SLEEP_AFTER`] unasked, by the project half of the
+/// session ids (`{projectId}:{serverId}`). A project with one server still in use keeps them all:
+/// the editor would otherwise lose half its answers for a file.
+fn sleepy(last: &HashMap<String, std::time::Instant>, now: std::time::Instant) -> Vec<String> {
+    let mut projects: HashMap<&str, bool> = HashMap::new();
+    for (id, at) in last {
+        let project = id.rsplit_once(':').map_or(id.as_str(), |(project, _)| project);
+        let idle = now.duration_since(*at) >= SLEEP_AFTER;
+        projects.entry(project).and_modify(|all| *all &= idle).or_insert(idle);
+    }
+    let mut out: Vec<String> = projects.into_iter().filter(|(_, idle)| *idle).map(|(p, _)| p.to_string()).collect();
+    out.sort();
+    out
+}
+
+/// Battery saving at Máximo (`crate::power`): once a minute, a project whose servers have all gone
+/// 5 min unasked has them closed — `lsp:slept` first, so the editor knows to start them again the
+/// next time a file is typed in or opened, rather than taking it for a crash. Started with the first
+/// server; it sleeps through every level below Máximo.
+fn spawn_sleeper(app: AppHandle) {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            if !crate::power::saving(3) {
+                continue;
+            }
+            let projects = last_used().lock().map(|last| sleepy(&last, std::time::Instant::now())).unwrap_or_default();
+            for project in projects {
+                let ids: Vec<String> = registry()
+                    .lock()
+                    .map(|r| r.keys().filter(|id| id.rsplit_once(':').is_some_and(|(p, _)| p == project)).cloned().collect())
+                    .unwrap_or_default();
+                let _ = app.emit("lsp:slept", json!({ "project_id": project }));
+                for id in ids {
+                    stop(&id).await;
+                }
+                crate::applog::info(&format!("battery saving: language servers of {project} closed after 5 min idle"));
+            }
+        }
+    });
+}
+
 pub async fn stop(session_id: &str) {
+    if let Ok(mut last) = last_used().lock() {
+        last.remove(session_id);
+    }
     let session = registry().lock().ok().and_then(|mut r| r.remove(session_id));
     let Some(session) = session else { return };
     // The protocol's own goodbye: `shutdown` lets the server flush caches it took minutes to
@@ -643,6 +711,21 @@ pub async fn probe(command: &str, args: &[String]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_sleeps_only_when_every_one_of_its_servers_is_idle() {
+        let now = std::time::Instant::now() + SLEEP_AFTER * 2;
+        let long_ago = now - SLEEP_AFTER - std::time::Duration::from_secs(1);
+        let just_now = now - std::time::Duration::from_secs(10);
+        let last: HashMap<String, std::time::Instant> = [
+            ("a:rust".to_string(), long_ago),
+            ("a:ts".to_string(), long_ago),
+            ("b:rust".to_string(), long_ago),
+            ("b:ts".to_string(), just_now),
+        ]
+        .into();
+        assert_eq!(sleepy(&last, now), vec!["a".to_string()]);
+    }
 
     #[test]
     fn a_configuration_item_gets_the_inside_of_its_section() {

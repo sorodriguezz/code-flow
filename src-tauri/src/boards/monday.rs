@@ -85,7 +85,7 @@ struct GraphQlError {
 /// GraphQL answers a *failed* request with HTTP 200 and an `errors` array, so a status check alone
 /// would read every failure as a success and then fail to deserialise, reporting a parse problem for
 /// what was actually a permissions one. Both are checked, errors first.
-async fn run<T: for<'de> Deserialize<'de>>(
+pub(super) async fn run<T: for<'de> Deserialize<'de>>(
     query: &str,
     variables: serde_json::Value,
     auth: &BoardAuth,
@@ -169,7 +169,7 @@ pub async fn whoami(auth: &BoardAuth) -> Result<MondayAccount, String> {
 }
 
 /// The page a person opens for one item.
-fn item_url(slug: &str, board_id: &str, item_id: i64) -> String {
+pub(super) fn item_url(slug: &str, board_id: &str, item_id: i64) -> String {
     format!("https://{slug}.monday.com/boards/{board_id}/pulses/{item_id}")
 }
 
@@ -432,7 +432,7 @@ struct RawCreated {
     id: String,
 }
 
-fn numeric_id(raw: &str) -> i64 {
+pub(super) fn numeric_id(raw: &str) -> i64 {
     raw.trim().parse().unwrap_or(0)
 }
 

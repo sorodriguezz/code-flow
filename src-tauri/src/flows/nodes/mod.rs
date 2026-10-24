@@ -65,6 +65,7 @@ mod transform;
 pub(crate) mod utils;
 mod vision;
 pub(crate) mod web;
+mod worklog;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -534,6 +535,7 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "net.feed" => feed::execute(ctx).await,
         "ai.api" | "ai.embed" | "ai.vectors" => llm::execute(ctx).await,
         "app.prList" | "app.prDecide" | "app.prComments" | "app.prMemory" => prs::execute(ctx).await,
+        "app.worklog" => worklog::execute(ctx).await,
         "net.webPage" | "net.check" | "logic.until" | "transform.changes" | "transform.template" | "transform.json" | "transform.sql" => {
             utils::execute(ctx).await
         }

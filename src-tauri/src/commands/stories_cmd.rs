@@ -98,7 +98,7 @@ fn jira_email(db: &State<Db>, site: &str) -> Result<String, String> {
 /// The one place that knows a PAT and an e-mail-plus-token are the same thing to a caller. Every
 /// board command goes through it, so a provider added later has exactly one place to be taught how
 /// it authenticates rather than one per command.
-fn board_auth(db: &State<Db>, provider: BoardProvider, org: &str) -> Result<BoardAuth, String> {
+pub(crate) fn board_auth(db: &State<Db>, provider: BoardProvider, org: &str) -> Result<BoardAuth, String> {
     match provider {
         BoardProvider::Azure => Ok(BoardAuth::pat(pat_for_org(org)?)),
         // One API host for every customer, so the account slug is the key and nothing has to be

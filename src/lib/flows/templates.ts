@@ -279,6 +279,27 @@ export const FLOW_TEMPLATES: FlowTemplate[] = [
       ),
   },
   {
+    // «Como Flujo programado: todos los días a las 9:00 te deja el daily listo, sin publicarlo solo»
+    // (user, 2026-10-23): the summary node keeps the note itself; the notification only says so.
+    id: "dailyAt9",
+    icon: "app.worklog",
+    build: (t) =>
+      flow(
+        [
+          node("morning", "trigger.schedule", n(t, "weekdays9"), 0, 0, { mode: "times", at: ["09:00"], days: ["mon", "tue", "wed", "thu", "fri"] }),
+          node("daily", "app.worklog", n(t, "worklog"), 260, 0, {
+            worklogPeriod: "previousWorkday",
+            worklogFormat: "standup",
+            worklogScope: "allWorkspaces",
+            worklogWriter: "writeWithAi",
+            worklogSaveNote: true,
+          }),
+          node("notify", "app.notify", n(t, "dailyReady"), 520, 0, { title: n(t, "dailyReady"), body: "={{ $json.title }}" }),
+        ],
+        [wire("morning", "daily"), wire("daily", "notify")],
+      ),
+  },
+  {
     id: "pushToPhone",
     icon: "trigger.app",
     build: (t) =>

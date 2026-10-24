@@ -681,6 +681,11 @@ mod tests {
             ("haz pull en segundo plano", Some(("git.pull", ""))),
             ("abre el panel de servicios y reinicia el backend", None),
             ("levanta el frontend y después ábreme la terminal", None),
+            // The work summary, kept in Notas (user, 2026-10-23).
+            ("¿qué hice ayer?", Some(("worklog.summary", "previousWorkday"))),
+            ("what did I do yesterday?", Some(("worklog.summary", "previousWorkday"))),
+            ("resumen de mi semana", Some(("worklog.summary", "thisWeek"))),
+            ("arma mi daily", Some(("worklog.summary", ""))),
         ];
         let mut wrong = Vec::new();
         for (order, want) in cases {

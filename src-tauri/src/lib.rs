@@ -44,6 +44,7 @@ mod containers;
 mod dap;
 mod datasource;
 mod db;
+mod deps;
 mod desktop;
 mod debugger;
 mod dictation;
@@ -110,6 +111,7 @@ mod secret_clipboard;
 mod secret_scan;
 mod secrets;
 mod services;
+mod repo_env;
 mod shell_env;
 mod shell_integration;
 mod shell_profiles;
@@ -140,6 +142,7 @@ mod watcher;
 mod window_state;
 mod windows;
 mod workspace_chat;
+mod worklog;
 
 use tauri::Manager;
 use api::ApiRegistry;
@@ -1441,6 +1444,45 @@ sharded_invoke_handler! {
         commands::app_cmd::ai_usage_stats,
         commands::app_cmd::ai_quota_status,
         commands::app_cmd::power_status,
+        commands::app_cmd::power_save_set,
+        // «Salud de dependencias» — the Revisor's «Dependencias» section (deps/).
+        commands::deps_cmd::deps_config_get,
+        commands::deps_cmd::deps_analyze,
+        commands::deps_cmd::deps_reports,
+        commands::deps_cmd::deps_update_plan,
+        commands::deps_cmd::deps_update_apply,
+        commands::deps_cmd::deps_check_alerts,
+
+        commands::worklog_cmd::worklog_generate,
+        commands::tickets_cmd::tickets_list,
+        commands::tickets_cmd::tickets_detail,
+        commands::tickets_cmd::tickets_states,
+        commands::tickets_cmd::tickets_move,
+        commands::tickets_cmd::tickets_links,
+        commands::tickets_cmd::tickets_unlink,
+        commands::tickets_cmd::tickets_branch_name,
+        commands::tickets_cmd::tickets_start,
+        commands::tickets_cmd::tickets_pr_reference,
+        commands::tickets_cmd::tickets_apply_reference,
+        commands::tickets_cmd::tickets_on_pr_created,
+        commands::tickets_cmd::tickets_on_pr_merged,
+        commands::tickets_cmd::tickets_sync,
+        commands::repo_env_cmd::repo_env_defaults,
+        commands::repo_env_cmd::repo_env_scan,
+        commands::repo_env_cmd::repo_env_usage,
+        commands::repo_env_cmd::repo_env_reveal,
+        commands::repo_env_cmd::repo_env_move_to_vault,
+        commands::repo_env_cmd::repo_env_add_key,
+        commands::repo_env_cmd::repo_env_service_files,
+        commands::mock_cmd::api_mock_get_config,
+        commands::mock_cmd::api_mock_save_config,
+        commands::mock_cmd::api_mock_start,
+        commands::mock_cmd::api_mock_stop,
+        commands::mock_cmd::api_mock_list,
+        commands::mock_cmd::api_mock_log,
+        commands::mock_cmd::api_mock_clear_log,
+        commands::mock_cmd::api_mock_workspace,
+        commands::mock_cmd::api_mock_start_with_services,
         commands::app_cmd::system_load,
         commands::agents_cmd::set_chain_step_input,
         commands::agents_cmd::set_chain_step_skipped,

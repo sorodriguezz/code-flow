@@ -69,6 +69,8 @@ pub const TABLES: &[&str] = &[
     "story_drafts",
     "doc_pages",
     "work_item_reviews",
+    // Which ticket each branch was started from (`boards::ticket_links`) — what moves it on a PR.
+    "ticket_links",
     // The Notes workspace, which is authored content too but gets a switch of its own — see the
     // `notes` group below. Folders before notes: a note points at the folder it is filed in.
     "note_books",
@@ -118,6 +120,8 @@ pub const TABLES: &[&str] = &[
     // Which scripts may run unasked. Travels with the collections it vouches for — restored without
     // it, every script the user wrote would stop at the trust gate once on the new machine.
     "api_script_trust",
+    // The collections' mock rules (`api::mock`) — hand-edited routes are work worth restoring.
+    "api_mocks",
     "api_cookies",
     "api_history",
     // The database workspace.
@@ -375,6 +379,7 @@ pub const GROUPS: &[Group] = &[
             "api_sync_conflicts",
             "api_tombstones",
             "api_script_trust",
+            "api_mocks",
         ],
     },
     Group { key: "databases", tables: &["db_groups", "db_connections", "db_consoles"] },
@@ -384,7 +389,7 @@ pub const GROUPS: &[Group] = &[
     },
     Group {
         key: "authored",
-        tables: &["story_batches", "story_drafts", "doc_pages", "work_item_reviews"],
+        tables: &["story_batches", "story_drafts", "doc_pages", "work_item_reviews", "ticket_links"],
     },
     Group {
         // Its own switch rather than riding with `authored`, though notes are authored content by

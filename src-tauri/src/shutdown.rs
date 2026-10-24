@@ -89,6 +89,9 @@ pub fn shutdown_cleanup(app: &AppHandle) {
         // Cancelled first so each run files itself as canceled; the processes that have not gone
         // when the grace is up are ended directly.
         crate::flows::triggers::shutdown();
+        // The API client's mock servers: in-process listeners, cancelled here so a quit by any path
+        // leaves no port bound and no connection half-answered.
+        crate::api::mock::shutdown();
         // The panel's `kubectl port-forward`s: children of a task no runtime will run again.
         crate::containers::forward::shutdown();
         crate::flows::runs::shutdown(std::time::Duration::from_secs(3));

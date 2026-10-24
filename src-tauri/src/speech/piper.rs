@@ -300,6 +300,14 @@ pub fn loaded() -> Option<String> {
     LOADED.try_lock().ok()?.as_ref().map(|tts| tts.voice.clone())
 }
 
+
+/// Frees the Piper voice held in memory — battery saving at its most (`crate::power::set_saving`). The
+/// next sentence loads it again.
+pub fn unload() {
+    if let Ok(mut held) = LOADED.lock() {
+        *held = None;
+    }
+}
 fn create(dir: &Path, model: &str, espeak: &Path, threads: i32) -> Result<Engine, String> {
     let mut config = Config::new();
     config.path(offsets::VITS_MODEL, &dir.join(model))?;

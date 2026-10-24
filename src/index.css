@@ -4356,6 +4356,75 @@ html:has(.cf-codi-shell) body {
   animation-duration: 0.32s;
 }
 
+/* Battery saving (`powerSaveStore`, `data-power-save` 1–3 on the root). The motion level is capped
+   in script; what is left here is what no motion level reaches:
+   - the decorations that loop at rest — the AI glyphs' gradient flow, the battery's own loops. The
+     thinking mark keeps moving while a model runs: that motion is the progress report, and it stops
+     with the rest at Fuerte, where motion is off;
+   - the blur behind a see-through window and behind Settings — the GPU's steadiest cost. The window
+     stays see-through, washed a little more so text keeps its contrast without the frost. */
+:root[data-power-save] .cf-ai-glyph-flowing::before,
+:root[data-power-save] .cf-ai-glyph-idle::before,
+:root[data-power-save] :is(.cf-battery-charge, .cf-battery-breath, .cf-battery-alarm) {
+  animation: none !important;
+}
+:root[data-power-save] {
+  --cf-glass-frost: none;
+  --cf-glass-acrylic: none;
+  --cf-glass-boost: 20%;
+}
+:root[data-power-save] .cf-settings-scrim {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  background-color: color-mix(in oklab, var(--cf-bg-solid, var(--cf-bg)) 80%, transparent);
+}
+
+/* The chat's transcript at Full only (user, 2026-10-23: «como que es un rollo de papel metiéndose
+   bajo la barra»): a block crossing the top or bottom edge of the scroller tips back from the edge
+   it is passing under, as paper bends round a roller — the answer's blocks one by one, so a long
+   reply curls line by line, not as a slab. Driven by the scroll position itself (a view timeline),
+   so it costs no script and runs both ways, up and down.
+
+   Each animation covers only its edge's crossing (`entry`, `exit`) and fills nothing: a block wholly
+   in view carries no transform at all — nothing for a fixed popover inside it to be trapped by.
+   `transform` and not `rotate`: these blocks take no other transform, and the perspective has to
+   live on the block, since one on the scroller would trap every fixed descendant. */
+@supports (animation-timeline: view()) {
+  :root[data-motion="full"] .cf-paper-scroll :is(.cf-chat-reading > *, .cf-paper) {
+    animation:
+      cf-paper-from-below linear none,
+      cf-paper-under-top linear none;
+    animation-timeline: view(), view();
+    animation-range:
+      entry 0% entry 100%,
+      exit 0% exit 100%;
+  }
+}
+@keyframes cf-paper-from-below {
+  from {
+    transform-origin: 50% 0%;
+    transform: perspective(640px) rotateX(-58deg) scale(0.96);
+    opacity: 0.2;
+  }
+  to {
+    transform-origin: 50% 0%;
+    transform: perspective(640px) rotateX(0deg) scale(1);
+    opacity: 1;
+  }
+}
+@keyframes cf-paper-under-top {
+  from {
+    transform-origin: 50% 100%;
+    transform: perspective(640px) rotateX(0deg) scale(1);
+    opacity: 1;
+  }
+  to {
+    transform-origin: 50% 100%;
+    transform: perspective(640px) rotateX(58deg) scale(0.96);
+    opacity: 0.2;
+  }
+}
+
 /* Codi's window opening, in Full only (user, 2026-10-21: «que se abra con una animación bonita …
    como despertando», for every thinking design). The window rises in; the face arrives asleep —
    small, grey, out of focus, drawn in its quiet look (`CodiFace`) — takes one sleepy breath, then

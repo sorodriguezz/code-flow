@@ -538,7 +538,7 @@ pub async fn pr_review_requested(db: State<'_, Db>, project_id: String) -> Resul
 /// One pull request of a linked repository, read directly by number — however old it is and
 /// whatever its state. Never looked up inside a list: a list is one page, and an open pull request
 /// a few weeks old is routinely not on the first one.
-async fn fetch_linked_pull_request(link: &LinkedRepo, pr_id: i64) -> Result<ado::PullRequestSummary, String> {
+pub(crate) async fn fetch_linked_pull_request(link: &LinkedRepo, pr_id: i64) -> Result<ado::PullRequestSummary, String> {
     match link {
         LinkedRepo::Azure { org, project: ado_project, repo_id } => {
             let pat = pat_for_org(org)?;

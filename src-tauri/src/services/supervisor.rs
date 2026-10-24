@@ -1375,8 +1375,15 @@ fn launch<R: Runtime>(app: &AppHandle<R>, def: &Service, mut hooks: PtyHooks) ->
     let cwd = resolve_cwd(app, def)?;
     // The env files under the service's own variables: those were written for this service in
     // particular, a file is shared with everything else run in the folder. See `envfile`.
-    let loaded = envfile::load(&envfile::files_of(&def.env_files), cwd.as_deref());
-    hooks.env = envfile::merge(loaded.vars, std::mem::take(&mut hooks.env));
+    let env_files = envfile::files_of(&def.env_files);
+    let mut loaded = envfile::load(&env_files, cwd.as_deref());
+    // Then the secrets those files (and the service's config files) keep in the Llavero, over the
+    // empty values the references left in the files — and still under the service's own variables.
+    // Key names reach the console, values never. See `repo_env::inject`.
+    let secrets = crate::repo_env::inject::for_service(app, cwd.as_deref(), &env_files, &def.command, &hooks.env);
+    loaded.notes.extend(secrets.notes);
+    let from_files = envfile::merge(loaded.vars, secrets.vars);
+    hooks.env = envfile::merge(from_files, std::mem::take(&mut hooks.env));
     let env = hooks.env.clone();
     let (program, args) = shell_invocation(&def.command);
     let registry = app.state::<TerminalRegistry>();
@@ -1408,7 +1415,7 @@ fn launch<R: Runtime>(app: &AppHandle<R>, def: &Service, mut hooks: PtyHooks) ->
 /// one, `cwd` is absolute. `Path::join` treats an absolute `cwd` as a replacement, so a definition
 /// naming both a project and an absolute path lands on the absolute path — which is what somebody
 /// typing an absolute path means.
-fn resolve_cwd<R: Runtime>(app: &AppHandle<R>, service: &Service) -> Result<Option<PathBuf>, String> {
+pub(crate) fn resolve_cwd<R: Runtime>(app: &AppHandle<R>, service: &Service) -> Result<Option<PathBuf>, String> {
     let base = match &service.project_id {
         Some(project_id) => {
             let db = app.state::<Db>();

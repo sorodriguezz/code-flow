@@ -25,9 +25,21 @@ const LEVELS: readonly MotionLevel[] = ["off", "medium", "full"];
 
 const reduceQuery = typeof window !== "undefined" ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
 
-/** The level that applies: the chosen one, unless the system asks for reduced motion. */
+/** The most battery saving lets through — `full` while it is not saving (see `powerSaveStore`). */
+let cap: MotionLevel = "full";
+
+/** The level that applies: the chosen one, unless the system asks for reduced motion or battery
+ *  saving caps it. The choice itself is never rewritten — leaving the saving brings it back. */
 function effectiveOf(level: MotionLevel): MotionLevel {
-  return reduceQuery?.matches ? "off" : level;
+  if (reduceQuery?.matches) return "off";
+  return LEVELS[Math.min(LEVELS.indexOf(level), LEVELS.indexOf(cap))];
+}
+
+/** Battery saving's ceiling on the level: `medium` at Ligero, `off` from Fuerte, `full` for none. */
+export function capMotion(next: MotionLevel): void {
+  if (cap === next) return;
+  cap = next;
+  stamp(useMotionStore.getState().level);
 }
 
 function stamp(level: MotionLevel) {

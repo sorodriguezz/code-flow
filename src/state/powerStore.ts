@@ -28,8 +28,24 @@ interface PowerState {
   watch: () => () => void;
 }
 
-let timer: ReturnType<typeof setInterval> | null = null;
+let timer: ReturnType<typeof setTimeout> | null = null;
 let watchers = 0;
+/** Battery saving reads three times slower (`powerSaveStore`): the plug still shows within 15 s. */
+let every = POLL_MS;
+
+export function setBatteryPollEvery(ms: number): void {
+  every = ms;
+}
+
+/** One tick at a time, so a change of pace applies from the next one. */
+function schedule(): void {
+  timer = setTimeout(() => {
+    // A hidden window has nobody to show a battery to, and a laptop asleep in a bag is exactly
+    // when a timer that keeps firing is worth the least.
+    if (document.visibilityState === "visible") void usePowerStore.getState().refresh();
+    if (watchers > 0) schedule();
+  }, every);
+}
 
 export const usePowerStore = create<PowerState>((set) => ({
   status: null,
@@ -43,12 +59,7 @@ export const usePowerStore = create<PowerState>((set) => ({
     watchers += 1;
     if (watchers === 1) {
       void usePowerStore.getState().refresh();
-      timer = setInterval(() => {
-        // A hidden window has nobody to show a battery to, and a laptop asleep in a bag is exactly
-        // when a timer that keeps firing is worth the least.
-        if (document.visibilityState !== "visible") return;
-        void usePowerStore.getState().refresh();
-      }, POLL_MS);
+      schedule();
       document.addEventListener("visibilitychange", onVisibilityChange);
       // Focus as well as visibility, because they are not the same event and only one of them
       // fires when the user comes back from another application: on Windows in particular a window
@@ -59,7 +70,7 @@ export const usePowerStore = create<PowerState>((set) => ({
     return () => {
       watchers -= 1;
       if (watchers === 0 && timer) {
-        clearInterval(timer);
+        clearTimeout(timer);
         timer = null;
         document.removeEventListener("visibilitychange", onVisibilityChange);
         window.removeEventListener("focus", onWake);

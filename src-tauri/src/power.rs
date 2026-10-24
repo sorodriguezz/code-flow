@@ -192,3 +192,61 @@ mod tests {
         }
     }
 }
+
+/// The battery-saving level the windows apply (`powerSaveStore`): 0 none, 1 Ligero, 2 Fuerte,
+/// 3 Máximo. Set by the frontend, which owns the choice and the battery's thresholds; read here by
+/// what saves in the backend — vectorizing, meeting detection, idle model timers, model servers
+/// starting on their own. Never by anything the user started.
+static SAVING: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Codi was listening when saving closed its microphone, so leaving the level opens it again.
+static RESUME_CODI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the level that applies is at least `at`.
+pub fn saving(at: u8) -> bool {
+    SAVING.load(std::sync::atomic::Ordering::Relaxed) >= at
+}
+
+/// How long a local model server may sit idle before it is let go: its own limit, or 2 min from
+/// Fuerte on.
+pub fn idle_limit(normal: std::time::Duration) -> std::time::Duration {
+    if saving(2) { normal.min(std::time::Duration::from_secs(120)) } else { normal }
+}
+
+/// Applies a level. From Fuerte, Codi stops listening (see above). Reaching Máximo stops what is
+/// still running on its own: the local model's idle servers (completion, tasks, embeddings) and the
+/// models held in memory for dictation, meetings, Codi and reading aloud — each freed once whatever
+/// is using it right now is done. Each comes back when something the user does needs it. A
+/// fine-tuned adapter being served and a training run are the user's own and keep going.
+pub async fn set_saving(app: &tauri::AppHandle, level: u8) {
+    let level = level.min(3);
+    let before = SAVING.swap(level, std::sync::atomic::Ordering::Relaxed);
+    // Codi's listening, from Fuerte: closed while saving, opened again when the level drops — only
+    // if saving is what closed it. Opened by hand meanwhile, it stays open.
+    if level >= 2 && before < 2 && crate::codi::mic_on() {
+        RESUME_CODI.store(true, std::sync::atomic::Ordering::Relaxed);
+        let app = app.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || crate::codi::stop(&app)).await;
+    } else if level < 2 && before >= 2 && RESUME_CODI.swap(false, std::sync::atomic::Ordering::Relaxed) && !crate::codi::mic_on() {
+        let app = app.clone();
+        if let Ok(Err(error)) = tauri::async_runtime::spawn_blocking(move || crate::codi::start(&app)).await {
+            crate::applog::warn(&format!("battery saving: Codi did not listen again: {error}"));
+        }
+    }
+    if level >= 3 && before < 3 {
+        // Each only if idle: a completion, a task or a vectorizing pass the user started runs on,
+        // and its server goes by its idle timer — 2 min at this level — once it is done.
+        crate::localai::engine::shutdown_if_idle().await;
+        crate::localai::executor::shutdown_if_idle().await;
+        crate::localai::embedder::shutdown_if_idle().await;
+        let _ = tauri::async_runtime::spawn_blocking(|| {
+            crate::dictation::engine::unload();
+            crate::asr::recognizer::unload_all();
+            crate::speech::piper::unload();
+            crate::speech::kokoro::unload();
+        })
+        .await;
+        crate::background::changed();
+        crate::applog::info("battery saving: Máximo — model servers stopped, in-app models freed");
+    }
+}

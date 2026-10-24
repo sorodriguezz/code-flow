@@ -10,6 +10,7 @@ import {
   Send,
   Waypoints,
   Workflow,
+  Wrench,
   type LucideIcon,
 } from "lucide-react";
 import { useUiStore, type ApiWorkspace, type MainView } from "../state/uiStore";
@@ -163,6 +164,14 @@ export const APPS: WorkspaceApp[] = [
     icon: Network,
     labelKey: "tabbar.architecture",
     descriptionKey: "tabbar.architectureDescription",
+  },
+  // The developer toolbox — encoders, JWT, formatters, generators — all local, nothing leaves the
+  // machine. Newest, so last (user, 2026-10-23: «métele un montón de herramientas altiro»).
+  {
+    id: "toolbox",
+    icon: Wrench,
+    labelKey: "tabbar.toolbox",
+    descriptionKey: "tabbar.toolboxDescription",
   },
 ];
 

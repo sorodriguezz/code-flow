@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { systemLoad } from "../lib/tauri/commands";
 import type { SystemLoad } from "../types/domain";
+import { saving } from "./powerSaveStore";
 
 /**
  * How often the machine is re-read while the window is on screen.
@@ -66,10 +67,13 @@ export const useSystemLoadStore = create<SystemLoadState>((set) => ({
     watchers += 1;
     if (watchers === 1) {
       void useSystemLoadStore.getState().refresh();
+      let ticks = 0;
       timer = setInterval(() => {
         // A hidden window has nobody to show a meter to, and the process-table walk is the most
         // expensive poll in the app.
         if (document.visibilityState !== "visible") return;
+        // Battery saving reads every 15 s: five ticks in six go by (`powerSaveStore`).
+        if (saving(1) && ++ticks % 6 !== 0) return;
         void useSystemLoadStore.getState().refresh();
       }, POLL_MS);
       document.addEventListener("visibilitychange", onVisibilityChange);

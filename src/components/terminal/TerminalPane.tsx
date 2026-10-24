@@ -52,6 +52,7 @@ import { ContextMenu } from "../common/ContextMenu";
 import { TerminalSearch } from "./TerminalSearch";
 import { bufferText } from "./bufferText";
 import { KEPT_LINES } from "../../state/terminalRestore";
+import { useSaving } from "../../state/powerSaveStore";
 
 /** Shorter than one row and there is nothing meaningful to fit to — see `fitAndReport`. */
 const MIN_FIT_PX = 8;
@@ -333,6 +334,7 @@ export function TerminalPane({
   // window, the same glass (`terminalTheme`).
   const scheme = useThemeStore((s) => findTheme(s.resolved === "dark" ? s.darkThemeId : s.lightThemeId, s.resolved));
   const glass = useGlassStore((s) => s.enabled);
+  const noGpu = useSaving(3);
   const containerRef = useRef<HTMLDivElement>(null);
   const onCommandRef = useRef(onCommand);
   onCommandRef.current = onCommand;
@@ -1081,6 +1083,13 @@ export function TerminalPane({
   useEffect(() => {
     const term = termRef.current;
     if (!term || !visible) return;
+    // Battery saving at Máximo: no GPU context per terminal — the DOM renderer draws instead, and
+    // the cleanup of the WebGL one that was running has already handed back to it.
+    if (noGpu) {
+      setRenderer("dom");
+      repaint();
+      return;
+    }
     let webgl: WebglAddon | null = null;
     let retry: number | undefined;
     let disposed = false;
@@ -1139,7 +1148,7 @@ export function TerminalPane({
       if (retry !== undefined) window.clearTimeout(retry);
       webgl?.dispose();
     };
-  }, [visible, sessionId, glass]);
+  }, [visible, sessionId, glass, noGpu]);
 
   return (
     // The wrapper is exactly the box the container used to be, so nothing about xterm's geometry

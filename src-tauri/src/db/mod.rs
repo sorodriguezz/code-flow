@@ -22,6 +22,7 @@ pub mod version_queries;
 pub mod queries;
 pub mod remote_queries;
 pub mod service_queries;
+pub mod mock_queries;
 
 use rusqlite::Connection;
 use std::sync::Mutex;

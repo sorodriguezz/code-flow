@@ -149,6 +149,8 @@ pub fn specs() -> Vec<ActionSpec> {
             "risk": "read",
             "where": PLACE
         })),
+        // «¿qué hice ayer?» — the work summary, kept in Notas (user, 2026-10-23).
+        crate::worklog::codi::spec(),
     ]
 }
 
@@ -411,6 +413,7 @@ async fn run_now(app: &AppHandle, id: &str, params: &Value) -> Option<ActResult>
             };
             done(say, json!({ "routines": routines.iter().map(|r| json!({ "name": r.name, "phrases": r.phrases })).collect::<Vec<_>>() }))
         }
+        crate::worklog::codi::ID => crate::worklog::codi::act(app, params).await,
         _ => return None,
     })
 }

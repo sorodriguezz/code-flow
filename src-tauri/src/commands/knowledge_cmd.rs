@@ -239,7 +239,7 @@ async fn vectorize_workspace(db: &State<'_, Db>, workspace_id: &str) -> Result<(
         (workspace_scope(&conn, workspace_id)?, embed_settings(&conn))
     };
     if let Some(space) = embed::Space::resolve(setting.as_deref(), &ollama_url).await {
-        knowledge::vectorize_in_background(scope, space);
+        knowledge::vectorize_asked(scope, space);
     }
     Ok(())
 }
@@ -262,7 +262,7 @@ pub async fn knowledge_reindex(db: State<'_, Db>, workspace_id: String) -> Resul
     let refresh_scope = scope.clone();
     let done = tokio::task::spawn_blocking(move || knowledge::refresh_blocking(&refresh_scope, true)).await.map_err(|e| e.to_string())??;
     if let Some(space) = space {
-        knowledge::vectorize_in_background(scope, space);
+        knowledge::vectorize_asked(scope, space);
     }
     Ok(done)
 }

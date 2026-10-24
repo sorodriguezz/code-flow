@@ -753,6 +753,16 @@ static VECTORIZING: AtomicBool = AtomicBool::new(false);
 /// read. Held under its lock with [`VECTORIZING`] so a request is never lost between the two.
 static NEXT: std::sync::Mutex<Option<(Scope, embed::Space)>> = std::sync::Mutex::new(None);
 
+/// Whether the running passes were asked for by the user (Reindexar, a model picked or downloaded):
+/// battery saving pauses the others and never these. Cleared when the last pass ends.
+static ASKED: AtomicBool = AtomicBool::new(false);
+
+/// [`vectorize_in_background`] for a pass the user asked for — one battery saving does not pause.
+pub fn vectorize_asked(scope: Scope, space: embed::Space) {
+    ASKED.store(true, Ordering::SeqCst);
+    vectorize_in_background(scope, space);
+}
+
 /// Embeds the scope's prose chunks that have no vector yet, in the background, one pass at a time.
 /// Without a local embedding model it does nothing: search stays lexical.
 pub fn vectorize_in_background(scope: Scope, space: embed::Space) {
@@ -777,6 +787,7 @@ async fn vectorize(mut scope: Scope, mut space: embed::Space) {
             }
             None => {
                 VECTORIZING.store(false, Ordering::SeqCst);
+                ASKED.store(false, Ordering::SeqCst);
                 drop(next);
                 set_progress(None);
                 return;
@@ -793,6 +804,13 @@ async fn vectorize_pass(scope: &Scope, space: &embed::Space) {
         let switched = NEXT.lock().ok().is_some_and(|next| next.as_ref().is_some_and(|(_, wanted)| wanted.name != space.name));
         if switched {
             return;
+        }
+        // Battery saving from Fuerte holds a pass nobody asked for between batches, and lets it go on
+        // by itself once the level drops — on the charger, under «Automático». Its progress stays
+        // on screen meanwhile; the embedder, unused, is let go by its idle timer.
+        if crate::power::saving(2) && !ASKED.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            continue;
         }
         let (pending, left) = match index::global() {
             Ok(index) => (

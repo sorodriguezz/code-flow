@@ -231,6 +231,12 @@ pub fn power_status() -> Option<crate::power::PowerStatus> {
     crate::power::status()
 }
 
+/// The battery-saving level the windows apply — see `crate::power::set_saving`.
+#[tauri::command]
+pub async fn power_save_set(app: tauri::AppHandle, level: u8) {
+    crate::power::set_saving(&app, level).await;
+}
+
 /// CPU, memory and disk for the whole machine, plus this app's own share of the first two.
 ///
 /// `(async)` — off the main thread — because unlike the battery this one can walk the process

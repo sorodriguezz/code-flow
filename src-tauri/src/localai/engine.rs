@@ -272,6 +272,18 @@ pub async fn shutdown() {
     set_status(Status::Off);
 }
 
+/// Stops the engine unless it answered something in the last half minute — battery saving at
+/// Máximo (`crate::power`), which must not cut off a completion being written for the user.
+pub async fn shutdown_if_idle() {
+    let slot = ENGINE.get_or_init(|| AsyncMutex::new(None));
+    let mut guard = slot.lock().await;
+    let busy = guard.as_ref().is_some_and(|engine| now_millis().saturating_sub(engine.last_used.load(Ordering::Relaxed)) < 30_000);
+    if !busy {
+        stop_locked(&mut guard).await;
+        set_status(Status::Off);
+    }
+}
+
 async fn stop_locked(guard: &mut Option<Arc<Engine>>) {
     let Some(engine) = guard.take() else { return };
     engine.alive.store(false, Ordering::SeqCst);
@@ -471,7 +483,7 @@ fn spawn_reaper() {
                     now_millis().saturating_sub(engine.last_used.load(Ordering::Relaxed))
                 }
             };
-            if idle >= IDLE_TIMEOUT.as_millis() as u64 {
+            if idle >= crate::power::idle_limit(IDLE_TIMEOUT).as_millis() as u64 {
                 stop_locked(&mut guard).await;
                 set_status(Status::Off);
             }

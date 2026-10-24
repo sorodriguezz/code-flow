@@ -149,6 +149,7 @@ function nodeTip(type: string, params: Record<string, unknown>, t: (key: Transla
   if (type === "data.table") return t("flows.help.table");
   if (type === "logic.assert") return t("flows.help.assert");
   if (type === "app.runData") return t("flows.help.runData");
+  if (type === "app.worklog") return t("flows.help.worklog");
   if (type === "net.browser") return t("flows.help.browser");
   return "";
 }

@@ -542,6 +542,7 @@ const TASK_LABELS: Record<string, TranslationKey> = {
   "pipeline-analyze": "usage.task.pipelineAnalyze",
   "hybrid-execute": "usage.task.hybridExecute",
   meetings: "usage.task.meetings",
+  worklog: "worklog.usageTask",
   "spoken-summary": "usage.task.spokenSummary",
   codi: "usage.task.codi",
   "codi-research": "usage.task.codiResearch",

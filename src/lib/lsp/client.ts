@@ -227,6 +227,7 @@ export function refreshProbes(): void {
  * this existed: no completions for Go.
  */
 export async function startForProject(projectId: string, repoPath: string, rootEntries: string[]): Promise<void> {
+  lastEntries = { projectId, rootEntries };
   await enter(projectId, repoPath);
   await Promise.all(
     serversForRepo(rootEntries).map((server) =>
@@ -246,6 +247,8 @@ export async function startForProject(projectId: string, repoPath: string, rootE
  * a server already running or starting is simply waited for.
  */
 export async function startNativeTypeScript(projectId: string, repoPath: string, executable: string): Promise<void> {
+  // A script file on screen is a use: servers battery saving put to sleep come back with it.
+  if (isAsleep()) wake();
   await enter(projectId, repoPath);
   const id = `${projectId}:${NATIVE_TYPESCRIPT.id}`;
   const fresh = !sessions.has(id);
@@ -272,6 +275,7 @@ export function nativeTypeScriptHolds(uri: { scheme: string; path: string }): bo
 /** Points the client at a project, stopping the previous one's servers first. */
 async function enter(projectId: string, repoPath: string): Promise<void> {
   if (context && context.projectId !== projectId) await stopAll();
+  if (asleep !== projectId) asleep = null;
   context = { projectId, repoPath };
 }
 
@@ -344,6 +348,45 @@ export async function stopAll(): Promise<void> {
   announce();
   // Joined, not owned: the servers are the main window's, and it is still using them.
   if (projectId && !joinOnly) await lspStopProject(projectId).catch(() => {});
+}
+
+/**
+ * Battery saving at Máximo closed the project's servers after 5 min unasked (`lsp::spawn_sleeper`).
+ *
+ * Not a crash: they come back by themselves the next time a file is typed in or opened (`wake`).
+ * Until then nothing is registered — the sessions and what they were told are forgotten here, and
+ * `onSlept` tells the document sync to offer every file afresh once they are back.
+ */
+let asleep: string | null = null;
+let lastEntries: { projectId: string; rootEntries: string[] } | null = null;
+const sleptListeners = new Set<() => void>();
+
+export function onSlept(listener: () => void): () => void {
+  sleptListeners.add(listener);
+  return () => {
+    sleptListeners.delete(listener);
+  };
+}
+
+export function sleep(projectId: string): void {
+  if (context?.projectId !== projectId) return;
+  asleep = projectId;
+  sessions.clear();
+  documents.clear();
+  for (const listener of [...sleptListeners]) listener();
+  announce();
+}
+
+/** Starts a slept project's servers again, from the root it was started with. */
+export function wake(): void {
+  if (!asleep || !context || context.projectId !== asleep) return;
+  asleep = null;
+  const entries = lastEntries?.projectId === context.projectId ? lastEntries.rootEntries : [];
+  void startForProject(context.projectId, context.repoPath, entries).catch(() => undefined);
+}
+
+export function isAsleep(): boolean {
+  return asleep !== null && context?.projectId === asleep;
 }
 
 /** A session that has died — its process ended, so whatever was registered against it now answers

@@ -205,6 +205,18 @@ pub async fn shutdown() {
     set_status(Status::Off);
 }
 
+/// Stops the executor unless a request is in flight — battery saving at Máximo (`crate::power`)
+/// never cuts off a task the user started.
+pub async fn shutdown_if_idle() {
+    let slot = ENGINE.get_or_init(|| AsyncMutex::new(None));
+    let mut guard = slot.lock().await;
+    if guard.as_ref().is_some_and(|engine| engine.in_flight.load(Ordering::SeqCst) > 0) {
+        return;
+    }
+    stop_locked(&mut guard).await;
+    set_status(Status::Off);
+}
+
 /// The model the running executor has open and the memory it holds — weights, its window's KV
 /// cache and the working buffers (`hybrid::budget::memory_need`) — for the fit estimate of a model
 /// that would run *beside* it (`hybrid::runtime::resident_beside`). `None` when it is not running.
@@ -396,7 +408,7 @@ fn spawn_reaper() {
                 Some(engine) if engine.in_flight.load(Ordering::SeqCst) > 0 => continue,
                 Some(engine) => engine::now_millis().saturating_sub(engine.last_used.load(Ordering::Relaxed)),
             };
-            if idle >= IDLE_TIMEOUT.as_millis() as u64 {
+            if idle >= crate::power::idle_limit(IDLE_TIMEOUT).as_millis() as u64 {
                 stop_locked(&mut guard).await;
                 set_status(Status::Off);
             }

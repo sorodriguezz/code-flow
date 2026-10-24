@@ -66,14 +66,14 @@ pub fn normalize_site(site: &str) -> String {
 /// One client for the process, cloned per call — see `crate::github::client` for why building a
 /// rustls client per request cost a full TLS handshake and an unshared connection pool every time.
 /// Nothing here varies the transport per call, so the pool is pure gain.
-fn client() -> reqwest::Client {
+pub(super) fn client() -> reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(reqwest::Client::new).clone()
 }
 
 /// Percent-encodes one path segment. Issue keys are safe by construction, but project keys reach
 /// this from a text field and a stray space would otherwise split the path.
-fn encode_segment(s: &str) -> String {
+pub(super) fn encode_segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {
@@ -113,13 +113,13 @@ async fn fail(status: reqwest::StatusCode, body: String) -> String {
 /// how a Server or Data Center install answers a Cloud-only route) is a reason to try the older
 /// route, while every other failure — a bad token, a malformed query — would fail there too and
 /// is reported as it is.
-struct Failure {
+pub(super) struct Failure {
     /// `None` when the request never got an answer, or got one that was not the JSON expected.
-    status: Option<reqwest::StatusCode>,
-    message: String,
+    pub(super) status: Option<reqwest::StatusCode>,
+    pub(super) message: String,
 }
 
-async fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str, auth: &BoardAuth) -> Result<T, Failure> {
+pub(super) async fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str, auth: &BoardAuth) -> Result<T, Failure> {
     let res = client()
         .get(url)
         .header("Authorization", auth.header())
@@ -136,11 +136,11 @@ async fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str, auth: &BoardAuth) -
         .map_err(|e| Failure { status: None, message: format!("respuesta inesperada de Jira: {e}") })
 }
 
-async fn get_json<T: for<'de> Deserialize<'de>>(url: &str, auth: &BoardAuth) -> Result<T, String> {
+pub(super) async fn get_json<T: for<'de> Deserialize<'de>>(url: &str, auth: &BoardAuth) -> Result<T, String> {
     fetch_json(url, auth).await.map_err(|failure| failure.message)
 }
 
-async fn send_json(
+pub(super) async fn send_json(
     method: reqwest::Method,
     url: &str,
     payload: &serde_json::Value,
@@ -411,12 +411,12 @@ struct RawCreated {
     key: String,
 }
 
-fn numeric_id(raw: &str) -> i64 {
+pub(super) fn numeric_id(raw: &str) -> i64 {
     raw.trim().parse().unwrap_or(0)
 }
 
 /// The page a person opens for an issue.
-fn browse_url(site: &str, key: &str) -> String {
+pub(super) fn browse_url(site: &str, key: &str) -> String {
     format!("{site}/browse/{key}")
 }
 
@@ -463,7 +463,7 @@ fn compose_description(narrative: &str, description: &str, criteria: &[String]) 
 /// heading and comes back whole as prose, which is the honest answer — guessing that a bulleted list
 /// halfway down is "really" the acceptance criteria would be wrong often enough to matter on the one
 /// screen whose job is to tell the user what their story is missing.
-fn split_criteria(description: &str) -> (String, Vec<String>) {
+pub(super) fn split_criteria(description: &str) -> (String, Vec<String>) {
     let marker = format!("h3. {CRITERIA_HEADING}");
     let Some(at) = description.find(&marker) else {
         return (description.trim().to_string(), Vec::new());
@@ -844,7 +844,7 @@ pub async fn get_issue(site: &str, key: &str, auth: &BoardAuth) -> Result<WorkIt
 
 /// Which JQL search endpoint a query goes to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SearchRoute {
+pub(super) enum SearchRoute {
     /// `/search/jql` — the only one Jira Cloud still serves. The old route answers **410 Gone**
     /// there, and has since Atlassian retired it in 2025.
     Enhanced,

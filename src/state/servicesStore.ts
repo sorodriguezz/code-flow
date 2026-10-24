@@ -5,6 +5,7 @@ import { isMainWindow } from "../lib/windowIdentity";
 import { pushErrorToast } from "./toastStore";
 import { disownTerminalBacklog } from "./terminalStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import { mockStartWithServices } from "../lib/tauri/mockCommands";
 import type { ServiceGroup, ServiceRow, ServiceRuntime, ServiceStatus } from "../types/services";
 
 /**
@@ -306,6 +307,12 @@ export const useServicesStore = create<ServicesState>((set, get) => {
       const ids = pending.length ? pending : members;
       const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
       if (!ids.length || !workspaceId) return Promise.resolve();
+      // The collection mocks marked «Arrancar con los servicios» come up with the group (user,
+      // 2026-10-23: «para arrancarlo junto con el resto del proyecto»). Best effort: a mock that
+      // cannot bind says so, and the services start regardless.
+      void mockStartWithServices(workspaceId)
+        .then((errors) => errors.forEach((e) => pushErrorToast(e)))
+        .catch(() => {});
       return attempt(api.startServices(workspaceId, ids));
     },
 

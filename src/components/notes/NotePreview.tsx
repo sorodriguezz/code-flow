@@ -170,6 +170,8 @@ export function NotePreview({ source, className }: { source: string; className?:
         event.preventDefault();
         const href = anchor.getAttribute("href") ?? "";
         if (/^https?:\/\//i.test(href)) void openUrl(href).catch(() => {});
+        // A commit of a «Daily / Semanal» note's sources opens in the graph.
+        else if (href.startsWith("#cf-commit=")) void import("./worklog/actions").then(({ openCommitLink }) => openCommitLink(href));
         return;
       }
 

@@ -25,7 +25,7 @@ fn client() -> reqwest::Client {
 
 /// One query or mutation's `data`. GraphQL reports a failure as HTTP 200 with `errors`, so those
 /// are read first — see `monday::run` for the same rule.
-async fn run(query: &str, variables: Value, auth: &BoardAuth) -> Result<Value, String> {
+pub(super) async fn run(query: &str, variables: Value, auth: &BoardAuth) -> Result<Value, String> {
     let res = client()
         .post(ENDPOINT)
         // Linear's personal API keys go in bare, with no scheme word.

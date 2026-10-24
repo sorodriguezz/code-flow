@@ -30,7 +30,7 @@ pub enum Tracker {
 }
 
 impl Tracker {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Tracker::GitHub => "GitHub",
             Tracker::GitLab => "GitLab",
@@ -43,7 +43,7 @@ fn client() -> reqwest::Client {
     CLIENT.get_or_init(crate::ado::pr_http_client).clone()
 }
 
-fn request(tracker: Tracker, method: reqwest::Method, url: &str, token: &str) -> reqwest::RequestBuilder {
+pub(super) fn request(tracker: Tracker, method: reqwest::Method, url: &str, token: &str) -> reqwest::RequestBuilder {
     let builder = client().request(method, url).header("User-Agent", crate::github::USER_AGENT);
     match tracker {
         Tracker::GitHub => builder
@@ -54,7 +54,7 @@ fn request(tracker: Tracker, method: reqwest::Method, url: &str, token: &str) ->
     }
 }
 
-async fn send(tracker: Tracker, builder: reqwest::RequestBuilder) -> Result<Value, String> {
+pub(super) async fn send(tracker: Tracker, builder: reqwest::RequestBuilder) -> Result<Value, String> {
     let res = builder.send().await.map_err(|e| format!("no se pudo conectar con {}: {e}", tracker.name()))?;
     let status = res.status();
     let text = res.text().await.unwrap_or_default();
@@ -72,7 +72,7 @@ async fn send(tracker: Tracker, builder: reqwest::RequestBuilder) -> Result<Valu
 }
 
 /// The repository's API prefix: `…/repos/owner/repo` or `…/projects/group%2Fproject`.
-fn repo_root(tracker: Tracker, host: &str, repo: &str) -> Result<String, String> {
+pub(super) fn repo_root(tracker: Tracker, host: &str, repo: &str) -> Result<String, String> {
     let repo = repo.trim().trim_matches('/');
     if repo.split('/').filter(|part| !part.is_empty()).count() < 2 {
         return Err(format!("«{repo}» no es un repositorio (dueño/repositorio)"));
@@ -90,7 +90,7 @@ pub fn split_key(key: &str) -> Option<(String, i64)> {
     (!repo.is_empty() && number > 0).then(|| (repo.to_string(), number))
 }
 
-fn key_of(repo: &str, number: i64) -> String {
+pub(super) fn key_of(repo: &str, number: i64) -> String {
     format!("{}#{number}", repo.trim().trim_matches('/'))
 }
 

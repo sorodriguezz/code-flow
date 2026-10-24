@@ -2,6 +2,7 @@ import {
   Fragment,
   memo,
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -26,6 +27,7 @@ import {
   Link2,
   PauseCircle,
   RefreshCw,
+  Server,
   Settings2,
   Share2,
   ShieldAlert,
@@ -43,6 +45,8 @@ import { canDrop, useApiDragStore, type ApiDrag, type ApiDropZone } from "../../
 import { createPortal } from "react-dom";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { useApiStore } from "../../state/apiStore";
+import { useApiMockStore } from "../../state/apiMockStore";
+import { startMock, stopMock } from "./mockActions";
 import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
 import { scopeMenuItems } from "../../lib/scopeMenu";
 import { useApiModalStore } from "../../state/apiModalStore";
@@ -327,6 +331,7 @@ function TreeRowBase({
   // what makes tracking hover in state affordable on a tree this size.
   const isHovered = useRowHoverStore((s) => s.key === hoverKey);
   const anyDrag = useApiDragStore((s) => s.drag !== null);
+  const mockUrl = useApiMockStore((s) => (node.kind === "collection" ? s.running[node.id]?.url : undefined));
   const isContainer = node.kind !== "request";
 
   return (
@@ -504,6 +509,11 @@ function TreeRowBase({
           className="flex h-5 w-5 shrink-0 items-center justify-center text-[var(--cf-warning)]"
         >
           <ShieldAlert size={13} />
+        </span>
+      )}
+      {mockUrl && (
+        <span title={t("api.mock.runningAt", { url: mockUrl })} className="flex h-5 w-5 shrink-0 items-center justify-center text-[var(--cf-success)]">
+          <Server size={12} />
         </span>
       )}
       {global && (
@@ -789,6 +799,8 @@ export function CollectionTree() {
   } | null>(null);
   const openModal = useApiModalStore((s) => s.openApiModal);
   const pushToast = useToastStore((s) => s.pushToast);
+  // So a mock started from the Services dock, or before a reload, lights its collection's row.
+  useEffect(() => useApiMockStore.getState().ensure(), []);
 
   // Reduced to id sets here rather than selected as sets in the store: a selector that builds a
   // new Set every call is a new reference every render, which is the shape zustand re-renders on
@@ -1153,6 +1165,21 @@ export function CollectionTree() {
         label: t("api.docs.generate"),
         icon: FileText,
         onClick: () => openModal({ kind: "docs", collectionId: node.id }),
+      });
+      // The mock's switch, beside the other things made *from* the collection (user, 2026-10-23:
+      // «con un botón «Levantar mock»»).
+      const mockStore = useApiMockStore.getState();
+      mockStore.ensure();
+      const mockRunning = mockStore.running[node.id];
+      items.push({
+        label: mockRunning ? t("api.mock.stop") : t("api.mock.start"),
+        icon: Server,
+        onClick: () => {
+          const job = mockRunning
+            ? stopMock(node.id)
+            : startMock(node.id).then((status) => pushToast(t("api.mock.started", { url: status.url }), "success"));
+          void job.catch((e: unknown) => pushToast(String(e), "error"));
+        },
       });
       if (sharedIds.has(node.id)) {
         // The invitation carries the project's URL and key, so it is the host's to hand out and

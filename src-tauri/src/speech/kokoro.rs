@@ -202,6 +202,14 @@ pub fn loaded() -> Option<String> {
     LOADED.try_lock().ok()?.as_ref().map(|loaded| loaded.lang.to_string())
 }
 
+
+/// Frees the Kokoro model held in memory — battery saving at its most (`crate::power::set_saving`). The
+/// next sentence loads it again.
+pub fn unload() {
+    if let Ok(mut held) = LOADED.lock() {
+        *held = None;
+    }
+}
 fn create(lang: &'static str, threads: i32) -> Result<Engine, String> {
     let dir = dir();
     let mut config = Config::new();

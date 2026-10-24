@@ -11,11 +11,14 @@
  * half-typed key going live the moment it is typed would change what those requests send.
  */
 
-import { useState } from "react";
-import { Boxes, ChevronRight, FileText, Folder, Play, Save, Share2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Boxes, ChevronRight, FileText, Folder, Play, Save, Server, Share2, Square } from "lucide-react";
 import { AuthEditor, ROOT_AUTH_TYPES, authAncestors } from "./AuthPanel";
 import { ScriptEditor } from "./ScriptsPanel";
 import { VariableTable } from "./VariableTable";
+import { MockPanel } from "./MockPanel";
+import { startMock, stopMock } from "./mockActions";
+import { useApiMockStore } from "../../state/apiMockStore";
 import { buttonClass, Kbd } from "../common/Button";
 import { ActiveUnderline } from "../common/ActivePill";
 import { Segmented } from "../common/Segmented";
@@ -23,24 +26,33 @@ import { Tooltip } from "../common/Tooltip";
 import { underlineStripClass, underlineTabClass } from "../common/recipes";
 import { useApiStore, type ApiEntityTab } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
-import { useToastStore } from "../../state/toastStore";
+import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { useShortcutChord } from "../../lib/useShortcutHint";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
-type PanelId = "overview" | "auth" | "variables" | "scripts";
+type PanelId = "overview" | "auth" | "variables" | "scripts" | "mock";
 
 const PANEL_LABELS: Record<PanelId, TranslationKey> = {
   overview: "api.entity.overview",
   auth: "api.tab.authorization",
   variables: "api.entity.variables",
   scripts: "api.entity.scripts",
+  mock: "api.mock.tab",
 };
 
 export function EntitySettingsView({ tabId }: { tabId: string }) {
   const t = useT();
   const tab = useApiStore((s) => s.entityTabs.find((entry) => entry.id === tabId));
   const [panel, setPanel] = useState<PanelId>("overview");
+  // The Services dock opens a collection straight on its mock.
+  const focusMock = useApiMockStore((s) => s.focusMock);
+  useEffect(() => {
+    if (tab && focusMock === tab.entityId) {
+      setPanel("mock");
+      useApiMockStore.getState().setFocusMock(null);
+    }
+  }, [focusMock, tab]);
 
   if (!tab) return <div className="h-full" />;
 
@@ -48,7 +60,7 @@ export function EntitySettingsView({ tabId }: { tabId: string }) {
   // there is no folder equivalent, so offering the tab would promise a scope that never resolves.
   const panels: PanelId[] =
     tab.kind === "collection"
-      ? ["overview", "auth", "variables", "scripts"]
+      ? ["overview", "auth", "variables", "scripts", "mock"]
       : ["overview", "auth", "scripts"];
   const active = panels.includes(panel) ? panel : "overview";
 
@@ -80,6 +92,7 @@ export function EntitySettingsView({ tabId }: { tabId: string }) {
         {active === "auth" && <AuthTab tab={tab} />}
         {active === "variables" && <VariablesPanel tab={tab} />}
         {active === "scripts" && <ScriptsTab tab={tab} />}
+        {active === "mock" && <MockPanel collectionId={tab.entityId} />}
       </div>
     </div>
   );
@@ -149,6 +162,7 @@ function Header({ tab }: { tab: ApiEntityTab }) {
               <Share2 size={14} />
               {t("api.export.title")}
             </button>
+            <MockButton collectionId={tab.entityId} />
             {/* Next to Export because the two are asked in the same breath, and this is the screen
                 where the descriptions the document is made of are actually written. */}
             <button
@@ -181,6 +195,37 @@ function Header({ tab }: { tab: ApiEntityTab }) {
         </Tooltip>
       </div>
     </div>
+  );
+}
+
+/** «Levantar mock» / «Detener mock» — the same switch the Mock panel and the row's menu have. */
+function MockButton({ collectionId }: { collectionId: string }) {
+  const t = useT();
+  const running = useApiMockStore((s) => s.running[collectionId]);
+  const ensure = useApiMockStore((s) => s.ensure);
+  const pushToast = useToastStore((s) => s.pushToast);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => ensure(), [ensure]);
+
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      if (running) await stopMock(collectionId);
+      else pushToast(t("api.mock.started", { url: (await startMock(collectionId)).url }), "success");
+    } catch (e) {
+      pushErrorToast(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Tooltip label={running ? running.url : t("api.mock.startHint")}>
+      <button type="button" disabled={busy} onClick={() => void toggle()} className={buttonClass({ variant: "ghost" })}>
+        {running ? <Square size={13} className="text-[var(--cf-success)]" /> : <Server size={14} />}
+        {running ? t("api.mock.stop") : t("api.mock.start")}
+      </button>
+    </Tooltip>
   );
 }
 

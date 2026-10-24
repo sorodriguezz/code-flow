@@ -27,12 +27,16 @@ import {
   SaveAll,
   ShieldCheck,
   Network,
+  SquareAsterisk,
   Sparkles,
   TerminalSquare,
   Waypoints,
   Workflow,
+  Wrench,
   Zap,
 } from "lucide-react";
+import { TOOLS } from "./toolbox/catalog";
+import { appByKey, openRailApp } from "./railApps";
 import { canPasteJsonHere, pasteJsonInFocusedEditor } from "../components/editor/pasteJsonAsCode";
 import { WORKSPACE_ICONS } from "../components/layout/WorkspaceGlyph";
 import { fetchNow, pullNow, pushNow } from "./gitActions";
@@ -73,7 +77,7 @@ export function fold(text: string): string {
   return text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
-export type PaletteGroup = "workspaces" | "projects" | "branches" | "views" | "actions" | "api" | "settings";
+export type PaletteGroup = "workspaces" | "projects" | "branches" | "views" | "actions" | "api" | "tools" | "settings";
 
 export interface PaletteItem {
   key: string;
@@ -83,12 +87,14 @@ export interface PaletteItem {
   onSelect: () => void;
   /** Key caps drawn at the end of the row — for the one action whose chord is not an app chord. */
   keys?: string[];
+  /** Extra words the row is found by but never shows — the toolbox's "jwt", "b64", "epoch". */
+  keywords?: string;
 }
 
 /** A scoped opening (from the "switch repository" / "switch workspace" / "switch branch"
  * shortcuts) narrows the palette to one group, so it acts as a dedicated picker. */
 export const SCOPE_GROUPS: Record<PaletteScope, PaletteGroup[]> = {
-  all: ["workspaces", "projects", "branches", "views", "actions", "api", "settings"],
+  all: ["workspaces", "projects", "branches", "views", "actions", "api", "tools", "settings"],
   workspaces: ["workspaces"],
   projects: ["projects"],
 };
@@ -118,6 +124,7 @@ export const VIEW_ITEMS: {
   // here would only bounce off the guard in `App.tsx`. Settings › Revisor is found by the search.
   { id: "reviewer", labelKey: "tabbar.reviewer", icon: ShieldCheck },
   { id: "codemap", labelKey: "tabbar.codemap", icon: Network },
+  { id: "env", labelKey: "tabbar.env", icon: SquareAsterisk },
   { id: "api", workspace: "requests", labelKey: "tabbar.api", icon: Zap },
   { id: "api", workspace: "database", labelKey: "tabbar.databases", icon: Database },
   { id: "agents", labelKey: "tabbar.agents", icon: Bot },
@@ -132,6 +139,7 @@ export const VIEW_ITEMS: {
   { id: "chat", labelKey: "tabbar.chat", icon: MessagesSquare },
   { id: "flows", labelKey: "tabbar.flows", icon: Waypoints },
   { id: "architecture", labelKey: "tabbar.architecture", icon: Network },
+  { id: "toolbox", labelKey: "tabbar.toolbox", icon: Wrench },
 ];
 
 export const GROUP_LABEL_KEY: Record<PaletteGroup, TranslationKey> = {
@@ -141,6 +149,7 @@ export const GROUP_LABEL_KEY: Record<PaletteGroup, TranslationKey> = {
   views: "titlebar.goTo",
   actions: "titlebar.aiActions",
   api: "api.title",
+  tools: "tabbar.toolbox",
   settings: "statusbar.settings",
 };
 
@@ -448,6 +457,27 @@ export function buildPaletteItems({
     })),
   ]);
 
+  /**
+   * Every tool of «Herramientas», so typing "jwt", "base64" or "uuid" opens that tool directly.
+   * Found by their keywords as well as their names, and only listed once something is typed — 54
+   * rows would bury the palette's own groups (see `filterPaletteItems`).
+   */
+  const toolItems: PaletteItem[] = TOOLS.map((tool) => ({
+    key: `tool:${tool.id}`,
+    icon: tool.icon,
+    label: `${t("tabbar.toolbox")} › ${t(tool.titleKey)}`,
+    group: "tools" as const,
+    keywords: `${tool.id} ${tool.keywords}`,
+    onSelect: () => {
+      // Imported lazily: the store pulls in settings sync, which the palette's own tests stub.
+      void import("../state/toolboxStore").then(({ useToolboxStore }) => {
+        useToolboxStore.getState().open(tool.id);
+        const app = appByKey("toolbox");
+        if (app) openRailApp(app);
+      });
+    },
+  }));
+
   return [
     ...workspaceItems,
     ...projectItems,
@@ -455,6 +485,7 @@ export function buildPaletteItems({
     ...viewItems,
     ...actionItems,
     ...apiItems,
+    ...toolItems,
     ...settingsItems,
   ];
 }
@@ -465,7 +496,15 @@ export function buildPaletteItems({
  */
 export function filterPaletteItems(items: PaletteItem[], groups: PaletteGroup[], query: string): PaletteItem[] {
   const words = fold(query.trim()).split(/\s+/).filter(Boolean);
-  const inScope = items.filter((item) => groups.includes(item.group));
-  const hits = words.length === 0 ? inScope : inScope.filter((item) => words.every((w) => fold(item.label).includes(w)));
+  // The toolbox's rows wait for a query: with nothing typed they would only push the other groups
+  // down the list.
+  const inScope = items.filter((item) => groups.includes(item.group) && (words.length > 0 || item.group !== "tools"));
+  const hits =
+    words.length === 0
+      ? inScope
+      : inScope.filter((item) => {
+          const haystack = fold(item.keywords ? `${item.label} ${item.keywords}` : item.label);
+          return words.every((w) => haystack.includes(w));
+        });
   return groups.flatMap((group) => hits.filter((item) => item.group === group));
 }

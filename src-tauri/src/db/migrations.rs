@@ -2034,7 +2034,23 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_codi_recollections(conn)?;
     add_reference_repos(conn)?;
     add_on_demand_to_review_contexts(conn)?;
+    add_api_mocks(conn)?;
+    // Tickets → code (boards::ticket_links): the ticket ↔ branch ↔ pull request record.
+    crate::boards::ticket_links::migrate(conn)?;
     Ok(())
+}
+
+/// The API client's mock rules (`db::mock_queries`, `api::mock`), one JSON blob per collection.
+/// Local to this machine on purpose: not a column of `api_collections`, so sync, export and backup
+/// never carry a port or a «start with the services» flag to someone else's computer.
+pub(crate) fn add_api_mocks(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS api_mocks (
+            collection_id TEXT PRIMARY KEY REFERENCES api_collections(id) ON DELETE CASCADE,
+            config        TEXT NOT NULL DEFAULT '{}',
+            updated_at    TEXT NOT NULL
+        );",
+    )
 }
 
 /// A workspace context marked «a demanda» (`context::on_demand`): a chat lists it by name and the

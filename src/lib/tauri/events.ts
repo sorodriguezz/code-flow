@@ -357,6 +357,11 @@ export const onLspDiagnostics = (handler: (event: LspDiagnosticsEvent) => void) 
 export const onLspExited = (handler: (event: { session_id: string }) => void) =>
   listen<{ session_id: string }>("lsp:exited", (e) => handler(e.payload));
 
+/** Battery saving at Máximo closed a project's language servers after 5 min unasked — they start
+ *  again on the next file typed in or opened (`lib/lsp/client` `wake`). */
+export const onLspSlept = (handler: (event: { project_id: string }) => void) =>
+  listen<{ project_id: string }>("lsp:slept", (e) => handler(e.payload));
+
 /**
  * A server saying something it drew is stale and should be asked for again — the
  * `workspace/<feature>/refresh` requests. Only inlay hints are acted on: rust-analyzer sends this one

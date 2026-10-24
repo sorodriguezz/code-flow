@@ -11,6 +11,8 @@ import { NewChainModal } from "./NewChainModal";
 import { NewTaskModal } from "./NewTaskModal";
 import { StoryRealizerModal } from "./StoryRealizerModal";
 import { TemplateDetail } from "./TemplateDetail";
+import { TicketDetail } from "./tickets/TicketDetail";
+import { useTicketStore } from "../../state/ticketStore";
 import { TerminalBench } from "./TerminalBench";
 import { TaskBoard } from "./taskPlanning";
 import { WorktreesView } from "./worktrees/WorktreesView";
@@ -87,6 +89,8 @@ export function AgentsView() {
   const [helping, setHelping] = useState(false);
   const selectedChainId = useChainStore((s) => s.selectedId);
   const selectedTemplateId = useChainStore((s) => s.selectedTemplateId);
+  /** A ticket from the tree's «Tickets» section — last in line: selecting one clears the others. */
+  const selectedTicket = useTicketStore((s) => s.selectedUid);
   /**
    * Whether the bench has been on screen at least once this session.
    *
@@ -250,6 +254,8 @@ export function AgentsView() {
                 <ChainDetail key={selectedChainId} chainId={selectedChainId} />
               ) : selectedId ? (
                 <AgentTaskDetail key={selectedId} taskId={selectedId} />
+              ) : selectedTicket && groupBy === "tree" ? (
+                <TicketDetail key={selectedTicket} uid={selectedTicket} />
               ) : groupBy === "board" ? (
                 <TaskBoard />
               ) : (

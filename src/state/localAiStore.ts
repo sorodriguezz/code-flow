@@ -12,6 +12,7 @@ import {
 } from "../lib/tauri/localaiCommands";
 import { onLocalAiDownload, onLocalAiEngine, type LocalAiDownloadEvent } from "../lib/tauri/events";
 import { pushErrorToast } from "./toastStore";
+import { saving } from "./powerSaveStore";
 
 /**
  * The editor's local completion: what is downloaded, what is running, and how far a download has
@@ -223,6 +224,9 @@ export const useLocalAiStore = create<LocalAiStore>((set, get) => ({
  * cost more than the completion.
  */
 export function completionIsUsable(): boolean {
+  // Battery saving from Fuerte: no ghost text — it asks the local model on every pause in typing,
+  // and its first ask starts a server.
+  if (saving(2)) return false;
   const state = useLocalAiStore.getState().state;
   return Boolean(state?.enabled && state.model_installed && state.engine_available);
 }

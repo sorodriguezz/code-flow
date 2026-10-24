@@ -67,6 +67,7 @@ export type ShortcutId =
   | "view.pipelines"
   | "view.reviewer"
   | "view.codemap"
+  | "view.env"
   | "db.newConsole"
   | "db.connections"
   | "db.refresh"
@@ -199,6 +200,8 @@ const VIEW_ORDER: { view: MainView; workspace?: ApiWorkspace }[] = [
   { view: "flows" },
   // Arquitectura, newer still, after it for the same reason.
   { view: "architecture" },
+  // Herramientas, newest of all.
+  { view: "toolbox" },
   // The keyring is deliberately absent, for a sharper version of `remote`'s reason: cycling into it
   // by accident would put a lock screen — or worse, an open vault — on screen in the middle of
   // moving between documents. It has its own chord.
@@ -601,6 +604,14 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     // O for overview — M (map) is the meetings recorder's.
     defaultChord: "Mod+Alt+O",
     run: () => useUiStore.getState().setActiveView("codemap"),
+  },
+  {
+    id: "view.env",
+    group: "views",
+    labelKey: "tabbar.env",
+    // Y: E, V and D are taken (and ⌘⌥D hides the Dock on macOS).
+    defaultChord: "Mod+Alt+Y",
+    run: () => useUiStore.getState().setActiveView("env"),
   },
   {
     id: "view.next",

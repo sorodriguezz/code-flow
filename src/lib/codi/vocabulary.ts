@@ -78,6 +78,10 @@ const APP_EXTRA: Record<string, Partial<Spoken>> = {
     en: ["flows", "flow", "automations", "automation", "workflows", "n8n"],
   },
   architecture: { es: ["arquitectura", "arquitecturas", "diseno del sistema"], en: ["architecture", "architectures", "system design"] },
+  toolbox: {
+    es: ["herramientas", "caja de herramientas", "utilidades", "herramientas de desarrollo"],
+    en: ["toolbox", "tools", "developer tools", "dev tools", "utilities"],
+  },
 };
 
 export function appVocabulary(): Vocabulary {
@@ -92,6 +96,7 @@ const VIEW_NAMES: Record<string, [TranslationKey, Partial<Spoken>]> = {
   pipelines: ["tabbar.pipelines", { es: ["pipelines", "ci", "integracion continua", "builds"], en: ["pipelines", "ci", "builds"] }],
   reviewer: ["tabbar.reviewer", { es: ["revisor", "sonar", "sonarqube", "calidad", "quality gate"], en: ["reviewer", "sonar", "sonarqube", "quality", "quality gate"] }],
   codemap: ["tabbar.codemap", { es: ["mapa", "mapa del repo", "mapa de codigo"], en: ["map", "code map", "repo map"] }],
+  env: ["tabbar.env", { es: ["entorno", "variables de entorno", "env", "punto env"], en: ["environment", "environment variables", "env", "dotenv"] }],
 };
 
 export function viewVocabulary(views: readonly string[]): Vocabulary {

@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { create } from "zustand";
 import { listPullRequestsPage, repoSummaries, type RepoSummary } from "../lib/tauri/commands";
 import type { Project } from "../types/domain";
+import { saving } from "./powerSaveStore";
 
 /**
  * What the projects panel says about the repositories that are *not* open: the branch, how many
@@ -13,6 +14,8 @@ import type { Project } from "../types/domain";
  * most every five minutes, and only for projects linked to a host.
  */
 
+/** How many ticks battery saving folds into one (`powerSaveStore`). */
+const SAVING_STRIDE = 3;
 const SUMMARY_EVERY_MS = 60_000;
 const PRS_EVERY_MS = 5 * 60_000;
 /** A window brought forward twice within this is not asked twice. */
@@ -112,14 +115,21 @@ export function useRepoSummaryPolling(projects: Project[], skip: (project: Proje
     };
     summaries();
     prs();
+    // Battery saving reads a third as often — every 3 min and every 15 min — by letting two ticks
+    // in three go by, so a change of level applies from the next tick with no timer to rebuild.
+    let summaryTicks = 0;
+    let prTicks = 0;
     const summaryTimer = window.setInterval(() => {
+      if (saving(1) && ++summaryTicks % SAVING_STRIDE !== 0) return;
       if (document.visibilityState === "visible") summaries();
     }, SUMMARY_EVERY_MS);
     const prTimer = window.setInterval(() => {
+      if (saving(1) && ++prTicks % SAVING_STRIDE !== 0) return;
       if (document.visibilityState === "visible") prs();
     }, PRS_EVERY_MS);
     const onFocus = () => {
       const now = Date.now();
+      if (saving(1) && now - lastFocus < SUMMARY_EVERY_MS * SAVING_STRIDE) return;
       if (now - lastFocus < FOCUS_SETTLE_MS) return;
       lastFocus = now;
       summaries();

@@ -350,6 +350,8 @@ pub const CATALOG: &[NodeDescriptor] = &[
     node("app.diagram", App, "workflow", 12),
     node("app.story", App, "book-open-text", 12),
     node("app.aiUsage", App, "gauge", 12),
+    // «Resumen de tu trabajo»: the daily or weekly summary (user, 2026-10-23).
+    node("app.worklog", App, "list-checks", 12),
     node("app.process", App, "activity", 12),
     node("app.runData", App, "tags", 12),
     node("code.service", Code, "circle-play", 2).shown_in(App),
@@ -486,8 +488,9 @@ mod tests {
         assert_eq!(count(Files), 14);
         assert_eq!(count(Logic), 13);
         assert_eq!(count(Transform), 20);
-        assert_eq!(count(App), 18);
-        assert_eq!(CATALOG.len(), 179);
+        // + «Resumen de trabajo» (2026-10-23).
+        assert_eq!(count(App), 19);
+        assert_eq!(CATALOG.len(), 180);
     }
 
     #[test]

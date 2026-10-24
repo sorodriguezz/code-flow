@@ -364,6 +364,17 @@ pub async fn shutdown() {
     stop_locked(&mut guard);
 }
 
+/// Stops the embedder unless it is embedding right now — battery saving at Máximo
+/// (`crate::power`): a pass the user asked for keeps it, one nobody asked for is paused anyway.
+pub async fn shutdown_if_idle() {
+    let slot = SLOT.get_or_init(|| AsyncMutex::new(None));
+    let mut guard = slot.lock().await;
+    if guard.as_ref().is_some_and(|e| e.in_flight.load(Ordering::SeqCst) > 0) {
+        return;
+    }
+    stop_locked(&mut guard);
+}
+
 fn spawn_reaper() {
     static ARMED: OnceLock<()> = OnceLock::new();
     if ARMED.set(()).is_err() {

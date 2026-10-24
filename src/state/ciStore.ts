@@ -15,6 +15,7 @@ import type {
   StartPipelineRequest,
 } from "../types/domain";
 import type { DeclaredStages } from "../lib/pipelineGraph";
+import { saving } from "./powerSaveStore";
 
 /**
  * The Pipelines tab's state: runs, their jobs, their logs, and the polling that keeps the live
@@ -842,7 +843,9 @@ export const useCiStore = create<CiState>((set, get) => ({
        * there is nothing for a minimised window to deliver, and `wake` forces a poll the moment it
        * comes back.
        */
-      if (!onTab && !anyLive) return;
+      // Battery saving at Máximo: off the tab, not even a live run is followed — back on the tab,
+      // the polling picks up again.
+      if (!onTab && (!anyLive || saving(3))) return;
       sinceLastPoll += TICK_MS;
       const liveMs = runs.some((r) => r.provider === "bitbucket") ? Math.max(LIVE_MS, BITBUCKET_LIVE_MS) : LIVE_MS;
       if (sinceLastPoll < (anyLive ? liveMs : IDLE_MS)) return;

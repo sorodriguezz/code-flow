@@ -1,9 +1,9 @@
-import { agentLaunchFiles, getSetting, terminalSetAgent, writeTerminal } from "../tauri/commands";
+import { agentLaunchFiles, getSetting, listShellProfiles, terminalSetAgent, writeTerminal } from "../tauri/commands";
 import { AI_PROVIDERS } from "../aiProviders";
 import { currentPlatform } from "../platform";
 import { useBenchStore } from "../../state/benchStore";
 import { useTerminalAgentStore } from "../../state/terminalAgentStore";
-import { cliLine, noteInLine, promptInLine } from "./cliLaunch";
+import { cliLine, noteInLine, promptInLine, shellFamily, type CliShell } from "./cliLaunch";
 
 /**
  * Starts an agent's own CLI in a new terminal of the bench, standing in `path` — what every «run
@@ -31,7 +31,7 @@ export async function startAgentCli(options: {
   resume?: { sessionId: string | null; accountId?: string | null };
 }): Promise<{ terminalId: string; sessionId: string } | null> {
   const { workspaceId, path, provider, title } = options;
-  const windows = currentPlatform() === "windows";
+  const shell = await defaultShell();
   const stored = (await getSetting(`${provider}_binary_path`).catch(() => null))?.trim() ?? "";
   const binary = stored || AI_PROVIDERS.find((candidate) => candidate.id === provider)?.defaultBinary || provider;
   // Missing files cost the card its prompt and reply, and the agent its note on `cf` — not the launch.
@@ -39,7 +39,7 @@ export async function startAgentCli(options: {
   const asked = options.prompt?.trim() ?? "";
   // No flag adds to these CLIs' own instructions, so the note rides at the head of the first prompt.
   const prompt = asked && files.note && !noteInLine(provider) ? `${files.note}\n\n${asked}` : asked;
-  const line = cliLine(provider, binary, options.resume ?? { sessionId: null }, windows, {
+  const line = cliLine(provider, binary, options.resume ?? { sessionId: null }, shell, {
     settings: files.settings,
     noteFile: files.note_file,
     note: files.note,
@@ -59,8 +59,22 @@ export async function startAgentCli(options: {
   if (!sessionId) return null;
   await terminalSetAgent(sessionId, provider).catch(() => false);
   await writeTerminal(sessionId, `${line}\r`);
-  if (prompt && !promptInLine(provider, windows)) typeWhenReady(sessionId, prompt);
+  if (prompt && !promptInLine(provider, shell)) typeWhenReady(sessionId, prompt);
   return { terminalId, sessionId };
+}
+
+/**
+ * The family of the shell a new bench tab opens: on Windows the default profile's — Git Bash unless
+ * Settings › Terminal picks another, as `shell_profiles::resolve` decides — and POSIX elsewhere.
+ */
+async function defaultShell(): Promise<CliShell> {
+  if (currentPlatform() !== "windows") return "posix";
+  const [profiles, configured] = await Promise.all([
+    listShellProfiles().catch(() => []),
+    getSetting("terminal_default_profile").catch(() => null),
+  ]);
+  const profile = profiles.find((p) => p.id === configured) ?? profiles.find((p) => p.id === "git-bash") ?? profiles[0];
+  return profile ? shellFamily(profile.command) : "posix";
 }
 
 /** How long a CLI gets to draw itself before the prompt is typed anyway. */

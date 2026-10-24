@@ -36,6 +36,7 @@ import { Select } from "../common/Select";
 import { Actions, Note, Status } from "../api/settingsChrome";
 import { formatBytes } from "./localModelRow";
 import { PaneBlock, RailSection } from "./settingsNav";
+import { DepsSettingsPane } from "../deps/DepsSettings";
 
 const COMPONENT_LABEL: Record<ReviewerComponent["id"], "reviewer.componentJdk" | "reviewer.componentSonarqube" | "reviewer.componentScanner"> = {
   jdk: "reviewer.componentJdk",
@@ -60,6 +61,7 @@ export function ReviewerSettings() {
           {tab === "sonarqube" && <SonarPane />}
           {tab === "rules" && <RulesPane />}
           {tab === "servers" && <ServersPane />}
+          {tab === "dependencies" && <DepsSettingsPane />}
         </>
       )}
     </RailSection>

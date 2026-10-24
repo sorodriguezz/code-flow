@@ -78,9 +78,13 @@ function joinPath(base: string, rel: string): string {
  * single quotes, which every shell the dock opens reads literally — POSIX shells and PowerShell
  * both. `cmd` has no single quotes, so on Windows a path with a space gets double ones, which both
  * `cmd` and PowerShell take and Git Bash does too.
+ *
+ * A backslash is never left bare: Git Bash — the default shell on Windows — reads it as an escape
+ * and swallows it, so `C:\Users\me\x.json` arrived as `C:Usersmex.json`. Inside double quotes it
+ * stays, in Git Bash as in PowerShell and `cmd`.
  */
 export function quotePath(path: string, windows: boolean): string {
-  if (/^[\w@%+=:,./\\-]+$/.test(path)) return path;
+  if (/^[\w@%+=:,./-]+$/.test(path)) return path;
   if (windows) return `"${path.replace(/"/g, '""')}"`;
   return `'${path.replace(/'/g, `'\\''`)}'`;
 }

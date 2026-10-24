@@ -1841,7 +1841,8 @@ mod stream_tests {
         let response = send(get(port, 1_500), None, None).await.unwrap();
         // …and when the deadline cuts it, what arrived is still the response.
         assert!(response.body_text.contains("data: one"));
-        assert!(response.interrupted.unwrap_or_default().contains("Timed out"));
+        let interrupted = response.interrupted.unwrap_or_default();
+        assert!(interrupted.contains("Timed out"), "interrupted: {interrupted:?}");
     }
 
     #[tokio::test]

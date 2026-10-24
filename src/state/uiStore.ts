@@ -28,6 +28,9 @@ export type MainView =
   /** «Mapa» — the repository's folders, files and the imports between them, from the same map the
    *  agents read (`codemap`). Repository-scoped like Graph, Changes and Editor, and unconditional. */
   | "codemap"
+  /** «Entorno» — the repository's env files side by side, and what its code reads. Repository-scoped
+   *  and unconditional, like Mapa; see `components/env`. */
+  | "env"
   | "api"
   | "agents"
   | "stories"
@@ -41,6 +44,10 @@ export type MainView =
    *  Workspace-scoped and rail-reached like Diagramas, whose table it shares; see
    *  `components/architecture`. */
   | "architecture"
+  /** Herramientas — the local developer toolbox (encoders, JWT, formatters, generators…). Not
+   *  scoped to anything: rail-reached like the apps above, renders with no project open; see
+   *  `components/toolbox`. */
+  | "toolbox"
   | "vault"
   /**
    * The chat workspace — the odd one among the odd ones, and for a different reason than the vault.
@@ -61,7 +68,7 @@ export type MainView =
   | "chat";
 
 /** The views that are the open repository's — its tabs — as against the workspace's apps. */
-export const REPO_VIEWS: MainView[] = ["graph", "changes", "editor", "reviewer", "codemap", "pipelines"];
+export const REPO_VIEWS: MainView[] = ["graph", "changes", "editor", "reviewer", "codemap", "env", "pipelines"];
 
 /** The three directions the stories section works in. Its own sub-tab, one level under the view. */
 export type StoriesMode = "batches" | "review" | "wiki";

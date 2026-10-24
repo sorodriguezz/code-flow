@@ -9,7 +9,7 @@ import type {
 } from "monaco-editor";
 import type { Monaco } from "@monaco-editor/react";
 import { listDir } from "../../lib/tauri/commands";
-import { onLspDiagnostics, onLspExited, onLspRefresh } from "../../lib/tauri/events";
+import { onLspDiagnostics, onLspExited, onLspRefresh, onLspSlept } from "../../lib/tauri/events";
 import { relPathFromModelUri } from "../../lib/editorModel";
 import { LANGUAGE_SERVERS, NATIVE_TYPESCRIPT, lspLanguageOf, monacoLanguageOf } from "../../lib/lsp/servers";
 import { TS_LANGUAGES } from "../../lib/tsserver";
@@ -22,12 +22,16 @@ import {
   lspKnows,
   nativeTypeScriptHolds,
   sessionsForLanguage,
+  isAsleep,
   onSessionsChanged,
+  onSlept,
+  sleep,
   startForProject,
   syncChange,
   syncClose,
   syncOpen,
   uriFor,
+  wake,
 } from "../../lib/lsp/client";
 import {
   modelUriFor,
@@ -651,11 +655,21 @@ function installDocumentSync(monaco: Monaco): void {
 
   const perModel = new Map<string, IDisposable>();
 
-  const attach = (model: MonacoEditorNS.ITextModel) => {
+  /** While battery saving has the servers asleep: a one-shot per model that wakes them on its
+   *  first edit. Opening a file wakes them too (`attach`). */
+  const waking = new Map<string, IDisposable>();
+
+  /** `opened`: a model just created — a file opened — which wakes sleeping servers; a sweep over
+   *  the models already open does not, or the sleep's own announcement would undo it. */
+  const attach = (model: MonacoEditorNS.ITextModel, opened = false) => {
     const projectId = currentProjectId();
     if (!projectId) return;
     const relPath = relPathFromModelUri(model.uri, projectId);
     if (!relPath || perModel.has(model.uri.toString())) return;
+    if (isAsleep()) {
+      if (opened) wake();
+      return;
+    }
     const language = lspLanguageOf(relPath, model.getLanguageId());
     if (sessionsForLanguage(language).length === 0) return;
     syncOpen(relPath, language, model.getValue());
@@ -671,12 +685,29 @@ function installDocumentSync(monaco: Monaco): void {
     for (const model of monaco.editor.getModels()) attach(model);
   };
 
+  // The servers went to sleep: nothing is attached any more, and the first edit to any model brings
+  // them back — then `sweep` offers every model afresh, as on a first start.
+  onSlept(() => {
+    for (const listener of perModel.values()) listener.dispose();
+    perModel.clear();
+    for (const model of monaco.editor.getModels()) {
+      const key = model.uri.toString();
+      if (waking.has(key)) continue;
+      waking.set(key, model.onDidChangeContent(() => wake()));
+    }
+  });
+  onSessionsChanged(() => {
+    if (isAsleep()) return;
+    for (const listener of waking.values()) listener.dispose();
+    waking.clear();
+  });
+
   sweep();
   // Again once the servers are actually up. The first sweep runs in the same commit as the effect
   // that starts them, so at that moment `sessionsForLanguage` is empty for every model and the file
   // on screen would be the one file no server was ever told about — see `onSessionsChanged`.
   onSessionsChanged(sweep);
-  monaco.editor.onDidCreateModel(attach);
+  monaco.editor.onDidCreateModel((model: MonacoEditorNS.ITextModel) => attach(model, true));
   monaco.editor.onWillDisposeModel((model: MonacoEditorNS.ITextModel) => {
     const key = model.uri.toString();
     perModel.get(key)?.dispose();
@@ -756,6 +787,7 @@ function installDiagnostics(monaco: Monaco): void {
     }
   });
 
+  void onLspSlept((event) => sleep(event.project_id));
   void onLspExited((event) => {
     forgetSession(event.session_id);
     // A server that is gone vouches for nothing it said.

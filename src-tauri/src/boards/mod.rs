@@ -24,11 +24,15 @@
 //! Nothing here **deletes**. Work items are read, created and edited; whatever a review concludes
 //! still goes back through the user's own hands.
 
+pub mod assigned;
 pub mod azure;
 pub mod issues;
 pub mod jira;
 pub mod linear;
 pub mod monday;
+pub mod ticket_links;
+pub mod tickets;
+pub mod transitions;
 
 use std::collections::HashSet;
 

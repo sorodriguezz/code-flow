@@ -1,5 +1,6 @@
 import { useRepoStore } from "../state/repoStore";
 import { restartAutoFetchCountdown } from "./gitActions";
+import { saving } from "../state/powerSaveStore";
 
 /**
  * The fetch nobody asked for.
@@ -59,6 +60,9 @@ let retryTimer: ReturnType<typeof setTimeout> | null = null;
  * for them to await or to do about a failure.
  */
 export function backgroundFetch(): void {
+  // Battery saving from Fuerte: no fetch nobody asked for. The Fetch button still reaches the
+  // remote — it goes through `repoStore.fetch`, not here.
+  if (saving(2)) return;
   attempt(true);
 }
 

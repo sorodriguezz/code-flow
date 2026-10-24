@@ -30,6 +30,7 @@ import { TagPill } from "./notesChrome";
 import { TREE_COLORS } from "../../lib/swatchColors";
 import { scopeMenuItems } from "../../lib/scopeMenu";
 import { noteRepoItems } from "./noteRepoItems";
+import { WorklogModalHost, openWorklogForm, WORKLOG_ICON } from "./worklog/WorklogModal";
 import { buildBookTree, descendantIds, flattenTree } from "../../lib/notes/tree";
 import { exportNotes, importMarkdownFiles, importVault, notebookForExport } from "../../lib/notes/exportActions";
 import type { NoteTreeRow as NoteTreeRowData } from "../../types/notes";
@@ -727,6 +728,8 @@ export function NoteExplorer() {
                     { label: t("notes.newNote"), icon: FilePlus2, onClick: () => void createNote(null) },
                     // Today's note — opened when it exists, made in «Diario» when it does not.
                     { label: t("notes.dailyNote"), icon: CalendarDays, onClick: () => void useNotesStore.getState().openDailyNote() },
+                    // «Daily / Semanal»: the work summary written and kept as a note (user, 2026-10-23).
+                    { label: t("worklog.menu"), icon: WORKLOG_ICON, onClick: openWorklogForm },
                     {
                       label: t("notes.newBook"),
                       icon: BookPlus,
@@ -758,6 +761,7 @@ export function NoteExplorer() {
             </button>
           </div>
           {createMenu && <ContextMenu x={createMenu.x} y={createMenu.y} items={createMenu.items} onClose={() => setCreateMenu(null)} />}
+          <WorklogModalHost />
         </div>
 
         <div className="relative" data-tour="notes-search">

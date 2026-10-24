@@ -5,6 +5,8 @@ import type { WorkItem } from "../../types/domain";
 import { CloudUpload, GitPullRequest, Loader2, X } from "lucide-react";
 import { AiSparkles } from "../common/AiGlyph";
 import { listBranches, generatePrDescription, gitPushBranch } from "../../lib/tauri/commands";
+import { ticketsApplyReference, ticketsPrReference, type TicketPrReference } from "../../lib/tauri/ticketCommands";
+import { displayKey } from "../../lib/tickets/ticketKeys";
 import { isCancellation, newRunId, useAiRunStore } from "../../state/aiRunStore";
 import { usePrStore } from "../../state/prStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -100,6 +102,20 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
   }, [project.local_path]);
 
   const sameBranch = source !== "" && source === target;
+  /** The ticket this branch was started from («Tickets» › «Empezar»): its reference goes into the
+   *  title and description on submit, and an Azure work item is linked (user, 2026-10-23). */
+  const [ticketRef, setTicketRef] = useState<TicketPrReference | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    setTicketRef(null);
+    if (!source) return;
+    void ticketsPrReference(project.id, source)
+      .then((found) => !cancelled && setTicketRef(found))
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [project.id, source]);
   const canSubmit =
     !creating &&
     !generating &&
@@ -170,13 +186,20 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
     if (!canSubmit) return;
     setCreating(true);
     try {
+      // Applied here rather than typed into the fields, so an AI draft generated afterwards cannot
+      // drop it; the backend's check leaves a reference the user already wrote alone.
+      const [finalTitle, finalDescription] = ticketRef
+        ? await ticketsApplyReference(title.trim(), description, ticketRef.title_prefix, ticketRef.body_line)
+        : [title.trim(), description];
+      const linkedIds = workItems.map((item) => item.id);
+      for (const id of ticketRef?.work_item_ids ?? []) if (!linkedIds.includes(id)) linkedIds.push(id);
       const created = await createPr(project.id, {
-        title: title.trim(),
-        description,
+        title: finalTitle,
+        description: finalDescription,
         sourceBranch: source,
         targetBranch: target,
         draft,
-        workItemIds: workItems.map((item) => item.id),
+        workItemIds: linkedIds,
       });
       onCreated(created);
       onClose();
@@ -305,6 +328,12 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
               disabled={busy}
               className="mb-3 w-full resize-none rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
             />
+
+            {ticketRef && (
+              <p className="-mt-1.5 mb-3 truncate text-[11.5px] text-[var(--cf-text-muted)]" title={ticketRef.body_line}>
+                {t("tickets.prLinked", { key: displayKey(ticketRef.ticket), line: ticketRef.body_line })}
+              </p>
+            )}
 
             {/* Azure only, and above the draft toggle rather than below it: "Work items must be
                 linked" is a branch policy, so this is part of whether the PR will pass its checks

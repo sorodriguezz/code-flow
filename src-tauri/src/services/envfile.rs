@@ -109,6 +109,9 @@ fn value(raw: &str) -> String {
                 inner.to_string()
             }
         }
+        // `KEY= # comment` is an empty KEY — what every dotenv reader makes of it, and the shape a
+        // value moved into the Llavero leaves behind (`KEY= # llavero:<id>`, see `repo_env::edit`).
+        _ if raw.starts_with('#') => String::new(),
         _ => {
             let cut = raw.find(" #").or_else(|| raw.find("\t#")).unwrap_or(raw.len());
             raw[..cut].trim_end().to_string()
@@ -203,6 +206,13 @@ mod tests {
                 ("URL", "http://host/#anchor"),
             ])
         );
+    }
+
+    /// A value moved into the Llavero leaves `KEY= # llavero:<id>`: an empty KEY, not one whose
+    /// value is the comment — Services fills it in from the Llavero.
+    #[test]
+    fn a_comment_where_the_value_would_be_is_an_empty_value() {
+        assert_eq!(parse("TOKEN= # llavero:abc\nB=#x\n"), pairs(&[("TOKEN", ""), ("B", "")]));
     }
 
     #[test]

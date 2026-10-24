@@ -66,6 +66,8 @@ import { useCsvStore } from "./state/csvStore";
 import { useThinkingDesignStore } from "./state/thinkingDesignStore";
 import { useGlassStore } from "./state/glassStore";
 import { useMotionStore } from "./state/motionStore";
+import { saving, usePowerSaveStore } from "./state/powerSaveStore";
+import { startDepsAlerts } from "./state/depsStore";
 import { startAgentCli } from "./state/agentCliStore";
 import { startCodiBus } from "./lib/codi/bus";
 import { startTerminalAgents } from "./state/terminalAgentStore";
@@ -129,6 +131,7 @@ const ReviewerView = lazy(() =>
   import("./components/reviewer/ReviewerView").then((m) => ({ default: m.ReviewerView })),
 );
 const CodeMapView = lazy(() => import("./components/codemap/CodeMapView").then((m) => ({ default: m.CodeMapView })));
+const EnvView = lazy(() => import("./components/env/EnvView").then((m) => ({ default: m.EnvView })));
 const ApiView = lazy(() => import("./components/api/ApiView").then((m) => ({ default: m.ApiView })));
 const AgentsView = lazy(() => import("./components/agents/AgentsView").then((m) => ({ default: m.AgentsView })));
 const StoriesView = lazy(() => import("./components/stories/StoriesView").then((m) => ({ default: m.StoriesView })));
@@ -143,6 +146,7 @@ const ArchitectureView = lazy(() =>
   import("./components/architecture/ArchitectureView").then((m) => ({ default: m.ArchitectureView })),
 );
 const ChatView = lazy(() => import("./components/chat/ChatView").then((m) => ({ default: m.ChatView })));
+const ToolboxView = lazy(() => import("./components/toolbox/ToolboxView").then((m) => ({ default: m.ToolboxView })));
 
 const loadServicesDock = () =>
   import("./components/services/ServicesDock").then((m) => ({ default: m.ServicesDock }));
@@ -300,6 +304,7 @@ const PROJECT_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   // The Revisor, conditional on a setting rather than on a host — same guard below, same reason.
   { id: "reviewer", render: () => <ReviewerView /> },
   { id: "codemap", render: () => <CodeMapView /> },
+  { id: "env", render: () => <EnvView /> },
 ];
 
 /** Views that aren't about a repository, so the "no project open" empty state must not swallow
@@ -335,6 +340,8 @@ const WORKSPACE_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "flows", render: () => <FlowsView /> },
   // Architecture documents, like diagrams: about the system, made before any one repository.
   { id: "architecture", render: () => <ArchitectureView /> },
+  // The toolbox needs no repository at all — a JWT is decoded the same with or without one.
+  { id: "toolbox", render: () => <ToolboxView /> },
   // In this list because it renders with no project open, not because it follows the workspace —
   // the keyring is global. Membership here is what exempts a view from the "no project" empty
   // state, and the gate is `workspaceId !== null`, which is true whenever the app is usable.
@@ -691,6 +698,8 @@ export default function App() {
         useGlassStore.getState().init(),
         // How much the app moves. With the look, before the first panel has anything to animate.
         useMotionStore.getState().init(),
+        // Battery saving, after the motion level it may cap (`powerSaveStore`).
+        usePowerSaveStore.getState().init(),
         // `cf`'s three listeners and the focus it reports back. One socket's worth of plumbing,
         // already bound by the time the window appears — see `agentCliStore`.
         Promise.resolve(startAgentCli()),
@@ -700,6 +709,9 @@ export default function App() {
         // The agents in the app's terminals, followed from the start: a turn that ends while the
         // user is in another view is exactly the one worth a notification.
         Promise.resolve(startTerminalAgents()),
+        // The daily check for new advisories on what the repositories use («Salud de dependencias»);
+        // its first tick waits a few minutes, so this only arms it.
+        Promise.resolve(startDepsAlerts()),
         useLanguageOverrideStore.getState().init(),
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.
@@ -1185,7 +1197,8 @@ export default function App() {
       if (remaining === null) return;
       if (remaining <= 1) {
         // `auto`: a failure is reported once, not on every tick while offline — see `autoFetchFailing`.
-        void useRepoStore.getState().fetch({ auto: true });
+        // Battery saving from Fuerte pauses the clock's fetch; the countdown just starts over.
+        if (!saving(2)) void useRepoStore.getState().fetch({ auto: true });
         useFetchTimerStore.getState().setRemaining(autoFetchSeconds);
       } else {
         useFetchTimerStore.getState().setRemaining(remaining - 1);

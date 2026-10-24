@@ -1,14 +1,26 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Battery, BatteryCharging, BatteryFull, BatteryLow, BatteryWarning, Plug } from "lucide-react";
+import { Battery, BatteryCharging, BatteryFull, BatteryLow, BatteryWarning, Leaf, Plug } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import { batterySeverity, formatRunway, usePowerStore } from "../../state/powerStore";
+import { usePowerSaveStore, type SaveLevel } from "../../state/powerSaveStore";
+import { Segmented } from "../common/Segmented";
+import { Checkbox } from "../common/Checkbox";
+import type { TranslationKey } from "../../lib/i18n/translations";
 
-const PANEL_WIDTH = 216;
+const PANEL_WIDTH = 300;
 
 /** The colour of the icon at each severity. Same three as the AI limits beside it, so one glance
  * across the status bar reads by colour without having to know which widget said it. */
+/** What each level does, in its own words — the panel lists the ones that apply now. Each level
+ *  does everything the ones before it do. */
+const SAVES: Record<Exclude<SaveLevel, 0>, TranslationKey[]> = {
+  1: ["battery.save.motionMedium", "battery.save.noBlur", "battery.save.slowerReads"],
+  2: ["battery.save.motionOff", "battery.save.noFetch", "battery.save.noVectorize", "battery.save.noCodi", "battery.save.noMeetings", "battery.save.noInline", "battery.save.idleModels"],
+  3: ["battery.save.stopModels", "battery.save.lspIdle", "battery.save.noWebgl", "battery.save.ciOnOpen"],
+};
+
 const TINT: Record<ReturnType<typeof batterySeverity>, string | undefined> = {
   normal: undefined,
   low: "text-[var(--cf-warning)]",
@@ -31,6 +43,9 @@ export function BatteryMeter() {
   const t = useT();
   const status = usePowerStore((s) => s.status);
   const watch = usePowerStore((s) => s.watch);
+  const choice = usePowerSaveStore((s) => s.choice);
+  const level = usePowerSaveStore((s) => s.level);
+  const setChoice = usePowerSaveStore((s) => s.setChoice);
 
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -120,13 +135,15 @@ export function BatteryMeter() {
         type="button"
         onClick={() => setOpen((wasOpen) => !wasOpen)}
         aria-expanded={open}
-        title={t("battery.title")}
+        title={level > 0 ? `${t("battery.title")} · ${t("battery.save.on", { mode: t(`battery.save.level${level}` as TranslationKey) })}` : t("battery.title")}
         className={`flex h-[22px] shrink-0 items-center gap-[5px] rounded-md px-1.5 text-[12px] tabular-nums hover:bg-[var(--cf-hover)] ${
           TINT[severity] ?? "text-[var(--cf-text-muted)]"
         }`}
       >
         <Icon size={14} className={`shrink-0 ${motion}`} />
         <span>{percent}%</span>
+        {/* Saving: a leaf, in the success green, so a slower app explains itself at a glance. */}
+        {level > 0 && <Leaf size={12} aria-hidden className="shrink-0 text-[var(--cf-success)]" />}
       </button>
 
       {open &&
@@ -152,6 +169,50 @@ export function BatteryMeter() {
             <p className="mt-2 border-t border-[var(--cf-border)] pt-2 text-[11px] leading-snug text-[var(--cf-text)]">
               {runway || t("battery.noEstimate")}
             </p>
+
+            {/* Battery saving (user, 2026-10-23). Automatic follows the battery; a level picked by
+                hand stays until changed. */}
+            <div className="mt-2 border-t border-[var(--cf-border)] pt-2">
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 text-[12px] font-semibold">{t("battery.save.title")}</span>
+                <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+                  <Checkbox checked={choice === "auto"} onChange={(on) => void setChoice(on ? "auto" : level)} />
+                  {t("battery.save.auto")}
+                </label>
+              </div>
+              <Segmented
+                className="mt-1.5"
+                size="sm"
+                full
+                layoutId="cf-battery-save"
+                ariaLabel={t("battery.save.title")}
+                value={String(level) as "0" | "1" | "2" | "3"}
+                onChange={(value) => void setChoice(Number(value) as SaveLevel)}
+                options={([0, 1, 2, 3] as const).map((n) => ({
+                  value: String(n) as "0" | "1" | "2" | "3",
+                  label: t(`battery.save.level${n}` as TranslationKey),
+                }))}
+              />
+              <p className="mt-1.5 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
+                {choice === "auto" ? t("battery.save.autoHint") : t("battery.save.manualHint")}
+              </p>
+              {level > 0 && (
+                <ul className="mt-1.5 space-y-0.5 text-[11px] leading-snug text-[var(--cf-text)]">
+                  {([1, 2, 3] as const)
+                    .filter((n) => n <= level)
+                    .flatMap((n) => SAVES[n])
+                    // Fuerte's «sin animaciones» says more than Ligero's «como máximo Media».
+                    .filter((key) => !(level >= 2 && key === "battery.save.motionMedium"))
+                    .map((key) => (
+                      <li key={key} className="flex gap-1.5">
+                        <span aria-hidden className="text-[var(--cf-success)]">·</span>
+                        {t(key)}
+                      </li>
+                    ))}
+                </ul>
+              )}
+              {level > 0 && <p className="mt-1.5 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">{t("battery.save.yours")}</p>}
+            </div>
           </div>,
           document.body,
         )}

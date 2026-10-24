@@ -230,7 +230,9 @@ export function ChatTranscript({
 
   return (
     <div className="relative min-h-0 flex-1">
-      <div ref={scrollRef} onScroll={onScroll} onContextMenu={textMenu.onText} className="h-full overflow-y-auto">
+      {/* `cf-paper-scroll`: at the «completa» motion level, what scrolls rolls under the edges like
+          paper going under a bar — the blocks marked `cf-paper` and the answer's own (index.css). */}
+      <div ref={scrollRef} onScroll={onScroll} onContextMenu={textMenu.onText} className="cf-paper-scroll h-full overflow-y-auto">
         {/* `wrap-anywhere` for everything in the column — thinking, queued turns, error banners, the
             continued-from legend — not only the bubbles: any of them can carry a path with no space. */}
         <div ref={contentRef} className={`${READING_COLUMN} ${COLUMN_GUTTER} space-y-5 py-8 wrap-anywhere`}>

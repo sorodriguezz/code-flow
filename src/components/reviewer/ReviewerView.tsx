@@ -56,6 +56,8 @@ import { chipClass, fieldClass, tabCountClass, underlineStripClass, underlineTab
 import { Tooltip } from "../common/Tooltip";
 import { ContextMenu } from "../common/ContextMenu";
 import { HotspotsPanel, IssueDetail, exportReviewReport, onNewCode, useChangedLines, useHotspotsToReview } from "./ReviewerFindings";
+import { DepsPanel } from "../deps/DepsPanel";
+import { useDepsStore } from "../../state/depsStore";
 
 const STAGE_LABEL: Record<ReviewerStageId, TranslationKey> = {
   prepare: "reviewer.stagePrepare",
@@ -156,7 +158,7 @@ function StageIcon({ status }: { status: ReviewerStage["status"] }) {
   }
 }
 
-type SubTab = "issues" | "hotspots" | "tests" | "coverage" | "log";
+type SubTab = "issues" | "hotspots" | "tests" | "coverage" | "deps" | "log";
 
 export function ReviewerView() {
   const t = useT();
@@ -177,6 +179,11 @@ export function ReviewerView() {
   const [stageFilter, setStageFilter] = useState<ReviewerStageId | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
   const [exportAt, setExportAt] = useState<{ x: number; y: number } | null>(null);
+  // «Dependencias» rides with the quality tabs (user, 2026-10-23); its count is what needs action.
+  const depsVulnerable = useDepsStore((s) => (project ? s.reports[project.id]?.rows.filter((r) => r.advisories.length > 0).length : undefined));
+  useEffect(() => {
+    if (project) void useDepsStore.getState().loadReports([project.id]).catch(() => {});
+  }, [project?.id]);
 
   useEffect(() => {
     void refresh().catch(() => {});
@@ -359,6 +366,7 @@ export function ReviewerView() {
           <SubTabButton id="hotspots" active={tab} onSelect={setTab} label={t("reviewer.tabHotspots")} count={hotspotsToReview} />
           <SubTabButton id="tests" active={tab} onSelect={setTab} label={t("reviewer.tabTests")} count={summary?.tests?.total} />
           <SubTabButton id="coverage" active={tab} onSelect={setTab} label={t("reviewer.tabCoverage")} />
+          <SubTabButton id="deps" active={tab} onSelect={setTab} label={t("deps.tab")} count={depsVulnerable} />
           <SubTabButton id="log" active={tab} onSelect={setTab} label={t("reviewer.tabLog")} />
           <span className="flex-1" />
           <HistoryStrip history={history} />
@@ -370,6 +378,7 @@ export function ReviewerView() {
         {tab === "hotspots" && <HotspotsPanel summary={summary} projectId={project.id} serverUrl={server.state === "running" ? server.url : null} />}
         {tab === "tests" && <TestsPanel summary={summary} />}
         {tab === "coverage" && <CoveragePanel summary={summary} />}
+        {tab === "deps" && <DepsPanel project={project} />}
         {tab === "log" && <LogPanel log={run?.log ?? EMPTY_LOG} running={running} stage={stageFilter} onClearStage={() => setStageFilter(null)} />}
       </div>
     </div>

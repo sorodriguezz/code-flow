@@ -17,6 +17,7 @@ import { useCsvStore } from "./state/csvStore";
 import { useThinkingDesignStore } from "./state/thinkingDesignStore";
 import { useGlassStore } from "./state/glassStore";
 import { useMotionStore } from "./state/motionStore";
+import { usePowerSaveStore } from "./state/powerSaveStore";
 import { useLanguageOverrideStore } from "./state/languageOverrideStore";
 import { useIconRulesStore } from "./state/iconRulesStore";
 import { useLanguageStore, useT } from "./state/languageStore";
@@ -80,6 +81,7 @@ const VaultView = lazy(() => import("./components/vault/VaultView").then((m) => 
 const DiagramsView = lazy(() =>
   import("./components/diagrams/DiagramsView").then((m) => ({ default: m.DiagramsView })),
 );
+const ToolboxView = lazy(() => import("./components/toolbox/ToolboxView").then((m) => ({ default: m.ToolboxView })));
 const FlowsView = lazy(() => import("./components/flows/FlowsView").then((m) => ({ default: m.FlowsView })));
 const ArchitectureView = lazy(() =>
   import("./components/architecture/ArchitectureView").then((m) => ({ default: m.ArchitectureView })),
@@ -119,6 +121,7 @@ const APP_VIEWS: Record<string, { view: MainView; workspace?: ApiWorkspace; rend
   diagrams: { view: "diagrams", render: () => <DiagramsView /> },
   flows: { view: "flows", render: () => <FlowsView /> },
   architecture: { view: "architecture", render: () => <ArchitectureView /> },
+  toolbox: { view: "toolbox", render: () => <ToolboxView /> },
   vault: { view: "vault", render: () => <VaultView /> },
   chat: { view: "chat", render: () => <ChatView /> },
 };
@@ -154,6 +157,7 @@ function useSatelliteBoot(): boolean {
         useThinkingDesignStore.getState().init(),
         useGlassStore.getState().init(),
         useMotionStore.getState().init(),
+        usePowerSaveStore.getState().init(),
         useLanguageOverrideStore.getState().init(),
         // The satellite draws its own title bar too, so the maximize button needs the same
         // rectangle tracking the main window's does.

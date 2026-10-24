@@ -861,6 +861,13 @@ pub fn spawn(app: AppHandle) {
         // The first look waits for the launch to settle.
         std::thread::sleep(Duration::from_secs(120));
         loop {
+            // Battery saving from Fuerte: no scheduled clone or pull (and the reindex after it) —
+            // the repositories catch up at the first tick after the level drops. «Actualizar» by
+            // hand still runs.
+            if crate::power::saving(2) {
+                std::thread::sleep(TICK);
+                continue;
+            }
             let now = chrono::Utc::now().timestamp_millis();
             let due: Vec<RefRepo> = crate::ai_usage::with_conn(list)
                 .and_then(Result::ok)

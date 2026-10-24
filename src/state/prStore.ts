@@ -4,6 +4,7 @@ import { pushErrorToast, useToastStore } from "./toastStore";
 import { useJobsStore } from "./jobsStore";
 import { useLanguageStore } from "./languageStore";
 import { usePrWatchStore } from "./prWatchStore";
+import { useTicketStore } from "./ticketStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { tabsOfProject, useAiPanelStore, type LinkPrSession } from "./aiPanelStore";
 import { translations } from "../lib/i18n/translations";
@@ -512,6 +513,8 @@ export const usePrStore = create<PrState>((set, get) => ({
       useToastStore.getState().pushToast(translate(merged ? "pr.mergedToast" : "pr.mergeQueued"), "success");
       if (warning) pushErrorToast(translate("pr.mergeWarning", { error: warning }));
       usePrWatchStore.getState().reconcile(watchWorkspaceId, busyKey, pr, get().decisionByPr[busyKey] ?? "none");
+      // Merged here: its ticket, if the branch was started from one, moves to done.
+      if (merged && target.kind === "project") void useTicketStore.getState().onPrMerged(target.projectId, pr.source_branch);
       if (target.kind === "project") void get().loadPullRequests(target.projectId);
       return true;
     } catch (e) {
@@ -537,6 +540,8 @@ export const usePrStore = create<PrState>((set, get) => ({
     );
     await get().loadPullRequests(projectId);
     useToastStore.getState().pushToast(translate("createPr.created"), "success");
+    // A branch started from a ticket: the PR is recorded on the link and the ticket moves to review.
+    void useTicketStore.getState().onPrCreated(projectId, input.sourceBranch, pr);
     return pr;
   },
 }));

@@ -32,6 +32,7 @@ import { ServiceImportModal } from "./ServiceImportModal";
 import { ServiceConsole } from "./ServiceConsole";
 import { PortsPanel } from "./PortsPanel";
 import { HeaderButton, PortsRow, SectionHeader, ServiceActions, ServiceList } from "./ServiceList";
+import { MockServiceRows } from "../api/MockServiceRows";
 import { ContainersList, ContainersPane, ContainersSummary, useContainersPulse } from "../containers/ContainersPanel";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useT } from "../../state/languageStore";
@@ -638,6 +639,8 @@ export function ServicesDock() {
                   onNew={(groupId) => setEditing({ service: null, groupId })}
                   onImport={() => setImporting(true)}
                 />
+                {/* The API client's collection mocks, under the services they are started with. */}
+                <MockServiceRows />
               </div>
               <div className="flex shrink-0 flex-col border-t border-[var(--cf-border)]">
                 <PortsRow selected={selection?.kind === "ports"} onSelect={() => setSelection({ kind: "ports" })} />

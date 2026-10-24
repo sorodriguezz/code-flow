@@ -45,6 +45,7 @@ import { NoteTagBar } from "./NoteTagBar";
 import { SaveTemplateModal } from "./SaveTemplateModal";
 import { NoteAiPanel } from "./NoteAiPanel";
 import { MeetingButton, MeetingSection } from "./meetings/MeetingSection";
+import { WorklogNoteBar } from "./worklog/WorklogNoteBar";
 import { noteRepoItems } from "./noteRepoItems";
 import { ICON_BUTTON, readingMinutes, relativeTime } from "./notesChrome";
 import type { NoteMonacoHandle } from "./NoteMonaco";
@@ -487,6 +488,9 @@ export function NoteEditor() {
           <NoteTagBar tags={draft.tags} onChange={(tags) => editDraft({ tags })} />
         </div>
       </div>
+
+      {/* A «Daily / Semanal» note's copy and regenerate strip; nothing on any other note. */}
+      <WorklogNoteBar noteId={draft.id} title={draft.title} content={draft.content} />
 
       {workspaceId && (
         <MeetingSection

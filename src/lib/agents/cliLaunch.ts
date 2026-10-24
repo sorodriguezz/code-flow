@@ -19,6 +19,20 @@ export function hasCli(provider: string): boolean {
 }
 
 /**
+ * The family of the shell the line is typed into, which decides its quoting: a POSIX shell (macOS,
+ * Linux, and Git Bash — Windows' default terminal), PowerShell, or `cmd`.
+ */
+export type CliShell = "posix" | "powershell" | "cmd";
+
+/** A shell profile's family, by its program: `pwsh.exe`/`powershell.exe`, `cmd.exe`, or POSIX. */
+export function shellFamily(command: string): CliShell {
+  const program = command.split(/[\\/]/).pop()?.toLowerCase().replace(/\.exe$/, "") ?? "";
+  if (program === "pwsh" || program === "powershell") return "powershell";
+  if (program === "cmd") return "cmd";
+  return "posix";
+}
+
+/**
  * The line that starts `provider`'s CLI: `binary` quoted for the shell, and — for Claude Code
  * only — `--resume` with the chat's session, so the terminal continues the very conversation the
  * chat was having.
@@ -31,7 +45,7 @@ export function cliLine(
   provider: string,
   binary: string,
   resume: { sessionId: string | null; accountId?: string | null },
-  windows: boolean,
+  shell: CliShell,
   extra: {
     /** Claude Code's `--settings` file: the status hooks that tell the rail what it is doing. */
     settings?: string;
@@ -43,9 +57,11 @@ export function cliLine(
     prompt?: string;
   } = {},
 ): string {
+  // Git Bash on Windows quotes as any POSIX shell: single quotes keep a `C:\…` path whole.
+  const windows = shell !== "posix";
   const quoted = quotePath(binary, windows);
   // PowerShell runs a quoted string only through the call operator.
-  const head = windows && quoted !== binary ? `& ${quoted}` : quoted;
+  const head = shell === "powershell" && quoted !== binary ? `& ${quoted}` : quoted;
   const parts = [head];
   if (provider === "claude" && extra.settings) parts.push(`--settings ${quotePath(extra.settings, windows)}`);
   if (provider === "claude" && extra.noteFile) parts.push(`--append-system-prompt-file ${quotePath(extra.noteFile, windows)}`);
@@ -54,18 +70,18 @@ export function cliLine(
   if (provider === "codex" && extra.note) parts.push(`-c ${quotePath(`developer_instructions=${extra.note}`, windows)}`);
   if (canResume(provider, resume)) parts.push(`--resume ${quotePath(resume.sessionId ?? "", windows)}`);
   const prompt = extra.prompt?.trim() ?? "";
-  if (prompt && promptInLine(provider, windows)) parts.push(quotePath(prompt, windows));
+  if (prompt && promptInLine(provider, shell)) parts.push(quotePath(prompt, windows));
   return parts.join(" ");
 }
 
 /**
  * Whether `provider`'s CLI takes its first prompt as an argument: `claude "…"` and `codex "…"`
  * start the interactive session with it. The others are started bare and the prompt is typed in
- * once they are ready. Never on Windows: PowerShell expands `$` inside the double quotes `cmd`
+ * once they are ready. Only in a POSIX shell: PowerShell expands `$` inside the double quotes `cmd`
  * needs, and a prompt is free text.
  */
-export function promptInLine(provider: string, windows: boolean): boolean {
-  return !windows && (provider === "claude" || provider === "codex");
+export function promptInLine(provider: string, shell: CliShell): boolean {
+  return shell === "posix" && (provider === "claude" || provider === "codex");
 }
 
 export function canResume(provider: string, resume: { sessionId: string | null; accountId?: string | null }): boolean {

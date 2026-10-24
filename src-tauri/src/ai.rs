@@ -1387,6 +1387,9 @@ pub mod task {
     /// A meeting's transcript turned into minutes, decisions, tasks… or a question about it
     /// answered — see `crate::meetings::ai`.
     pub const MEETINGS: &str = "meetings";
+    /// «Resumen de tu trabajo»: a daily or weekly summary written from the user's activity — see
+    /// [`super::worklog_write`].
+    pub const WORKLOG: &str = "worklog";
     /// A long answer cut to what is worth hearing, before the thinking mark reads it aloud — see
     /// [`super::spoken_summary`].
     pub const SPOKEN_SUMMARY: &str = "spoken-summary";
@@ -4239,6 +4242,20 @@ pub async fn meeting_answer(
     inv.system_prompt = Some(system);
     inv.model = model;
     inv.task = task::MEETINGS;
+    inv.text_only = true;
+    inv.read_only = true;
+    let run = run(engine, binary, inv).await?;
+    Ok(strip_wrapper_fence(&run.text))
+}
+
+/// «Resumen de tu trabajo»: the daily or weekly summary written from facts the app collected
+/// (`crate::worklog`) — commits, pull requests, reviews, meetings — which go on stdin. Text only
+/// and read-only, so it routes anywhere a note does.
+pub async fn worklog_write(engine: &dyn AiEngine, binary: &str, model: &str, system: &str, ask: &str, facts: &str) -> Result<String, String> {
+    let mut inv = AiInvocation::new(ask, facts);
+    inv.system_prompt = Some(system);
+    inv.model = model;
+    inv.task = task::WORKLOG;
     inv.text_only = true;
     inv.read_only = true;
     let run = run(engine, binary, inv).await?;
