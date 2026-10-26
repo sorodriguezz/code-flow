@@ -88,7 +88,7 @@ pub struct Round {
     pub meta: Option<FlowMeta>,
 }
 
-fn lock(db: &Db) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>, String> {
+fn lock(db: &Db) -> Result<crate::db::DbGuard<'_>, String> {
     db.0.lock().map_err(|e| e.to_string())
 }
 
@@ -497,7 +497,7 @@ mod round_trip {
                  VALUES ('w1', 'Plataforma', 'workflow', '#111', 0, '2026-01-01T00:00:00+00:00');",
         )
         .unwrap();
-        Db(std::sync::Mutex::new(conn))
+        Db::new(conn)
     }
 
     fn document(script: &str) -> String {

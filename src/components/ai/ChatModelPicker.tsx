@@ -171,9 +171,10 @@ export function ChatModelPicker({
   // menu with what cannot be picked (user's ask, 2026-10-10). The one in use stays, so the menu
   // never loses the current choice. Unchecked counts as usable — see `isProviderReady`.
   const selectable = AI_PROVIDERS.filter((p) => p.available && (p.id === providerId || isProviderReady(statuses, p.id)));
-  // What the engine reported for the last turn beats the stored setting: with no model configured
-  // the CLI picks its own, so only the reply knows which.
-  const shownModel = liveModel ?? configuredModel;
+  // A configured model is what the next turn runs on, so it wins — the last turn's report would keep
+  // naming the old model after a pick. Only with none configured does the reply say which the CLI
+  // chose on its own.
+  const shownModel = configuredModel.trim() ? configuredModel : (liveModel ?? configuredModel);
   const active = AI_PROVIDERS.find((p) => p.id === providerId) ?? AI_PROVIDERS[0];
   const activeLabel = active.label ?? (active.labelKey ? t(active.labelKey) : active.id);
 

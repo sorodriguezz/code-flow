@@ -28,6 +28,18 @@ function truncate(text: string): string {
 
 function toolCallLabel(name: string, input: unknown): string {
   if (!isRecord(input)) return name;
+  // A sub-agent is named by its short description; its prompt is the long brief behind it. Cline's
+  // `spawn_agent` has no description, only its `task`.
+  if ((name === "Task" || name === "Agent" || name === "spawn_subagent") && typeof input.description === "string" && input.description.trim()) {
+    return `${name}: ${truncate(input.description)}`;
+  }
+  if (name === "spawn_agent" && typeof input.task === "string" && input.task.trim()) return `${name}: ${truncate(input.task)}`;
+  // Cline's tools take lists (`commands`, `paths`): the first item is what it is doing.
+  for (const value of Object.values(input)) {
+    if (Array.isArray(value) && typeof value[0] === "string" && value[0].trim() && !TOOL_ARG_KEYS.some((key) => typeof input[key] === "string")) {
+      return `${name}: ${truncate(value[0])}`;
+    }
+  }
   for (const key of TOOL_ARG_KEYS) {
     const value = input[key];
     if (typeof value === "string" && value.trim()) return `${name}: ${truncate(value)}`;
@@ -194,6 +206,21 @@ function codeflowLine(event: Record<string, unknown>): string | null {
   }
 }
 
+/**
+ * Cline's `--json` (3.0.73): a tool call as it starts, and the model's prose once a block is done.
+ * The deltas and usage between them are noise in a live log.
+ */
+function clineLine(event: unknown): string | null {
+  if (!isRecord(event)) return null;
+  if (event.type === "content_start" && event.contentType === "tool" && typeof event.toolName === "string") {
+    return `⏵ ${toolCallLabel(event.toolName, event.input)}`;
+  }
+  if (event.type === "content_end" && event.contentType === "text" && typeof event.text === "string" && event.text.trim()) {
+    return truncate(event.text);
+  }
+  return null;
+}
+
 export function formatAgentLogLine(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed.startsWith("{")) return raw;
@@ -219,6 +246,8 @@ export function formatAgentLogLine(raw: string): string | null {
     }
     case "system":
       return systemLine(event);
+    case "agent_event":
+      return clineLine(event.event);
     case "codeflow":
       return codeflowLine(event);
     // The tool results the model reads back, and the final verdict, which the caller renders as

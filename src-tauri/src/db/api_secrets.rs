@@ -1400,7 +1400,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        Db(Mutex::new(conn))
+        Db::new(conn)
     }
 
     fn text(db: &Db, sql: &str) -> String {

@@ -61,7 +61,7 @@ fn database(repo: &Path) -> (Db, String, String) {
     )
     .unwrap();
     let agent = queries::upsert_workspace_agent(&conn, None, &ws.id, "Claude", "", "claude", PLANNER_MODEL, "", true, None).unwrap();
-    (Db(std::sync::Mutex::new(conn)), project.id, agent.id)
+    (Db::new(conn), project.id, agent.id)
 }
 
 /// The run's configuration as `create_hybrid_task` would freeze it for Ollama at 16k.

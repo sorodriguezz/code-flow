@@ -19,6 +19,19 @@ export interface SidebarGroup {
   id: string;
   name: string;
   collapsed: boolean;
+  /** The band's hue, picked from the group's menu. Absent, one of `GROUP_TINTS` chosen by the id. */
+  color?: string;
+}
+
+/** The hues a group's band can be tinted with — the menu's swatches, and the automatic pick. */
+export const GROUP_TINTS = ["#3b82f6", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#84cc16"];
+
+/** The hue `group`'s band is drawn in: its own, else one kept by its id. */
+export function groupTint(group: SidebarGroup): string {
+  if (group.color) return group.color;
+  let hash = 0;
+  for (const char of group.id) hash = (hash * 31 + char.charCodeAt(0)) | 0;
+  return GROUP_TINTS[Math.abs(hash) % GROUP_TINTS.length];
 }
 
 export interface SidebarLayout {
@@ -41,7 +54,12 @@ function parse(raw: string | null): SidebarLayout {
       groups: Array.isArray(value.groups)
         ? value.groups
             .filter((g): g is SidebarGroup => !!g && typeof g.id === "string" && typeof g.name === "string")
-            .map((g) => ({ id: g.id, name: g.name, collapsed: g.collapsed === true }))
+            .map((g) => ({
+              id: g.id,
+              name: g.name,
+              collapsed: g.collapsed === true,
+              ...(typeof g.color === "string" && g.color ? { color: g.color } : {}),
+            }))
         : [],
       groupOf: value.groupOf && typeof value.groupOf === "object" ? (value.groupOf as Record<string, string>) : {},
     };
@@ -85,6 +103,8 @@ interface SidebarLayoutState {
   /** The group goes; its repositories go back to the ungrouped list. */
   deleteGroup: (workspaceId: string, groupId: string) => void;
   toggleGroup: (workspaceId: string, groupId: string) => void;
+  /** `null` goes back to the automatic hue. */
+  setGroupColor: (workspaceId: string, groupId: string, color: string | null) => void;
   /** `null` takes it out of any group. */
   setGroup: (workspaceId: string, projectId: string, groupId: string | null) => void;
 }
@@ -145,6 +165,18 @@ export const useSidebarLayoutStore = create<SidebarLayoutState>((set, get) => {
       write(workspaceId, {
         ...layout,
         groups: layout.groups.map((g) => (g.id === groupId ? { ...g, collapsed: !g.collapsed } : g)),
+      });
+    },
+
+    setGroupColor: (workspaceId, groupId, color) => {
+      const layout = current(workspaceId);
+      write(workspaceId, {
+        ...layout,
+        groups: layout.groups.map((g) => {
+          if (g.id !== groupId) return g;
+          const { color: _old, ...rest } = g;
+          return color ? { ...rest, color } : rest;
+        }),
       });
     },
 

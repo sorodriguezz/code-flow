@@ -116,7 +116,7 @@ export function conversationToMarkdown(conversation: ExportConversation, labels:
       lines.push("");
     }
     if (turn.trace && turn.trace.length > 0) {
-      const body = turn.trace.map((line) => line.text).join("\n");
+      const body = turn.trace.map((line) => line.text).filter(Boolean).join("\n");
       const ticks = fence(body);
       lines.push(
         `<details><summary>${labels.process(turn.trace.length)}</summary>`,
@@ -151,7 +151,7 @@ export function conversationToJson(conversation: ExportConversation): string {
         isError: turn.isError ?? false,
         isCancelled: turn.isCancelled ?? false,
         outputs: turn.outputs ?? [],
-        ...(turn.trace ? { trace: turn.trace.map((line) => ({ stream: line.stream, text: line.text })) } : {}),
+        ...(turn.trace ? { trace: turn.trace.filter((line) => line.text).map((line) => ({ stream: line.stream, text: line.text })) } : {}),
       })),
     },
     null,

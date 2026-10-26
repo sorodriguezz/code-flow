@@ -36,7 +36,7 @@ pub const CLI_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "grok", "openc
 /// How often a waiting Agents task is looked at.
 const AGENT_POLL: Duration = Duration::from_secs(3);
 
-fn lock_db(host: &AppHost) -> Result<std::sync::MutexGuard<'_, rusqlite::Connection>, String> {
+fn lock_db(host: &AppHost) -> Result<crate::db::DbGuard<'_>, String> {
     let db = host.app.state::<Db>();
     // The guard borrows the state, which lives as long as the app handle the host holds.
     let db: &Db = db.inner();

@@ -1,7 +1,9 @@
 <!doctype html>
 <!-- `lang` is the first frame's only: `languageStore` rewrites it to the language on screen (the
      user's choice, or the system's on a first run), which is what screen readers pick a voice by. -->
-<html lang="en">
+<!-- `spellcheck` is inherited: off here, no field underlines words in red (WebView2 does on
+     Windows; user's ask, 2026-10-26). A field that wants it sets `spellcheck="true"` itself. -->
+<html lang="en" spellcheck="false">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/codeflow.svg" />

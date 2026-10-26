@@ -1169,7 +1169,7 @@ mod live {
             risks: vec![],
         };
         hybrid_queries::store_plan(&conn, &detail.chain.id, &plan, budget::Delegate::All).unwrap();
-        let db = Db(std::sync::Mutex::new(conn));
+        let db = Db::new(conn);
         let app = tauri::test::mock_app();
         let repos = vec![RepoRef { project_id: project.id.clone(), name: "live".into(), path: repo.to_string_lossy().into_owned() }];
         let report = run(Job { app: app.handle(), db: &db, chain_id: &detail.chain.id, repos: &repos })

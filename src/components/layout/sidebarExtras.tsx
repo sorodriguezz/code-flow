@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, GitPullRequest, Pin } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, GitPullRequest, Palette, Pin } from "lucide-react";
 import type { Project } from "../../types/domain";
 import type { ProjectMenuContext } from "./projectMenu";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useRepoSummaryStore } from "../../state/repoSummaryStore";
-import { useSidebarLayout, useSidebarLayoutStore, type SidebarGroup } from "../../state/sidebarLayoutStore";
+import { GROUP_TINTS, useSidebarLayout, useSidebarLayoutStore, type SidebarGroup } from "../../state/sidebarLayoutStore";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useAiPanelStore } from "../../state/aiPanelStore";
 import { promptAction } from "../../state/promptStore";
@@ -156,7 +156,7 @@ export function ProjectBadges({ project, isActive }: { project: Project; isActiv
 }
 
 /** A group's heading in the panel: its name and count, a click folds it, the right-click renames
- *  or deletes it (its repositories go back to the ungrouped list). */
+ *  it, tints its band or deletes it (its repositories go back to the ungrouped list). */
 export function GroupHeader({ workspaceId, group, count }: { workspaceId: string; group: SidebarGroup; count: number }) {
   const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
@@ -189,6 +189,20 @@ export function GroupHeader({ workspaceId, group, count }: { workspaceId: string
                 const name = await promptAction(t("sidebar.newGroupPrompt"), { initial: group.name });
                 if (name) store.renameGroup(workspaceId, group.id, name);
               },
+            },
+            {
+              label: t("sidebar.menuColor"),
+              icon: Palette,
+              onClick: () => {},
+              children: [
+                { label: t("sidebar.groupColorAuto"), swatch: "transparent", checked: !group.color, onClick: () => store.setGroupColor(workspaceId, group.id, null) },
+                ...GROUP_TINTS.map((color) => ({
+                  label: color,
+                  swatch: color,
+                  checked: color === group.color,
+                  onClick: () => store.setGroupColor(workspaceId, group.id, color),
+                })),
+              ],
             },
             { label: t("sidebar.deleteGroup"), danger: true, onClick: () => store.deleteGroup(workspaceId, group.id) },
           ]}

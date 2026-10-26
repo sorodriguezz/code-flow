@@ -25,9 +25,91 @@ pub mod service_queries;
 pub mod mock_queries;
 
 use rusqlite::Connection;
-use std::sync::Mutex;
+use std::cell::Cell;
+use std::ops::{Deref, DerefMut};
+use std::sync::{LockResult, Mutex, MutexGuard, PoisonError, TryLockError, TryLockResult};
 
-pub struct Db(pub Mutex<Connection>);
+pub struct Db(pub DbMutex);
+
+impl Db {
+    pub fn new(conn: Connection) -> Self {
+        Db(DbMutex(Mutex::new(conn)))
+    }
+}
+
+/// The app's one connection behind a `std` mutex that knows which thread holds it.
+///
+/// A `std::sync::Mutex` locked a second time from the thread that already holds it never returns —
+/// no panic, no error, nothing in the log. With `Db` that is a whole-app freeze: the stuck thread
+/// keeps the connection, and the next sync command (Tauri runs those on the main thread) waits on it
+/// for good — "not responding" until killed. It happened once already (2026-10-26): `chat_send`
+/// read a setting through `ai_usage::setting` inside its own lock block.
+///
+/// So a second lock from the same thread is caught before it can block: in a debug build it panics
+/// there and then, naming the mistake; in a release build it is logged (the hang still follows, but
+/// the log says why) — panicking there would poison the connection for every later command instead.
+/// The guard is `!Send` like `MutexGuard`, so it cannot follow a task to another thread.
+pub struct DbMutex(Mutex<Connection>);
+
+thread_local! {
+    static HOLDS_DB: Cell<bool> = const { Cell::new(false) };
+}
+
+impl DbMutex {
+    pub fn lock(&self) -> LockResult<DbGuard<'_>> {
+        if HOLDS_DB.with(Cell::get) {
+            let why = "database: Db locked again on the thread that already holds it — this deadlocks; \
+                       take what you need before the lock block, or pass the held connection down";
+            if cfg!(debug_assertions) {
+                panic!("{why}");
+            }
+            crate::applog::error(&format!("{why}\n{}", std::backtrace::Backtrace::force_capture()));
+        }
+        self.0.lock().map(DbGuard::held).map_err(|poisoned| PoisonError::new(DbGuard::held(poisoned.into_inner())))
+    }
+
+    /// Never waits, so never deadlocks: a second take from the holding thread is `WouldBlock`.
+    pub fn try_lock(&self) -> TryLockResult<DbGuard<'_>> {
+        match self.0.try_lock() {
+            Ok(inner) => Ok(DbGuard::held(inner)),
+            Err(TryLockError::Poisoned(poisoned)) => {
+                Err(TryLockError::Poisoned(PoisonError::new(DbGuard::held(poisoned.into_inner()))))
+            }
+            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
+        }
+    }
+}
+
+/// [`DbMutex::lock`]'s guard: the connection, and the thread's mark cleared when it goes.
+pub struct DbGuard<'a> {
+    inner: MutexGuard<'a, Connection>,
+}
+
+impl<'a> DbGuard<'a> {
+    fn held(inner: MutexGuard<'a, Connection>) -> Self {
+        HOLDS_DB.with(|held| held.set(true));
+        DbGuard { inner }
+    }
+}
+
+impl Drop for DbGuard<'_> {
+    fn drop(&mut self) {
+        HOLDS_DB.with(|held| held.set(false));
+    }
+}
+
+impl Deref for DbGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.inner
+    }
+}
+
+impl DerefMut for DbGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.inner
+    }
+}
 
 // Opening used to be one call, `init()`, that also migrated and recovered and was `.expect()`ed in
 // `run()`: a migration step that met data it did not expect, a file that is no longer a database, a
@@ -178,7 +260,7 @@ fn write_stamp(conn: &Connection, stamp: i64) -> rusqlite::Result<()> {
 /// that owns them. See `queries::recover_after_restart`.
 pub fn finish(conn: Connection) -> rusqlite::Result<Db> {
     queries::recover_after_restart(&conn)?;
-    Ok(Db(Mutex::new(conn)))
+    Ok(Db::new(conn))
 }
 
 /// A throwaway database in memory, for a launch where the state root must not be written to.
@@ -259,6 +341,25 @@ pub fn configure(conn: Connection) -> rusqlite::Result<Connection> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn db_locks_again_once_the_guard_is_gone() {
+        let db = Db::new(Connection::open_in_memory().unwrap());
+        drop(db.0.lock().unwrap());
+        let conn = db.0.lock().unwrap();
+        assert_eq!(scalar(&conn, "SELECT 1"), 1);
+        drop(conn);
+        assert!(db.0.try_lock().is_ok());
+    }
+
+    /// The freeze of 2026-10-26, caught instead of hung: a std mutex taken twice by one thread.
+    #[test]
+    #[should_panic(expected = "locked again on the thread that already holds it")]
+    fn db_locked_twice_on_one_thread_panics_instead_of_hanging() {
+        let db = Db::new(Connection::open_in_memory().unwrap());
+        let _held = db.0.lock().unwrap();
+        let _again = db.0.lock();
+    }
 
     fn scalar(conn: &Connection, sql: &str) -> i64 {
         conn.query_row(sql, [], |row| row.get(0)).unwrap()

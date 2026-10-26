@@ -62,6 +62,13 @@
 //! earlier CodeFlow wrote — keeps `--continue`, exactly as before. That is the only fallback that
 //! can occur: a build older than 1.1.10 rejects `--output-format stream-json` outright, so it
 //! never reaches a second turn here at all.
+//!
+//! # No sub-agent lanes
+//!
+//! Antigravity has sub-agents (`invoke_subagent` in 1.4.7), but the run card draws no lanes for it
+//! (`src/lib/subagentLanes.ts`): its `stream-json`, as captured, says only `step_update` (index and
+//! state) — nothing names a sub-agent — and it talks to Google's backend, so it cannot be pointed at
+//! a fake API to see what a delegating run prints.
 
 use tokio::process::Command;
 

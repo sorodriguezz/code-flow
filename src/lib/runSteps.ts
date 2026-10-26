@@ -58,11 +58,11 @@ export function parseRunSteps(lines: readonly AiRunLine[] | undefined): RunStep[
 /** What calling `tool` means the run is doing. Unknown tools (and every MCP one) are "using tools". */
 export function phaseOfTool(tool: string): RunPhase {
   const name = tool.toLowerCase();
-  if (/^(read|notebookread|ls|view|cat)$/.test(name)) return "read";
-  if (/^(grep|glob|search|websearch|webfetch|toolsearch|find)$/.test(name)) return "search";
-  if (/^(edit|multiedit|write|notebookedit|apply_patch|str_replace_editor|create)$/.test(name)) return "edit";
-  if (/^(bash|bashoutput|shell|killshell|exec|run_terminal_cmd)$/.test(name)) return "run";
-  if (/^(task|agent)$/.test(name)) return "delegate";
+  if (/^(read|notebookread|ls|view|cat|read_file|list_dir)$/.test(name)) return "read";
+  if (/^(grep|glob|search|websearch|webfetch|web_search|web_fetch|toolsearch|find)$/.test(name)) return "search";
+  if (/^(edit|multiedit|write|notebookedit|apply_patch|str_replace_editor|search_replace|create)$/.test(name)) return "edit";
+  if (/^(bash|bashoutput|shell|killshell|exec|run_terminal_cmd|run_terminal_command)$/.test(name)) return "run";
+  if (/^(task|agent|spawn_subagent|spawn_agent)$/.test(name)) return "delegate";
   if (/^(todowrite|exitplanmode|todo)$/.test(name)) return "plan";
   return "tool";
 }
@@ -74,8 +74,8 @@ export function phaseOfSteps(steps: readonly RunStep[]): RunPhase {
   return last.kind === "tool" ? phaseOfTool(last.tool) : "work";
 }
 
-const READS = /^(read|notebookread|view)$/i;
-const EDITS = /^(edit|multiedit|write|notebookedit|create)$/i;
+const READS = /^(read|notebookread|view|read_file)$/i;
+const EDITS = /^(edit|multiedit|write|notebookedit|create|search_replace)$/i;
 
 /**
  * The files a run read or changed, in the order it first touched them — the "sources" a finished

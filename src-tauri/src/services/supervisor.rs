@@ -1976,7 +1976,6 @@ mod tests {
     #[cfg(unix)]
     mod live {
         use super::*;
-        use std::sync::Mutex;
 
         struct Harness {
             app: tauri::App<tauri::test::MockRuntime>,
@@ -1997,7 +1996,7 @@ mod tests {
                     service_queries::create_service(&conn, service).unwrap();
                 }
                 let app = tauri::test::mock_app();
-                app.manage(Db(Mutex::new(conn)));
+                app.manage(Db::new(conn));
                 app.manage(TerminalRegistry::default());
                 let sup = Arc::new(Supervisor::default());
                 app.manage(sup.clone());

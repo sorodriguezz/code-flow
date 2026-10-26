@@ -7,6 +7,7 @@ import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { RunPhase } from "../../lib/thinking/activity";
 import { parseRunSteps, phaseOfSteps, touchedFiles, type RunStep } from "../../lib/runSteps";
+import { lanesOf, type SubagentLane } from "../../lib/subagentLanes";
 
 /**
  * A run, while it runs — and what it left behind afterwards.
@@ -26,6 +27,12 @@ import { parseRunSteps, phaseOfSteps, touchedFiles, type RunStep } from "../../l
  * Finished (`running` false, a recorded `lines`), it folds into one quiet line — "Pensó 15 s ·
  * 5 pasos" — that opens to the same rows, wrapped and selectable: the reason anyone opens it is to
  * take a path or a stack trace out of it.
+ *
+ * A run that delegated (Claude Code's `Task`/`Agent`) draws its sub-agents as **lanes** under the
+ * feed (`lib/subagentLanes`): one per sub-agent, its short description, the step it is on and a bar
+ * for its span of the run, so the ones running side by side read as side by side. Their steps leave
+ * the main feed — they are the lanes' — and a lane opens to them on a click. A lane that is done
+ * folds to its one line (user's ask, 2026-10-26).
  *
  * `runId` is the id the caller minted and passed to the backend — what ties these lines, the timer
  * and the stop button to this particular run.
@@ -87,13 +94,17 @@ export function AiRunLog({
 }) {
   const liveLines = useAiRunStore((s) => (runId ? s.linesByRun[runId] : undefined));
   const lines = explicitLines ?? liveLines;
-  const steps = useMemo(() => parseRunSteps(lines), [lines]);
+  const allSteps = useMemo(() => parseRunSteps(lines), [lines]);
+  const { lanes, total } = useMemo(() => lanesOf(lines), [lines]);
+  const steps = useMemo(() => (lanes.length > 0 ? allSteps.filter((step) => !step.sub) : allSteps), [allSteps, lanes]);
+  const laneSpan = { lanes, total, stepTotal: allSteps.length };
 
   if (!running) {
-    if (steps.length === 0 && !thinking?.trim()) return null;
+    if (allSteps.length === 0 && !thinking?.trim()) return null;
     return (
       <FinishedRun
         steps={steps}
+        laneSpan={laneSpan}
         thinking={thinking}
         durationMs={durationMs}
         label={label}
@@ -106,6 +117,7 @@ export function AiRunLog({
     <LiveRun
       runId={runId}
       steps={steps}
+      laneSpan={laneSpan}
       startedAt={startedAt ?? null}
       label={label}
       thinking={thinking}
@@ -137,9 +149,18 @@ const PHASE_LABEL: Record<RunPhase, TranslationKey> = {
 
 type StepStatus = "run" | "ok" | "wait" | "stop";
 
+/** A run's sub-agent lanes, the line count their bars are drawn against, and every step the run
+ *  took — the main feed's and the lanes' — for the count beside the timer. */
+interface LaneSpan {
+  lanes: SubagentLane[];
+  total: number;
+  stepTotal: number;
+}
+
 function LiveRun({
   runId,
   steps,
+  laneSpan,
   startedAt,
   label,
   thinking,
@@ -151,6 +172,7 @@ function LiveRun({
 }: {
   runId?: string;
   steps: RunStep[];
+  laneSpan: LaneSpan;
   startedAt: number | null;
   label?: string;
   thinking?: string;
@@ -188,7 +210,9 @@ function LiveRun({
   // Silence with a sub-agent out is the run working — its own output waits for theirs — so it is
   // said as that, in the ordinary colour, rather than as a stall.
   const open = subagents ? Object.values(subagents) : [];
-  const delegating = open.length > 0;
+  const lanes = laneSpan.lanes;
+  const liveLanes = lanes.filter((lane) => lane.status === "live").length;
+  const delegating = open.length > 0 || liveLanes > 0;
   const latest = open[open.length - 1];
   // What the watchdog still allows, mirroring `gone_quiet`: three times the limit while a sub-agent
   // is out. Said, so a quiet run reads as something that ends by itself — not a clock that runs on.
@@ -209,14 +233,15 @@ function LiveRun({
     : stalled
       ? { id: "quiet", text: t("ai.quietFor", { time: formatElapsed(quietFor) }), tone: "warn" as const }
       : quiet && delegating
-        ? { id: "subagents", text: t("ai.subagentsWorking", { n: open.length }), tone: "live" as const }
+        ? { id: "subagents", text: t("ai.subagentsWorking", { n: Math.max(open.length, liveLanes) }), tone: "live" as const }
         : label
           ? { id: "label", text: label, tone: "live" as const }
           : { id: phase, text: t(PHASE_LABEL[phase]), tone: "live" as const };
 
   const lastIndex = steps.length - 1;
   const lastStatus: StepStatus = cancelling ? "stop" : stalled ? "wait" : "run";
-  const hasFeed = steps.length > 0 || !!thinking?.trim() || (delegating && !!latest);
+  const hasFeed = steps.length > 0 || !!thinking?.trim() || (delegating && !!latest) || lanes.length > 0;
+  const hasStepFeed = steps.length > 0 || !!thinking?.trim() || (delegating && !!latest && lanes.length === 0);
   const showFeed = hasFeed && !folded;
   const quietBar = quiet && runId && (onRetry || !showStop || (autoStopIn !== null && autoStopIn > 0));
 
@@ -256,7 +281,7 @@ function LiveRun({
           </button>
           <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--cf-text-faint)]">
             {formatElapsed(elapsed)}
-            {reading && steps.length > 0 && ` · ${stepCount(t, steps.length)}`}
+            {reading && laneSpan.stepTotal > 0 && ` · ${stepCount(t, laneSpan.stepTotal)}`}
           </span>
           {runId && showStop && (
             <button
@@ -271,9 +296,9 @@ function LiveRun({
           )}
         </div>
 
-        {(showFeed || quietBar) && (
+        {((showFeed && hasStepFeed) || quietBar) && (
           <div className="overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-sunken)]">
-            {showFeed && (
+            {showFeed && hasStepFeed && (
               <div
                 ref={feedRef}
                 className={`cf-run-feed select-text overflow-y-auto ${reading ? "max-h-36 px-3.5 py-3" : "max-h-28 px-3 py-2.5"}`}
@@ -298,7 +323,8 @@ function LiveRun({
                       compact={!reading}
                     />
                   ))}
-                  {delegating && latest && (
+                  {/* The lanes say this better, one per sub-agent, where there are lanes. */}
+                  {delegating && latest && lanes.length === 0 && (
                     <StepRow
                       step={{
                         kind: "note",
@@ -321,7 +347,7 @@ function LiveRun({
                 the two, not a second copy of one action. */}
             {quietBar && (
               <div
-                className={`flex flex-wrap items-center gap-2 px-3 py-2 ${showFeed ? "border-t border-[var(--cf-border)]" : ""}`}
+                className={`flex flex-wrap items-center gap-2 px-3 py-2 ${showFeed && hasStepFeed ? "border-t border-[var(--cf-border)]" : ""}`}
               >
                 <span className="min-w-0 flex-1 text-[11px] text-[var(--cf-text-muted)]">
                   {autoStopIn !== null && autoStopIn > 0 ? t("ai.autoStopIn", { time: formatElapsed(autoStopIn) }) : null}
@@ -353,6 +379,10 @@ function LiveRun({
           </div>
         )}
 
+        {showFeed && lanes.length > 0 && (
+          <SubagentLanes lanes={lanes} total={laneSpan.total} running compact={!reading} />
+        )}
+
         {children}
       </div>
     </div>
@@ -362,6 +392,7 @@ function LiveRun({
 /** A finished run: one line that opens to the reasoning and every step, wrapped and selectable. */
 function FinishedRun({
   steps,
+  laneSpan,
   thinking,
   durationMs,
   label,
@@ -369,6 +400,7 @@ function FinishedRun({
   defaultOpen,
 }: {
   steps: RunStep[];
+  laneSpan: LaneSpan;
   thinking?: string;
   durationMs?: number;
   label?: string;
@@ -378,11 +410,13 @@ function FinishedRun({
   const t = useT();
   const [open, setOpen] = useState(defaultOpen);
   const reading = density === "reading";
-  const count = steps.length > 0 ? stepCount(t, steps.length) : null;
+  const { lanes, stepTotal } = laneSpan;
+  const count = stepTotal > 0 ? stepCount(t, stepTotal) : null;
+  const delegated = lanes.length > 0 ? laneCount(t, lanes.length) : null;
   const headline =
     durationMs !== undefined && durationMs > 0
-      ? [t("ai.thoughtFor", { time: formatThoughtTime(durationMs) }), count].filter(Boolean).join(" · ")
-      : (label ?? (steps.length > 0 ? t("ai.traceSteps", { n: steps.length }) : t("ai.runOutput")));
+      ? [t("ai.thoughtFor", { time: formatThoughtTime(durationMs) }), count, delegated].filter(Boolean).join(" · ")
+      : [label ?? (stepTotal > 0 ? t("ai.traceSteps", { n: stepTotal }) : t("ai.runOutput")), delegated].filter(Boolean).join(" · ");
   return (
     <div className="min-w-0">
       <button
@@ -416,9 +450,123 @@ function FinishedRun({
               <StepRow key={i} step={step} status="ok" compact wrap />
             ))}
           </ul>
+          {lanes.length > 0 && (
+            <div className={steps.length > 0 || thinking?.trim() ? "mt-2" : ""}>
+              <SubagentLanes lanes={lanes} total={laneSpan.total} running={false} compact />
+            </div>
+          )}
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * A run's sub-agents, one lane each: a dot for how it is going, what it was asked (the short
+ * description), its type, and a bar for its span of the run — against `total`, the run's line
+ * count, so lanes that overlap ran together. While the run runs, a lane still working shows the
+ * step it is on under its name; one that is done is a single line. A click opens a lane's steps.
+ */
+function SubagentLanes({
+  lanes,
+  total,
+  running,
+  compact,
+}: {
+  lanes: SubagentLane[];
+  total: number;
+  running: boolean;
+  compact: boolean;
+}) {
+  const t = useT();
+  const [opened, setOpened] = useState<Record<string, boolean>>({});
+  const span = Math.max(total, 1);
+  return (
+    <ul className="cf-fade-in grid min-w-0 grid-cols-[minmax(0,1fr)] overflow-hidden rounded-xl border border-[var(--cf-border)]">
+      {lanes.map((lane, i) => {
+        // A lane the run never heard the end of is not working any more once the run is over.
+        const live = running && lane.status === "live";
+        const open = opened[lane.id] ?? false;
+        const last = lane.steps[lane.steps.length - 1];
+        const left = (lane.start / span) * 100;
+        const width = Math.max((((lane.end ?? total) - lane.start) / span) * 100, 2);
+        const tone = live
+          ? "cf-runstep-live bg-[var(--cf-ai-a)]"
+          : lane.status === "failed"
+            ? "bg-[var(--cf-danger)]"
+            : lane.status === "done"
+              ? "bg-[var(--cf-success)]"
+              : "bg-[var(--cf-border-strong)]";
+        const bar = live ? "bg-[var(--cf-ai-a)]" : lane.status === "failed" ? "bg-[var(--cf-danger)]" : "bg-[var(--cf-text-faint)]";
+        return (
+          <li key={lane.id} className={i > 0 ? "border-t border-[var(--cf-border)]" : ""}>
+            <button
+              type="button"
+              onClick={() => setOpened((current) => ({ ...current, [lane.id]: !open }))}
+              aria-expanded={open}
+              disabled={lane.steps.length === 0}
+              className={`flex w-full min-w-0 flex-col gap-1 text-left transition-colors hover:bg-[var(--cf-hover)] disabled:hover:bg-transparent ${
+                compact ? "px-3 py-1.5" : "px-3.5 py-2"
+              }`}
+            >
+              <span className="flex w-full min-w-0 items-center gap-2">
+                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${tone}`} />
+                <span className={`min-w-0 flex-1 truncate text-[var(--cf-text)] ${compact ? "text-[12px]" : "text-[13px]"}`}>
+                  {lane.description || t("ai.laneUnnamed")}
+                </span>
+                {lane.type && (
+                  <span className="shrink-0 rounded-md bg-[var(--cf-hover)] px-1.5 font-mono text-[10px] leading-[18px] text-[var(--cf-text-muted)]">
+                    {lane.type}
+                  </span>
+                )}
+                {!live && (
+                  <span
+                    className={`shrink-0 text-[11px] tabular-nums ${
+                      lane.status === "failed" ? "text-[var(--cf-danger)]" : "text-[var(--cf-text-faint)]"
+                    }`}
+                  >
+                    {lane.status === "failed" ? t("ai.laneFailed") : lane.steps.length > 0 ? stepCount(t, lane.steps.length) : null}
+                  </span>
+                )}
+                {lane.steps.length > 0 && (
+                  <ChevronRight
+                    size={12}
+                    className={`shrink-0 text-[var(--cf-text-faint)] transition-transform duration-200 ${open ? "rotate-90" : ""}`}
+                  />
+                )}
+              </span>
+              {live && (
+                <span className="flex min-w-0 items-center gap-1.5 pl-3.5 text-[11px] text-[var(--cf-text-muted)]">
+                  {/* Codex reports no steps of a sub-agent: it is working, and that is all it says. */}
+                  <span className={`min-w-0 flex-1 truncate ${last ? "font-mono" : ""}`}>{last?.replace(/^⏵ /, "") ?? t("ai.phaseWork")}</span>
+                  {lane.steps.length > 0 && (
+                    <span className="shrink-0 tabular-nums text-[var(--cf-text-faint)]">{stepCount(t, lane.steps.length)}</span>
+                  )}
+                </span>
+              )}
+              <span className="relative ml-3.5 block h-[3px] rounded-full bg-[var(--cf-border)]">
+                <span className={`absolute top-0 h-[3px] rounded-full ${bar}`} style={{ left: `${left}%`, width: `${Math.min(width, 100 - left)}%` }} />
+              </span>
+            </button>
+            {open && (
+              <ul className="grid min-w-0 grid-cols-[minmax(0,1fr)] select-text px-3 pb-2 pl-6">
+                {lane.steps.map((row, j) => (
+                  <li
+                    key={j}
+                    className={`truncate font-mono text-[11px] leading-[1.6] text-[var(--cf-text-muted)] ${
+                      live && j === lane.steps.length - 1 ? "text-[var(--cf-text)]" : ""
+                    }`}
+                    title={row}
+                  >
+                    {row.replace(/^⏵ /, "")}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
@@ -659,6 +807,11 @@ function formatElapsed(seconds: number): string {
 /** "1 paso", "5 pasos" — the one step is said in the singular. */
 function stepCount(t: ReturnType<typeof useT>, n: number): string {
   return n === 1 ? t("ai.stepOne") : t("ai.stepsN", { n: String(n) });
+}
+
+/** "1 subagente", "3 subagentes". */
+function laneCount(t: ReturnType<typeof useT>, n: number): string {
+  return n === 1 ? t("ai.laneOne") : t("ai.lanesN", { n: String(n) });
 }
 
 /** "15 s", "2 min 05 s" — a duration said as one, for the folded line of a finished run. */

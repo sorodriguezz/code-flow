@@ -106,7 +106,14 @@ import {
   useProjectArrangement,
 } from "./sidebarExtras";
 import { useRepoSummaryPolling, useRepoSummaryStore } from "../../state/repoSummaryStore";
-import { sectionsOf, useSidebarLayout, useSidebarLayoutStore, type SidebarSection } from "../../state/sidebarLayoutStore";
+import {
+  groupTint,
+  sectionsOf,
+  useSidebarLayout,
+  useSidebarLayoutStore,
+  type SidebarGroup,
+  type SidebarSection,
+} from "../../state/sidebarLayoutStore";
 import { ConnectAdoModal } from "./ConnectAdoModal";
 import { ConnectGithubModal } from "./ConnectGithubModal";
 import { ConnectGitlabModal } from "./ConnectGitlabModal";
@@ -329,7 +336,7 @@ function CollapsedProjects({
               role="group"
               aria-label={section.group.name}
               className="flex flex-col items-center gap-1.5 rounded-[11px] p-[5px]"
-              style={groupBandStyle(section.group.id)}
+              style={groupBandStyle(section.group)}
             >
               {section.projects.map(chip)}
             </div>
@@ -374,14 +381,9 @@ function CollapsedProjects({
   );
 }
 
-/** The hues a group's band is tinted from — one per group, kept by its id. */
-const GROUP_TINTS = ["#3b82f6", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981", "#06b6d4", "#ef4444", "#84cc16"];
-
 /** A group's see-through band, folded or not: a tint of its hue and a hairline of the same. */
-function groupBandStyle(groupId: string): CSSProperties {
-  let hash = 0;
-  for (const char of groupId) hash = (hash * 31 + char.charCodeAt(0)) | 0;
-  const tint = GROUP_TINTS[Math.abs(hash) % GROUP_TINTS.length];
+function groupBandStyle(group: SidebarGroup): CSSProperties {
+  const tint = groupTint(group);
   return {
     background: `color-mix(in oklab, ${tint} 14%, transparent)`,
     boxShadow: `inset 0 0 0 1px color-mix(in oklab, ${tint} 34%, transparent)`,
@@ -3026,7 +3028,7 @@ export function Sidebar() {
                               // rows only — the header stays outside, on the panel.
                               <div
                                 className="space-y-0.5 rounded-[10px] p-[3px]"
-                                style={groupBandStyle(section.group.id)}
+                                style={groupBandStyle(section.group)}
                               >
                                 {rows.map((project) => (
                                   <ProjectRow key={project.id} project={project} at={slot++} reorder={reorder} canReorder={!needle} />

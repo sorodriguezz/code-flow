@@ -58,7 +58,8 @@ import { isRepoBusy, notifyStateChange, REPO_BUSY_MARKER } from "../lib/tauri/co
 import { onAiChatDelta, onAiDone, onChatTitled, onStateInvalidate, type AiChatDeltaEvent } from "../lib/tauri/events";
 import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunLine } from "./aiRunStore";
 import { parseTrace, traceIdOf } from "../lib/turnTrace";
-import { formatAgentLogLine, repeatsStatus } from "../lib/agentLog";
+import { repeatsStatus } from "../lib/agentLog";
+import { newLaneReader, readRunLine, type LaneMark } from "../lib/subagentLanes";
 import { providerCapabilities } from "../lib/aiProviders";
 import { leavesContextAsIs } from "../lib/contextWindow";
 import { translate } from "./languageStore";
@@ -186,14 +187,25 @@ export function traceOf(raw: unknown): AiRunLine[] | undefined {
   if (typeof raw === "string") return parseTrace(raw);
   if (!Array.isArray(raw)) return undefined;
   const lines: AiRunLine[] = [];
+  const reader = newLaneReader();
+  let last: string | undefined;
   for (const item of raw) {
     if (typeof item !== "object" || item === null) continue;
-    const { stream, line, text } = item as { stream?: unknown; line?: unknown; text?: unknown };
-    // Already-formatted entries (`text`) pass through; raw ones (`line`) are formatted here. The
-    // formatter answers `null` for a line that renders as nothing, which must not take up a slot.
-    const rendered = typeof text === "string" ? text : typeof line === "string" ? formatAgentLogLine(line) : null;
-    if (rendered === null || repeatsStatus(lines[lines.length - 1]?.text, rendered)) continue;
-    lines.push({ stream: stream === "stderr" ? "stderr" : "stdout", text: rendered });
+    const { stream, line, text, lanes } = item as { stream?: unknown; line?: unknown; text?: unknown; lanes?: unknown };
+    const channel = stream === "stderr" ? "stderr" : "stdout";
+    // Already-formatted entries (`text`) pass through with their lane marks; raw ones (`line`) are
+    // formatted and marked here. A line that renders as nothing and marks nothing takes no slot.
+    const read: AiRunLine | null =
+      typeof text === "string"
+        ? repeatsStatus(last, text) && !Array.isArray(lanes)
+          ? null
+          : { stream: channel, text, ...(Array.isArray(lanes) ? { lanes: lanes as LaneMark[] } : {}) }
+        : typeof line === "string"
+          ? readRunLine(reader, channel, line, last)
+          : null;
+    if (read === null) continue;
+    lines.push(read);
+    if (read.text) last = read.text;
   }
   return lines.length > 0 ? lines : undefined;
 }

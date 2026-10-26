@@ -8,7 +8,8 @@ import {
   type AiEngineEvent,
   type AiOutputBatchEvent,
 } from "../lib/tauri/events";
-import { formatAgentLogLine, repeatsStatus, trackSubagents, type SubagentState } from "../lib/agentLog";
+import { trackSubagents, type SubagentState } from "../lib/agentLog";
+import { newLaneReader, readRunLine, type LaneMark, type LaneReader } from "../lib/subagentLanes";
 // Types only, so neither of these is a module this one depends on at runtime — `notificationStore`
 // in particular reaches back into half the app, and importing it for real here would close a cycle.
 import type { TranslationKey } from "../lib/i18n/translations";
@@ -41,6 +42,8 @@ const MAX_TRACE_LINES = 300;
 export interface AiRunLine {
   stream: "stdout" | "stderr";
   text: string;
+  /** The sub-agent lanes this line speaks of (`lib/subagentLanes`) — Claude Code's only. */
+  lanes?: LaneMark[];
 }
 
 /** What is doing the work on a run: the engine's display name and, when one was forced, the model
@@ -173,6 +176,10 @@ const offs: (() => void)[] = [];
  * start re-render every subscriber. */
 let recentRuns: string[] = [];
 
+/** What reading each run's lines has to remember about its sub-agents (`LaneReader`). Bookkeeping
+ *  like `recentRuns`: dropped with the run's buffers. */
+const laneReaders = new Map<string, LaneReader>();
+
 /** Drops the keys `gone` names, or hands back the same object when there is nothing to drop —
  * so an ordinary run start still costs exactly the one spread it always did. */
 function without<T>(map: Record<string, T>, gone: Set<string>): Record<string, T> {
@@ -229,12 +236,18 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
       let last = logged?.[logged.length - 1]?.text;
       const openBefore = get().subagentsByRun[event.run_id] ?? NO_SUBAGENTS;
       let open = openBefore;
+      let reader = laneReaders.get(event.run_id);
+      if (!reader) {
+        reader = newLaneReader();
+        laneReaders.set(event.run_id, reader);
+      }
       for (const entry of event.lines) {
         open = trackSubagents(open, entry.line);
-        const text = formatAgentLogLine(entry.line);
-        if (text === null || repeatsStatus(last, text)) continue;
-        added.push({ stream: entry.stream, text });
-        last = text;
+        const line = readRunLine(reader, entry.stream, entry.line, last);
+        if (line === null) continue;
+        added.push(line);
+        // A line that only marks a lane's end prints nothing, and is not what the next repeats.
+        if (line.text) last = line.text;
       }
       if (open !== openBefore) {
         set((s) => ({ subagentsByRun: { ...s.subagentsByRun, [event.run_id]: open } }));
@@ -352,6 +365,9 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
         if (!s.active[id]) gone.add(id);
       }
       if (gone.size > 0) recentRuns = recentRuns.filter((id) => !gone.has(id));
+      for (const id of gone) laneReaders.delete(id);
+      // A run id reused starts reading its sub-agents afresh, with its lines.
+      laneReaders.delete(runId);
 
       // The engine is dropped along with the lines: routing can have changed since, and a stale
       // name on a fresh run is worse than no name at all. The backend re-announces immediately.
@@ -397,6 +413,7 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
   clear: (runId) =>
     set((s) => {
       const { [runId]: _dropped, ...rest } = s.linesByRun;
+      laneReaders.delete(runId);
       return { linesByRun: rest };
     }),
 

@@ -689,7 +689,7 @@ mod tests {
     fn db() -> Db {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
-        Db(Mutex::new(conn))
+        Db::new(conn)
     }
 
     /// The default that matters most in this whole module.

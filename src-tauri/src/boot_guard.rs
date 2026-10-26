@@ -177,9 +177,7 @@ fn scratch() -> db::Db {
         // anybody's data. A bare connection keeps every command answering with an error instead of
         // the app panicking at its first `state::<Db>()`.
         applog::error(&format!("database: even the scratch database failed — {e}"));
-        db::Db(std::sync::Mutex::new(
-            Connection::open_in_memory().expect("an in-memory SQLite connection"),
-        ))
+        db::Db::new(Connection::open_in_memory().expect("an in-memory SQLite connection"))
     })
 }
 

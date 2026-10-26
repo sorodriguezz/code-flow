@@ -6,7 +6,7 @@ use tauri::State;
 use crate::db::Db;
 use crate::experiences::{self, Experience, Filter, NewExperience};
 
-fn conn<'a>(db: &'a State<'_, Db>) -> Result<std::sync::MutexGuard<'a, rusqlite::Connection>, String> {
+fn conn<'a>(db: &'a State<'_, Db>) -> Result<crate::db::DbGuard<'a>, String> {
     db.0.lock().map_err(|e| e.to_string())
 }
 

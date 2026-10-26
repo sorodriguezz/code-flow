@@ -773,7 +773,10 @@ pub fn vectorize_in_background(scope: Scope, space: embed::Space) {
     }
     VECTORIZING.store(true, Ordering::SeqCst);
     drop(next);
-    tokio::spawn(vectorize(scope, space));
+    // Tauri's runtime, not `tokio::spawn`: callers include plain threads (the file watcher) with no
+    // runtime of their own, where `tokio::spawn` panicked — after `VECTORIZING` was set, so no pass
+    // ever ran again that session.
+    tauri::async_runtime::spawn(vectorize(scope, space));
 }
 
 async fn vectorize(mut scope: Scope, mut space: embed::Space) {

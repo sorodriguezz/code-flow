@@ -47,6 +47,19 @@
 //! conversation started read-only could never write again after the user switched file generation
 //! on — and one started without it would fail to resume. The tool allow-list carries the guarantee
 //! without that trap.
+//!
+//! # Streamed, since 1.0.62
+//!
+//! A run asks for `--output-format streaming-messages-json`: NDJSON in Claude Code's own
+//! `stream-json` shape (`system`/`init`, `assistant` and `user` messages, a closing `result`), so the
+//! run card reads its steps with the parser it already has for Claude, and draws grok's sub-agents
+//! (`spawn_subagent`) as lanes (`src/lib/subagentLanes.ts`). The reply, session, usage and errors
+//! come off the `result` line ([`streamed_reply`]). Verified against grok 1.0.62 pointed at a fake
+//! Chat Completions endpoint (a `[model.fake]` with `base_url`, under a scratch `GROK_HOME`).
+//!
+//! Two differences from Claude that the reading has to know: a sub-agent's steps carry
+//! `parent_tool_use_id: null` like the main agent's, and `total_cost_usd` is `0` when the cost is
+//! unknown, not when it was free. A run with `--json-schema` stays on `json`, which the flag implies.
 
 use tokio::process::Command;
 
@@ -139,7 +152,9 @@ impl AiEngine for GrokEngine {
             }
         }
 
-        cmd.arg("--output-format").arg("json");
+        // Streamed (see the module docs); a schema run keeps `json`, which `--json-schema` implies.
+        let format = if inv.json_schema.is_some() { "json" } else { "streaming-messages-json" };
+        cmd.arg("--output-format").arg(format);
 
         if !inv.model.trim().is_empty() {
             cmd.arg("--model").arg(inv.model);
@@ -203,15 +218,18 @@ impl AiEngine for GrokEngine {
         true
     }
 
-    /// `--output-format json` prints one object when the turn is over and nothing before it, so
-    /// silence is how a working grok looks. See [`AiEngine::quiet_while_working`].
+    /// A streamed run prints a message per model response, but one long response is a long silence,
+    /// and a schema run (`json`) prints nothing until it ends. See [`AiEngine::quiet_while_working`].
     fn quiet_while_working(&self) -> bool {
         true
     }
 
     /// A failed turn that got as far as printing its object still carries `usage`.
     fn reported_usage(&self, stdout: &str, _stderr: &str) -> Option<AiUsage> {
-        let reply = serde_json::from_str::<GrokReply>(stdout.trim()).ok()?;
+        let reply = match streamed_reply(stdout) {
+            Some(streamed) => streamed.reply,
+            None => serde_json::from_str::<GrokReply>(stdout.trim()).ok()?,
+        };
         reply.usage.as_ref().map(|u| usage_of(u, reply.total_cost_usd))
     }
 
@@ -261,7 +279,7 @@ fn usage_of(u: &GrokUsage, cost_usd: Option<f64>) -> AiUsage {
         input_tokens: u.input_tokens,
         output_tokens: u.output_tokens,
         cache_read_tokens: u.cache_read_input_tokens,
-        cache_write_tokens: 0,
+        cache_write_tokens: u.cache_creation_input_tokens,
         cost_usd,
     }
 }
@@ -299,7 +317,7 @@ fn parse_model_list(stdout: &str) -> Vec<String> {
 /// The shape of `--output-format json`. Only the fields this app acts on are named; the rest
 /// (`usage`, `total_cost_usd`, `requestId`, `thought`, …) are ignored rather than modelled, so a
 /// new field upstream can't fail the parse.
-#[derive(serde::Deserialize)]
+#[derive(Default, serde::Deserialize)]
 struct GrokReply {
     #[serde(default)]
     text: String,
@@ -313,8 +331,8 @@ struct GrokReply {
     usage: Option<GrokUsage>,
     /// Filed as the run's own cost. Claude's field of the same name is the *session's* running
     /// total on `--resume` (see `ClaudeEngine::session_cost`); whether grok's is too has not been
-    /// checked — it takes a paid turn, and there is no endpoint to point it at a fake API. If it is,
-    /// implement `AiEngine::session_cost` here the same way and the meter does the rest.
+    /// checked — it takes a paid turn (a fake endpoint reports no cost at all). If it is, implement
+    /// `AiEngine::session_cost` here the same way and the meter does the rest.
     #[serde(default)]
     total_cost_usd: Option<f64>,
 }
@@ -327,6 +345,96 @@ struct GrokUsage {
     output_tokens: i64,
     #[serde(default)]
     cache_read_input_tokens: i64,
+    /// Only the streamed `result` reports it; `json` folds nothing here.
+    #[serde(default)]
+    cache_creation_input_tokens: i64,
+}
+
+/// The closing `result` line of `streaming-messages-json`, as far as this app reads it.
+#[derive(serde::Deserialize)]
+struct StreamResult {
+    #[serde(default)]
+    result: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    is_error: bool,
+    #[serde(default)]
+    subtype: String,
+    #[serde(default)]
+    errors: Vec<serde_json::Value>,
+    #[serde(default)]
+    usage: Option<GrokUsage>,
+    #[serde(default)]
+    total_cost_usd: Option<f64>,
+    #[serde(default, rename = "modelUsage")]
+    model_usage: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+/// A streamed run, read into the shape `json` gives, plus what only the stream knows.
+struct Streamed {
+    reply: GrokReply,
+    /// `error_max_turns`, `error_during_execution`… with what grok said, when the run failed.
+    failure: Option<String>,
+    /// The last main-agent response's whole prompt — what the context meter shows.
+    context_tokens: Option<i64>,
+}
+
+/// Reads a `streaming-messages-json` run: `None` when `stdout` is not one (a `json` object, or
+/// text), `Some` with a failure when it is one that never reached its `result` line.
+fn streamed_reply(stdout: &str) -> Option<Streamed> {
+    let mut streamed = false;
+    let mut context_tokens = None;
+    let mut closing = None;
+    for line in stdout.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line.trim()) else { continue };
+        match value.get("type").and_then(|t| t.as_str()) {
+            Some("system") => streamed = true,
+            Some("assistant") => {
+                streamed = true;
+                // The main agent's prompt only: a sub-agent's (same null parent in grok) would be a
+                // smaller, unrelated figure — but it cannot be told apart, and the main agent
+                // answers last, so its response is the one left standing.
+                if let Some(usage) = value.pointer("/message/usage") {
+                    let n = |key: &str| usage.get(key).and_then(|v| v.as_i64()).unwrap_or(0);
+                    let total = n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens");
+                    if total > 0 {
+                        context_tokens = Some(total);
+                    }
+                }
+            }
+            Some("result") => closing = serde_json::from_value::<StreamResult>(value).ok(),
+            _ => {}
+        }
+    }
+    let Some(result) = closing else {
+        return streamed.then(|| Streamed {
+            reply: GrokReply::default(),
+            failure: Some("grok ended without a result".to_string()),
+            context_tokens,
+        });
+    };
+    let failure = (result.is_error || result.subtype.starts_with("error")).then(|| {
+        let said: Vec<String> = result
+            .errors
+            .iter()
+            .map(|e| e.as_str().map(str::to_string).unwrap_or_else(|| e.to_string()))
+            .collect();
+        let head = if result.subtype.is_empty() { "error".to_string() } else { result.subtype.clone() };
+        if said.is_empty() { head } else { format!("{head}: {}", said.join("; ")) }
+    });
+    Some(Streamed {
+        reply: GrokReply {
+            text: result.result,
+            session_id: result.session_id,
+            model_usage: result.model_usage,
+            usage: result.usage,
+            // `0` is "unknown" on this stream, never "free" — and `json` leaves the field out then.
+            total_cost_usd: result.total_cost_usd.filter(|cost| *cost > 0.0),
+        },
+        failure,
+        context_tokens,
+    })
 }
 
 /// Grok prints one JSON object on stdout in headless mode; banners and errors go to stderr.
@@ -336,7 +444,11 @@ fn interpret_output(
     stdout: &str,
     stderr: &str,
 ) -> Result<AiRun, String> {
+    let streamed = streamed_reply(stdout);
     if !success {
+        // A streamed stdout is the whole transcript: its `result` says what went wrong, not its bulk.
+        let said = streamed.as_ref().and_then(|s| s.failure.clone()).unwrap_or_default();
+        let stdout = if streamed.is_some() { said.as_str() } else { stdout };
         if quota_signal(stderr) {
             return Err(format!("{QUOTA_MARKER}{}", stderr.trim()));
         }
@@ -360,14 +472,26 @@ fn interpret_output(
         });
     }
 
-    // A clean exit whose stdout isn't the JSON we asked for means something printed over it. Fall
-    // back to treating stdout as the reply rather than failing: a usable answer in the wrong shape
-    // still beats an error, and this is also what a future `--output-format` change would look like.
-    let Ok(reply) = serde_json::from_str::<GrokReply>(raw) else {
-        if refusal_reply(raw, None) {
-            return Err(format!("{QUOTA_MARKER}{raw}"));
+    let (reply, context_tokens) = match streamed {
+        Some(Streamed { failure: Some(failure), .. }) => {
+            if quota_signal(&failure) {
+                return Err(format!("{QUOTA_MARKER}{failure}"));
+            }
+            return Err(format!("grok: {failure}"));
         }
-        return Ok(AiRun { text: raw.to_string(), session_id: None, model: None, usage: None, context_tokens: None });
+        Some(Streamed { reply, context_tokens, .. }) => (reply, context_tokens),
+        None => {
+            // A clean exit whose stdout isn't the JSON we asked for means something printed over
+            // it. Fall back to treating stdout as the reply rather than failing: a usable answer in
+            // the wrong shape still beats an error.
+            let Ok(reply) = serde_json::from_str::<GrokReply>(raw) else {
+                if refusal_reply(raw, None) {
+                    return Err(format!("{QUOTA_MARKER}{raw}"));
+                }
+                return Ok(AiRun { text: raw.to_string(), session_id: None, model: None, usage: None, context_tokens: None });
+            };
+            (reply, None)
+        }
     };
 
     let text = reply.text.trim();
@@ -393,10 +517,9 @@ fn interpret_output(
         session_id: reply.session_id.filter(|s| !s.trim().is_empty()),
         model,
         usage: usage.filter(|u| !u.is_empty()),
-        // `None`: this app does not read this CLI's output step by step, so it has no
-        // figure for the *final* prompt — only a cumulative total, which is a bill and not a
-        // gauge. The chat's context meter estimates instead, and says so.
-        context_tokens: None,
+        // Streamed, the last response's own prompt; `json` has only the cumulative total, which is
+        // a bill and not a gauge, so the chat's meter estimates instead and says so.
+        context_tokens,
     })
 }
 
@@ -547,5 +670,52 @@ mod tests {
         let usage = GrokEngine.reported_usage(SAMPLE, "").expect("usage");
         assert_eq!((usage.input_tokens, usage.output_tokens), (13820, 22));
         assert!(GrokEngine.reported_usage("", "not signed in").is_none());
+    }
+    /// `streaming-messages-json` from grok 1.0.62 against a fake Chat Completions endpoint, trimmed.
+    const STREAM: &str = concat!(
+        r#"{"type":"system","subtype":"init","session_id":"01a17978-a245","apiKeySource":"user","model":"fake","tools":["read_file"]}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_0","type":"message","role":"assistant","model":"fake","content":[{"type":"tool_use","id":"call_2","name":"spawn_subagent","input":{"prompt":"SUBTAREA","description":"Revisar archivos"}}],"usage":{"input_tokens":900,"output_tokens":1,"cache_read_input_tokens":100,"cache_creation_input_tokens":0}},"parent_tool_use_id":null,"session_id":"01a17978-a245"}"#,
+        "\n",
+        r#"{"type":"assistant","message":{"id":"msg_1","type":"message","role":"assistant","model":"fake","content":[{"type":"text","text":"FIN"}],"usage":{"input_tokens":1200,"output_tokens":1,"cache_read_input_tokens":300,"cache_creation_input_tokens":0}},"parent_tool_use_id":null,"session_id":"01a17978-a245"}"#,
+        "\n",
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":3,"result":"FIN","stop_reason":"end_turn","total_cost_usd":0.0,"usage":{"input_tokens":5,"output_tokens":5,"cache_read_input_tokens":2,"cache_creation_input_tokens":1,"server_tool_use":{"web_search_requests":0}},"modelUsage":{"fake":{"inputTokens":5,"outputTokens":5}},"session_id":"01a17978-a245"}"#,
+    );
+
+    #[test]
+    fn a_streamed_run_is_read_off_its_result_line() {
+        let run = interpret_output(true, "exit status: 0", STREAM, "").unwrap();
+        assert_eq!(run.text, "FIN");
+        assert_eq!(run.session_id.as_deref(), Some("01a17978-a245"));
+        assert_eq!(run.model.as_deref(), Some("fake"));
+        // The last response's whole prompt, not the first one's.
+        assert_eq!(run.context_tokens, Some(1500));
+        let usage = run.usage.expect("usage");
+        assert_eq!((usage.input_tokens, usage.cache_read_tokens, usage.cache_write_tokens), (5, 2, 1));
+        // `0` on this stream is "unknown", not "free".
+        assert_eq!(usage.cost_usd, None);
+        assert_eq!(GrokEngine.reported_usage(STREAM, "").map(|u| u.output_tokens), Some(5));
+    }
+
+    #[test]
+    fn a_streamed_failure_says_its_subtype_and_errors() {
+        let failed = r#"{"type":"system","subtype":"init","session_id":"s"}
+{"type":"result","subtype":"error_max_turns","is_error":true,"result":"","errors":["reached 3 turns"],"session_id":"s"}"#;
+        let err = interpret_output(true, "exit status: 0", failed, "").unwrap_err();
+        assert_eq!(err, "grok: error_max_turns: reached 3 turns");
+        let cut = r#"{"type":"system","subtype":"init","session_id":"s"}"#;
+        assert_eq!(interpret_output(true, "exit status: 0", cut, "").unwrap_err(), "grok: grok ended without a result");
+        // A failed exit names what the result said, not the transcript.
+        let err = interpret_output(false, "exit status: 1", failed, "").unwrap_err();
+        assert!(err.ends_with("error_max_turns: reached 3 turns"), "{err}");
+    }
+
+    #[test]
+    fn a_run_streams_unless_it_has_a_schema() {
+        let plain = AiInvocation::new("hola", "");
+        assert!(args_of(&plain).windows(2).any(|w| w == ["--output-format", "streaming-messages-json"]));
+        let mut schema = AiInvocation::new("hola", "");
+        schema.json_schema = Some("{}");
+        assert!(args_of(&schema).windows(2).any(|w| w == ["--output-format", "json"]));
     }
 }

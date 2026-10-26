@@ -1,4 +1,4 @@
-import { formatAgentLogLine, repeatsStatus } from "./agentLog";
+import { newLaneReader, readRunLine } from "./subagentLanes";
 import { getTurnTrace } from "./tauri/commands";
 import type { AiRunLine } from "../state/aiRunStore";
 
@@ -25,13 +25,16 @@ export function parseTrace(raw: string | null): AiRunLine[] | undefined {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return undefined;
     const lines: AiRunLine[] = [];
+    const reader = newLaneReader();
+    let last: string | undefined;
     for (const item of parsed) {
       if (typeof item !== "object" || item === null) continue;
       const { stream, line } = item as { stream?: unknown; line?: unknown };
       if (typeof line !== "string") continue;
-      const text = formatAgentLogLine(line);
-      if (text === null || repeatsStatus(lines[lines.length - 1]?.text, text)) continue;
-      lines.push({ stream: stream === "stderr" ? "stderr" : "stdout", text });
+      const read = readRunLine(reader, stream === "stderr" ? "stderr" : "stdout", line, last);
+      if (read === null) continue;
+      lines.push(read);
+      if (read.text) last = read.text;
     }
     return lines.length > 0 ? lines : undefined;
   } catch {

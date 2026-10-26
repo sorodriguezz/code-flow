@@ -1355,6 +1355,15 @@ pub async fn chat_send(
     // session whose contents were just replaced with a summary.
     let session_id = session_id.filter(|_| !auto_compacted);
 
+    // Before the lock below, never inside it: for most engines this reads a setting through
+    // `ai_usage::setting`, which takes the same `Db` mutex — and a `std` mutex locked twice from one
+    // thread waits forever. That hung the turn holding `Db`, and with it every sync command on the
+    // main thread: the whole app "not responding" until killed (2026-10-26).
+    let reaches_tools = if workspace_scope {
+        crate::context::need::reaches_workspace_tools(&config.provider)
+    } else {
+        crate::context::need::reaches_tools(&config.provider, plan)
+    };
     let (contexts, skills) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
 
@@ -1373,12 +1382,7 @@ pub async fn chat_send(
                     .map_err(|e| e.to_string())?;
             // The on-demand ones are listed for the model to read when it needs them, where the
             // engine can call the reader (`context::on_demand`).
-            let tools = if workspace_scope {
-                crate::context::need::reaches_workspace_tools(&config.provider)
-            } else {
-                crate::context::need::reaches_tools(&config.provider, plan)
-            };
-            contexts.extend(crate::context::on_demand::for_chat(workspace_contexts, tools));
+            contexts.extend(crate::context::on_demand::for_chat(workspace_contexts, reaches_tools));
         }
         // The chain this chat was opened to carry on, when it was opened from one: all of it, once
         // per session.
@@ -3941,7 +3945,7 @@ plain prose with no leading slash
         chat_queries::set_caveman_level(&conn, &c.id, "lite").unwrap();
         chat_queries::set_mcp_overrides(&conn, &c.id, r#"{"trello":true}"#).unwrap();
         let app = tauri::test::mock_app();
-        app.manage(Db(std::sync::Mutex::new(conn)));
+        app.manage(Db::new(conn));
         let db = || app.state::<Db>();
 
         let fork = chat_branch_conversation(db(), c.id.clone(), 3).unwrap();
