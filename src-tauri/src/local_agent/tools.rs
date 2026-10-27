@@ -138,7 +138,7 @@ pub type Door = Arc<dyn Fn(AppCall) -> Pin<Box<dyn Future<Output = Result<String
 const OBSERVE_TOOLS: &[&str] = &["service_logs", "service_wait", "terminal_output"];
 /// The app's action tools, offered only to a run that may act.
 const ACT_TOOLS: &[&str] =
-    &["service_restart", "open_in_editor", "notify", "propose_memory", "add_task", "db_query", "http_request", "run_with_secret"];
+    &["service_restart", "open_in_editor", "notify", "propose_memory", "flag_memory", "add_task", "db_query", "http_request", "run_with_secret"];
 
 /// The tools a run is offered, in the order the model reads them: what the project is (the map,
 /// the knowledge, the memories, the notes), then its files, then what may change them, then the app.
@@ -190,6 +190,10 @@ pub fn offered(grants: Grants, map: bool, checks: bool, inventory: &Inventory, g
             names.push("service_restart");
         }
         names.extend(["open_in_editor", "notify", "propose_memory"]);
+        // Only a run that was given memories (or may recall them) has one to doubt.
+        if inventory.memories > 0 {
+            names.push("flag_memory");
+        }
         if inventory.project {
             names.push("add_task");
         }
@@ -593,6 +597,16 @@ impl Toolbox {
                     "kind": { "type": "string", "enum": ["decision", "convention", "fact", "preference"], "description": "Optional: fact." }
                 }),
                 &["fact"],
+            ),
+            "flag_memory" => tool(
+                "flag_memory",
+                "Tells the user that a memory they approved in CodeFlow (one of the rules in your message, or what recall returned) is contradicted by the code, so it is reviewed instead of misleading the next run. Nothing about the memory changes: the user decides. Only for a contradiction you checked in the code, saying where you saw it.",
+                json!({
+                    "memory": string("The memory's title, as you were shown it."),
+                    "reason": string("What in the code says otherwise, in a sentence."),
+                    "evidence": string("Where you saw it: path:line. Optional.")
+                }),
+                &["memory", "reason"],
             ),
             "add_task" => tool(
                 "add_task",
@@ -1330,6 +1344,15 @@ pub(crate) fn app_verb(name: &str, args: &Value) -> Option<Result<AppCall, Strin
             let kind = if matches!(kind.as_str(), "decision" | "convention" | "fact" | "preference") { kind } else { "fact".to_string() };
             list.extend(["--kind".to_string(), kind, fact]);
             "remember"
+        }
+        "flag_memory" => {
+            let memory = match need("memory") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let reason = match need("reason") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            if !text("evidence").is_empty() {
+                list.extend(["--evidence".to_string(), text("evidence")]);
+            }
+            list.extend([memory, "--".to_string(), reason]);
+            "contradict"
         }
         "add_task" => {
             list.push(match need("title") { Ok(v) => v, Err(e) => return Some(Err(e)) });

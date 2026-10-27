@@ -103,6 +103,16 @@ describe("sub-agent lanes", () => {
     expect(lanesOf(done).lanes).toMatchObject([{ status: "done", steps: ["⏵ Bash: echo hola"] }]);
   });
 
+  it("are not drawn for a long Bash, which Claude Code reports as a task too", () => {
+    const lines = read([
+      `{"type":"system","subtype":"task_started","task_id":"b7","tool_use_id":"toolu_bash","description":"pnpm test --run","task_type":"local_bash"}`,
+      mainRead,
+      `{"type":"system","subtype":"task_notification","task_id":"b7","tool_use_id":"toolu_bash","status":"completed"}`,
+    ]);
+    expect(lanesOf(lines).lanes).toEqual([]);
+    expect(lines.map((line) => line.text).some((text) => /Sub-agent|Subagente/.test(text))).toBe(false);
+  });
+
   it("are not there for a run that never delegated", () => {
     const lines = read([mainRead, "plain text from another engine"]);
     expect(lines.every((line) => !line.lanes)).toBe(true);

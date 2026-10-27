@@ -2389,6 +2389,25 @@ textarea,
 .cf-runstep-live {
   animation: cf-runstep-ping 1.4s ease-out infinite;
 }
+/* A sub-agent still working: a segment sweeping its lane's bar — moving, not measuring. */
+@keyframes cf-lane-progress {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
+.cf-lane-progress {
+  animation: cf-lane-progress 1.3s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Still: the whole bar, faint, says "working" without the sweep. */
+  .cf-lane-progress {
+    width: 100%;
+    opacity: 0.45;
+  }
+}
 @keyframes cf-caret-blink {
   to {
     visibility: hidden;
@@ -2425,9 +2444,10 @@ textarea,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* Still, but still the accent: a run's headline keeps saying "working" without the sweep. */
   .cf-text-shimmer {
     animation: none;
-    color: var(--cf-text-muted);
+    color: color-mix(in oklab, var(--cf-ai-a) 55%, var(--cf-text));
     background: none;
   }
   .cf-run-label-in,
@@ -2436,6 +2456,7 @@ textarea,
   .cf-run-label-out.cf-text-shimmer,
   .cf-runstep-in,
   .cf-runstep-live,
+  .cf-lane-progress,
   .cf-caret,
   .cf-avatar-in,
   .cf-orb-out {
@@ -4309,11 +4330,12 @@ html:has(.cf-codi-shell) body {
 
    Off: whatever moves only to look good arrives finished. A 1 ms run rather than `none`, so an
    animation that holds its last frame still lands on it and `animationend` still fires. What
-   reports progress keeps moving — a spinner, and the hold ring and bar, which carry their own
+   reports progress keeps moving — a spinner, a working sub-agent's bar, a run's shimmering
+   headline («Trabajando», «Pensando»…), and the hold ring and bar, which carry their own
    durations inline and count down a hold the user is still pressing. */
-:root[data-motion="off"] *:not(.animate-spin, .cf-hold-ring, .cf-hold-bar),
-:root[data-motion="off"] *:not(.animate-spin, .cf-hold-ring, .cf-hold-bar)::before,
-:root[data-motion="off"] *:not(.animate-spin, .cf-hold-ring, .cf-hold-bar)::after {
+:root[data-motion="off"] *:not(.animate-spin, .cf-hold-ring, .cf-hold-bar, .cf-lane-progress, .cf-text-shimmer),
+:root[data-motion="off"] *:not(.animate-spin, .cf-hold-ring, .cf-hold-bar, .cf-lane-progress, .cf-text-shimmer)::before,
+:root[data-motion="off"] *:not(.animate-spin, .cf-hold-ring, .cf-hold-bar, .cf-lane-progress, .cf-text-shimmer)::after {
   animation-duration: 1ms !important;
   animation-delay: 0s !important;
   animation-iteration-count: 1 !important;

@@ -2788,6 +2788,9 @@ fn run_idle_limit(engine: &dyn AiEngine) -> Option<std::time::Duration> {
 /// as it works, and `task_notification` (`"status":"completed"`) or `task_updated` with a terminal
 /// `patch.status` when it is done. Between those the parent can be silent for minutes, which is the
 /// run working — see [`ai_runs::SUBAGENT_IDLE_FACTOR`]. A substring check first: this runs per line.
+///
+/// A long or background `Bash` is a task too (`task_type: "local_bash"`): only an agent task, or one
+/// naming a `subagent_type`, is a sub-agent — mirrors `isAgentTask` in `agentLog.ts`.
 fn track_subagent(line: &[u8], activity: &ai_runs::Activity) {
     let has = |needle: &[u8]| line.windows(needle.len()).any(|window| window == needle);
     if !has(b"\"task_started\"") && !has(b"\"task_notification\"") && !has(b"\"task_updated\"") {
@@ -2800,7 +2803,7 @@ fn track_subagent(line: &[u8], activity: &ai_runs::Activity) {
     let Some(task) = value.get("task_id").and_then(serde_json::Value::as_str) else { return };
     let terminal = |status: Option<&str>| matches!(status, Some("completed" | "failed" | "killed" | "stopped" | "cancelled" | "error"));
     match value.get("subtype").and_then(serde_json::Value::as_str) {
-        Some("task_started") => activity.subagent_started(task),
+        Some("task_started") if is_agent_task(&value) => activity.subagent_started(task),
         Some("task_notification") if terminal(value.get("status").and_then(serde_json::Value::as_str)) => {
             activity.subagent_ended(task)
         }
@@ -2811,6 +2814,14 @@ fn track_subagent(line: &[u8], activity: &ai_runs::Activity) {
         }
         _ => {}
     }
+}
+
+/// The `task_type`s that are a sub-agent; none at all is an older CLI, where only sub-agents were tasks.
+const AGENT_TASKS: [&str; 3] = ["local_agent", "remote_agent", "in_process_teammate"];
+
+fn is_agent_task(value: &serde_json::Value) -> bool {
+    let named = value.get("subagent_type").and_then(serde_json::Value::as_str).is_some_and(|kind| !kind.is_empty());
+    named || value.get("task_type").and_then(serde_json::Value::as_str).is_none_or(|kind| AGENT_TASKS.contains(&kind))
 }
 
 async fn pump<R: tokio::io::AsyncRead + Unpin>(
@@ -8750,6 +8761,12 @@ mod tests {
         track_subagent(br#"{"type":"system","subtype":"task_started","task_id":"b1","description":"x"}"#, &activity);
         track_subagent(br#"{"type":"system","subtype":"task_updated","task_id":"b1","patch":{"status":"failed"}}"#, &activity);
         assert!(!activity.subagents_open(), "a terminal update ends it too");
+
+        // A long `Bash` is a task, not a sub-agent: the run is not delegating.
+        track_subagent(br#"{"type":"system","subtype":"task_started","task_id":"c3","tool_use_id":"toolu_bash","description":"pnpm test","task_type":"local_bash"}"#, &activity);
+        assert!(!activity.subagents_open());
+        track_subagent(br#"{"type":"system","subtype":"task_started","task_id":"d4","description":"Explorar","subagent_type":"Explore","task_type":"local_agent"}"#, &activity);
+        assert!(activity.subagents_open());
     }
 
     #[test]

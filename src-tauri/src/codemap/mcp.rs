@@ -870,6 +870,15 @@ fn app_action_tools() -> Vec<Value> {
             }, "required": ["fact"]},
         }), false, false),
         acts(json!({
+            "name": "flag_memory",
+            "description": "Tells the user that a memory they approved in CodeFlow (one of the rules in your message, or what recall returned) is contradicted by the code, so it is reviewed instead of misleading the next run. Nothing about the memory changes: the user decides. Only for a contradiction you checked in the code, saying where you saw it.",
+            "inputSchema": {"type": "object", "properties": {
+                "memory": {"type": "string", "description": "The memory's title, as you were shown it"},
+                "reason": {"type": "string", "description": "What in the code says otherwise, in a sentence"},
+                "evidence": {"type": "string", "description": "Where you saw it: path:line, a command and its output. Optional."}
+            }, "required": ["memory", "reason"]},
+        }), false, false),
+        acts(json!({
             "name": "add_task",
             "description": "Adds a draft task to this project's task tree in CodeFlow, for an agent of the workspace's roster. Nothing starts it: the user does.",
             "inputSchema": {"type": "object", "properties": {
@@ -981,6 +990,15 @@ async fn app_tool(access: &Access, name: &str, args: &Value) -> Option<Result<St
             }
             list.push(fact);
             ("remember", true)
+        }
+        "flag_memory" => {
+            let memory = match need("memory") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            let reason = match need("reason") { Ok(v) => v, Err(e) => return Some(Err(e)) };
+            if !text("evidence").is_empty() {
+                list.extend(["--evidence".to_string(), text("evidence")]);
+            }
+            list.extend([memory, "--".to_string(), reason]);
+            ("contradict", true)
         }
         "add_task" => {
             list.push(match need("title") { Ok(v) => v, Err(e) => return Some(Err(e)) });
@@ -1185,7 +1203,7 @@ mod tests {
         for query in ["find_symbol", "search_knowledge", "service_logs", "service_wait", "terminal_output", "local_llm"] {
             assert!(names.contains(&query.to_string()), "{query} missing from {names:?}");
         }
-        for action in ["service_restart", "open_in_editor", "notify", "propose_memory", "add_task", "db_query", "http_request", "run_with_secret"] {
+        for action in ["service_restart", "open_in_editor", "notify", "propose_memory", "flag_memory", "add_task", "db_query", "http_request", "run_with_secret"] {
             assert!(!names.contains(&action.to_string()), "{action} offered to a read-only run");
         }
         let (actor, _a) = with_access("/tmp/repo", true);

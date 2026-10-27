@@ -26,16 +26,37 @@
 //!
 //! What a model is shown ([`note`]) carries each memory's kind and the day the user approved it, so
 //! the model can weigh a three-month-old convention against the code in front of it — and it is
-//! told to say so when they disagree, not to pick one silently. A memory nobody has used in
-//! [`STALE_DAYS`] is flagged `stale` for the Memory pane to show as «sin uso»; nothing is deleted on
-//! a timer, since a rule that is rarely needed is not therefore wrong.
+//! told to say so when they disagree, not to pick one silently.
+//!
+//! **Keeping them true** ([`review`]). Being used says nothing about being right — a rule shown to a
+//! model every day ("tests use Jest") stays fresh by use long after the project moved to Vitest. So
+//! an approved memory waits for the user («para revisar») when:
+//! - the code it is about changed under it: each memory is **anchored** to the files and symbols it
+//!   names, and a later pass finds one of them gone ([`review::check`]);
+//! - a model found it **contradicted** by the code and said so with `flag_memory` ([`flag`]);
+//! - a newer memory seems to say something else about the same thing (`conflicts_with`, found when
+//!   the newer one is written — [`review::clash`]);
+//! - nobody has **confirmed** it in its kind's time ([`review_days`]): a fact in 30 days, a decision
+//!   or a convention in 90, a preference never. Confirming is the user keeping it ([`confirm`]),
+//!   editing it, or a pass finding every anchor where it was.
+//!
+//! Nothing is deleted or changed on a timer or on a model's word: the user decides, from the queue.
 
 use rusqlite::{params, types::Value as SqlValue, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-/// Days without use (counted from the last use, or from the approval when it was never used) after
-/// which an approved memory is flagged for review. A flag, not a deletion.
-pub const STALE_DAYS: i64 = 90;
+pub mod review;
+
+/// Days without a confirmation after which an approved memory of `kind` waits for review — `None`:
+/// never (a preference is the user's taste, which the code cannot prove wrong). A flag, not a
+/// deletion. Mirrored by `MEMORY_REVIEW_DAYS` in `memoryCommands.ts`.
+pub fn review_days(kind: &str) -> Option<i64> {
+    match kind {
+        "preference" => None,
+        "fact" => Some(30),
+        _ => Some(90),
+    }
+}
 const DAY_MS: i64 = 86_400_000;
 /// How many evidence entries one memory keeps: the oldest ones are the ones that made the case, and
 /// a list of hundreds says nothing a list of fifty does not.
@@ -123,11 +144,25 @@ pub struct Memory {
     /// made to it — for approved memories only. Read from the revisions, not stored: the history is
     /// the record, and a column would be one more thing to keep in step with it.
     pub approved_at: Option<i64>,
-    /// Approved and not used in [`STALE_DAYS`]: the pane shows it as «sin uso» for review.
+    /// Approved and not confirmed in its kind's [`review_days`].
     pub stale: bool,
     /// The title of the memory this one replaces, when it still exists — so the pane can say
     /// «reemplaza a …» without a second lookup.
     pub supersedes_title: Option<String>,
+    /// The files and symbols it is about, as last found in the code ([`review::check`]).
+    pub anchors: Vec<review::Anchor>,
+    /// When it was last anchored (`None`: not yet — the next pass looks), and at which commit.
+    pub anchored_at: Option<i64>,
+    pub anchor_head: Option<String>,
+    /// Why it waits for the user: the code changed under it, or a model found it contradicted.
+    pub review: Option<review::Review>,
+    /// An approved memory this one seems to clash with, and its title while it exists.
+    pub conflicts_with: Option<String>,
+    pub conflicts_with_title: Option<String>,
+    /// When the user last kept it as it is, or a pass found every anchor where it was.
+    pub confirmed_at: Option<i64>,
+    /// Approved and waiting for the user for any of the reasons above — the pane's «para revisar».
+    pub needs_review: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -153,39 +188,60 @@ pub struct NewMemory {
 }
 
 /// The table's own columns, in the order [`row_to_memory`] reads them and the INSERT writes them.
-const COLUMNS: &str = "id, scope, workspace_id, project_id, task_ref, kind, title, body, status, source, evidence, supersedes, local_only, expires_at, created_at, updated_at, used_at, use_count";
+const COLUMNS: &str = "id, scope, workspace_id, project_id, task_ref, kind, title, body, status, source, evidence, supersedes, local_only, expires_at, created_at, updated_at, used_at, use_count, anchors, anchored_at, anchor_head, review, conflicts_with, confirmed_at";
 
 /// The latest moment the user vouched for a memory's text: an approval, or an edit they made. A
 /// memory created approved has neither, and falls back to its creation (see [`select_sql`]).
 const VOUCHED_AT: &str = "(SELECT MAX(r.at) FROM ai_memory_revisions r WHERE r.memory_id = m.id AND (r.action = 'approved' OR (r.action = 'edited' AND r.actor = 'user')))";
 
-/// `SELECT` of every column plus the two derived ones (the approval date, the replaced memory's
-/// title), from `ai_memories m` — every reader goes through it, so the alias is always `m` and the
-/// derived columns are always the 19th and 20th.
+/// `SELECT` of every column plus the three derived ones (the approval date, the replaced memory's
+/// title, the clashing memory's title), from `ai_memories m` — every reader goes through it, so the
+/// alias is always `m` and the derived columns are always the 25th to the 27th.
 fn select_sql() -> String {
     let columns = COLUMNS.split(", ").map(|c| format!("m.{c}")).collect::<Vec<_>>().join(", ");
     format!(
         "SELECT {columns}, CASE WHEN m.status = 'approved' THEN COALESCE({VOUCHED_AT}, m.created_at) END, \
-         (SELECT o.title FROM ai_memories o WHERE o.id = m.supersedes) FROM ai_memories m"
+         (SELECT o.title FROM ai_memories o WHERE o.id = m.supersedes), \
+         (SELECT o.title FROM ai_memories o WHERE o.id = m.conflicts_with AND o.status != 'revoked') FROM ai_memories m"
+    )
+}
+
+/// The SQL of "approved and not confirmed in its kind's time" for `ai_memories m`, its two cut-offs
+/// (a fact's, then a decision's or convention's) pushed as `?{fact}` and `?{other}`.
+fn stale_sql(fact: usize, other: usize) -> String {
+    let last = format!("MAX(COALESCE(m.confirmed_at, 0), COALESCE({VOUCHED_AT}, m.created_at))");
+    format!(
+        "(m.status = 'approved' AND CASE m.kind WHEN 'preference' THEN 0 WHEN 'fact' THEN {last} < ?{fact} ELSE {last} < ?{other} END)"
     )
 }
 
 fn row_to_memory(r: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
     let evidence: String = r.get(10)?;
     let status: String = r.get(8)?;
+    let kind: String = r.get(5)?;
     let created_at: i64 = r.get(14)?;
     let used_at: Option<i64> = r.get(16)?;
-    let approved_at: Option<i64> = r.get(18)?;
+    let anchors: String = r.get(18)?;
+    let review: Option<String> = r.get(21)?;
+    let review: Option<review::Review> = review.and_then(|text| serde_json::from_str(&text).ok());
+    let conflicts_with: Option<String> = r.get(22)?;
+    let confirmed_at: Option<i64> = r.get(23)?;
+    let approved_at: Option<i64> = r.get(24)?;
+    let conflicts_with_title: Option<String> = r.get(26)?;
+    let stale = is_stale(&status, &kind, approved_at, confirmed_at, created_at, now());
+    // A clash with a memory since revoked is no clash: the title only comes back while it is live.
+    let conflicts_with = conflicts_with.filter(|_| conflicts_with_title.is_some());
+    let needs_review = status == "approved" && (stale || review.is_some() || conflicts_with.is_some());
     Ok(Memory {
         id: r.get(0)?,
         scope: r.get(1)?,
         workspace_id: r.get(2)?,
         project_id: r.get(3)?,
         task_ref: r.get(4)?,
-        kind: r.get(5)?,
+        kind,
         title: r.get(6)?,
         body: r.get(7)?,
-        stale: is_stale(&status, approved_at, used_at, created_at, now()),
+        stale,
         status,
         source: r.get(9)?,
         evidence: serde_json::from_str(&evidence).unwrap_or_default(),
@@ -197,13 +253,23 @@ fn row_to_memory(r: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
         used_at,
         use_count: r.get(17)?,
         approved_at,
-        supersedes_title: r.get(19)?,
+        supersedes_title: r.get(25)?,
+        anchors: serde_json::from_str(&anchors).unwrap_or_default(),
+        anchored_at: r.get(19)?,
+        anchor_head: r.get(20)?,
+        review,
+        conflicts_with,
+        conflicts_with_title,
+        confirmed_at,
+        needs_review,
     })
 }
 
-/// Approved, and neither used nor re-approved in [`STALE_DAYS`] as of `at`.
-fn is_stale(status: &str, approved_at: Option<i64>, used_at: Option<i64>, created_at: i64, at: i64) -> bool {
-    status == "approved" && used_at.unwrap_or(0).max(approved_at.unwrap_or(created_at)) < at - STALE_DAYS * DAY_MS
+/// Approved, and neither approved, edited by the user nor confirmed in its kind's [`review_days`]
+/// as of `at`. Use does not count: a memory shown every day can be wrong every day.
+fn is_stale(status: &str, kind: &str, approved_at: Option<i64>, confirmed_at: Option<i64>, created_at: i64, at: i64) -> bool {
+    let Some(days) = review_days(kind) else { return false };
+    status == "approved" && confirmed_at.unwrap_or(0).max(approved_at.unwrap_or(created_at)) < at - days * DAY_MS
 }
 
 fn now() -> i64 {
@@ -346,7 +412,7 @@ fn insert(conn: &Connection, input: &NewMemory, place: &Place, title: &str, body
     let supersedes = input.supersedes.clone().filter(|s| !s.is_empty());
     let at = now();
     conn.execute(
-        &format!("INSERT INTO ai_memories ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, NULL, 0)"),
+        &format!("INSERT INTO ai_memories ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, NULL, 0, '[]', NULL, NULL, NULL, NULL, NULL)"),
         params![
             id,
             place.scope.as_str(),
@@ -404,7 +470,8 @@ pub fn remember(conn: &Connection, input: NewMemory) -> Result<(Memory, Remember
     let key = normalized(&title);
     let existing = live_in(conn, &place).map_err(|e| e.to_string())?.into_iter().find(|m| normalized(&m.title) == key);
     let Some(existing) = existing else {
-        return insert(conn, &input, &place, &title, &body, &evidence).map(|memory| (memory, Remembered::New));
+        let memory = insert(conn, &input, &place, &title, &body, &evidence)?;
+        return mark_clash(conn, memory).map(|memory| (memory, Remembered::New));
     };
     let new_body = !body.is_empty() && normalized(&body) != normalized(&existing.body);
     let outcome = if existing.status == "candidate" {
@@ -446,6 +513,7 @@ pub fn remember(conn: &Connection, input: NewMemory) -> Result<(Memory, Remember
     .map_err(|e| e.to_string())?;
     if new_body {
         revise(conn, &existing.id, "edited", &existing.title, &body, "user").map_err(|e| e.to_string())?;
+        vouched(conn, &existing.id).map_err(|e| e.to_string())?;
     }
     if outcome == Remembered::Approved {
         revise(conn, &existing.id, "approved", &existing.title, &body, "user").map_err(|e| e.to_string())?;
@@ -470,7 +538,8 @@ pub fn propose(conn: &Connection, input: NewMemory) -> Result<(Memory, Remembere
     let place = place_of(&input);
     let live = live_in(conn, &place).map_err(|e| e.to_string())?;
     let Some(existing) = near_duplicate(&live, &title, &body) else {
-        return insert(conn, &input, &place, &title, &body, &evidence).map(|memory| (memory, Remembered::New));
+        let memory = insert(conn, &input, &place, &title, &body, &evidence)?;
+        return mark_clash(conn, memory).map(|memory| (memory, Remembered::New));
     };
     let merged = merge_evidence(&existing.evidence, &evidence);
     let says_more = normalized(&title) != normalized(&existing.title) || (!body.is_empty() && normalized(&body) != normalized(&existing.body));
@@ -485,6 +554,36 @@ pub fn propose(conn: &Connection, input: NewMemory) -> Result<(Memory, Remembere
     }
     let memory = get(conn, &existing.id).map_err(|e| e.to_string())?.ok_or("memory vanished")?;
     Ok((memory, Remembered::AlreadyKnown))
+}
+
+/// A new memory that replaces nothing, checked against the approved ones of its place: one that
+/// seems to say something else about the same thing is recorded as `conflicts_with`, for the user to
+/// settle («¿reemplaza a …?») rather than leave both riding along ([`review::clash`]).
+fn mark_clash(conn: &Connection, memory: Memory) -> Result<Memory, String> {
+    if memory.supersedes.is_some() {
+        return Ok(memory);
+    }
+    let place = Place {
+        scope: match memory.scope.as_str() {
+            "global" => Scope::Global,
+            "workspace" => Scope::Workspace,
+            "task" => Scope::Task,
+            _ => Scope::Project,
+        },
+        workspace_id: memory.workspace_id.clone(),
+        project_id: memory.project_id.clone(),
+    };
+    let live = live_in(conn, &place).map_err(|e| e.to_string())?;
+    let Some(other) = review::clash(&memory, &live) else { return Ok(memory) };
+    conn.execute("UPDATE ai_memories SET conflicts_with = ?1 WHERE id = ?2", params![other, memory.id]).map_err(|e| e.to_string())?;
+    get(conn, &memory.id).map_err(|e| e.to_string())?.ok_or_else(|| "memory vanished".to_string())
+}
+
+/// The user just vouched for a memory's text by changing it: whatever it waited for is settled, and
+/// its anchors are found again in the code as it is now.
+fn vouched(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE ai_memories SET review = NULL, conflicts_with = NULL, anchors = '[]', anchored_at = NULL, anchor_head = NULL WHERE id = ?1", params![id])?;
+    Ok(())
 }
 
 fn near_duplicate<'a>(live: &'a [Memory], title: &str, body: &str) -> Option<&'a Memory> {
@@ -533,13 +632,18 @@ pub struct Filter {
     /// which is what the pane lists by default.
     #[serde(default)]
     pub include_global: bool,
-    /// Only approved memories unused in [`STALE_DAYS`] («sin uso»).
+    /// Only approved memories not confirmed in their kind's [`review_days`].
     #[serde(default)]
     pub stale: bool,
+    /// Only the approved memories waiting for the user («para revisar»): stale, the code changed
+    /// under them, contradicted, or clashing with another.
+    #[serde(default)]
+    pub review: bool,
 }
 
-/// One page of the Memory pane: the rows, how many match in all, and the two counts its chips show
-/// for the same place whatever the status filter says — proposals to review and memories unused.
+/// One page of the Memory pane: the rows, how many match in all, and the counts its chips show for
+/// the same place whatever the status filter says — proposals to approve, memories not confirmed in
+/// time, and every approved memory waiting for review (those included).
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Page {
@@ -547,6 +651,7 @@ pub struct Page {
     pub total: usize,
     pub candidates: usize,
     pub stale: usize,
+    pub review: usize,
 }
 
 /// The `WHERE` of a [`Filter`], its values pushed onto `values`.
@@ -577,9 +682,20 @@ fn where_of(filter: &Filter, values: &mut Vec<SqlValue>) -> String {
         let n = push(values, SqlValue::Text(query));
         sql.push_str(&format!(" AND m.id IN (SELECT memory_id FROM ai_memories_fts WHERE ai_memories_fts MATCH ?{n})"));
     }
-    if filter.stale {
-        let n = push(values, SqlValue::Integer(now() - STALE_DAYS * DAY_MS));
-        sql.push_str(&format!(" AND m.status = 'approved' AND MAX(COALESCE(m.used_at, 0), COALESCE({VOUCHED_AT}, m.created_at)) < ?{n}"));
+    if filter.stale || filter.review {
+        let at = now();
+        let fact = push(values, SqlValue::Integer(at - review_days("fact").unwrap_or(0) * DAY_MS));
+        let other = push(values, SqlValue::Integer(at - review_days("decision").unwrap_or(0) * DAY_MS));
+        let stale = stale_sql(fact, other);
+        if filter.review {
+            // A clash counts only while the other memory is live, as `row_to_memory` reads it.
+            sql.push_str(&format!(
+                " AND m.status = 'approved' AND (m.review IS NOT NULL \
+                 OR EXISTS (SELECT 1 FROM ai_memories o WHERE o.id = m.conflicts_with AND o.status != 'revoked') OR {stale})"
+            ));
+        } else {
+            sql.push_str(&format!(" AND {stale}"));
+        }
     }
     sql
 }
@@ -610,10 +726,11 @@ pub fn count(conn: &Connection, filter: &Filter) -> rusqlite::Result<usize> {
 pub fn page(conn: &Connection, filter: &Filter) -> rusqlite::Result<Page> {
     let rows = list(conn, filter)?;
     let total = count(conn, filter)?;
-    let place = Filter { status: None, query: None, stale: false, limit: None, offset: None, ..filter.clone() };
+    let place = Filter { status: None, query: None, stale: false, review: false, limit: None, offset: None, ..filter.clone() };
     let candidates = count(conn, &Filter { status: Some("candidate".into()), ..place.clone() })?;
-    let stale = count(conn, &Filter { stale: true, ..place })?;
-    Ok(Page { rows, total, candidates, stale })
+    let stale = count(conn, &Filter { stale: true, ..place.clone() })?;
+    let review = count(conn, &Filter { review: true, ..place })?;
+    Ok(Page { rows, total, candidates, stale, review })
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -662,6 +779,7 @@ pub fn edit(conn: &Connection, id: &str, patch: Patch) -> Result<Memory, String>
     .map_err(|e| e.to_string())?;
     if title != current.title || body != current.body {
         revise(conn, id, "edited", &title, &body, "user").map_err(|e| e.to_string())?;
+        vouched(conn, id).map_err(|e| e.to_string())?;
     }
     // Approval is when a replacement takes effect; on a memory already approved, that is now.
     if current.status == "approved" && supersedes.is_some() && supersedes != current.supersedes {
@@ -692,6 +810,87 @@ pub fn approve(conn: &Connection, id: &str, kind: Option<Kind>) -> Result<(), St
         conn.execute("UPDATE ai_memories SET kind = ?1 WHERE id = ?2", params![kind.as_str(), id]).map_err(|e| e.to_string())?;
     }
     set_status(conn, id, "approved")
+}
+
+/// «Mantener»: the user read a memory waiting for review and keeps it as it is. Whatever it waited
+/// for is settled, its review clock starts again, and its anchors are found again in the code as it
+/// is now — so a file that moved is not reported missing a second time.
+pub fn confirm(conn: &Connection, id: &str) -> Result<Memory, String> {
+    let current = get(conn, id).map_err(|e| e.to_string())?.ok_or("memory not found")?;
+    let at = now();
+    conn.execute(
+        "UPDATE ai_memories SET review = NULL, conflicts_with = NULL, confirmed_at = ?1, anchors = '[]', anchored_at = NULL, anchor_head = NULL, updated_at = ?1 WHERE id = ?2",
+        params![at, id],
+    )
+    .map_err(|e| e.to_string())?;
+    revise(conn, id, "confirmed", &current.title, &current.body, "user").map_err(|e| e.to_string())?;
+    get(conn, id).map_err(|e| e.to_string())?.ok_or_else(|| "memory vanished".to_string())
+}
+
+/// A clash settled by the user: `replaces` — this memory replaces the other one (revoked now when
+/// this one is approved, on approval otherwise); or they are about different things, and the clash
+/// is forgotten.
+pub fn settle_clash(conn: &Connection, id: &str, replaces: bool) -> Result<Memory, String> {
+    let current = get(conn, id).map_err(|e| e.to_string())?.ok_or("memory not found")?;
+    let other = current.conflicts_with.clone();
+    conn.execute("UPDATE ai_memories SET conflicts_with = NULL WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+    match other {
+        Some(other) if replaces => edit(conn, id, Patch { supersedes: Some(other), ..Default::default() }),
+        _ => {
+            revise(conn, id, "distinct", &current.title, &current.body, "user").map_err(|e| e.to_string())?;
+            get(conn, id).map_err(|e| e.to_string())?.ok_or_else(|| "memory vanished".to_string())
+        }
+    }
+}
+
+/// A model found an approved memory contradicted by the code (`flag_memory`, `cf contradict`): the
+/// memory waits for the user with the model's reason and evidence. Nothing about it changes — the
+/// model may be the one that is wrong. `title` names it as the model was shown it; matched among
+/// the approved memories this place sees, by title, or by one title being a phrase of the other.
+pub fn flag(
+    conn: &Connection,
+    workspace_id: Option<&str>,
+    project_id: Option<&str>,
+    title: &str,
+    reason: &str,
+    evidence: &[String],
+    by: &str,
+) -> Result<Memory, String> {
+    let reason = crate::secret_scan::redact(reason.trim()).0;
+    if reason.is_empty() {
+        return Err("say what in the code contradicts it".to_string());
+    }
+    let mut stmt = conn.prepare(&format!("{} WHERE {IN_SCOPE}", select_sql())).map_err(|e| e.to_string())?;
+    let seen: Vec<Memory> = stmt
+        .query_map(params![workspace_id, project_id, false, now()], row_to_memory)
+        .map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<_>>()
+        .map_err(|e| e.to_string())?;
+    let key = normalized(title.trim().trim_start_matches("- "));
+    let found = seen.iter().find(|m| normalized(&m.title) == key).or_else(|| {
+        seen.iter().find(|m| {
+            let other = normalized(&m.title);
+            (phrase_worthy(&key) && contains_phrase(&other, &key)) || (phrase_worthy(&other) && contains_phrase(&key, &other))
+        })
+    });
+    let Some(memory) = found else {
+        return Err(format!("no approved memory titled «{}» applies here", title.trim()));
+    };
+    let flagged = review::Review {
+        reason: review::Reason::Contradicted,
+        detail: reason.chars().take(MAX_EVIDENCE_CHARS).collect(),
+        evidence: clean_evidence(evidence).into_iter().take(10).collect(),
+        missing: Vec::new(),
+        by: by.to_string(),
+        at: now(),
+    };
+    conn.execute(
+        "UPDATE ai_memories SET review = ?1 WHERE id = ?2",
+        params![serde_json::to_string(&flagged).map_err(|e| e.to_string())?, memory.id],
+    )
+    .map_err(|e| e.to_string())?;
+    revise(conn, &memory.id, "flagged", &memory.title, &flagged.detail, by).map_err(|e| e.to_string())?;
+    get(conn, &memory.id).map_err(|e| e.to_string())?.ok_or_else(|| "memory vanished".to_string())
 }
 
 pub fn delete(conn: &Connection, id: &str) -> rusqlite::Result<()> {
@@ -873,6 +1072,13 @@ fn note_line(m: &Memory) -> String {
     }
     if m.source != "user" {
         tag.push_str(&format!(" · origen: {}", source_label(&m.source)));
+    }
+    // Still the user's rule until they say otherwise — but the model should weigh it knowing why it
+    // is in doubt.
+    match m.review.as_ref().map(|r| r.reason) {
+        Some(review::Reason::CodeChanged) => tag.push_str(" · en revisión: el código que nombra cambió"),
+        Some(review::Reason::Contradicted) => tag.push_str(" · en revisión: un modelo la vio contradicha"),
+        None => {}
     }
     if m.body.is_empty() || m.body == m.title {
         format!("- [{tag}] {}", m.title)

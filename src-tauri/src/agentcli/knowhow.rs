@@ -111,6 +111,37 @@ pub fn remember(request: &Request, app: &AppHandle) -> Reply {
     }
 }
 
+/// `cf contradict <memory title> -- <why> [--evidence <where>]`: an approved memory the agent found
+/// contradicted by the code. It waits for the user's review in the Memory pane; nothing about it
+/// changes — the agent may be the one that is wrong.
+pub fn contradict(request: &Request, app: &AppHandle) -> Reply {
+    let usage = || Reply::no("usage: cf contradict <memory title> -- <what in the code says otherwise> [--evidence <path:line>]");
+    let mut title = Vec::new();
+    let mut reason = Vec::new();
+    let mut evidence = Vec::new();
+    let mut args = request.args.iter();
+    let mut after = false;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--" if !after => after = true,
+            "--evidence" => evidence.extend(args.next().cloned()),
+            _ if after => reason.push(arg.clone()),
+            _ => title.push(arg.clone()),
+        }
+    }
+    let (title, reason) = (title.join(" "), reason.join(" "));
+    if title.trim().is_empty() || reason.trim().is_empty() {
+        return usage();
+    }
+    let place = place::of(app, &request.cwd, &request.session);
+    let project = place.project.as_ref().map(|p| p.id.clone());
+    match crate::ai_usage::with_conn(|conn| crate::ai_memory::flag(conn, place.workspace_id.as_deref(), project.as_deref(), &title, &reason, &evidence, "agent")) {
+        Some(Ok(memory)) => Reply::ok(format!("«{}» is now waiting for the user's review in Settings › Local intelligence › Memory, with your reason", memory.title)),
+        Some(Err(error)) => Reply::no(error),
+        None => Reply::no("the app's database is not available yet"),
+    }
+}
+
 fn memory_kind(word: &str) -> Option<crate::ai_memory::Kind> {
     use crate::ai_memory::Kind;
     match word.trim().to_ascii_lowercase().as_str() {

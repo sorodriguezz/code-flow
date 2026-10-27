@@ -5398,6 +5398,24 @@ pub(crate) fn add_ai_platform_tables(conn: &Connection) -> rusqlite::Result<()> 
             published_at      INTEGER
         );
         "#,
-    )
+    )?;
+    // What keeps a memory from going stale unseen (`ai_memory::review`): the code it is about
+    // (`anchors`, as JSON, found when it was last anchored at `anchor_head`), why it waits for the
+    // user (`review`, JSON: the code changed under it, or a model found it contradicted), an
+    // approved memory a new one seems to clash with (`conflicts_with`), and when the user last
+    // kept it as it is (`confirmed_at`).
+    for (column, ddl) in [
+        ("anchors", "ALTER TABLE ai_memories ADD COLUMN anchors TEXT NOT NULL DEFAULT '[]';"),
+        ("anchored_at", "ALTER TABLE ai_memories ADD COLUMN anchored_at INTEGER;"),
+        ("anchor_head", "ALTER TABLE ai_memories ADD COLUMN anchor_head TEXT;"),
+        ("review", "ALTER TABLE ai_memories ADD COLUMN review TEXT;"),
+        ("conflicts_with", "ALTER TABLE ai_memories ADD COLUMN conflicts_with TEXT;"),
+        ("confirmed_at", "ALTER TABLE ai_memories ADD COLUMN confirmed_at INTEGER;"),
+    ] {
+        if !has_column(conn, "ai_memories", column)? {
+            conn.execute_batch(ddl)?;
+        }
+    }
+    Ok(())
 }
 

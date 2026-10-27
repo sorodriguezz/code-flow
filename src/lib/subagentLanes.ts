@@ -1,4 +1,4 @@
-import { formatAgentLogLine, repeatsStatus } from "./agentLog";
+import { formatAgentLogLine, isAgentTask, repeatsStatus } from "./agentLog";
 import type { AiRunLine } from "../state/aiRunStore";
 
 /**
@@ -60,6 +60,8 @@ export interface LaneReader {
   open: Set<string>;
   background: Set<string>;
   byTask: Map<string, string>;
+  /** Claude: the tasks that are not sub-agents (a long `Bash`), whose end says nothing either. */
+  notAgents: Set<string>;
   /** Cline: each sub-agent's parent, the agent the last `hook_event` named, the `spawn_agent` call
    *  waiting for its agent to start (and its brief), and which agent each call started. */
   parentOf: Map<string, string>;
@@ -78,6 +80,7 @@ export function newLaneReader(): LaneReader {
     open: new Set(),
     background: new Set(),
     byTask: new Map(),
+    notAgents: new Set(),
     parentOf: new Map(),
     current: null,
     pending: null,
@@ -152,7 +155,12 @@ export function laneMarksOf(reader: LaneReader, raw: string): LaneMark[] {
 
   if (event.type === "system") {
     const task = str(event.task_id);
+    if (task && reader.notAgents.has(task)) return [];
     if (event.subtype === "task_started") {
+      if (!isAgentTask(event)) {
+        if (task) reader.notAgents.add(task);
+        return [];
+      }
       const id = str(event.tool_use_id) || task;
       if (!id) return [];
       if (task) reader.byTask.set(task, id);
@@ -363,17 +371,31 @@ export function readRunLine(
   raw: string,
   previousText: string | undefined,
 ): AiRunLine | null {
+  const marks = laneMarksOf(reader, raw);
+  // A task that is not a sub-agent (a long `Bash`) ending: its "sub-agent finished" would be wrong.
+  if (marks.length === 0 && raw.includes('"task_') && notAgentTask(reader, raw)) return null;
   const text = formatAgentLogLine(raw);
   // A step mark without anything printed has nothing to add to its lane.
-  const marks = laneMarksOf(reader, raw).filter((mark) => mark.kind !== "step" || text !== null);
-  if (marks.length === 0) {
+  const kept = marks.filter((mark) => mark.kind !== "step" || text !== null);
+  if (kept.length === 0) {
     if (text === null || repeatsStatus(previousText, text)) return null;
     return { stream, text };
   }
   // A sub-agent's step reads as one wherever it came from — Claude marks its own, Cline does not.
-  const sub = text !== null && marks.some((mark) => mark.kind === "step");
+  const sub = text !== null && kept.some((mark) => mark.kind === "step");
   const shown = sub ? text.split("\n").map((row) => (row.startsWith(SUB) ? row : `${SUB}${row}`)).join("\n") : text;
-  return { stream, text: shown ?? "", lanes: marks };
+  return { stream, text: shown ?? "", lanes: kept };
+}
+
+/** Whether `raw` is a `system` task event of a task that is not a sub-agent. */
+function notAgentTask(reader: LaneReader, raw: string): boolean {
+  if (reader.notAgents.size === 0) return false;
+  try {
+    const event: unknown = JSON.parse(raw.trim());
+    return isRecord(event) && event.type === "system" && reader.notAgents.has(str(event.task_id));
+  } catch {
+    return false;
+  }
 }
 
 export type LaneStatus = "live" | "done" | "failed";

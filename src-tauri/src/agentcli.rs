@@ -562,6 +562,7 @@ async fn dispatch(request: Request, app: &AppHandle) -> Reply {
         "task" => work::task(&request, app),
         "symbol" | "usages" | "outline" | "map" | "search" | "recall" => knowhow::tool(&request, app).await,
         "remember" => knowhow::remember(&request, app),
+        "contradict" => knowhow::contradict(&request, app),
         "llm" => knowhow::llm(&request).await,
         "secret" => vault::secret(&request, app).await,
         "db" => vault::db(&request, app).await,

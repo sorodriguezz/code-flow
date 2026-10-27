@@ -73,6 +73,20 @@ const SUBAGENT_MARK = "↳ ";
 /** The statuses a sub-agent ends with — mirrors `track_subagent` in `ai.rs`. */
 const SUBAGENT_DONE = new Set(["completed", "failed", "killed", "stopped", "cancelled", "error"]);
 
+/** The `task_type`s that are a sub-agent — mirrors `AGENT_TASKS` in `ai.rs`. */
+const AGENT_TASKS = new Set(["local_agent", "remote_agent", "in_process_teammate"]);
+
+/**
+ * Whether a `task_started` is a sub-agent. Claude Code reports a long or background `Bash` the same
+ * way (`task_type: "local_bash"`, the command as its description); only an agent task, or one that
+ * names a `subagent_type`, is a sub-agent. No `task_type` at all is an older CLI, where only
+ * sub-agents were tasks.
+ */
+export function isAgentTask(event: Record<string, unknown>): boolean {
+  if (typeof event.subagent_type === "string" && event.subagent_type) return true;
+  return typeof event.task_type !== "string" || AGENT_TASKS.has(event.task_type);
+}
+
 /** One sub-agent still working: what it was asked to do, and the step it reported last. */
 export interface SubagentState {
   description: string;
@@ -102,7 +116,7 @@ export function trackSubagents(open: Record<string, SubagentState>, raw: string)
   const description = typeof event.description === "string" ? event.description : "";
   switch (event.subtype) {
     case "task_started":
-      return { ...open, [id]: { description, progress: null } };
+      return isAgentTask(event) ? { ...open, [id]: { description, progress: null } } : open;
     case "task_progress":
       return open[id] ? { ...open, [id]: { ...open[id], progress: description || open[id].progress } } : open;
     case "task_notification":
@@ -126,7 +140,7 @@ function systemLine(event: Record<string, unknown>): string | null {
   if (event.subtype === "init") return typeof event.model === "string" ? `${STATUS_MARK}${event.model}` : null;
   if (event.subtype === "status" && event.status === "compacting") return `${STATUS_MARK}${translate("chat.compacting")}…`;
   // A sub-agent starting and finishing; its steps arrive as its own `assistant` lines, marked `↳`.
-  if (event.subtype === "task_started" && typeof event.description === "string") {
+  if (event.subtype === "task_started" && typeof event.description === "string" && isAgentTask(event)) {
     return `${STATUS_MARK}${translate("ai.subagentStarted", { task: event.description })}`;
   }
   if (event.subtype === "task_notification" && typeof event.status === "string" && SUBAGENT_DONE.has(event.status)) {

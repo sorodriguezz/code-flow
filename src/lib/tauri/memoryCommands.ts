@@ -8,8 +8,34 @@ export type MemoryStatus = "candidate" | "approved" | "revoked";
 /** What a create did — `ai_memory::Remembered`. */
 export type MemoryOutcome = "new" | "approved" | "updated" | "already_known";
 
-/** Days without use after which an approved memory shows as «sin uso» (`ai_memory::STALE_DAYS`). */
-export const MEMORY_STALE_DAYS = 90;
+/** Days without a confirmation after which an approved memory of a kind waits for review —
+ *  `null`: never (`ai_memory::review_days`). */
+export const MEMORY_REVIEW_DAYS: Record<MemoryKind, number | null> = { fact: 30, decision: 90, convention: 90, preference: null };
+
+/** A file or symbol a memory is about, as last found in the code — `ai_memory::review::Anchor`. */
+export interface MemoryAnchor {
+  projectId: string;
+  path?: string;
+  symbol?: string;
+}
+
+/** An anchor a pass did not find; a file of the same name elsewhere in `movedTo`. */
+export interface MemoryMissing {
+  path?: string;
+  symbol?: string;
+  movedTo?: string;
+}
+
+/** Why an approved memory waits for the user — `ai_memory::review::Review`. */
+export interface MemoryReview {
+  reason: "code_changed" | "contradicted";
+  /** The model's words, for a contradiction. */
+  detail: string;
+  evidence: string[];
+  missing: MemoryMissing[];
+  by: string;
+  at: number;
+}
 
 export interface Memory {
   id: string;
@@ -33,10 +59,22 @@ export interface Memory {
   useCount: number;
   /** When the user last vouched for the text (approved or edited it); approved memories only. */
   approvedAt: number | null;
-  /** Approved and unused for `MEMORY_STALE_DAYS`. */
+  /** Approved and not confirmed in its kind's `MEMORY_REVIEW_DAYS`. */
   stale: boolean;
   /** The title of the memory this one replaces, while it exists. */
   supersedesTitle: string | null;
+  anchors: MemoryAnchor[];
+  anchoredAt: number | null;
+  /** The short commit it was anchored at. */
+  anchorHead: string | null;
+  review: MemoryReview | null;
+  /** An approved memory this one seems to clash with, while it is live, and its title. */
+  conflictsWith: string | null;
+  conflictsWithTitle: string | null;
+  /** When the user last kept it as it is, or a pass found its anchors where they were. */
+  confirmedAt: number | null;
+  /** Approved and waiting for review: stale, code changed, contradicted or clashing. */
+  needsReview: boolean;
 }
 
 export interface NewMemory {
@@ -62,8 +100,10 @@ export interface MemoryFilter {
   offset?: number;
   /** With `workspaceId` / `projectId`: the global memories match too. */
   includeGlobal?: boolean;
-  /** Only approved memories unused in `MEMORY_STALE_DAYS`. */
+  /** Only approved memories not confirmed in their kind's time. */
   stale?: boolean;
+  /** Only the approved memories waiting for review («para revisar»). */
+  review?: boolean;
 }
 
 /** One page of the pane — `ai_memory::Page`. The counts are the place's, whatever the status filter. */
@@ -72,6 +112,7 @@ export interface MemoryPage {
   total: number;
   candidates: number;
   stale: number;
+  review: number;
 }
 
 export interface MemoryPatch {
@@ -102,3 +143,9 @@ export const aiMemorySetStatus = (id: string, status: MemoryStatus, kind?: Memor
 export const aiMemoryDelete = (id: string) => invoke<void>("ai_memory_delete", { id });
 export const aiMemoryRevisions = (id: string) => invoke<MemoryRevision[]>("ai_memory_revisions", { id });
 export const aiMemoryPropose = (workspaceId: string) => invoke<Memory[]>("ai_memory_propose", { workspaceId });
+/** One pass over the workspace's approved memories: anchors new ones, sends to review those whose code is gone. */
+export const aiMemoryReview = (workspaceId: string) => invoke<number>("ai_memory_review", { workspaceId });
+/** «Mantener»: keep a memory waiting for review as it is. */
+export const aiMemoryConfirm = (id: string) => invoke<Memory>("ai_memory_confirm", { id });
+/** A clash settled: `replaces` — it replaces the other memory; otherwise they are different. */
+export const aiMemorySettleClash = (id: string, replaces: boolean) => invoke<Memory>("ai_memory_settle_clash", { id, replaces });

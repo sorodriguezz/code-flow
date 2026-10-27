@@ -320,22 +320,78 @@ fn the_note_names_kind_approval_date_and_origin() {
 }
 
 #[test]
-fn unused_memories_are_flagged_stale_without_being_deleted() {
+fn memories_wait_for_review_by_kind_and_use_does_not_count_as_confirmation() {
     let conn = db();
-    let old = create(&conn, new(Scope::Project, Kind::Preference, "Usar tabs", "", true)).unwrap();
-    age(&conn, &old.id, STALE_DAYS + 10);
-    let fresh = create(&conn, new(Scope::Project, Kind::Preference, "Usar comillas dobles", "", true)).unwrap();
+    let fact = create(&conn, new(Scope::Project, Kind::Fact, "La API corre en el puerto 4001", "", true)).unwrap();
+    let convention = create(&conn, new(Scope::Project, Kind::Convention, "Usar tabs", "", true)).unwrap();
+    let preference = create(&conn, new(Scope::Project, Kind::Preference, "Responder en español", "", true)).unwrap();
+    for id in [&fact.id, &convention.id, &preference.id] {
+        age(&conn, id, 40);
+    }
     let pending = propose(&conn, agent("Algo viejo propuesto", "")).unwrap().0;
-    age(&conn, &pending.id, STALE_DAYS + 10);
-    assert!(get(&conn, &old.id).unwrap().unwrap().stale);
-    assert!(!get(&conn, &fresh.id).unwrap().unwrap().stale);
-    assert!(!get(&conn, &pending.id).unwrap().unwrap().stale, "only approved memories are reviewed for use");
-    let stale = list(&conn, &Filter { project_id: Some("p1".into()), stale: true, ..Default::default() }).unwrap();
-    assert_eq!(stale.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec![old.id.as_str()]);
-    // Used again: no longer stale. And nothing was ever deleted.
-    relevant(&conn, Some("w1"), Some("p1"), "", false, 2_000).unwrap();
-    assert!(!get(&conn, &old.id).unwrap().unwrap().stale);
-    assert_eq!(rows(&conn), 3);
+    age(&conn, &pending.id, 400);
+    let stale = |id: &str| get(&conn, id).unwrap().unwrap().stale;
+    assert!(stale(&fact.id), "a fact is reviewed after 30 days");
+    assert!(!stale(&convention.id), "a convention after 90");
+    assert!(!stale(&pending.id), "only approved memories are reviewed");
+    age(&conn, &convention.id, 60);
+    age(&conn, &preference.id, 400);
+    assert!(stale(&convention.id));
+    assert!(!stale(&preference.id), "a preference never");
+    // Shown to a model every day: still waiting — being used is not being right.
+    relevant(&conn, Some("w1"), Some("p1"), "puerto API tabs", false, 2_000).unwrap();
+    assert!(stale(&fact.id) && stale(&convention.id));
+    let queue = page(&conn, &Filter { project_id: Some("p1".into()), review: true, ..Default::default() }).unwrap();
+    assert_eq!((queue.total, queue.review, queue.stale), (2, 2, 2));
+    // «Mantener» confirms it; nothing was ever deleted.
+    let kept = confirm(&conn, &fact.id).unwrap();
+    assert!(!kept.stale && !kept.needs_review && kept.confirmed_at.is_some());
+    assert_eq!(revisions(&conn, &fact.id).unwrap()[0].action, "confirmed");
+    assert_eq!(rows(&conn), 4);
+}
+
+#[test]
+fn a_model_flags_a_contradicted_memory_for_review_without_changing_it() {
+    let conn = db();
+    let memory = create(&conn, new(Scope::Project, Kind::Convention, "Los tests usan Jest", "Config en jest.config.js", true)).unwrap();
+    assert!(flag(&conn, Some("w1"), Some("p1"), "Algo que no existe", "x", &[], "agent").is_err());
+    assert!(flag(&conn, Some("w1"), Some("p1"), "Los tests usan Jest", "  ", &[], "agent").is_err(), "a reason is required");
+    let flagged = flag(&conn, Some("w1"), Some("p1"), "- los tests usan jest", "package.json ya usa vitest", &["package.json:12".into()], "agent").unwrap();
+    assert_eq!(flagged.id, memory.id);
+    let review = flagged.review.clone().unwrap();
+    assert_eq!((review.reason, review.detail.as_str(), review.evidence.clone()), (review::Reason::Contradicted, "package.json ya usa vitest", vec!["package.json:12".to_string()]));
+    assert!(flagged.needs_review && flagged.status == "approved" && flagged.body == memory.body, "the user decides, not the model");
+    // The next model sees why it is in doubt.
+    let shown = relevant(&conn, Some("w1"), Some("p1"), "tests jest", false, 2_000).unwrap();
+    assert!(note(&shown).unwrap().0.contains("en revisión: un modelo la vio contradicha"));
+    // The user corrects it: the doubt is settled with the edit.
+    let edited = edit(&conn, &memory.id, Patch { title: Some("Los tests usan Vitest".into()), ..Default::default() }).unwrap();
+    assert!(edited.review.is_none() && !edited.needs_review);
+}
+
+#[test]
+fn a_new_memory_that_seems_to_say_otherwise_asks_whether_it_replaces_the_old_one() {
+    let conn = db();
+    let old = create(&conn, new(Scope::Project, Kind::Convention, "Los tests usan Jest con cobertura", "", true)).unwrap();
+    let unrelated = create(&conn, new(Scope::Project, Kind::Convention, "Las ramas se llaman feature/ticket", "", true)).unwrap();
+    assert!(unrelated.conflicts_with.is_none());
+    let newer = propose(&conn, agent("Los tests usan Vitest con cobertura", "")).unwrap().0;
+    assert_eq!(newer.conflicts_with.as_deref(), Some(old.id.as_str()));
+    assert_eq!(newer.conflicts_with_title.as_deref(), Some("Los tests usan Jest con cobertura"));
+    // Approved by the user, it waits in the queue until the clash is settled.
+    approve(&conn, &newer.id, None).unwrap();
+    assert!(get(&conn, &newer.id).unwrap().unwrap().needs_review);
+    let settled = settle_clash(&conn, &newer.id, true).unwrap();
+    assert!(settled.conflicts_with.is_none() && !settled.needs_review);
+    assert_eq!(settled.supersedes.as_deref(), Some(old.id.as_str()));
+    assert_eq!(get(&conn, &old.id).unwrap().unwrap().status, "revoked", "replaced at once, being approved");
+    // «Son distintas»: the clash is forgotten, both stay.
+    let a = create(&conn, new(Scope::Project, Kind::Decision, "El deploy corre en Vercel con preview", "", true)).unwrap();
+    let b = create(&conn, new(Scope::Project, Kind::Decision, "El deploy corre en Vercel con produccion manual", "", true)).unwrap();
+    assert_eq!(b.conflicts_with.as_deref(), Some(a.id.as_str()));
+    let apart = settle_clash(&conn, &b.id, false).unwrap();
+    assert!(apart.conflicts_with.is_none() && apart.supersedes.is_none());
+    assert_eq!(get(&conn, &a.id).unwrap().unwrap().status, "approved");
 }
 
 #[test]
@@ -394,7 +450,7 @@ fn the_pane_pages_a_workspace_with_its_global_memories() {
 
     let all = Filter { workspace_id: Some("w1".into()), include_global: true, limit: Some(4), ..Default::default() };
     let first = page(&conn, &all).unwrap();
-    assert_eq!((first.rows.len(), first.total, first.candidates, first.stale), (4, 6, 1, 0));
+    assert_eq!((first.rows.len(), first.total, first.candidates, first.stale, first.review), (4, 6, 1, 0, 0));
     assert_eq!(first.rows[0].status, "candidate", "proposals first");
     let second = page(&conn, &Filter { offset: Some(4), ..all.clone() }).unwrap();
     assert_eq!(second.rows.len(), 2);

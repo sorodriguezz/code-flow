@@ -70,3 +70,26 @@ pub fn ai_memory_propose(db: State<'_, Db>, workspace_id: String) -> Result<Vec<
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     ai_memory::propose_from_experiences(&conn, &workspace_id)
 }
+
+/// One pass over the workspace's approved memories (`ai_memory::review::run`): anchors the new ones
+/// to the files and symbols they name, and sends to review the ones whose code is gone. Run when the
+/// Memory pane opens. Returns how many memories changed state.
+#[tauri::command]
+pub async fn ai_memory_review(workspace_id: String) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || ai_memory::review::run(&workspace_id)).await.map_err(|e| e.to_string())?
+}
+
+/// «Mantener»: the user keeps a memory waiting for review as it is.
+#[tauri::command]
+pub fn ai_memory_confirm(db: State<'_, Db>, id: String) -> Result<Memory, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    ai_memory::confirm(&conn, &id)
+}
+
+/// A clash settled: `replaces` — this memory replaces the one it clashes with; otherwise they are
+/// about different things.
+#[tauri::command]
+pub fn ai_memory_settle_clash(db: State<'_, Db>, id: String, replaces: bool) -> Result<Memory, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    ai_memory::settle_clash(&conn, &id, replaces)
+}
