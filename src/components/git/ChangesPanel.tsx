@@ -50,6 +50,7 @@ import { AiSparkles } from "../common/AiGlyph";
 import type { LucideIcon } from "lucide-react";
 import { useRepoStore } from "../../state/repoStore";
 import { useBlameStore } from "../../state/blameStore";
+import { useCommitDraft, useCommitDraftStore } from "../../state/commitDraftStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { DiffView } from "./DiffView";
 import type { DiffSides } from "./BinaryDiff";
@@ -70,7 +71,7 @@ import {
 } from "../../lib/tauri/commands";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { diffToText } from "../../lib/diffText";
-import { parseClaudeError, quotaRetryText, type ClaudeErrorInfo } from "../../lib/claudeError";
+import { parseClaudeError, quotaRetryText } from "../../lib/claudeError";
 import { confirmAction } from "../../state/confirmStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
@@ -609,7 +610,18 @@ export function ChangesPanel({
    */
   const [refreshing, runRefreshing] = useMinimumSpin();
   const openInEditor = useUiStore((s) => s.openInEditor);
-  const [message, setMessage] = useState("");
+  /** The box, its «generating» lock and the AI error belong to the repository, not to this panel —
+   *  the panel stays mounted across a switch (see `commitDraftStore`). */
+  const { message, aiBusy, aiError } = useCommitDraft(repoPath);
+  const setMessage = useCallback(
+    (next: string | ((current: string) => string)) => {
+      if (!repoPath) return;
+      useCommitDraftStore
+        .getState()
+        .patch(repoPath, (d) => ({ message: typeof next === "function" ? next(d.message) : next }));
+    },
+    [repoPath],
+  );
   /** The list's filter (VS Code's Source Control filter): rows whose path contains it, either list. */
   const [filter, setFilter] = useState("");
   /** The lists' scroller — what a windowed list measures its visible rows against. */
@@ -625,8 +637,6 @@ export function ChangesPanel({
    *  workspace switch had no status yet, and React threw "Rendered fewer hooks than expected". */
   const afterCommit = useRef<"none" | "push">("none");
   const [commitMenu, setCommitMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
-  const [aiBusy, setAiBusy] = useState(false);
-  const [aiError, setAiError] = useState<ClaudeErrorInfo | null>(null);
   /** The right-click menu on a changed file, and where to draw it. */
   const [fileMenu, setFileMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   /** The file whose history is open, if any. */
@@ -1063,8 +1073,10 @@ export function ChangesPanel({
 
   const generateWithAi = async () => {
     if (!repoPath) return;
-    setAiError(null);
-    setAiBusy(true);
+    // Everything below writes to this repository's draft, whichever one is open when it answers.
+    const target = repoPath;
+    const { patch } = useCommitDraftStore.getState();
+    patch(target, { aiError: null, aiBusy: true });
     // Read before the first await: the account a commit runs as can depend on the workspace, and
     // the chip beside Commit resolved it against this one — and the status bar's row has to keep
     // naming where the work belongs after the user has moved on.
@@ -1089,15 +1101,15 @@ export function ChangesPanel({
       // of each change instead of the surrounding code is a real, silent downgrade in the messages
       // it writes — a perf change has no business costing that. So this one caller still pays for
       // whole-file context, once, on an explicit click, rather than several times a second.
-      const full = await getStagedDiff(repoPath);
+      const full = await getStagedDiff(target);
       const text = await generateCommitMessage(diffToText(full), runId, workspaceId);
-      setMessage(text);
+      patch(target, { message: text });
     } catch (e) {
       // Stopped from the status bar: a decision, not a failure — the box keeps what it had.
-      if (!isCancellation(e)) setAiError(parseClaudeError(String(e)));
+      if (!isCancellation(e)) patch(target, { aiError: parseClaudeError(String(e)) });
     } finally {
       useAiRunStore.getState().finish(runId);
-      setAiBusy(false);
+      patch(target, { aiBusy: false });
     }
   };
 
