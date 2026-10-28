@@ -254,7 +254,7 @@ export function AgentsView() {
                 <ChainDetail key={selectedChainId} chainId={selectedChainId} />
               ) : selectedId ? (
                 <AgentTaskDetail key={selectedId} taskId={selectedId} />
-              ) : selectedTicket && groupBy === "tree" ? (
+              ) : selectedTicket && (groupBy === "tree" || groupBy === "board") ? (
                 <TicketDetail key={selectedTicket} uid={selectedTicket} />
               ) : groupBy === "board" ? (
                 <TaskBoard />

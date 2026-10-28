@@ -388,10 +388,19 @@ export function TerminalBench() {
 
       <div className="relative min-h-0 flex-1">
         {tabs.length === 0 || !ready ? (
+          // The way in, not a paragraph about it: the empty bench used to explain tabs, splits and
+          // dividers, and the menu that runs a repository's scripts opened right over that text.
           <EmptyState
             icon={TerminalSquare}
             title={loading ? t("bench.loading") : t("bench.empty")}
-            subtitle={loading ? "" : t("bench.emptyHint")}
+            action={
+              loading || !workspaceId ? undefined : (
+                <button type="button" onClick={() => newTab()} className={buttonClass({ variant: "secondary" })}>
+                  <Plus size={14} />
+                  {t("bench.newTab")}
+                </button>
+              )
+            }
           />
         ) : (
           tabs.map((tab) => {

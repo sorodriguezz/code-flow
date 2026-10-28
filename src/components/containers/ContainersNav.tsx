@@ -1,6 +1,10 @@
 import { useEffect, useMemo, type ReactNode } from "react";
 import {
+  Activity,
   Blocks,
+  Cloud,
+  HeartPulse,
+  ScrollText,
   Boxes,
   Box,
   Hammer,
@@ -9,9 +13,11 @@ import {
   LayoutDashboard,
   Loader2,
   Network,
+  List,
   Plus,
   RefreshCw,
   Unplug,
+  Waypoints,
   type LucideIcon,
 } from "lucide-react";
 import { Select } from "../common/Select";
@@ -20,6 +26,8 @@ import { RowAction, RuntimeGlyph, StateDot } from "./containerBits";
 import { runtimeLabel } from "./containerActions";
 import { firstRead } from "./pageModel";
 import { disconnectCluster } from "./KubePage";
+import { AiVisibilityToggle } from "./AiVisibility";
+import { useAzureStore } from "../../state/azureStore";
 import { listKey, useContainersStore, type EngineSection } from "../../state/containersStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -89,6 +97,7 @@ export function ContainersNav({ onAddCluster, onAddEngine }: { onAddCluster: () 
         )}
         {detected && runtimes.length === 0 && <p className="px-1.5 py-2 text-[11.5px] text-[var(--cf-text-muted)]">{t("containers.noRuntimes")}</p>}
         {runtimes.map((runtime) => (runtime.id === "kubernetes" ? <KubeNav key={runtime.id} runtime={runtime} onAddCluster={onAddCluster} /> : <EngineNav key={runtime.id} runtime={runtime} />))}
+        <AzureNav />
         {detected && !hasKube && (
           <button onClick={onAddCluster} className={rowClass(false, "mt-2 h-7 text-[12px] text-[var(--cf-text-muted)]")}>
             <Plus size={13} className="shrink-0" />
@@ -186,7 +195,12 @@ function EngineNav({ runtime }: { runtime: RuntimeInfo }) {
   };
   return (
     <div>
-      <RuntimeHead runtime={runtime} selected={here && nav.section === "overview"} onClick={() => setNav({ runtime: runtime.id, section: "overview" })} />
+      <RuntimeHead
+        runtime={runtime}
+        selected={here && nav.section === "overview"}
+        onClick={() => setNav({ runtime: runtime.id, section: "overview" })}
+        extra={<AiVisibilityToggle kind="engines" id={runtime.id} name={runtimeLabel(runtime.id, t)} />}
+      />
       {runtime.contexts.length > 1 && (
         <div className="py-0.5 pl-6 pr-1">
           <Select
@@ -260,6 +274,7 @@ function KubeNav({ runtime, onAddCluster }: { runtime: RuntimeInfo; onAddCluster
             <span className="text-[11.5px] text-[var(--cf-text-muted)]">{t("containers.m.noClusters")}</span>
           )}
         </div>
+        {context && <AiVisibilityToggle kind="kube" id={context} name={context} />}
         {context && (
           <RowAction label={t("containers.m.kube.disconnectHint")} onClick={() => void disconnectCluster(t)}>
             <Unplug size={12} />
@@ -280,6 +295,9 @@ function KubeNav({ runtime, onAddCluster }: { runtime: RuntimeInfo; onAddCluster
           />
         </div>
       )}
+      {context && (
+        <NavRow icon={Waypoints} label={t("containers.topo.title")} selected={here && nav.section === "topology"} onClick={() => setNav({ runtime: "kubernetes", section: "topology" })} />
+      )}
       {context &&
         KUBE_GROUPS.map((group) => (
           <div key={group.label}>
@@ -296,6 +314,86 @@ function KubeNav({ runtime, onAddCluster }: { runtime: RuntimeInfo; onAddCluster
             ))}
           </div>
         ))}
+    </div>
+  );
+}
+
+/** The Azure pages, beside the runtimes whenever `az` is installed: the subscription and group they
+ *  read, and what there is to look at. Nothing here changes a resource. */
+const AZURE_SECTIONS: { id: string; icon: LucideIcon; label: TranslationKey }[] = [
+  { id: "resources", icon: List, label: "azure.section.resources" },
+  { id: "topology", icon: Waypoints, label: "azure.section.topology" },
+  { id: "health", icon: HeartPulse, label: "azure.section.health" },
+  { id: "activity", icon: Activity, label: "azure.section.activity" },
+  { id: "query", icon: ScrollText, label: "azure.section.query" },
+];
+
+function AzureNav() {
+  const t = useT();
+  const nav = useNav();
+  const setNav = useContainersStore((s) => s.setNav);
+  const found = useAzureStore((s) => s.found);
+  const detect = useAzureStore((s) => s.detect);
+  const loadPrefs = useAzureStore((s) => s.loadPrefs);
+  const subscriptions = useAzureStore((s) => s.subscriptions);
+  const loadSubscriptions = useAzureStore((s) => s.loadSubscriptions);
+  const prefs = useAzureStore((s) => s.prefs);
+  const setSubscription = useAzureStore((s) => s.setSubscription);
+  const setGroup = useAzureStore((s) => s.setGroup);
+  const groups = useAzureStore((s) => s.groups[s.prefs.subscription]);
+  const loadGroups = useAzureStore((s) => s.loadGroups);
+  const here = nav.runtime === "azure";
+  useEffect(() => {
+    void loadPrefs().then(() => (useAzureStore.getState().found === null ? detect() : undefined));
+  }, [loadPrefs, detect]);
+  // `az account list` reads az's own profile; the groups ask Azure — only once the pages are open.
+  useEffect(() => {
+    if (found) void loadSubscriptions();
+  }, [found, loadSubscriptions]);
+  useEffect(() => {
+    if (found && here && prefs.subscription) void loadGroups(prefs.subscription);
+  }, [found, here, prefs.subscription, loadGroups]);
+  if (!found) return null;
+  const subs = subscriptions.value?.contexts ?? [];
+  return (
+    <div>
+      <div
+        className={rowClass(here && nav.section === "resources", "mt-1.5 h-8 cursor-pointer pr-1")}
+        onClick={() => setNav({ runtime: "azure", section: "resources" })}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => e.key === "Enter" && setNav({ runtime: "azure", section: "resources" })}
+      >
+        <Cloud size={14} className="shrink-0 text-[var(--cf-accent)]" />
+        <span className="min-w-0 truncate text-[12.5px] font-semibold">Azure</span>
+        <span className="min-w-0 truncate text-[11px] text-[var(--cf-text-faint)]">{t("azure.readOnly")}</span>
+        <span className="flex-1" />
+        {subscriptions.loading && <Loader2 size={11} className="animate-spin text-[var(--cf-text-muted)]" />}
+      </div>
+      {subs.length > 0 && (
+        <div className="flex items-center gap-1 py-0.5 pl-6 pr-1">
+          <div className="min-w-0 flex-1">
+            <Select size="sm" value={prefs.subscription} onChange={setSubscription} options={subs.map((s) => ({ value: s.id, label: s.name }))} ariaLabel={t("azure.subscription")} />
+          </div>
+          {prefs.subscription && (
+            <AiVisibilityToggle kind="azure" id={prefs.subscription} name={subs.find((s) => s.id === prefs.subscription)?.name ?? prefs.subscription} />
+          )}
+        </div>
+      )}
+      {subs.length > 0 && (
+        <div className="py-0.5 pl-6 pr-1">
+          <Select
+            size="sm"
+            value={prefs.group}
+            onChange={setGroup}
+            options={[{ value: "", label: t("azure.allGroups") }, ...(groups?.value ?? []).map((g) => ({ value: g.id, label: g.name }))]}
+            ariaLabel={t("azure.group")}
+          />
+        </div>
+      )}
+      {AZURE_SECTIONS.map((section) => (
+        <NavRow key={section.id} icon={section.icon} label={t(section.label)} selected={here && nav.section === section.id} onClick={() => setNav({ runtime: "azure", section: section.id })} />
+      ))}
     </div>
   );
 }

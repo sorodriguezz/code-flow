@@ -3,6 +3,7 @@ import { AlertTriangle, Search, Trash2, X } from "lucide-react";
 import { iconButtonClass } from "../common/Button";
 import { fieldClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
+import { AiGlyph } from "../common/AiGlyph";
 import { dangerIconButtonClass, formatCount, formatDuration } from "./dbChrome";
 import { recordModel } from "../../lib/db/engineModel";
 import { useDbStore } from "../../state/dbStore";
@@ -126,6 +127,11 @@ export function DbHistoryList() {
                     </span>
                   </span>
                   <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--cf-text-faint)]">
+                    {entry.source === "ai" && (
+                      <span className="flex shrink-0 items-center" title={t("db.history.byAi")} aria-label={t("db.history.byAi")}>
+                        <AiGlyph name="sparkles" size={11} still />
+                      </span>
+                    )}
                     <span className="truncate">{entry.connection_name || "—"}</span>
                     {entry.database_name && <span className="truncate">· {entry.database_name}</span>}
                     <span className="ml-auto shrink-0 tabular-nums">

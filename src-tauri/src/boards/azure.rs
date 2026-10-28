@@ -846,6 +846,35 @@ async fn assignee(org: &str, pat: &str) -> Option<String> {
     Some(identity)
 }
 
+/// Assigns work item `id` to whoever the token belongs to — what «Empezar» on a ticket does, so the
+/// board says who picked it up (user, 2026-10-28: «asignar el ticket al user del pat»; shared or
+/// service tokens are not meant to be used, so the token's owner *is* the person). Returns the
+/// identity written.
+pub async fn assign_to_token_owner(org: &str, pat: &str, id: i64) -> Result<String, String> {
+    let identity = assignee(org, pat)
+        .await
+        .ok_or_else(|| "Azure DevOps didn't say who this token belongs to".to_string())?;
+    let url = format!(
+        "https://dev.azure.com/{}/_apis/wit/workitems/{id}?api-version={API_VERSION}",
+        encode_segment(&normalize_org(org))
+    );
+    let ops = serde_json::json!([{ "op": "add", "path": format!("/fields/{ASSIGNED_TO}"), "value": identity }]);
+    let res = client()
+        .patch(&url)
+        .header("Authorization", auth_header(pat))
+        .header("Content-Type", "application/json-patch+json")
+        .body(ops.to_string())
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
+    let status = res.status();
+    if !status.is_success() {
+        let body = res.text().await.unwrap_or_default();
+        return Err(crate::ado::describe_failure(status, &body));
+    }
+    Ok(identity)
+}
+
 /// Why a create came back without a work item.
 ///
 /// The distinction exists for exactly one caller — [`create_item`] retries, and a retry is only

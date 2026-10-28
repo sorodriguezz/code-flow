@@ -615,11 +615,6 @@ function RailCard({
           >
             {title}
           </span>
-          {row.isMain && (
-            <span className="shrink-0 rounded border border-[var(--cf-border)] px-1 text-[10px] leading-[15px] text-[var(--cf-text-muted)]">
-              {t("wt.primary")}
-            </span>
-          )}
           {raceId && <Flag size={11} className="shrink-0 text-[var(--cf-text-faint)]" aria-label={t("wt.tabRace")} />}
         </span>
         <span className="mt-1 flex min-w-0 items-center gap-1.5 pl-[18px]">
@@ -627,10 +622,21 @@ function RailCard({
             <span className="h-1.5 w-1.5 shrink-0 rounded-[2px]" style={{ background: repo?.color || "var(--cf-text-faint)" }} />
             <span className="truncate">{repoName}</span>
           </span>
-          <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--cf-text-faint)]">{row.branch || "—"}</span>
+          {/* Where it runs, on the line that already says where: «principal» used to be a pill beside
+              the title on every card in the main checkout, which is most of them. No branch to name
+              is nothing, not a lone dash. */}
+          <span className="min-w-0 flex-1 truncate text-[11px] text-[var(--cf-text-faint)]">
+            {row.isMain && <span>{t("wt.primary")}</span>}
+            {row.isMain && row.branch && <span> · </span>}
+            {row.branch && <span className="font-mono">{row.branch}</span>}
+          </span>
           <TallyText value={counted} />
         </span>
-        {lines.slice(0, MAX_LINES).map((line) => (
+        {lines.slice(0, MAX_LINES).map((line) => {
+          // A task's line opens with what it was asked, which is usually the card's own title: said
+          // twice, the second copy pushed the line's state and time out of a narrow rail.
+          const prompt = line.prompt === title ? "" : line.prompt;
+          return (
           <span
             key={line.key}
             role="button"
@@ -650,10 +656,10 @@ function RailCard({
             <span
               className={`min-w-0 flex-1 truncate ${line.unread ? "font-semibold text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"}`}
             >
-              {line.prompt || line.detail ? (
+              {prompt || line.detail ? (
                 <>
-                  {line.prompt}
-                  {line.prompt && line.detail ? <span className="text-[var(--cf-text-faint)]"> — </span> : null}
+                  {prompt}
+                  {prompt && line.detail ? <span className="text-[var(--cf-text-faint)]"> — </span> : null}
                   {line.detail && <span className="text-[var(--cf-text-faint)]">{line.detail}</span>}
                 </>
               ) : (
@@ -666,7 +672,8 @@ function RailCard({
               {line.state === "working" || line.state === "blocked" ? t(LINE_LABEL[line.state]) : ago(line.at)}
             </span>
           </span>
-        ))}
+          );
+        })}
         {lines.length > MAX_LINES && (
           <span className="mt-1 block pl-[18px] text-[11px] text-[var(--cf-text-faint)]">
             {t("wt.moreAgents", { n: lines.length - MAX_LINES })}

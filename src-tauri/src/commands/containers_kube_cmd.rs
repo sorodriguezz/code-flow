@@ -56,3 +56,9 @@ pub async fn containers_kube_aks_status(context: String) -> Result<kubeconfig::A
 pub async fn containers_kube_use_azure_cli(context: String) -> Result<kubeconfig::AzureCliSwitch, String> {
     kubeconfig::use_azure_cli(&context).await
 }
+
+/// How a namespace's objects hang together (all namespaces when none) — read-only.
+#[tauri::command]
+pub async fn containers_kube_topology(context: Option<String>, namespace: Option<String>) -> crate::containers::topology::Topology {
+    crate::containers::topology::topology(&crate::containers::kube::KubeTarget { context, namespace }).await
+}

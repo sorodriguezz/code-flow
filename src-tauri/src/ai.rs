@@ -2736,12 +2736,17 @@ fn is_stream_event_line(line: &str) -> bool {
 /// `strip_ansi` is skipped on that path too. It allocates a fresh `String` per call and the frames
 /// are machine-written JSON that carries no escape sequences; at one call per token that is
 /// hundreds of pointless allocations per reply.
+///
+/// `answered` is set by a turn's verdict going past: what streams after it is a follow-up turn — the
+/// report on work the first one left in the background — and its first words open a new paragraph,
+/// as they will in the saved reply (see `claude::result_payload`).
 fn emit_pumped(
     ctx: &RunCtx,
     stream: &'static str,
     raw: &[u8],
     deltas: Option<&DeltaPump>,
     engine: Option<&dyn AiEngine>,
+    answered: &mut bool,
 ) {
     let text = String::from_utf8_lossy(raw);
     let Some((deltas, engine)) = deltas.zip(engine) else {
@@ -2749,6 +2754,9 @@ fn emit_pumped(
         return;
     };
     if !text.contains(STREAM_EVENT_TAG) {
+        if text.contains(r#""type":"result""#) {
+            *answered = true;
+        }
         ai_runs::emit_line(ctx, stream, &strip_ansi(&text));
         return;
     }
@@ -2761,7 +2769,11 @@ fn emit_pumped(
         ai_runs::emit_line(ctx, stream, &strip_ansi(&text));
         return;
     }
-    for delta in parsed {
+    for mut delta in parsed {
+        if *answered && delta.kind == AiDeltaKind::Text {
+            *answered = false;
+            delta.text.insert_str(0, "\n\n");
+        }
         ai_runs::emit_delta(
             ctx,
             &deltas.sink.conversation_id,
@@ -2771,6 +2783,10 @@ fn emit_pumped(
         );
     }
 }
+
+/// Claude Code's ceiling on the wait for background tasks after a turn's answer, in milliseconds —
+/// see [`ai_runs::background_wait_ceiling`].
+const BACKGROUND_WAIT_VAR: &str = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS";
 
 /// The silence the watchdog allows a run on `engine`: the setting, three times over for a CLI that is
 /// silent by design until it answers — see [`AiEngine::quiet_while_working`]. `None` is "no watchdog".
@@ -2791,26 +2807,52 @@ fn run_idle_limit(engine: &dyn AiEngine) -> Option<std::time::Duration> {
 ///
 /// A long or background `Bash` is a task too (`task_type: "local_bash"`): only an agent task, or one
 /// naming a `subagent_type`, is a sub-agent — mirrors `isAgentTask` in `agentLog.ts`.
+///
+/// Whatever its kind, a task started with `is_backgrounded` keeps the run waiting: 2.1.312 answers
+/// the turn (`result`), stays alive until its background tasks end, then answers again. Between the
+/// two it prints nothing — and it says what is still out with `background_tasks_changed`, whose
+/// `tasks` list replaces what was read so far.
 fn track_subagent(line: &[u8], activity: &ai_runs::Activity) {
     let has = |needle: &[u8]| line.windows(needle.len()).any(|window| window == needle);
-    if !has(b"\"task_started\"") && !has(b"\"task_notification\"") && !has(b"\"task_updated\"") {
+    if !has(b"\"task_started\"")
+        && !has(b"\"task_notification\"")
+        && !has(b"\"task_updated\"")
+        && !has(b"\"background_tasks_changed\"")
+    {
         return;
     }
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(line.trim_ascii()) else { return };
     if value.get("type").and_then(serde_json::Value::as_str) != Some("system") {
         return;
     }
+    if value.get("subtype").and_then(serde_json::Value::as_str) == Some("background_tasks_changed") {
+        if let Some(tasks) = value.get("tasks").and_then(serde_json::Value::as_array) {
+            activity.background_is(
+                tasks.iter().filter_map(|task| task.get("task_id").and_then(serde_json::Value::as_str)).map(str::to_string),
+            );
+        }
+        return;
+    }
     let Some(task) = value.get("task_id").and_then(serde_json::Value::as_str) else { return };
     let terminal = |status: Option<&str>| matches!(status, Some("completed" | "failed" | "killed" | "stopped" | "cancelled" | "error"));
+    let ended = || {
+        activity.subagent_ended(task);
+        activity.background_ended(task);
+    };
     match value.get("subtype").and_then(serde_json::Value::as_str) {
-        Some("task_started") if is_agent_task(&value) => activity.subagent_started(task),
-        Some("task_notification") if terminal(value.get("status").and_then(serde_json::Value::as_str)) => {
-            activity.subagent_ended(task)
+        Some("task_started") => {
+            if is_agent_task(&value) {
+                activity.subagent_started(task);
+            }
+            if value.get("is_backgrounded").and_then(serde_json::Value::as_bool) == Some(true) {
+                activity.background_started(task);
+            }
         }
+        Some("task_notification") if terminal(value.get("status").and_then(serde_json::Value::as_str)) => ended(),
         Some("task_updated")
             if terminal(value.get("patch").and_then(|patch| patch.get("status")).and_then(serde_json::Value::as_str)) =>
         {
-            activity.subagent_ended(task)
+            ended()
         }
         _ => {}
     }
@@ -2839,6 +2881,7 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
 
     let mut buf = [0u8; 8192];
     let mut pending: Vec<u8> = Vec::new();
+    let mut answered = false;
     loop {
         let read = match pipe.read(&mut buf).await {
             Ok(0) | Err(_) => break,
@@ -2854,18 +2897,18 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
         while let Some(idx) = pending.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = pending.drain(..=idx).collect();
             track_subagent(&line, &activity);
-            emit_pumped(ctx, stream, &line, deltas.as_ref(), delta_engine.as_deref());
+            emit_pumped(ctx, stream, &line, deltas.as_ref(), delta_engine.as_deref(), &mut answered);
         }
         // A CLI drawing a progress bar rewrites one line forever with `\r` and never sends a
         // newline; without this the buffer would grow unbounded and the user would see nothing.
         if pending.len() > 8192 {
-            emit_pumped(ctx, stream, &pending, deltas.as_ref(), delta_engine.as_deref());
+            emit_pumped(ctx, stream, &pending, deltas.as_ref(), delta_engine.as_deref(), &mut answered);
             pending.clear();
         }
     }
     if let Some(ctx) = &ctx {
         if !pending.is_empty() {
-            emit_pumped(ctx, stream, &pending, deltas.as_ref(), delta_engine.as_deref());
+            emit_pumped(ctx, stream, &pending, deltas.as_ref(), delta_engine.as_deref(), &mut answered);
         }
     }
     collected.finish()
@@ -2993,7 +3036,8 @@ async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Resu
     // prompts (one that may write): a read-only agy run cannot answer the "mcp" permission
     // headlessly, agy denies the call, and on a live run the model then gave up with an empty reply —
     // worse than no map; a read-only Grok run denies every MCP tool (`grok.rs`). Allow-rules live in
-    // the user's own settings, which this never writes.
+    // the user's own settings, which this never writes. A workspace chat's folder gets one too, with
+    // the workspace chat's tools (`codemap::mcp::for_file_client`).
     let _file_map_grant = match inv.cwd {
         Some(cwd) if inv.auto_approve_edits && !inv.read_only => match engine.id() {
             "gemini" => crate::codemap::mcp::for_agy(cwd),
@@ -3119,6 +3163,12 @@ async fn spawn_once(
     // covered too. See `keep_claude_from_updating`.
     if engine.id() == "claude" {
         cmd.env("DISABLE_AUTOUPDATER", "1");
+        // How long the CLI waits, after answering, for the background work the turn left running —
+        // tied to this run's watchdog rather than the CLI's own ten minutes, after which it dropped
+        // that work and the report it had promised. A value the user set themselves wins.
+        if std::env::var_os(BACKGROUND_WAIT_VAR).is_none() {
+            cmd.env(BACKGROUND_WAIT_VAR, ai_runs::background_wait_ceiling(run_idle_limit(engine)).to_string());
+        }
     } else {
         keep_claude_from_updating(&mut cmd, &program);
     }
@@ -3200,14 +3250,21 @@ async fn spawn_once(
                     (Vec::new(), Vec::new())
                 }
             };
+            let stdout_text = strip_ansi(&String::from_utf8_lossy(&stdout));
+            let stderr_text = strip_ansi(&String::from_utf8_lossy(&stderr));
             // Stopped halfway is not free: what it spent up to the stop is still spent, whenever the
             // CLI had already said so.
-            record_failed_usage(
-                engine,
-                inv,
-                &strip_ansi(&String::from_utf8_lossy(&stdout)),
-                &strip_ansi(&String::from_utf8_lossy(&stderr)),
-            );
+            record_failed_usage(engine, inv, &stdout_text, &stderr_text);
+            // A turn somebody is reading that had already answered, and was only waiting on the
+            // background work it left: the stop ended that wait, not the turn, and what it said is
+            // theirs. A chain step stopped the same way stays stopped — the next step must not
+            // start on work that was cut short.
+            if inv.stream_deltas.is_some() && engine.id() == "claude" && crate::claude::answered(&stdout_text) {
+                if let Ok(mut run) = without_reasoning(engine.interpret(true, "stopped", &stdout_text, &stderr_text)) {
+                    run.text = format!("{}\n\n{}", run.text.trim_end(), ai_runs::background_stopped_note());
+                    return Ok(run);
+                }
+            }
             return Err(match stopped {
                 Stopped::Cancelled => ai_runs::CANCELLED_MARKER.to_string(),
                 Stopped::WentQuiet(limit) => ai_runs::idle_error(engine.label(), limit),
@@ -8792,8 +8849,28 @@ mod tests {
         // A long `Bash` is a task, not a sub-agent: the run is not delegating.
         track_subagent(br#"{"type":"system","subtype":"task_started","task_id":"c3","tool_use_id":"toolu_bash","description":"pnpm test","task_type":"local_bash"}"#, &activity);
         assert!(!activity.subagents_open());
+        assert!(!activity.waiting_on_tasks(), "a foreground Bash is the turn itself, not work left behind");
         track_subagent(br#"{"type":"system","subtype":"task_started","task_id":"d4","description":"Explorar","subagent_type":"Explore","task_type":"local_agent"}"#, &activity);
         assert!(activity.subagents_open());
+    }
+
+    /// What 2.1.312 printed around a `run_in_background` shell, trimmed: the turn answers, the
+    /// process stays, and the task's end comes minutes later with nothing in between.
+    #[test]
+    fn a_background_shell_keeps_the_run_waiting_until_it_ends() {
+        let activity = ai_runs::Activity::new();
+        track_subagent(br#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b78","task_type":"local_bash","description":"Run tests"}]}"#, &activity);
+        track_subagent(br#"{"type":"system","subtype":"task_started","task_id":"b78","tool_use_id":"toolu_01","description":"Run tests","is_backgrounded":true,"task_type":"local_bash"}"#, &activity);
+        track_subagent(br#"{"type":"result","subtype":"success","is_error":false,"result":"started"}"#, &activity);
+        assert!(activity.waiting_on_tasks());
+        assert!(!activity.subagents_open(), "a shell is not a sub-agent");
+        track_subagent(br#"{"type":"system","subtype":"task_notification","task_id":"b78","status":"completed","summary":"Background command \"Run tests\" completed (exit code 0)"}"#, &activity);
+        assert!(!activity.waiting_on_tasks());
+
+        // The CLI's list is the truth: a task it no longer names is over, however it ended.
+        track_subagent(br#"{"type":"system","subtype":"task_started","task_id":"c9","description":"dev server","is_backgrounded":true,"task_type":"local_bash"}"#, &activity);
+        track_subagent(br#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#, &activity);
+        assert!(!activity.waiting_on_tasks());
     }
 
     #[test]

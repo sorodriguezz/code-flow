@@ -1,0 +1,67 @@
+/* The topology graphs of the Contenedores panel (`TopologyCanvas`), dressed like the code map: React
+   Flow draws the pane and the edges, the nodes and bands are ours. Travels in the page's lazy chunk. */
+
+.cf-topo-canvas {
+  --xy-background-color: transparent;
+  --xy-background-pattern-color: color-mix(in oklab, var(--cf-text) 12%, transparent);
+  background-color: var(--cf-sunken);
+}
+
+.cf-topo-canvas .react-flow__pane {
+  cursor: default;
+}
+.cf-topo-canvas .react-flow__pane.dragging {
+  cursor: grabbing;
+}
+
+/* The handles only anchor the edges; nothing connects here. */
+.cf-topo-canvas .react-flow__handle {
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+}
+
+.cf-topo-canvas .react-flow__node-band {
+  pointer-events: none !important;
+}
+
+.cf-topo-node {
+  padding: 7px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--cf-border);
+  background: var(--cf-surface);
+  cursor: pointer;
+  transition: border-color 0.12s, opacity 0.12s, box-shadow 0.12s;
+}
+.cf-topo-node:hover {
+  border-color: var(--cf-border-strong);
+}
+.cf-topo-node--selected {
+  border-color: var(--cf-accent);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--cf-accent) 18%, transparent);
+}
+.cf-topo-node--dimmed {
+  opacity: 0.3;
+}
+.cf-topo-node--ghost {
+  border-style: dashed;
+  background: transparent;
+}
+
+.cf-topo-band {
+  position: relative;
+  border-radius: 12px;
+  border: 1px solid color-mix(in oklab, var(--cf-border) 70%, transparent);
+  background: color-mix(in oklab, var(--cf-surface) 35%, transparent);
+}
+.cf-topo-band-label {
+  position: absolute;
+  left: 12px;
+  top: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--cf-text-muted);
+}

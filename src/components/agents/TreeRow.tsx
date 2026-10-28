@@ -58,6 +58,7 @@ export function Row({
   pinned = false,
   muted = false,
   flag,
+  badge,
 }: {
   selected: boolean;
   onClick: () => void;
@@ -86,6 +87,9 @@ export function Row({
   muted?: boolean;
   /** A mark before the name — a task's priority. */
   flag?: ReactNode;
+  /** A mark at the head of the line of context — a ticket's state. There rather than in `chip`'s
+   *  place so the name keeps the row's full width: a pill beside it took a third of a narrow rail. */
+  badge?: ReactNode;
 }) {
   return (
     <div
@@ -127,7 +131,14 @@ export function Row({
               {label}
             </span>
           </span>
-          <span className="block truncate text-[11px] leading-4 text-[var(--cf-text-faint)]">{meta}</span>
+          {badge ? (
+            <span className="mt-0.5 flex min-w-0 items-center gap-1.5">
+              {badge}
+              <span className="min-w-0 truncate text-[11px] leading-4 text-[var(--cf-text-faint)]">{meta}</span>
+            </span>
+          ) : (
+            <span className="block truncate text-[11px] leading-4 text-[var(--cf-text-faint)]">{meta}</span>
+          )}
         </span>
         {chip && (
           <span className={chipClass("neutral", "mt-px max-w-[38%]")}>

@@ -1,7 +1,8 @@
 import { useMemo } from "react";
 import { parseSpec, useDbStore } from "../../state/dbStore";
 import { useT } from "../../state/languageStore";
-import { ENVIRONMENT_COLOR, type DbEnvironment } from "../../types/database";
+import { ENVIRONMENT_COLOR, type DbAiAccess, type DbEnvironment } from "../../types/database";
+import { AiGlyph } from "../common/AiGlyph";
 
 /** A connection's environment label, `""` when it has none (or the connection is gone). */
 export function useConnectionEnvironment(connectionId: string): DbEnvironment {
@@ -13,6 +14,31 @@ export function useConnectionEnvironment(connectionId: string): DbEnvironment {
     const env = config?.environment ?? "";
     return env === "dev" || env === "test" || env === "prod" ? env : "";
   }, [spec, kind, connectionId]);
+}
+
+/** What a connection lets AI do (`""` = closed), from its spec — `ai_access`. */
+export function useConnectionAiAccess(connectionId: string): DbAiAccess {
+  const spec = useDbStore((s) => s.connections.find((c) => c.id === connectionId)?.spec);
+  return useMemo(() => {
+    try {
+      const access = (JSON.parse(spec ?? "{}") as { ai_access?: unknown }).ai_access;
+      return access === "read" || access === "write" ? access : "";
+    } catch {
+      return "";
+    }
+  }, [spec]);
+}
+
+/** The tree's mark for a connection open to AI; the level is in its tooltip. */
+export function AiAccessMark({ access }: { access: DbAiAccess }) {
+  const t = useT();
+  if (!access) return null;
+  const label = `${t("db.aiAccess")}: ${t(access === "write" ? "db.aiAccess.write" : "db.aiAccess.read")}`;
+  return (
+    <span title={label} aria-label={label} className="flex shrink-0 items-center">
+      <AiGlyph name="sparkles" size={12} still />
+    </span>
+  );
 }
 
 /**

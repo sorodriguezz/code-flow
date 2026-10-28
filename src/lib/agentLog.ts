@@ -97,6 +97,9 @@ export function isAgentTask(event: Record<string, unknown>): boolean {
 export interface SubagentState {
   description: string;
   progress: string | null;
+  /** Not a sub-agent: work the turn left running in the background — a `run_in_background` shell —
+   *  which the run still waits on after it has answered. */
+  background?: true;
 }
 
 /**
@@ -110,19 +113,27 @@ export interface SubagentState {
  * to say instead of "no output".
  */
 export function trackSubagents(open: Record<string, SubagentState>, raw: string): Record<string, SubagentState> {
-  if (!raw.includes('"task_')) return open;
+  if (!raw.includes('"task_') && !raw.includes('"background_tasks_changed"')) return open;
   let event: unknown;
   try {
     event = JSON.parse(raw.trim());
   } catch {
     return open;
   }
-  if (!isRecord(event) || event.type !== "system" || typeof event.task_id !== "string") return open;
+  if (!isRecord(event) || event.type !== "system") return open;
+  // 2.1.312 lists what is still running in the background whenever that changes; for the shells it
+  // is the truth — a turn answers and then waits on them, with nothing else to say. See
+  // `track_subagent` in `ai.rs`.
+  if (event.subtype === "background_tasks_changed" && Array.isArray(event.tasks)) {
+    return backgroundListed(open, event.tasks.filter(isRecord));
+  }
+  if (typeof event.task_id !== "string") return open;
   const id = event.task_id;
   const description = typeof event.description === "string" ? event.description : "";
   switch (event.subtype) {
     case "task_started":
-      return isAgentTask(event) ? { ...open, [id]: { description, progress: null } } : open;
+      if (isAgentTask(event)) return { ...open, [id]: { description, progress: null } };
+      return event.is_backgrounded === true ? { ...open, [id]: { description, progress: null, background: true } } : open;
     case "task_progress":
       return open[id] ? { ...open, [id]: { ...open[id], progress: description || open[id].progress } } : open;
     case "task_notification":
@@ -137,6 +148,28 @@ export function trackSubagents(open: Record<string, SubagentState>, raw: string)
   }
 }
 
+/** `open` with its background shells made to match the CLI's list — the same object when they do. */
+function backgroundListed(open: Record<string, SubagentState>, tasks: Record<string, unknown>[]): Record<string, SubagentState> {
+  const listed = new Map<string, Record<string, unknown>>();
+  for (const task of tasks) if (typeof task.task_id === "string") listed.set(task.task_id, task);
+  let next = open;
+  for (const [id, state] of Object.entries(open)) {
+    if (state.background && !listed.has(id)) {
+      const { [id]: _gone, ...rest } = next;
+      next = rest;
+    }
+  }
+  for (const [id, task] of listed) {
+    if (next[id] || isAgentTask(task)) continue;
+    const description = typeof task.description === "string" ? task.description : "";
+    next = { ...next, [id]: { description, progress: null, background: true } };
+  }
+  return next;
+}
+
+/** Claude Code's own words for a background shell's end — a sub-agent's end reads differently. */
+const BACKGROUND_SHELL_SUMMARY = /^Background command\b/;
+
 /**
  * The few `system` events worth a line: which model answered, and Claude summarising the
  * conversation — on `/compact`, or by itself when the window fills mid-turn. A summary can take a
@@ -149,8 +182,15 @@ function systemLine(event: Record<string, unknown>): string | null {
   if (event.subtype === "task_started" && typeof event.description === "string" && isAgentTask(event)) {
     return `${STATUS_MARK}${translate("ai.subagentStarted", { task: event.description })}`;
   }
+  if (event.subtype === "task_started" && typeof event.description === "string" && event.is_backgrounded === true) {
+    return `${STATUS_MARK}${translate("ai.backgroundStarted", { task: event.description })}`;
+  }
   if (event.subtype === "task_notification" && typeof event.status === "string" && SUBAGENT_DONE.has(event.status)) {
-    return `${STATUS_MARK}${translate(event.status === "completed" ? "ai.subagentDone" : "ai.subagentFailed")}`;
+    const done = event.status === "completed";
+    if (typeof event.summary === "string" && BACKGROUND_SHELL_SUMMARY.test(event.summary)) {
+      return `${STATUS_MARK}${translate(done ? "ai.backgroundDone" : "ai.backgroundFailed")}`;
+    }
+    return `${STATUS_MARK}${translate(done ? "ai.subagentDone" : "ai.subagentFailed")}`;
   }
   if (event.subtype === "compact_boundary") {
     const meta = isRecord(event.compact_metadata) ? event.compact_metadata : {};

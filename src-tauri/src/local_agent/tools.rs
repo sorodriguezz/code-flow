@@ -29,7 +29,7 @@
 //!
 //! A small model pays for every tool on offer — its schema takes the window, and each extra name is
 //! one more to pick wrongly — so what is offered follows the run ([`Reach`]) and what is there to
-//! reach ([`Inventory`]): no `db_query` on a workspace with no saved connection, no `recall` when
+//! reach ([`Inventory`]): no `db_read` on a workspace with no connection open to AI, no `recall` when
 //! every approved memory is already in the message, no app tool at all for a run judging material
 //! someone else wrote. See [`offered`].
 //!
@@ -98,7 +98,7 @@ pub enum Reach {
 }
 
 /// What the run's place has for the app's tools to reach. A tool with nothing to act on is not
-/// offered: a `db_query` on a workspace with no saved connection can only fail, and costs a small
+/// offered: a `db_read` on a workspace with no connection open to AI can only fail, and costs a small
 /// model its schema's share of the window on every step all the same.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Inventory {
@@ -106,7 +106,13 @@ pub struct Inventory {
     pub project: bool,
     pub services: bool,
     pub terminals: bool,
+    /// A saved database connection the user opened to AI («Acceso de IA»), and one open for writing.
     pub databases: bool,
+    pub databases_writable: bool,
+    /// What the Contenedores panel reaches, for looking: `kubectl`, the Azure CLI, a container engine.
+    pub clusters: bool,
+    pub azure: bool,
+    pub engines: bool,
     pub requests: bool,
     pub secrets: bool,
     /// Notes the knowledge search can cite (`read_note` opens one whole).
@@ -135,10 +141,13 @@ pub enum AppCall {
 pub type Door = Arc<dyn Fn(AppCall) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> + Send + Sync>;
 
 /// The app's read tools — the `cf` verbs that change nothing.
-const OBSERVE_TOOLS: &[&str] = &["service_logs", "service_wait", "terminal_output"];
+const OBSERVE_TOOLS: &[&str] = &["service_logs", "service_wait", "terminal_output", "db_connections", "db_schema", "db_read", "kubernetes", "azure", "containers"];
 /// The app's action tools, offered only to a run that may act.
 const ACT_TOOLS: &[&str] =
-    &["service_restart", "open_in_editor", "notify", "propose_memory", "flag_memory", "add_task", "db_query", "http_request", "run_with_secret"];
+    &["service_restart", "open_in_editor", "notify", "propose_memory", "flag_memory", "add_task", "db_write", "http_request", "run_with_secret"];
+/// The tools whose definitions and `cf` calls are the MCP server's own (`codemap::mcp::data_tool_call`),
+/// so a CLI agent and this one read and call them the same way.
+const DATA_TOOLS: &[&str] = &["db_connections", "db_schema", "db_read", "db_write", "kubernetes", "azure", "containers"];
 
 /// The tools a run is offered, in the order the model reads them: what the project is (the map,
 /// the knowledge, the memories, the notes), then its files, then what may change them, then the app.
@@ -184,6 +193,18 @@ pub fn offered(grants: Grants, map: bool, checks: bool, inventory: &Inventory, g
         if inventory.terminals {
             names.push("terminal_output");
         }
+        if inventory.databases {
+            names.extend(["db_connections", "db_schema", "db_read"]);
+        }
+        if inventory.clusters {
+            names.push("kubernetes");
+        }
+        if inventory.azure {
+            names.push("azure");
+        }
+        if inventory.engines {
+            names.push("containers");
+        }
     }
     if grants.reach == Reach::Act {
         if inventory.services {
@@ -197,8 +218,8 @@ pub fn offered(grants: Grants, map: bool, checks: bool, inventory: &Inventory, g
         if inventory.project {
             names.push("add_task");
         }
-        if inventory.databases {
-            names.push("db_query");
+        if inventory.databases_writable {
+            names.push("db_write");
         }
         if inventory.requests {
             names.push("http_request");
@@ -415,6 +436,13 @@ impl Toolbox {
     }
 
     fn schema(&self, name: &str) -> Option<Value> {
+        if DATA_TOOLS.contains(&name) {
+            return crate::codemap::mcp::db_tools(true)
+                .into_iter()
+                .chain(crate::codemap::mcp::infra_tools_of(true))
+                .find(|t| t["name"] == name)
+                .map(|t| json!({ "type": "function", "function": { "name": name, "description": t["description"], "parameters": t["inputSchema"] } }));
+        }
         let string = |description: &str| json!({ "type": "string", "description": description });
         let integer = |description: &str| json!({ "type": "integer", "description": description });
         // With reference repositories, the map's tools can look in one of them instead.
@@ -617,16 +645,6 @@ impl Toolbox {
                     "agent": string("The roster agent's name. Optional.")
                 }),
                 &["title"],
-            ),
-            "db_query" => tool(
-                "db_query",
-                "Run SQL on a database connection the user saved in CodeFlow and get the rows as a table. The app connects with the saved password, which you never see; the user approves every statement first.",
-                json!({
-                    "connection": string("The saved connection's name."),
-                    "sql": string("The statement(s)."),
-                    "max_rows": integer("At most this many rows (default 200).")
-                }),
-                &["connection", "sql"],
             ),
             "http_request" => tool(
                 "http_request",
@@ -1289,7 +1307,7 @@ impl Toolbox {
 fn is_outside_text(name: &str) -> bool {
     matches!(name, "read_file" | "search" | "run_command" | "run_check" | "search_knowledge" | "recall" | "read_note" | "read_context" | "read_reference_file")
         || OBSERVE_TOOLS.contains(&name)
-        || matches!(name, "db_query" | "http_request" | "run_with_secret")
+        || matches!(name, "db_write" | "http_request" | "run_with_secret")
 }
 
 /// The `cf` verb behind an app tool and its arguments, built exactly as `codemap::mcp::app_tool`
@@ -1306,6 +1324,9 @@ pub(crate) fn app_verb(name: &str, args: &Value) -> Option<Result<AppCall, Strin
         let value = text(key);
         if value.is_empty() { Err(format!("{key} is required")) } else { Ok(value) }
     };
+    if let Some(call) = crate::codemap::mcp::data_tool_call(name, args) {
+        return Some(call.map(|(verb, args, _)| AppCall::Verb { verb, args, stdin: String::new() }));
+    }
     let mut list: Vec<String> = Vec::new();
     let verb = match name {
         "service_logs" => {
@@ -1363,12 +1384,6 @@ pub(crate) fn app_verb(name: &str, args: &Value) -> Option<Result<AppCall, Strin
                 list.extend(["--".to_string(), text("prompt")]);
             }
             "task"
-        }
-        "db_query" => {
-            list.push(match need("connection") { Ok(v) => v, Err(e) => return Some(Err(e)) });
-            list.extend(number("max_rows").into_iter().flat_map(|n| ["--max-rows".to_string(), n]));
-            list.push(match need("sql") { Ok(v) => v, Err(e) => return Some(Err(e)) });
-            "db"
         }
         "http_request" => {
             list.push(match need("request") { Ok(v) => v, Err(e) => return Some(Err(e)) });
@@ -1429,6 +1444,17 @@ fn take_inventory(conn: &rusqlite::Connection, root: &str, reach: Reach) -> (Opt
     // Every reach: comparing with a team template is as much a review's business as a chat's.
     inventory.references = crate::refrepos::enabled_for(conn, ws, false).len();
     inventory.contexts = crate::context::on_demand::waiting(conn, ws);
+    if reach >= Reach::Observe {
+        // A workspace chat's too: what the user keeps open to AI is the workspace's, not a repository's.
+        let access: Vec<crate::agentcli::AiAccess> = crate::db::datasource_queries::load_tree(conn, ws)
+            .map(|tree| tree.connections.iter().map(|c| crate::agentcli::AiAccess::of_spec(&c.spec)).collect())
+            .unwrap_or_default();
+        inventory.databases = access.iter().any(|a| *a != crate::agentcli::AiAccess::None);
+        inventory.databases_writable = access.contains(&crate::agentcli::AiAccess::Write);
+        inventory.clusters = crate::codemap::mcp::kube_configured();
+        inventory.azure = crate::codemap::mcp::azure_configured();
+        inventory.engines = ["docker", "podman", "nerdctl"].iter().any(|cli| crate::containers::cli::find(cli).is_some());
+    }
     if workspace_chat {
         return (workspace, inventory, true);
     }
@@ -1437,7 +1463,6 @@ fn take_inventory(conn: &rusqlite::Connection, root: &str, reach: Reach) -> (Opt
         inventory.terminals = crate::db::queries::list_workspace_terminals(conn, ws).is_ok_and(|list| !list.is_empty());
     }
     if reach == Reach::Act {
-        inventory.databases = crate::db::datasource_queries::load_tree(conn, ws).is_ok_and(|tree| !tree.connections.is_empty());
         inventory.requests = crate::db::api_queries::load_tree(conn, ws).is_ok_and(|tree| !tree.requests.is_empty());
         inventory.secrets = crate::db::keyvault_queries::load_tree(conn, ws).is_ok_and(|tree| !tree.items.is_empty());
     }
@@ -1705,7 +1730,22 @@ mod tests {
 
     /// Everything a workspace can have for the app tools.
     const FULL: Inventory =
-        Inventory { project: true, services: true, terminals: true, databases: true, requests: true, secrets: true, notes: true, memories: 3, references: 0, contexts: 0 };
+        Inventory {
+            project: true,
+            services: true,
+            terminals: true,
+            databases: true,
+            databases_writable: true,
+            clusters: true,
+            azure: true,
+            engines: true,
+            requests: true,
+            secrets: true,
+            notes: true,
+            memories: 3,
+            references: 0,
+            contexts: 0,
+        };
 
     /// Reference repositories add the two reference tools and teach the map's tools `repo` — and
     /// cost nothing where there are none.
@@ -1772,9 +1812,9 @@ mod tests {
         for name in ACT_TOOLS.iter().chain(OBSERVE_TOOLS).chain(["run_check", "run_command", "edit_file"].iter()) {
             assert!(all.contains(name), "{name}: {all:?}");
         }
-        // A workspace with nothing saved: no db_query, http_request, run_with_secret, no services.
+        // A workspace with nothing saved: no database, cluster, http_request, run_with_secret, no services.
         let bare = offered(act, false, false, &Inventory::default(), 0);
-        for name in ["db_query", "http_request", "run_with_secret", "service_logs", "service_restart", "terminal_output", "add_task", "recall", "read_note", "run_check", "find_symbol"] {
+        for name in ["db_read", "db_write", "kubernetes", "azure", "containers", "http_request", "run_with_secret", "service_logs", "service_restart", "terminal_output", "add_task", "recall", "read_note", "run_check", "find_symbol"] {
             assert!(!bare.contains(&name), "{name} with nothing to reach: {bare:?}");
         }
         for name in ["open_in_editor", "notify", "propose_memory"] {
@@ -1794,7 +1834,7 @@ mod tests {
         let dir = temp_repo();
         let (door, calls) = stub_door(Ok("rows".into()));
         let tools = toolbox(&dir, Grants { write: false, run: false, reach: Reach::Observe }).with_inventory(FULL).with_door(door);
-        let out = tools.call("db_query", &json!({ "connection": "prod", "sql": "select 1" }), &mut None).await;
+        let out = tools.call("db_write", &json!({ "connection": "prod", "sql": "delete from t" }), &mut None).await;
         assert!(!out.ok && out.content.contains("no tool named"), "{}", out.content);
         assert!(calls.lock().unwrap().is_empty(), "nothing reached the app");
     }
@@ -1804,8 +1844,8 @@ mod tests {
         let dir = temp_repo();
         let (door, calls) = stub_door(Ok("| id |\n| 1 |".into()));
         let tools = toolbox(&dir, Grants { write: false, run: false, reach: Reach::Act }).with_inventory(FULL).with_door(door);
-        assert!(names(&tools).contains(&"db_query".to_string()));
-        let out = tools.call("db_query", &json!({ "connection": "local pg", "sql": "select 1", "max_rows": 5 }), &mut None).await;
+        assert!(names(&tools).contains(&"db_write".to_string()));
+        let out = tools.call("db_read", &json!({ "connection": "local pg", "sql": "select 1", "max_rows": 5 }), &mut None).await;
         assert!(out.ok, "{}", out.content);
         assert!(out.content.contains("| 1 |"));
         let out = tools.call("propose_memory", &json!({ "fact": "Amounts are stored in cents" }), &mut None).await;
@@ -1813,7 +1853,7 @@ mod tests {
         let calls = calls.lock().unwrap().clone();
         assert_eq!(
             calls[0],
-            AppCall::Verb { verb: "db", args: vec!["local pg".into(), "--max-rows".into(), "5".into(), "select 1".into()], stdin: String::new() }
+            AppCall::Verb { verb: "db", args: vec!["--read".into(), "--max-rows".into(), "5".into(), "local pg".into(), "select 1".into()], stdin: String::new() }
         );
         assert_eq!(
             calls[1],
@@ -1840,6 +1880,11 @@ mod tests {
             AppCall::Verb { verb: "open", args: vec!["src/a.ts:12".into()], stdin: String::new() }
         );
         assert!(app_verb("read_file", &json!({})).is_none(), "not an app tool");
+        assert_eq!(
+            app_verb("kubernetes", &json!({ "action": "logs", "name": "orders-api", "tail": 50 })).unwrap().unwrap(),
+            AppCall::Verb { verb: "k8s", args: vec!["logs".into(), "orders-api".into(), "--tail".into(), "50".into()], stdin: String::new() },
+            "the MCP server's own call"
+        );
         assert!(app_verb("local_llm", &json!({ "instruction": "x" })).is_none(), "this run is the local model");
     }
 

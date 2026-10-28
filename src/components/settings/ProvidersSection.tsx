@@ -907,7 +907,7 @@ function AutoResumeQuotaField() {
   }, []);
 
   return (
-    <label title={t("settings.autoResumeQuotaHint")} className="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+    <label title={t("settings.autoResumeQuotaHint")} className="flex w-fit cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
       <Checkbox
         checked={on}
         onChange={() => {
@@ -946,7 +946,7 @@ function AutomationField() {
   }, []);
 
   return (
-    <label title={dir ? `${t("automation.hint")}\n${dir}` : t("automation.hint")} className="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+    <label title={dir ? `${t("automation.hint")}\n${dir}` : t("automation.hint")} className="flex w-fit cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
       <Checkbox
         checked={on}
         onChange={() => {
@@ -985,7 +985,7 @@ function CliUpdatesField() {
 
   return (
     <div className="flex items-center gap-3">
-      <label className="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+      <label className="flex w-fit cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
         <Checkbox
           checked={on}
           onChange={() => {
@@ -1002,7 +1002,8 @@ function CliUpdatesField() {
           setLooking(true);
           void check(true).finally(() => setLooking(false));
         }}
-        className={buttonClass({ variant: "ghost", size: "sm" })}
+        // Pulled into the line's height, so this row steps like the plain checkboxes around it.
+        className={buttonClass({ variant: "ghost", size: "sm", className: "-my-1" })}
       >
         {looking ? <Loader2 size={13} className="animate-spin" /> : <RotateCw size={13} />}
         {t("cliUpdates.checkNow")}
@@ -1126,7 +1127,6 @@ export function ProvidersSection() {
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <IdleTimeoutField />
-        <AutoResumeQuotaField />
         <button
           onClick={() => void checkAll()}
           disabled={checking}
@@ -1136,8 +1136,12 @@ export function ProvidersSection() {
           {t("settings.providerRecheck")}
         </button>
       </div>
-      <CliUpdatesField />
-      <AutomationField />
+      {/* The switches read as one list: same column, same step between them. */}
+      <div className="flex flex-col gap-1.5">
+        <AutoResumeQuotaField />
+        <CliUpdatesField />
+        <AutomationField />
+      </div>
       <BackupModelsField />
       {AI_PROVIDERS.filter((p) => p.available).map((provider) => (
         <ProviderRow key={provider.id} provider={provider} />

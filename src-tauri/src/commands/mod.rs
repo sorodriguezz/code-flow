@@ -11,6 +11,7 @@ pub mod backup_cmd;
 pub mod chat_attach;
 pub mod chat_cmd;
 pub mod containers_cmd;
+pub mod containers_azure_cmd;
 pub mod containers_kube_cmd;
 pub mod checkpoint_cmd;
 pub mod tests_cmd;

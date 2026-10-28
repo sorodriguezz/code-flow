@@ -311,6 +311,7 @@ fn participant(name: &str) -> String {
 /// The repositories whose current commit is not the one their card was read at — the map no longer
 /// describes them. A card read outside git (`head` empty) is never reported: there is nothing to compare.
 /// Blocking: it asks git.
+#[cfg(test)]
 pub fn stale(map: &SystemMap) -> Vec<String> {
     map.cards
         .iter()

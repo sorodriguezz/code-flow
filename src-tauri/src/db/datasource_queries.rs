@@ -27,7 +27,7 @@ const GROUP_COLUMNS: &str = "id, workspace_id, name, sort_order, created_at, sco
 const CONSOLE_COLUMNS: &str =
     "id, connection_id, name, body, database_name, schema_name, sort_order, created_at, updated_at";
 const HISTORY_COLUMNS: &str = "id, workspace_id, connection_id, connection_name, statement, \
-                               database_name, duration_ms, row_count, error, ran_at";
+                               database_name, duration_ms, row_count, error, ran_at, source";
 
 fn map_connection(row: &rusqlite::Row) -> rusqlite::Result<DbConnectionRow> {
     Ok(DbConnectionRow {
@@ -82,6 +82,7 @@ fn map_history(row: &rusqlite::Row) -> rusqlite::Result<DbQueryHistoryEntry> {
         row_count: row.get(7)?,
         error: row.get(8)?,
         ran_at: row.get(9)?,
+        source: row.get(10)?,
     })
 }
 
@@ -553,8 +554,8 @@ pub fn add_history(
     let ran_at = if entry.ran_at.is_empty() { now() } else { entry.ran_at.clone() };
     conn.execute(
         "INSERT INTO db_query_history (id, workspace_id, connection_id, connection_name, statement, \
-         database_name, duration_ms, row_count, error, ran_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+         database_name, duration_ms, row_count, error, ran_at, source) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             id,
             entry.workspace_id,
@@ -565,7 +566,8 @@ pub fn add_history(
             entry.duration_ms,
             entry.row_count,
             entry.error,
-            ran_at
+            ran_at,
+            entry.source
         ],
     )?;
     conn.execute(
@@ -656,6 +658,7 @@ mod tests {
                 row_count: 1,
                 error: String::new(),
                 ran_at: String::new(),
+                source: String::new(),
             },
         )
         .unwrap();

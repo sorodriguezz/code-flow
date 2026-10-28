@@ -32,6 +32,25 @@ const AUTO_MOVE: &str = "tickets_auto_move";
 const BRANCH_PREFIX: &str = "tickets_branch_prefix";
 const BUG_PREFIX: &str = "tickets_bug_prefix";
 const TARGET_STATES: &str = "tickets_target_states";
+/// `mine` (the default) or `all`: whether Azure lists only your tickets or every open one of your
+/// projects. Mirrors `TICKETS_SCOPE_KEY` in `ticketStore.ts`.
+const SCOPE: &str = "tickets_scope";
+/// `{"<org>": ["Project", …]}` — which projects «all» reads; an org missing or empty is every project.
+/// Mirrors `TICKETS_PROJECTS_KEY` in `ticketStore.ts`.
+const PROJECTS: &str = "tickets_projects";
+
+/// The projects «all» reads in `org`, or none for every project.
+fn chosen_projects(db: &State<'_, Db>, org: &str) -> Vec<String> {
+    let parsed: serde_json::Value =
+        setting(db, PROJECTS).ok().flatten().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+    parsed
+        .get(org)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect()
+}
 
 fn setting(db: &State<'_, Db>, key: &str) -> Result<Option<String>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -98,8 +117,14 @@ fn connections(db: &State<'_, Db>) -> Result<Vec<(BoardProvider, String)>, Strin
 #[tauri::command]
 pub async fn tickets_list(db: State<'_, Db>) -> Result<TicketList, String> {
     let mut list = TicketList::default();
+    let everyone = setting(&db, SCOPE).ok().flatten().as_deref().map(str::trim) == Some("all");
     for (provider, account) in connections(&db)? {
         let result = match board_auth(&db, provider, &account) {
+            // «All» is Azure's alone for now: the one board whose projects the user asked to see whole.
+            Ok(auth) if everyone && provider == BoardProvider::Azure => {
+                let projects = chosen_projects(&db, &account);
+                assigned::azure_open(&account, &auth.secret, &projects).await
+            }
             Ok(auth) => assigned::list_assigned(provider, &account, &auth).await,
             Err(e) => Err(e),
         };
@@ -115,6 +140,26 @@ pub async fn tickets_list(db: State<'_, Db>) -> Result<TicketList, String> {
         }
     }
     Ok(list)
+}
+
+/// The projects of each connected Azure organisation, for the section's «Proyectos» menu.
+#[derive(Debug, Serialize)]
+pub struct BoardProjects {
+    pub account: String,
+    pub projects: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn tickets_azure_projects(db: State<'_, Db>) -> Result<Vec<BoardProjects>, String> {
+    let mut out = Vec::new();
+    for org in ado_connected_orgs(&db)? {
+        let Ok(auth) = board_auth(&db, BoardProvider::Azure, &org) else { continue };
+        let mut projects: Vec<String> =
+            crate::ado::list_projects(&org, &auth.secret).await.unwrap_or_default().into_iter().map(|p| p.name).collect();
+        projects.sort_by_key(|name| name.to_lowercase());
+        out.push(BoardProjects { account: org, projects });
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -245,9 +290,18 @@ pub async fn tickets_start(
         .map_err(|e| e.to_string())??
     };
 
+    // Started here is picked up by whoever's token this is: on Azure the ticket goes to them (a
+    // no-op when it already is theirs). After the worktree, so a refusal (no permission to edit the item) costs
+    // the assignment, never the work that was just set up.
+    let mut ticket = detail.ticket.clone();
+    if ticket.board() == BoardProvider::Azure {
+        if let Ok(identity) = crate::boards::azure::assign_to_token_owner(&ticket.account, &auth.secret, ticket.id).await {
+            ticket.assigned_to = identity.split(" <").next().unwrap_or(&identity).to_string();
+        }
+    }
     let link = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        ticket_links::upsert(&conn, &workspace_id, &project_id, &detail.ticket, &branch_out, &path).map_err(|e| e.to_string())?
+        ticket_links::upsert(&conn, &workspace_id, &project_id, &ticket, &branch_out, &path).map_err(|e| e.to_string())?
     };
     let prompt = tickets::ticket_prompt(&detail, &branch_out);
     Ok(TicketStart { link, path, branch: branch_out, prompt, reused: false })

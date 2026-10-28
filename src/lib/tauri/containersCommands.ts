@@ -18,6 +18,7 @@ import type {
   AzureCliSwitch,
   AksStatus,
   KubeTools,
+  KubeTopology,
   RunSpec,
   RuntimeInfo,
 } from "../../types/containers";
@@ -94,7 +95,9 @@ export interface SessionRequest {
   /** `kubeLogin`: `kubectl version` against the context named by `target`, so that a sign-in its
    *  auth plugin asks for (a device code) shows in the pane. */
   /** `aksStart`: `az aks start` for the cluster named by `target`, in `resourceGroup` and `subscription`. */
-  kind: "logs" | "exec" | "projectLogs" | "pull" | "build" | "composeUp" | "composeDown" | "composeRestart" | "composePull" | "kubeLogin" | "aksStart";
+  /** `azureLogs`: an Azure resource's own log stream (`az webapp log tail`, `az containerapp logs show
+   *  --follow`, `az container logs --follow`); `target` is the resource's id. */
+  kind: "logs" | "exec" | "projectLogs" | "pull" | "build" | "composeUp" | "composeDown" | "composeRestart" | "composePull" | "kubeLogin" | "aksStart" | "azureLogs";
   runtime: string;
   context: string | null;
   namespace?: string | null;
@@ -210,3 +213,6 @@ export const containersAnalyzeLogs = (args: { log: string; about: string; langua
 export const containersKubeUseAzureCli = (context: string) => invoke<AzureCliSwitch>("containers_kube_use_azure_cli", { context });
 
 export const containersKubeAksStatus = (context: string) => invoke<AksStatus>("containers_kube_aks_status", { context });
+
+/** How a namespace's objects hang together (every namespace when `null`) — read-only. */
+export const containersKubeTopology = (context: string | null, namespace: string | null) => invoke<KubeTopology>("containers_kube_topology", { context, namespace });

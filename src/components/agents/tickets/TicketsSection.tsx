@@ -5,7 +5,14 @@ import { Tooltip } from "../../common/Tooltip";
 import { iconButtonClass } from "../../common/Button";
 import { chipClass, sectionLabelClass, tabCountClass } from "../../common/recipes";
 import { Row } from "../TreeRow";
-import { useTicketStore, AUTO_MOVE_KEY, BRANCH_PREFIX_KEY, BUG_PREFIX_KEY } from "../../../state/ticketStore";
+import {
+  useTicketStore,
+  AUTO_MOVE_KEY,
+  BRANCH_PREFIX_KEY,
+  BUG_PREFIX_KEY,
+  TICKETS_PROJECTS_KEY,
+  TICKETS_SCOPE_KEY,
+} from "../../../state/ticketStore";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
 import { useAgentsStore } from "../../../state/agentsStore";
 import { useChainStore } from "../../../state/chainStore";
@@ -22,7 +29,7 @@ import {
   valuesOf,
   type TicketFilters,
 } from "../../../lib/tickets/ticketKeys";
-import type { Ticket } from "../../../lib/tauri/ticketCommands";
+import { ticketsAzureProjects, type Ticket } from "../../../lib/tauri/ticketCommands";
 
 /** The chip tone a state category reads in. */
 export function stateTone(category: string): "neutral" | "accent" | "ok" | "warn" | "info" {
@@ -74,11 +81,24 @@ export function TicketsSection({ query }: { query: string }) {
   const [expanded, setExpanded] = useState(true);
   const [menu, setMenu] = useState<{ x: number; y: number; kind: "filter" | "settings" } | null>(null);
   const [autoMove, setAutoMove] = useState(true);
+  // Whose tickets: only yours, or every open one of your projects (Azure). And which projects.
+  const [everyone, setEveryone] = useState(false);
+  const [chosen, setChosen] = useState<Record<string, string[]>>({});
+  const [orgProjects, setOrgProjects] = useState<{ account: string; projects: string[] }[]>([]);
 
   useEffect(() => {
     void useTicketStore.getState().loadCache();
     void getSetting(AUTO_MOVE_KEY)
       .then((value) => setAutoMove(value !== "0"))
+      .catch(() => undefined);
+    void getSetting(TICKETS_SCOPE_KEY)
+      .then((value) => setEveryone(value === "all"))
+      .catch(() => undefined);
+    void getSetting(TICKETS_PROJECTS_KEY)
+      .then((raw) => {
+        const parsed: unknown = raw ? JSON.parse(raw) : {};
+        if (parsed && typeof parsed === "object") setChosen(parsed as Record<string, string[]>);
+      })
       .catch(() => undefined);
   }, []);
 
@@ -135,9 +155,56 @@ export function TicketsSection({ query }: { query: string }) {
     if (next !== null) await setSetting(key, next).catch(() => undefined);
   };
 
+  const setScope = (all: boolean) => {
+    setEveryone(all);
+    void setSetting(TICKETS_SCOPE_KEY, all ? "all" : "mine")
+      .then(() => useTicketStore.getState().refresh(workspaceId))
+      .catch(() => undefined);
+  };
+
+  const saveChosen = (next: Record<string, string[]>) => {
+    setChosen(next);
+    void setSetting(TICKETS_PROJECTS_KEY, JSON.stringify(next))
+      .then(() => useTicketStore.getState().refresh(workspaceId))
+      .catch(() => undefined);
+  };
+
+  /** One organisation's «Proyectos»: none ticked is every project, so ticking the first narrows it. */
+  const projectItems = (account: string, projects: string[]): MenuItem[] => {
+    const picked = chosen[account] ?? [];
+    return [
+      {
+        label: check(picked.length === 0, t("tickets.allProjects")),
+        onClick: () => saveChosen({ ...chosen, [account]: [] }),
+      },
+      ...projects.map((name, at) => ({
+        label: check(picked.includes(name), name),
+        separated: at === 0,
+        onClick: () =>
+          saveChosen({
+            ...chosen,
+            [account]: picked.includes(name) ? picked.filter((p) => p !== name) : [...picked, name],
+          }),
+      })),
+    ];
+  };
+
   const settingsItems = (): MenuItem[] => [
+    { label: check(!everyone, t("tickets.showMine")), onClick: () => setScope(false) },
+    { label: check(everyone, t("tickets.showAll")), onClick: () => setScope(true) },
+    // Only once «all» is on: «mine» already spans every project.
+    ...(everyone
+      ? orgProjects
+          .filter((org) => org.projects.length > 0)
+          .map((org) => ({
+            label: orgProjects.length > 1 ? `${t("tickets.projects")} · ${org.account}` : t("tickets.projects"),
+            onClick: () => undefined,
+            children: projectItems(org.account, org.projects),
+          }))
+      : []),
     {
       label: check(autoMove, t("tickets.autoMove")),
+      separated: true,
       onClick: () => {
         const next = !autoMove;
         setAutoMove(next);
@@ -183,7 +250,11 @@ export function TicketsSection({ query }: { query: string }) {
         <Tooltip label={t("tickets.settings")}>
           <button
             type="button"
-            onClick={(e) => setMenu({ x: e.clientX, y: e.clientY, kind: "settings" })}
+            onClick={(e) => {
+              setMenu({ x: e.clientX, y: e.clientY, kind: "settings" });
+              // Asked when the menu opens, not before: it is a call to the board per organisation.
+              if (orgProjects.length === 0) void ticketsAzureProjects().then(setOrgProjects).catch(() => undefined);
+            }}
             aria-label={t("tickets.settings")}
             className={iconButtonClass({ size: "xs", className: "opacity-0 focus-visible:opacity-100 group-hover/section:opacity-100" })}
           >
@@ -234,7 +305,9 @@ export function TicketsSection({ query }: { query: string }) {
               </p>
               {group.tickets.map((ticket, at) => {
                 const uid = ticketUid(ticket);
-                const meta = [displayKey(ticket), ticket.sprint, ticket.priority].filter(Boolean).join(" · ");
+                // Whose it is matters once the list holds other people's work.
+                const owner = everyone ? ticket.assigned_to || t("tickets.unassigned") : "";
+                const meta = [displayKey(ticket), owner, ticket.sprint, ticket.priority].filter(Boolean).join(" · ");
                 return (
                   <Row
                     key={uid}
@@ -245,7 +318,13 @@ export function TicketsSection({ query }: { query: string }) {
                     glyph={<TicketTypeGlyph ticket={ticket} />}
                     label={ticket.title}
                     meta={meta}
-                    chip={ticket.state || undefined}
+                    badge={
+                      ticket.state ? (
+                        <span className={chipClass(stateTone(ticket.state_category), "h-4 max-w-[60%] px-1.5 text-[10.5px]")}>
+                          <span className="min-w-0 truncate">{ticket.state}</span>
+                        </span>
+                      ) : undefined
+                    }
                     flag={
                       linkedUids.has(uid) ? (
                         <span className={chipClass("accent", "h-4 px-1 text-[10.5px]")}>{t("tickets.started")}</span>

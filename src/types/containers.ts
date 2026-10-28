@@ -344,3 +344,130 @@ export interface AzureCliSwitch {
   file: string;
   backup: string;
 }
+
+// ------------------------------------------------------------------- topology (read-only graphs)
+
+/** One object of a cluster's graph (`containers::topology`). `id` = `kind/namespace/name`. */
+export interface TopoNode {
+  id: string;
+  kind: string;
+  name: string;
+  namespace: string;
+  status: string;
+  tone: "ok" | "warn" | "bad" | "idle";
+  ready: string;
+  detail: string;
+  /** Referenced, but not in the cluster. */
+  missing: boolean;
+}
+
+export interface TopoEdge {
+  from: string;
+  to: string;
+  kind: "routes" | "selects" | "owns" | "mounts" | "env" | "pull" | "claims" | "scales";
+  label: string;
+}
+
+export interface TopoIssue {
+  node: string;
+  code: "noPods" | "missing" | "failing";
+  detail: string;
+}
+
+export interface KubeTopology {
+  nodes: TopoNode[];
+  edges: TopoEdge[];
+  issues: TopoIssue[];
+  warnings: string[];
+}
+
+// ---------------------------------------------------------------------------- Azure (read-only)
+
+export interface AzSubscription {
+  id: string;
+  name: string;
+  detail: string;
+  default: boolean;
+}
+
+export interface AzSubscriptions {
+  found: boolean;
+  contexts: AzSubscription[];
+  error: string | null;
+}
+
+export interface AzGroup {
+  id: string;
+  name: string;
+}
+
+export interface AzResource {
+  id: string;
+  name: string;
+  type: string;
+  /** The resource's own `kind` (`functionapp,linux`). */
+  flavor: string;
+  location: string;
+  group: string;
+  sku: string;
+  /** `provisioningState`. */
+  state: string;
+  tags: Record<string, string>;
+}
+
+export interface AzHealth {
+  id: string;
+  state: "Available" | "Degraded" | "Unavailable" | "Unknown" | string;
+  summary: string;
+  reason: string;
+  since: string;
+}
+
+export interface AzActivity {
+  time: string;
+  operation: string;
+  status: string;
+  level: string;
+  caller: string;
+  resource: string;
+  message: string;
+}
+
+export interface AzWorkspace {
+  id: string;
+  name: string;
+  group: string;
+  customerId: string;
+  location: string;
+}
+
+export interface AzQueryResult {
+  columns: string[];
+  rows: unknown[][];
+  cut: boolean;
+}
+
+export interface AzNode {
+  id: string;
+  name: string;
+  type: string;
+  flavor: string;
+  group: string;
+  location: string;
+  state: string;
+  external: boolean;
+}
+
+export interface AzEdge {
+  from: string;
+  to: string;
+  kind: "ref" | "host" | "setting" | "vault";
+  /** The property or setting's name — never its value. */
+  label: string;
+}
+
+export interface AzTopology {
+  nodes: AzNode[];
+  edges: AzEdge[];
+  warnings: string[];
+}

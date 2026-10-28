@@ -69,7 +69,7 @@ import {
   type DbSidebarSection,
 } from "../../state/dbStore";
 import { sessionDialect } from "../../lib/db/sessionQueries";
-import { EnvironmentChip, useConnectionEnvironment } from "./EnvironmentChip";
+import { AiAccessMark, EnvironmentChip, useConnectionAiAccess, useConnectionEnvironment } from "./EnvironmentChip";
 import { backupSupported } from "../../lib/db/backup";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { useDbDragStore } from "../../state/dbDragStore";
@@ -1235,6 +1235,7 @@ function ConnectionBranch({
   const driverSettings = useDriverStore((s) => s.settings);
   const driver = effectiveDriver(rowDriverId(row), driverSettings);
   const environment = useConnectionEnvironment(row.id);
+  const aiAccess = useConnectionAiAccess(row.id);
   const engineLabel = driverEngineInfo(driver, row.kind).label;
 
   return (
@@ -1273,8 +1274,9 @@ function ConnectionBranch({
         // exists for it — so "this one is on every workspace's shelf" reads identically in all
         // three trees.
         badge={
-          environment || row.scope === "global" ? (
+          environment || aiAccess || row.scope === "global" ? (
             <span className="flex shrink-0 items-center gap-1">
+              <AiAccessMark access={aiAccess} />
               <EnvironmentChip environment={environment} />
               {row.scope === "global" && (
                 <span

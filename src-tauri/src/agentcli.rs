@@ -14,6 +14,7 @@
 //! - `work.rs` — services, terminals, opening files, the agent's card, tasks;
 //! - `knowhow.rs` — the code map, knowledge, memory and the local model;
 //! - `vault.rs` — saved credentials, used and never shown;
+//! - `infra.rs` — Kubernetes and Azure, looked at (never changed);
 //! - `place.rs` — which project and workspace the folder `cf` ran in belongs to.
 //!
 //! ```text
@@ -50,10 +51,14 @@
 //! nothing off this machine can even connect.
 
 mod automation;
+mod infra;
 mod knowhow;
 mod place;
 mod vault;
 mod work;
+
+/// What the user lets a model do on a saved database connection — read by the map server too.
+pub(crate) use vault::AiAccess;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -613,8 +618,13 @@ async fn dispatch(request: Request, app: &AppHandle) -> Reply {
         "llm" => knowhow::llm(&request).await,
         "secret" => vault::secret(&request, app).await,
         "db" => vault::db(&request, app).await,
+        "dbs" => vault::dbs(&request, app),
+        "dbschema" => vault::dbschema(&request, app).await,
         "http" => vault::http(&request, app).await,
         "ui" => interface(&request, app).await,
+        "k8s" => infra::k8s(&request.args).await,
+        "azure" => infra::azure(&request.args).await,
+        "containers" => infra::containers(&request.args).await,
         "status" => {
             let snapshot = focus().lock().ok().map(|held| held.clone()).unwrap_or_default();
             Reply::ok(serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".into()))

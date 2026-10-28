@@ -64,6 +64,7 @@ import {
   type DbConnectionConfig,
   type DbConnectionRow,
   type DbDriverSettings,
+  type DbAiAccess,
   type DbEnvironment,
   ENVIRONMENT_COLOR,
   type DbKind,
@@ -165,6 +166,7 @@ function sameConfig(a: DbConnectionConfig, b: DbConnectionConfig) {
     a.ssl === b.ssl &&
     a.read_only === b.read_only &&
     a.environment === b.environment &&
+    (a.ai_access || "") === (b.ai_access || "") &&
     a.connect_timeout_ms === b.connect_timeout_ms &&
     a.show_all_databases === b.show_all_databases &&
     a.object_filter === b.object_filter &&
@@ -394,6 +396,7 @@ export function ConnectionModal({
       options: current.options,
       read_only: current.read_only,
       environment: current.environment,
+      ai_access: current.ai_access,
       show_all_databases: current.show_all_databases,
       // How you reach the host and how long you hold it are true of the network and the machine,
       // not of the engine listening on it — a tunnel to a bastion survives realising you meant
@@ -1177,6 +1180,25 @@ export function ConnectionModal({
                         />
                         <span className="mt-1 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
                           {t("db.environmentHint")}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="mb-[5px] block text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
+                          {t("db.aiAccess")}
+                        </span>
+                        <Segmented
+                          size="sm"
+                          layoutId="cf-db-ai-access"
+                          value={config.ai_access || "none"}
+                          onChange={(value) => patch({ ai_access: (value === "none" ? "" : value) as DbAiAccess })}
+                          options={[
+                            { value: "none", label: t("db.aiAccess.none") },
+                            { value: "read", label: t("db.aiAccess.read") },
+                            { value: "write", label: t("db.aiAccess.write") },
+                          ]}
+                        />
+                        <span className="mt-1 block text-[11px] leading-snug text-[var(--cf-text-muted)]">
+                          {t(config.ai_access === "write" ? "db.aiAccess.writeHint" : config.ai_access === "read" ? "db.aiAccess.readHint" : "db.aiAccess.noneHint")}
                         </span>
                       </div>
                       <Toggle

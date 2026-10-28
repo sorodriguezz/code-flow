@@ -989,19 +989,62 @@ fn last_step_context(stdout: &str) -> Option<i64> {
 /// the run's verdict — the same object the old single-blob `json` format printed on its own.
 /// Falling back to parsing the whole buffer keeps a CLI that ignored (or doesn't know) the flag
 /// working exactly as before, so this is safe against both older and newer versions.
+///
+/// # A run of several turns
+///
+/// A turn that leaves work in the background (`run_in_background`, a background sub-agent) answers
+/// — "it is running, I will report back" — and the process stays: when that work ends the CLI runs
+/// a follow-up turn with the report, and prints a second verdict (2.1.312). Both answers are the
+/// reply, so their texts are joined; each verdict's `usage` is its own turn's, so those are summed,
+/// while `total_cost_usd` and `modelUsage` are the process's running totals and are taken from the
+/// last. A follow-up that failed is the run's outcome, and is returned as it stands.
 fn result_payload(stdout: &str) -> Option<ClaudeCliResult> {
-    for line in stdout.lines().rev() {
-        let line = line.trim();
-        if !line.starts_with('{') {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-            if value.get("type").and_then(serde_json::Value::as_str) == Some("result") {
-                return serde_json::from_value(value).ok();
-            }
-        }
+    let mut verdicts: Vec<ClaudeCliResult> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('{') && line.contains("\"result\""))
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|value| value.get("type").and_then(serde_json::Value::as_str) == Some("result"))
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect();
+    let Some(mut last) = verdicts.pop() else {
+        return serde_json::from_str::<ClaudeCliResult>(stdout).ok();
+    };
+    if verdicts.is_empty() || last.is_error {
+        return Some(last);
     }
-    serde_json::from_str::<ClaudeCliResult>(stdout).ok()
+    let texts: Vec<String> = verdicts
+        .iter()
+        .filter(|verdict| !verdict.is_error)
+        .chain(std::iter::once(&last))
+        .filter_map(|verdict| verdict.result.as_deref().map(str::trim).filter(|text| !text.is_empty()))
+        .map(str::to_string)
+        .collect();
+    if !texts.is_empty() {
+        last.result = Some(texts.join("\n\n"));
+    }
+    let turns: Vec<&ClaudeUsage> = verdicts.iter().chain(std::iter::once(&last)).filter_map(|v| v.usage.as_ref()).collect();
+    if !turns.is_empty() {
+        last.usage = Some(ClaudeUsage {
+            input_tokens: turns.iter().map(|u| u.input_tokens).sum(),
+            output_tokens: turns.iter().map(|u| u.output_tokens).sum(),
+            cache_read_input_tokens: turns.iter().map(|u| u.cache_read_input_tokens).sum(),
+            cache_creation_input_tokens: turns.iter().map(|u| u.cache_creation_input_tokens).sum(),
+        });
+    }
+    Some(last)
+}
+
+/// Whether the run has already answered — a clean verdict on stdout — even though its process is
+/// still alive, waiting on background work. A stop then ends the wait, not the turn.
+pub(crate) fn answered(stdout: &str) -> bool {
+    stdout.lines().map(str::trim).filter(|line| line.starts_with('{') && line.contains("\"result\"")).any(|line| {
+        serde_json::from_str::<serde_json::Value>(line).is_ok_and(|value| {
+            value.get("type").and_then(serde_json::Value::as_str) == Some("result")
+                && value.get("is_error").and_then(serde_json::Value::as_bool) != Some(true)
+                && value.get("result").and_then(serde_json::Value::as_str).is_some_and(|text| !text.trim().is_empty())
+        })
+    })
 }
 
 /// Turns one finished `claude` run into either its reply text (plus the session id) or an error
@@ -1144,6 +1187,53 @@ fn readable_stdout(stdout: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2.1.312 with a `run_in_background` shell, trimmed: the turn answers, the process waits for
+    /// the shell, then a follow-up turn reports. `usage` is per turn; cost and `modelUsage` are the
+    /// process's running totals.
+    const BACKGROUND_RUN: &str = concat!(
+        r#"{"type":"system","subtype":"init","session_id":"99a3"}"#,
+        "\n",
+        r#"{"type":"system","subtype":"task_started","task_id":"b78","is_backgrounded":true,"task_type":"local_bash"}"#,
+        "\n",
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":2,"session_id":"99a3","result":"Lo dejé corriendo; te aviso cuando termine.","total_cost_usd":0.0064,"usage":{"input_tokens":4,"output_tokens":240,"cache_read_input_tokens":64543,"cache_creation_input_tokens":28392},"modelUsage":{"claude-haiku-5-5":{"outputTokens":240}}}"#,
+        "\n",
+        r#"{"type":"system","subtype":"task_notification","task_id":"b78","status":"completed"}"#,
+        "\n",
+        r#"{"type":"system","subtype":"init","session_id":"99a3"}"#,
+        "\n",
+        r#"{"type":"result","subtype":"success","is_error":false,"num_turns":1,"session_id":"99a3","result":"Terminó: 12 pruebas, todas pasan.","total_cost_usd":0.0071,"usage":{"input_tokens":4,"output_tokens":154,"cache_read_input_tokens":50101,"cache_creation_input_tokens":422},"modelUsage":{"claude-haiku-5-5":{"outputTokens":394}}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn a_turn_that_reported_back_from_the_background_keeps_both_answers() {
+        let run = interpret_output(true, "exit status: 0", BACKGROUND_RUN, "").expect("answered");
+        assert_eq!(run.text, "Lo dejé corriendo; te aviso cuando termine.\n\nTerminó: 12 pruebas, todas pasan.");
+        assert_eq!(run.session_id.as_deref(), Some("99a3"));
+        let usage = run.usage.expect("usage");
+        assert_eq!(usage.output_tokens, 240 + 154, "each verdict's usage is its own turn's");
+        assert_eq!(usage.cache_read_tokens, 64543 + 50101);
+        assert_eq!(usage.cost_usd, Some(0.0071), "the cost is the process's running total: the last one");
+    }
+
+    #[test]
+    fn a_follow_up_that_failed_is_the_runs_outcome() {
+        let stdout = BACKGROUND_RUN.replace(
+            r#""is_error":false,"num_turns":1,"session_id":"99a3","result":"Terminó: 12 pruebas, todas pasan.""#,
+            r#""is_error":true,"num_turns":1,"session_id":"99a3","result":"API Error: 500""#,
+        );
+        assert_eq!(interpret_output(false, "exit status: 1", &stdout, "").unwrap_err(), "API Error: 500");
+    }
+
+    #[test]
+    fn a_run_has_answered_once_a_clean_verdict_is_out() {
+        let first_turn = BACKGROUND_RUN.lines().take(3).collect::<Vec<_>>().join("\n");
+        assert!(answered(&first_turn), "still waiting on its shell, but it said its piece");
+        assert!(!answered(r#"{"type":"system","subtype":"init"}"#));
+        assert!(!answered(r#"{"type":"result","is_error":true,"result":"boom"}"#));
+        assert!(!answered(r#"{"type":"result","is_error":false,"result":"  "}"#));
+    }
 
     /// A real `--json-schema` run of 2.1.287 in `-p` mode, captured against a fake API on
     /// 2026-10-02 and trimmed to the fields read: the CLI has the model call its `StructuredOutput`

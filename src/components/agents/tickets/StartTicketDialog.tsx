@@ -62,6 +62,14 @@ export function StartTicketDialog({ ticket, onClose }: { ticket: Ticket; onClose
     lastProjectId = repo.id;
     try {
       const started = await ticketsStart(workspaceId, repo.id, ticket, branch.trim() || null);
+      // Starting assigns it to you on Azure; the row says so now rather than at the next refresh.
+      const owner = started.link.ticket.assigned_to;
+      if (owner) {
+        const uid = started.link.ticket_uid;
+        useTicketStore.setState((s) => ({
+          tickets: s.tickets.map((row) => (ticketUid(row) === uid ? { ...row, assigned_to: owner } : row)),
+        }));
+      }
       await useWorktreeViewStore.getState().refreshListings([repo]);
       const shown = `${displayKey(ticket)} ${ticket.title}`.trim();
       useWorktreeViewStore.getState().setName(started.path, shown);

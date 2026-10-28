@@ -3508,6 +3508,11 @@ void listen("app:foreground", () => {
   void useDbStore.getState().syncConnected();
 });
 
+/** A chat or an agent ran a statement (`db_read`/`db_write`): it is in the history now. */
+void listen("db:history-changed", () => {
+  void useDbStore.getState().refreshHistory();
+});
+
 void listen<{ run_id: string; rows: number }>("db:export-progress", (event) => {
   const { run_id: runId, rows } = event.payload;
   useDbStore.setState((s) =>

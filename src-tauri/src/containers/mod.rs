@@ -12,6 +12,7 @@
 //! - [`session`] opens a container's logs or a shell inside it as a terminal session.
 //! - [`forward`] keeps `kubectl port-forward`s running.
 
+pub mod azure;
 pub mod cli;
 pub mod engine;
 pub mod files;
@@ -22,6 +23,7 @@ pub mod kubeconfig;
 pub mod manage;
 pub mod run;
 pub mod session;
+pub mod topology;
 
 use std::time::Duration;
 

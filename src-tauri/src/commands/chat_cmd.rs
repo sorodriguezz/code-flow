@@ -1535,10 +1535,11 @@ pub async fn chat_send(
     allowed_tools.extend(turn_mcp.allow_rules.iter().cloned());
     // The workspace chat's knowledge — every repository's files and docs, the workspace's folders,
     // notes and memories — through the map's server, on the engines that take the app's servers per
-    // run. Queries only, so a read-only turn has it too. Held until the turn ends: dropping the grant
+    // run. Queries only, so a read-only turn has it too — plus a database write, approved statement by
+    // statement, on a turn that may write. Held until the turn ends: dropping the grant
     // revokes its token. Agy and Grok get the best passages with the question instead, below.
     let ws_knowledge = if workspace_scope && matches!(config.provider.as_str(), "claude" | "codex" | "opencode" | "cline") {
-        crate::codemap::mcp::for_workspace_chat(&conversation.workspace_id)
+        crate::codemap::mcp::for_workspace_chat(&conversation.workspace_id, may_write)
     } else {
         None
     };

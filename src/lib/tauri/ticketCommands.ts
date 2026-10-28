@@ -28,6 +28,8 @@ export interface Ticket {
   url: string;
   updated_at: string;
   state_field: string;
+  /** Display name of whoever it is assigned to; empty for nobody. Filled when the list shows everyone's. */
+  assigned_to?: string;
 }
 
 export interface TicketComment {
@@ -104,6 +106,9 @@ export interface TicketAuto {
 }
 
 export const ticketsList = () => invoke<TicketList>("tickets_list");
+
+/** The projects of each connected Azure organisation, for the «Proyectos» menu. */
+export const ticketsAzureProjects = () => invoke<{ account: string; projects: string[] }[]>("tickets_azure_projects");
 export const ticketsDetail = (ticket: Ticket) => invoke<TicketDetail>("tickets_detail", { ticket });
 export const ticketsStates = (ticket: Ticket) => invoke<TicketState[]>("tickets_states", { ticket });
 export const ticketsMove = (ticket: Ticket, state: string) => invoke<TicketMove>("tickets_move", { ticket, state });

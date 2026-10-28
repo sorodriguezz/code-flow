@@ -441,22 +441,88 @@ pub async fn kill_tree(child: &mut tokio::process::Child) {
         // The pid *is* the group id — see `proc::own_process_group`. A negative pid is how every
         // Unix names a process group.
         let group = -(pid as i32);
+        // Read before anything is signalled: once the root is gone its descendants belong to init,
+        // and nothing links them to this run any more. See `stray_groups`.
+        let strays = stray_groups(pid);
         // SAFETY: `kill` is async-signal-safe and takes only integers. A group that has already
         // exited answers `ESRCH`, which is why the result is discarded rather than checked: this is
         // "make sure it is gone", not "report whether it was there".
         unsafe { libc::kill(group, libc::SIGTERM) };
+        signal_groups(&strays, libc::SIGTERM);
         // Given a chance to leave cleanly, and no more than that.
         if tokio::time::timeout(TERM_GRACE, child.wait()).await.is_ok() {
             // The root is gone, but a descendant that ignored SIGTERM would still be running: the
             // group signal below is what closes that off, and it costs nothing when the group is
             // already empty.
             unsafe { libc::kill(group, libc::SIGKILL) };
+            signal_groups(&strays, libc::SIGKILL);
             return;
         }
         unsafe { libc::kill(group, libc::SIGKILL) };
+        signal_groups(&strays, libc::SIGKILL);
     }
 
     let _ = child.kill().await;
+}
+
+/// The process groups below `root` that its own group signal cannot reach.
+///
+/// Claude Code starts every `run_in_background` shell as the leader of a group of its own (seen on
+/// 2.1.312: the shell's pgid is its pid, not the CLI's). On SIGTERM the CLI stops those shells
+/// itself; on SIGKILL — the second half of a stop, and the end of a quit — it cannot, and they were
+/// left running under init, a test suite or a dev server nobody could see any more. So the groups
+/// are read off the process table while the tree is still a tree, and signalled with the root's.
+#[cfg(unix)]
+fn stray_groups(root: u32) -> Vec<i32> {
+    let Ok(out) = std::process::Command::new("ps").args(["-A", "-o", "pid=,ppid=,pgid="]).output() else {
+        return Vec::new();
+    };
+    // SAFETY: `getpgrp` takes nothing and cannot fail.
+    let own = unsafe { libc::getpgrp() };
+    groups_below(&String::from_utf8_lossy(&out.stdout), root as i32, own)
+}
+
+/// [`stray_groups`] on a `pid ppid pgid` table. Only a group **led by** one of `root`'s descendants
+/// counts — a descendant that joined some other group was put there by someone, and signalling that
+/// group would reach processes that are not this run's. Neither `root`'s group nor `own` (the
+/// app's) is ever returned.
+#[cfg(any(unix, test))]
+fn groups_below(table: &str, root: i32, own: i32) -> Vec<i32> {
+    let rows: Vec<(i32, i32, i32)> = table
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace().map(str::parse::<i32>);
+            match (fields.next(), fields.next(), fields.next()) {
+                (Some(Ok(pid)), Some(Ok(ppid)), Some(Ok(pgid))) => Some((pid, ppid, pgid)),
+                _ => None,
+            }
+        })
+        .collect();
+    let mut below = std::collections::HashSet::new();
+    let mut queue = VecDeque::from([root]);
+    while let Some(parent) = queue.pop_front() {
+        for &(pid, ppid, _) in &rows {
+            if ppid == parent && pid != root && below.insert(pid) {
+                queue.push_back(pid);
+            }
+        }
+    }
+    let mut groups: Vec<i32> = rows
+        .iter()
+        .filter(|&&(pid, _, pgid)| below.contains(&pid) && pgid == pid && pgid != root && pgid != own && pgid > 1)
+        .map(|&(_, _, pgid)| pgid)
+        .collect();
+    groups.sort_unstable();
+    groups.dedup();
+    groups
+}
+
+#[cfg(unix)]
+fn signal_groups(groups: &[i32], signal: libc::c_int) {
+    for group in groups {
+        // SAFETY: as in `kill_tree`; a group that has already gone answers `ESRCH`.
+        unsafe { libc::kill(-group, signal) };
+    }
 }
 
 // ---------- every AI process, for the moment the app quits ----------
@@ -549,9 +615,14 @@ fn stop_everything(grace: Duration) -> Vec<String> {
     }
 
     let pids = || -> Vec<u32> { live().lock().map(|live| live.keys().copied().collect()).unwrap_or_default() };
+    // Read before anything is signalled, for the reason `kill_tree` gives.
+    #[cfg(unix)]
+    let strays: Vec<i32> = pids().into_iter().flat_map(stray_groups).collect();
     for pid in pids() {
         terminate(pid);
     }
+    #[cfg(unix)]
+    signal_groups(&strays, libc::SIGTERM);
 
     // Polled rather than awaited: this runs on the main thread in the middle of `RunEvent::Exit`,
     // and the runtime that would wake an await is the one whose workers are reaping these very
@@ -566,6 +637,8 @@ fn stop_everything(grace: Duration) -> Vec<String> {
         // SAFETY: `kill` takes only integers; a group that has already gone answers `ESRCH`.
         unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
     }
+    #[cfg(unix)]
+    signal_groups(&strays, libc::SIGKILL);
     runs
 }
 
@@ -634,8 +707,8 @@ pub fn idle_limit() -> Option<Duration> {
 /// sub-agent can hang too. Mirrored by `SUBAGENT_IDLE_FACTOR` in `AiRunLog.tsx`.
 pub const SUBAGENT_IDLE_FACTOR: u32 = 3;
 
-/// When a run last printed anything, on either stream — and which of its sub-agents are still out.
-/// Cheap to clone and to touch: the pumps touch it on every read.
+/// When a run last printed anything, on either stream — and which of its sub-agents and background
+/// tasks are still out. Cheap to clone and to touch: the pumps touch it on every read.
 #[derive(Clone)]
 pub struct Activity {
     started: Instant,
@@ -643,11 +716,45 @@ pub struct Activity {
     last_ms: Arc<AtomicU64>,
     /// Sub-agents the run started and has not heard back from, by the CLI's task id.
     subagents: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Everything the run left working in the background — a `run_in_background` shell as much as a
+    /// sub-agent — by task id. Claude Code keeps its process alive after the turn's answer until
+    /// these end, then answers again; the silence in between is the run waiting, not hanging.
+    background: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Activity {
     pub fn new() -> Self {
-        Activity { started: Instant::now(), last_ms: Arc::new(AtomicU64::new(0)), subagents: Arc::default() }
+        Activity {
+            started: Instant::now(),
+            last_ms: Arc::new(AtomicU64::new(0)),
+            subagents: Arc::default(),
+            background: Arc::default(),
+        }
+    }
+
+    pub fn background_started(&self, task_id: &str) {
+        if let Ok(mut open) = self.background.lock() {
+            open.insert(task_id.to_string());
+        }
+    }
+
+    pub fn background_ended(&self, task_id: &str) {
+        if let Ok(mut open) = self.background.lock() {
+            open.remove(task_id);
+        }
+    }
+
+    /// The CLI's own list of what is still running in the background, which replaces ours: it is the
+    /// truth, and it also covers a task whose start this run never saw.
+    pub fn background_is(&self, task_ids: impl IntoIterator<Item = String>) {
+        if let Ok(mut open) = self.background.lock() {
+            *open = task_ids.into_iter().collect();
+        }
+    }
+
+    /// Whether the run is waiting on work it started: a sub-agent, or a background task.
+    pub fn waiting_on_tasks(&self) -> bool {
+        self.subagents_open() || self.background.lock().map(|open| !open.is_empty()).unwrap_or(false)
     }
 
     pub fn subagent_started(&self, task_id: &str) {
@@ -696,8 +803,9 @@ pub fn idle_remaining(limit: Duration, quiet_for: Duration) -> Option<Duration> 
 pub async fn gone_quiet(activity: &Activity, limit: Option<Duration>) -> Duration {
     let Some(limit) = limit else { return std::future::pending().await };
     loop {
-        // Re-read each time round: a sub-agent opening or ending moves the deadline both ways.
-        let allowed = if activity.subagents_open() { limit * SUBAGENT_IDLE_FACTOR } else { limit };
+        // Re-read each time round: a sub-agent or a background task opening or ending moves the
+        // deadline both ways.
+        let allowed = if activity.waiting_on_tasks() { limit * SUBAGENT_IDLE_FACTOR } else { limit };
         match idle_remaining(allowed, activity.quiet_for()) {
             None => return allowed,
             // Capped, so a sub-agent that ends while this sleeps toward its longer deadline is
@@ -705,6 +813,18 @@ pub async fn gone_quiet(activity: &Activity, limit: Option<Duration>) -> Duratio
             Some(left) => tokio::time::sleep(left.min(Duration::from_secs(30))).await,
         }
     }
+}
+
+/// How long Claude Code may wait, after a turn's answer, for the background work that turn left
+/// running (`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`); `0` is "for as long as it takes".
+///
+/// Left alone the CLI gives up after ten minutes (2.1.312): it stops those tasks and exits with the
+/// turn's first answer — "it is running, I will report back" — and the report never comes. So the
+/// wait follows the watchdog instead: as long as the silence a run is allowed while it waits on
+/// tasks, less a minute, so the CLI stops its own tasks and says so before the watchdog has to kill
+/// it. No watchdog, no ceiling.
+pub fn background_wait_ceiling(limit: Option<Duration>) -> u64 {
+    limit.map_or(0, |limit| (limit * SUBAGENT_IDLE_FACTOR).saturating_sub(Duration::from_secs(60)).as_millis().max(1) as u64)
 }
 
 /// What a run the watchdog stopped ends with — said in the app's language, because this string is
@@ -715,6 +835,21 @@ pub async fn gone_quiet(activity: &Activity, limit: Option<Duration>) -> Duratio
 pub fn idle_error(engine: &str, limit: Duration) -> String {
     let spanish = crate::ai_usage::setting("app_language").is_some_and(|language| language.starts_with("es"));
     idle_message(engine, limit, spanish)
+}
+
+/// The line a kept answer ends with when its background work was stopped before it reported back —
+/// in the app's language, for the reason [`idle_error`] gives.
+pub fn background_stopped_note() -> String {
+    let spanish = crate::ai_usage::setting("app_language").is_some_and(|language| language.starts_with("es"));
+    background_stopped_message(spanish).to_string()
+}
+
+fn background_stopped_message(spanish: bool) -> &'static str {
+    if spanish {
+        "_Se detuvo lo que seguía en segundo plano, antes de que informara._"
+    } else {
+        "_What was still running in the background was stopped before it reported back._"
+    }
 }
 
 fn idle_message(engine: &str, limit: Duration, spanish: bool) -> String {
@@ -747,6 +882,51 @@ mod tests {
         assert_eq!(idle_limit_from(Some("0")), None);
         assert_eq!(idle_limit_from(Some(" 45 ")), Some(Duration::from_secs(45 * 60)));
         assert_eq!(idle_limit_from(Some("100000")), Some(Duration::from_secs(MAX_IDLE_MINUTES * 60)));
+    }
+
+    /// The tree `ps` showed for a Claude Code run with a background shell (2.1.312): the CLI leads
+    /// group 100, its shell leads a group of its own, and the shell's children are in the shell's.
+    #[test]
+    fn a_background_shells_own_group_is_found_below_the_run() {
+        let table = "\
+              1     0     1
+             50     1    50
+            100    50   100
+            101   100   100
+            200   100   200
+            201   200   200
+            202   201   200
+            300   100    50
+            400     1   400
+        ";
+        // 50 is the app's group: a descendant moved into it is not ours to signal.
+        assert_eq!(groups_below(table, 100, 50), vec![200]);
+        assert!(groups_below(table, 400, 50).is_empty(), "a run with no children has no strays");
+        assert!(groups_below("garbage\n\n", 100, 50).is_empty());
+    }
+
+    #[test]
+    fn a_background_task_counts_as_work_until_the_cli_says_it_ended() {
+        let activity = Activity::new();
+        assert!(!activity.waiting_on_tasks());
+        activity.background_started("b1");
+        assert!(activity.waiting_on_tasks());
+        activity.background_is(Vec::new());
+        assert!(!activity.waiting_on_tasks(), "the CLI's empty list closes it");
+        activity.background_is(vec!["b2".to_string()]);
+        activity.background_ended("b2");
+        assert!(!activity.waiting_on_tasks());
+        activity.subagent_started("a1");
+        assert!(activity.waiting_on_tasks());
+    }
+
+    #[test]
+    fn the_clis_wait_for_background_work_ends_before_the_watchdog() {
+        assert_eq!(background_wait_ceiling(None), 0, "no watchdog: wait as long as it takes");
+        let limit = Duration::from_secs(20 * 60);
+        let ceiling = Duration::from_millis(background_wait_ceiling(Some(limit)));
+        assert!(ceiling > limit && ceiling < limit * SUBAGENT_IDLE_FACTOR);
+        assert!(background_wait_ceiling(Some(Duration::from_secs(1))) > 0, "never 0, which would mean forever");
     }
 
     #[test]

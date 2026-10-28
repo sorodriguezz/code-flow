@@ -38,6 +38,10 @@ const CACHE_MAX = 400;
 export const AUTO_MOVE_KEY = "tickets_auto_move";
 export const BRANCH_PREFIX_KEY = "tickets_branch_prefix";
 export const BUG_PREFIX_KEY = "tickets_bug_prefix";
+/** `mine` | `all` — mirrors `SCOPE` in `tickets_cmd.rs`. */
+export const TICKETS_SCOPE_KEY = "tickets_scope";
+/** `{"<org>": ["Project", …]}`, empty for every project — mirrors `PROJECTS` in `tickets_cmd.rs`. */
+export const TICKETS_PROJECTS_KEY = "tickets_projects";
 export const TARGET_STATES_KEY = "tickets_target_states";
 
 interface TicketState {

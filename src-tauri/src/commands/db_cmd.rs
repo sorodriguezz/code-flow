@@ -978,7 +978,7 @@ fn relation_word(kind: &DbNodeKind) -> &'static str {
 ///
 /// Row estimates are included because they change the answer: which side of a join to drive from,
 /// and whether a sequential scan matters, are questions about size.
-fn render_schema(diagram: &DbSchemaDiagram) -> String {
+pub(crate) fn render_schema(diagram: &DbSchemaDiagram) -> String {
     let mut out = String::new();
     for table in &diagram.tables {
         let qualified = match &table.schema {

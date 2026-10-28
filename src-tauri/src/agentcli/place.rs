@@ -51,7 +51,12 @@ pub fn of(app: &AppHandle, cwd: &str, session: &str) -> Place {
         .and_then(|main| find_project(&projects, main, true))
         .or_else(|| find_project(&projects, cwd, false))
         .cloned();
-    let workspace_id = project.as_ref().map(|p| p.workspace_id.clone()).or_else(|| bench_workspace(app, session));
+    // A workspace chat runs in a folder of its own, which is no project: the folder names its workspace.
+    let workspace_id = project
+        .as_ref()
+        .map(|p| p.workspace_id.clone())
+        .or_else(|| bench_workspace(app, session))
+        .or_else(|| crate::ai_usage::with_conn(|conn| crate::workspace_chat::workspace_of_dir(conn, cwd)).flatten());
     Place { root, project, workspace_id }
 }
 

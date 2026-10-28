@@ -8,7 +8,9 @@
 //! and the credential stays on this side:
 //!
 //! - `cf db` connects with the saved password (attached from the keychain, as the database console
-//!   does) and returns rows. The agent sees results, never the connection string.
+//!   does) and returns rows. The agent sees results, never the connection string. Only on a
+//!   connection the user opened to AI («Acceso de IA», [`AiAccess`]): reads run without asking, on
+//!   a read-only session; writes need «Lectura y escritura» and are approved one by one.
 //! - `cf http` sends the saved request through the API client's own path (`runSavedRequest` in the
 //!   window, which resolves its environment), and the answer comes back with every stored API
 //!   credential scrubbed and the credential-bearing headers dropped.
@@ -17,14 +19,14 @@
 //!   URL-encoded forms) scrubbed. The user approves the exact command each time: a command is code,
 //!   and `echo $TOKEN` is a command too.
 //!
-//! Reads of a database and a given saved request can be allowed for the rest of the run of one
-//! terminal ("allow in this terminal"); writes and Llavero secrets are asked every time.
+//! A given saved request can be allowed for the rest of the run of one terminal ("allow in this
+//! terminal"); database writes and Llavero secrets are asked every time.
 
 use std::time::Duration;
 
 use base64::Engine as _;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use super::{approve, pick, place, AskEvent, Reply, Request};
 use crate::db::Db;
@@ -224,15 +226,248 @@ fn clip(mut text: String) -> String {
 
 // --------------------------------------------------------------------------------------------- db
 
-/// Rows `cf db` returns when not told otherwise, and the most it will.
-const DEFAULT_ROWS: u32 = 200;
+/// Rows `cf db` returns when not told otherwise, and the most it will. Fifty: every row is tokens a
+/// model pays for, and a question about data is answered with an aggregate, not a dump.
+const DEFAULT_ROWS: u32 = 50;
 const MAX_ROWS: u32 = 5_000;
 /// The widest a cell is printed; the rest of a long value is cut with an ellipsis.
 const CELL_MAX: usize = 80;
+/// A whole-schema listing longer than this becomes the table names alone, and the agent asks for
+/// the tables it needs one by one.
+const SCHEMA_MAX: usize = 16_000;
+/// How long a schema read is reused: the catalog rarely changes between two questions, and reading
+/// it is the slow part of answering one. A write through `db` drops the connection's entries.
+const SCHEMA_FRESH: Duration = Duration::from_secs(600);
 
-/// `cf db <connection> [--max-rows N] <SQL>`: the statement on a saved connection, as text tables.
+/// Schema answers by connection, its spec's last change, database, schema and table.
+static SCHEMAS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn forget_schemas(connection_id: &str) {
+    if let Ok(mut held) = SCHEMAS.lock() {
+        held.retain(|key, _| !key.starts_with(&format!("{connection_id}|")));
+    }
+}
+
+/// The schema as a model reads it cheapest: one line per table, its columns comma-separated with
+/// their marks and where each foreign key points (`~` for a relation guessed from a name).
+pub(crate) fn compact_schema(diagram: &crate::datasource::DbSchemaDiagram) -> String {
+    let qualified = |schema: &Option<String>, name: &str| match schema {
+        Some(s) => format!("{s}.{name}"),
+        None => name.to_string(),
+    };
+    let mut out = String::new();
+    for table in &diagram.tables {
+        let columns: Vec<String> = table
+            .columns
+            .iter()
+            .map(|c| {
+                let mut text = format!("{} {}", c.name, c.data_type);
+                if c.primary_key {
+                    text.push_str(" PK");
+                }
+                if let Some(edge) = diagram.edges.iter().find(|e| e.from_table == table.name && e.from_schema == table.schema && e.from_column == c.name) {
+                    text.push_str(&format!(" {}→{}.{}", if edge.inferred { "~" } else { "" }, edge.to_table, edge.to_column));
+                }
+                if !c.nullable && !c.primary_key {
+                    text.push_str(" NN");
+                }
+                text
+            })
+            .collect();
+        let rows = table.row_estimate.map(|n| format!(" ~{n} rows")).unwrap_or_default();
+        out.push_str(&format!("{}{rows}: {}\n", qualified(&table.schema, &table.name), columns.join(", ")));
+    }
+    for note in &diagram.notes {
+        out.push_str(&format!("note: {note}\n"));
+    }
+    out
+}
+/// How long a model's statement may run before CodeFlow stops it on the server: a read (which runs
+/// without asking — a heavy one must not hold a production server) and a write the user approved.
+const READ_LIMIT: Duration = Duration::from_secs(30);
+const WRITE_LIMIT: Duration = Duration::from_secs(120);
+
+/// What the user lets a model do on one connection — «Acceso de IA» in its options, saved in the
+/// spec as `ai_access`. Absent (or anything else) is [`AiAccess::None`]: a connection made before the
+/// setting existed stays closed to every model until the user opens it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AiAccess {
+    None,
+    /// Reads, run without asking — on a session opened read-only, so the driver refuses a write
+    /// whatever the statement looks like.
+    Read,
+    /// Reads as above; every write shown to the user verbatim and run only once approved.
+    Write,
+}
+
+impl AiAccess {
+    pub(crate) fn of_spec(spec: &str) -> Self {
+        let parsed: Value = serde_json::from_str(spec).unwrap_or(Value::Null);
+        match parsed.get("ai_access").and_then(Value::as_str) {
+            Some("read") => AiAccess::Read,
+            Some("write") => AiAccess::Write,
+            _ => AiAccess::None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            AiAccess::None => "closed",
+            AiAccess::Read => "read only",
+            AiAccess::Write => "read and write (each write approved by the user)",
+        }
+    }
+}
+
+/// The saved connections of the run's workspace and the global ones, with what a model may do on each.
+fn connections_here(app: &AppHandle, request: &Request) -> Vec<(crate::db::models::DbConnectionRow, AiAccess)> {
+    let place = place::of(app, &request.cwd, &request.session);
+    let workspace = place.workspace_id.unwrap_or_default();
+    crate::ai_usage::with_conn(|conn| crate::db::datasource_queries::load_tree(conn, &workspace))
+        .and_then(Result::ok)
+        .map(|tree| tree.connections)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| {
+            let access = AiAccess::of_spec(&row.spec);
+            (row, access)
+        })
+        .collect()
+}
+
+/// The connection named `name`, when the user opened it to AI — or the reply that says why not.
+fn usable(app: &AppHandle, request: &Request, name: &str) -> Result<(crate::db::models::DbConnectionRow, AiAccess), Reply> {
+    let row = match pick(connections_here(app, request), name, |(row, _)| row.name.as_str()) {
+        Ok(found) => found,
+        Err(names) if names.is_empty() => return Err(Reply::no(format!("no saved database connection named {name} here — db_connections lists them"))),
+        Err(names) => return Err(Reply::no(format!("{name} matches several connections: {}", names.join(", ")))),
+    };
+    if row.1 == AiAccess::None {
+        return Err(Reply::no(format!(
+            "«{}» is closed to AI. The user opens it in Base de datos › the connection's settings › Opciones › Acceso de IA.",
+            row.0.name
+        )));
+    }
+    Ok(row)
+}
+
+/// `cf dbs`: the connections a model may use here, and the names of the ones it may not.
+pub fn dbs(request: &Request, app: &AppHandle) -> Reply {
+    let all = connections_here(app, request);
+    if all.is_empty() {
+        return Reply::ok("No saved database connections in this workspace.");
+    }
+    let (open, closed): (Vec<_>, Vec<_>) = all.into_iter().partition(|(_, access)| *access != AiAccess::None);
+    let mut out = String::new();
+    if open.is_empty() {
+        out.push_str("No connection is open to AI. The user opens one in Base de datos › the connection's settings › Opciones › Acceso de IA.\n");
+    } else {
+        out.push_str("Connections open to AI (name · engine · environment · database · access):\n");
+        for (row, access) in &open {
+            let spec: Value = serde_json::from_str(&row.spec).unwrap_or(Value::Null);
+            let field = |key: &str| spec.get(key).and_then(Value::as_str).filter(|v| !v.is_empty()).unwrap_or("—").to_string();
+            let read_only = if spec.get("read_only").and_then(Value::as_bool).unwrap_or(false) { " · the connection itself is read-only" } else { "" };
+            out.push_str(&format!("- {} · {} · {} · {} · {}{read_only}\n", row.name, row.kind, field("environment"), field("database"), access.label()));
+        }
+    }
+    if !closed.is_empty() {
+        let names: Vec<&str> = closed.iter().map(|(row, _)| row.name.as_str()).collect();
+        out.push_str(&format!("Closed to AI (the user can open them in their settings): {}\n", names.join(", ")));
+    }
+    Reply::ok(out.trim_end().to_string())
+}
+
+/// `cf dbschema <connection> [--database D] [--schema S] [table]`: the tables, columns, keys and
+/// relationships — read by CodeFlow's own driver on a read-only session, no approval needed.
+pub async fn dbschema(request: &Request, app: &AppHandle) -> Reply {
+    let usage = || Reply::no("usage: cf dbschema <connection> [--database D] [--schema S] [table]");
+    let mut args = request.args.clone();
+    let mut take = |flag: &str| -> Option<String> {
+        let at = args.iter().position(|a| a == flag)?;
+        let value = args.get(at + 1).cloned();
+        args.drain(at..(at + 2).min(args.len()));
+        value.filter(|v| !v.trim().is_empty())
+    };
+    let database = take("--database");
+    let schema = take("--schema");
+    let Some((name, rest)) = args.split_first() else { return usage() };
+    let table = rest.first().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+    let (row, _) = match usable(app, request, name) {
+        Ok(found) => found,
+        Err(refused) => return refused,
+    };
+    let key = format!("{}|{}|{}|{}|{}", row.id, row.updated_at, database.as_deref().unwrap_or(""), schema.as_deref().unwrap_or(""), table.as_deref().unwrap_or("").to_lowercase());
+    if let Some(text) = SCHEMAS.lock().ok().and_then(|held| held.get(&key).filter(|(at, _)| at.elapsed() < SCHEMA_FRESH).map(|(_, text)| text.clone())) {
+        return Reply::ok(text);
+    }
+    let mut config = match crate::commands::db_cmd::resolve_config(&app.state::<Db>(), &row.id) {
+        Ok(config) => config,
+        Err(error) => return Reply::no(error),
+    };
+    config.read_only = true;
+    let tag = format!("agentcli-{}", uuid::Uuid::new_v4());
+    let session = match crate::datasource::Session::open_tagged(&config, database.as_deref(), &tag).await {
+        Ok(session) => session,
+        Err(error) => return Reply::no(error),
+    };
+    let node = crate::datasource::DbNodeRef {
+        kind: if schema.is_some() { crate::datasource::DbNodeKind::Schema } else { crate::datasource::DbNodeKind::Database },
+        database: database.clone(),
+        schema: schema.clone(),
+        name: schema.clone().or_else(|| database.clone()),
+    };
+    let mut diagram = match tokio::time::timeout(READ_LIMIT, session.schema_diagram(&node)).await {
+        Ok(Ok(diagram)) => diagram,
+        Ok(Err(error)) => return Reply::no(error),
+        Err(_) => {
+            session.cancel_running().await;
+            return Reply::no(format!("reading the catalog took over {} s — ask for one schema or one table", READ_LIMIT.as_secs()));
+        }
+    };
+    let scope = match (diagram.database.as_deref(), diagram.schema.as_deref()) {
+        (Some(db), Some(s)) => format!("database {db}, schema {s}"),
+        (Some(db), None) => format!("database {db}"),
+        (None, Some(s)) => format!("schema {s}"),
+        (None, None) => "the connection's default database".to_string(),
+    };
+    if let Some(wanted) = &table {
+        let wanted = wanted.to_lowercase();
+        let matches = |schema: &Option<String>, name: &str| {
+            let name = name.to_lowercase();
+            name == wanted || schema.as_ref().is_some_and(|s| format!("{}.{name}", s.to_lowercase()) == wanted)
+        };
+        let all: Vec<String> = diagram.tables.iter().map(|t| t.name.clone()).collect();
+        diagram.tables.retain(|t| matches(&t.schema, &t.name));
+        if diagram.tables.is_empty() {
+            return Reply::no(format!("no table {wanted} in {scope}. Tables: {}", all.join(", ")));
+        }
+        diagram.edges.retain(|e| matches(&e.from_schema, &e.from_table) || matches(&e.to_schema, &e.to_table));
+    }
+    let mut text = compact_schema(&diagram);
+    if table.is_none() && text.len() > SCHEMA_MAX {
+        let names: Vec<String> = diagram
+            .tables
+            .iter()
+            .map(|t| match &t.schema {
+                Some(s) => format!("{s}.{} ({} columns)", t.name, t.columns.len()),
+                None => format!("{} ({} columns)", t.name, t.columns.len()),
+            })
+            .collect();
+        text = format!("{} tables — too many to show whole; ask for one by name:\n{}", names.len(), names.join("\n"));
+    }
+    let text = clip(scrub(&format!("{} · {scope}\n{text}", config.engine_label()), &[]));
+    if let Ok(mut held) = SCHEMAS.lock() {
+        held.insert(key, (std::time::Instant::now(), text.clone()));
+    }
+    Reply::ok(text)
+}
+
+/// `cf db <connection> [--read|--write] [--max-rows N] <SQL>`: the statement on a saved connection
+/// the user opened to AI, as text tables. A read runs at once on a read-only session; a write needs
+/// «Lectura y escritura» and the user's approval of the exact statement, every time.
 pub async fn db(request: &Request, app: &AppHandle) -> Reply {
-    let usage = || Reply::no("usage: cf db <connection> [--max-rows N] <SQL>");
+    let usage = || Reply::no("usage: cf db <connection> [--read|--write] [--max-rows N] <SQL>");
     let mut args = request.args.clone();
     let mut max_rows = DEFAULT_ROWS;
     if let Some(at) = args.iter().position(|a| a == "--max-rows") {
@@ -240,40 +475,52 @@ pub async fn db(request: &Request, app: &AppHandle) -> Reply {
         max_rows = n.clamp(1, MAX_ROWS);
         args.drain(at..at + 2);
     }
+    let mut flag = |name: &str| match args.iter().position(|a| a == name) {
+        Some(at) => {
+            args.remove(at);
+            true
+        }
+        None => false,
+    };
+    let only_read = flag("--read");
+    flag("--write");
     let Some((name, sql)) = args.split_first() else { return usage() };
     let sql = sql.join(" ");
     if sql.trim().is_empty() {
         return usage();
     }
-    let place = place::of(app, &request.cwd, &request.session);
-    let workspace = place.workspace_id.clone().unwrap_or_default();
-    let connections = crate::ai_usage::with_conn(|conn| crate::db::datasource_queries::load_tree(conn, &workspace))
-        .and_then(Result::ok)
-        .map(|tree| tree.connections)
-        .unwrap_or_default();
-    let row = match pick(connections, name, |c| c.name.as_str()) {
-        Ok(row) => row,
-        Err(names) if names.is_empty() => return Reply::no(format!("no saved database connection named {name} here")),
-        Err(names) => return Reply::no(format!("{name} matches several connections: {}", names.join(", "))),
+    let (row, access) = match usable(app, request, name) {
+        Ok(found) => found,
+        Err(refused) => return refused,
     };
-    let config = match crate::commands::db_cmd::resolve_config(&app.state::<Db>(), &row.id) {
+    let mut config = match crate::commands::db_cmd::resolve_config(&app.state::<Db>(), &row.id) {
         Ok(config) => config,
         Err(error) => return Reply::no(error),
     };
     let writes = crate::datasource::export_refusal(config.kind, &sql).is_some();
-    let production = config.environment.eq_ignore_ascii_case("prod") || config.environment.eq_ignore_ascii_case("production");
-    let what = match (writes, production) {
-        (true, true) => "changes data on PRODUCTION",
-        (true, false) => "changes data",
-        (false, true) => "reads PRODUCTION",
-        (false, false) => "reads",
-    };
-    let mut event = AskEvent::new("db", format!("«{}» — {what}", row.name), &request.cwd);
-    event.detail = sql.clone();
-    // A read can be allowed for the rest of this terminal's run; a write is asked every time.
-    event.always = !writes;
-    if let Err(refused) = approve(app, request, &row.id, event).await {
-        return refused;
+    if writes {
+        if only_read {
+            return Reply::no("This statement changes data, and db_read only reads. Use db_write: the user approves it first.");
+        }
+        if access != AiAccess::Write {
+            return Reply::no(format!("«{}» is open to AI for reading only. Writing needs «Lectura y escritura» in its Acceso de IA.", row.name));
+        }
+        if config.read_only {
+            return Reply::no(format!("«{}» is a read-only connection: it refuses every write.", row.name));
+        }
+        let production = config.environment.eq_ignore_ascii_case("prod") || config.environment.eq_ignore_ascii_case("production");
+        let what = if production { "changes data on PRODUCTION" } else { "changes data" };
+        let mut event = AskEvent::new("db", format!("«{}» — {what}", row.name), &request.cwd);
+        event.detail = sql.clone();
+        // A write is asked every time: one click must not approve the next statement unseen.
+        event.always = false;
+        if let Err(refused) = approve(app, request, &row.id, event).await {
+            return refused;
+        }
+    } else {
+        // What makes a read a read is the driver, not the statement's first word: the session is
+        // opened read-only, so whatever slips past the classifier is refused before it is sent.
+        config.read_only = true;
     }
 
     let tag = format!("agentcli-{}", uuid::Uuid::new_v4());
@@ -282,7 +529,22 @@ pub async fn db(request: &Request, app: &AppHandle) -> Reply {
         Err(error) => return Reply::no(error),
     };
     let context = crate::datasource::DbExecContext { database: None, schema: None, max_rows };
-    match session.execute(&sql, &context).await {
+    let limit = if writes { WRITE_LIMIT } else { READ_LIMIT };
+    let started = std::time::Instant::now();
+    let outcome = match tokio::time::timeout(limit, session.execute(&sql, &context)).await {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            // Dropping the call stops waiting; this stops the statement on the server too, where the
+            // engine can (Postgres, MySQL, IRIS, Oracle, SQLite, JDBC).
+            session.cancel_running().await;
+            Err(format!(
+                "stopped after {} s: the statement ran too long and was cancelled on the server. Narrow it — a WHERE on an indexed column, a LIMIT, a COUNT instead of the rows — and try again.",
+                limit.as_secs()
+            ))
+        }
+    };
+    let elapsed = started.elapsed().as_millis() as i64;
+    let reply = match &outcome {
         Ok(result) => {
             let failed = result.results.iter().any(|r| r.error.is_some());
             let text = scrub(&result.results.iter().map(render_statement).collect::<Vec<_>>().join("\n\n"), &[]);
@@ -292,7 +554,43 @@ pub async fn db(request: &Request, app: &AppHandle) -> Reply {
                 Reply::ok(text)
             }
         }
-        Err(error) => Reply::no(error),
+        Err(error) => Reply::no(error.clone()),
+    };
+    let (rows, error) = match &outcome {
+        Ok(result) => (
+            result.results.iter().map(|r| r.rows_affected.unwrap_or(r.rows.len() as i64)).sum(),
+            result.results.iter().find_map(|r| r.error.clone()).unwrap_or_default(),
+        ),
+        Err(error) => (0, error.clone()),
+    };
+    record(app, request, &row, &sql, elapsed, rows, &error);
+    if writes {
+        // It may have changed the tables: the next schema question reads them again.
+        forget_schemas(&row.id);
+    }
+    reply
+}
+
+/// What a model ran, in the connection's query history and marked as the AI's — where the user
+/// already looks for what ran against a server — and the window told to show it.
+fn record(app: &AppHandle, request: &Request, row: &crate::db::models::DbConnectionRow, sql: &str, duration_ms: i64, row_count: i64, error: &str) {
+    let Some(workspace) = place::of(app, &request.cwd, &request.session).workspace_id.filter(|ws| !ws.is_empty()) else { return };
+    let spec: Value = serde_json::from_str(&row.spec).unwrap_or(Value::Null);
+    let entry = crate::db::models::DbQueryHistoryEntry {
+        id: String::new(),
+        workspace_id: workspace,
+        connection_id: row.id.clone(),
+        connection_name: row.name.clone(),
+        statement: sql.to_string(),
+        database_name: spec.get("database").and_then(Value::as_str).unwrap_or_default().to_string(),
+        duration_ms,
+        row_count,
+        error: error.to_string(),
+        ran_at: String::new(),
+        source: "ai".to_string(),
+    };
+    if crate::ai_usage::with_conn(|conn| crate::db::datasource_queries::add_history(conn, &entry).is_ok()) == Some(true) {
+        let _ = app.emit("db:history-changed", ());
     }
 }
 
@@ -476,6 +774,42 @@ fn render_response(answer: &Value, saved_url: &str) -> (bool, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_schema_reads_as_one_line_per_table() {
+        use crate::datasource::{DbDiagramColumn, DbDiagramEdge, DbDiagramTable, DbNodeKind, DbSchemaDiagram};
+        let column = |name: &str, data_type: &str, nullable: bool, primary_key: bool| DbDiagramColumn { name: name.into(), data_type: data_type.into(), nullable, primary_key, foreign_key: false };
+        let diagram = DbSchemaDiagram {
+            database: Some("shop".into()),
+            schema: Some("public".into()),
+            tables: vec![
+                DbDiagramTable { schema: Some("public".into()), name: "orders".into(), kind: DbNodeKind::Table, columns: vec![column("id", "int", false, true), column("customer_id", "int", false, false), column("note", "text", true, false)], row_estimate: Some(1200) },
+                DbDiagramTable { schema: Some("public".into()), name: "customers".into(), kind: DbNodeKind::Table, columns: vec![column("id", "int", false, true)], row_estimate: None },
+            ],
+            edges: vec![DbDiagramEdge {
+                constraint: "fk".into(),
+                from_schema: Some("public".into()),
+                from_table: "orders".into(),
+                from_column: "customer_id".into(),
+                to_schema: Some("public".into()),
+                to_table: "customers".into(),
+                to_column: "id".into(),
+                inferred: false,
+            }],
+            notes: vec![],
+        };
+        assert_eq!(compact_schema(&diagram), "public.orders ~1200 rows: id int PK, customer_id int →customers.id NN, note text\npublic.customers: id int PK\n");
+    }
+
+    #[test]
+    fn a_connection_is_closed_to_ai_unless_the_user_opened_it() {
+        assert_eq!(AiAccess::of_spec(r#"{"host":"localhost"}"#), AiAccess::None, "made before the setting");
+        assert_eq!(AiAccess::of_spec(r#"{"ai_access":""}"#), AiAccess::None);
+        assert_eq!(AiAccess::of_spec(r#"{"ai_access":"read"}"#), AiAccess::Read);
+        assert_eq!(AiAccess::of_spec(r#"{"ai_access":"write"}"#), AiAccess::Write);
+        assert_eq!(AiAccess::of_spec(r#"{"ai_access":"admin"}"#), AiAccess::None, "anything unknown stays closed");
+        assert_eq!(AiAccess::of_spec("not json"), AiAccess::None);
+    }
 
     #[test]
     fn an_entry_title_becomes_an_environment_name() {

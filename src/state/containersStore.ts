@@ -65,7 +65,8 @@ export type EngineSection = "overview" | "containers" | "images" | "volumes" | "
 
 /** Where the manager is: a runtime, and one of its sections (an `EngineSection`, or a Kubernetes kind). */
 export interface ContainersNav {
-  runtime: RuntimeId | null;
+  /** `azure` is no runtime: the Azure pages (see `azureStore`), there whenever `az` is. */
+  runtime: RuntimeId | "azure" | null;
   section: string;
 }
 
@@ -246,6 +247,7 @@ export const useContainersStore = create<ContainersState>((set, get) => ({
 
   nav: () => {
     const { prefs, runtimes } = get();
+    if (prefs.nav.runtime === "azure") return prefs.nav;
     const chosen = prefs.nav.runtime ? runtimes.find((r) => r.id === prefs.nav.runtime) : undefined;
     if (chosen) return prefs.nav;
     // The first engine that answers, else the first one found — Kubernetes last, being remote.
@@ -283,7 +285,7 @@ export const useContainersStore = create<ContainersState>((set, get) => ({
             open: Array.isArray(parsed.open) ? parsed.open.filter((k) => typeof k === "string") : DEFAULT_PREFS.open,
             nav:
               parsed.nav && typeof parsed.nav === "object" && typeof parsed.nav.section === "string"
-                ? { runtime: (parsed.nav.runtime as RuntimeId | null) ?? null, section: parsed.nav.section }
+                ? { runtime: (parsed.nav.runtime as RuntimeId | "azure" | null) ?? null, section: parsed.nav.section }
                 : DEFAULT_PREFS.nav,
             context: parsed.context && typeof parsed.context === "object" ? parsed.context : {},
             namespace: parsed.namespace && typeof parsed.namespace === "object" ? parsed.namespace : {},
@@ -483,7 +485,8 @@ export const useContainersStore = create<ContainersState>((set, get) => ({
         if (nav.runtime !== "kubernetes") continue;
         const context = get().contextOf("kubernetes");
         if (!context || get().reach[context]?.ok === false) continue;
-        if (nav.section && nav.section !== "overview") jobs.push(get().refreshList("kubernetes", nav.section));
+        // The topology page reads its own graph (`KubeTopologyPage`), not a kind's list.
+        if (nav.section && nav.section !== "overview" && nav.section !== "topology") jobs.push(get().refreshList("kubernetes", nav.section));
         continue;
       }
       // Every engine's containers, for the counts beside it; the rest only for the engine on screen.

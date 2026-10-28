@@ -1140,6 +1140,9 @@ pub struct DbQueryHistoryEntry {
     pub row_count: i64,
     pub error: String,
     pub ran_at: String,
+    /// `""` the user ran it, `ai` a chat or agent did (`db_read`/`db_write`).
+    #[serde(default)]
+    pub source: String,
 }
 
 /// A folder in the connection tree.

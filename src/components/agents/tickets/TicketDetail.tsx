@@ -23,8 +23,10 @@ import {
 } from "../../../lib/tauri/ticketCommands";
 
 /** Board HTML is someone else's markup: sanitised before it is drawn, links kept. */
+/** Boards' HTML is often pasted from Word: inline margins pushed lines halfway across the column and
+ *  fixed colours ignored the theme. The structure stays; the inline look goes. */
 function clean(html: string): string {
-  return DOMPurify.sanitize(html, { ADD_ATTR: ["target"] });
+  return DOMPurify.sanitize(html, { ADD_ATTR: ["target"], FORBID_ATTR: ["style", "class", "color", "face", "size", "align"] });
 }
 
 /** The key the per-board target states are stored under — `board_key` in `boards/tickets.rs`. */

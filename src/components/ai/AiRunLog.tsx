@@ -242,14 +242,21 @@ function LiveRun({
   const quiet = !cancelling && quietFor >= QUIET_AFTER_SECONDS;
   // Silence with a sub-agent out is the run working — its own output waits for theirs — so it is
   // said as that, in the ordinary colour, rather than as a stall.
-  const open = subagents ? Object.values(subagents) : [];
+  const tasks = subagents ? Object.values(subagents) : [];
+  const open = tasks.filter((task) => !task.background);
   const lanes = laneSpan.lanes;
   const liveLanes = lanes.filter((lane) => lane.status === "live").length;
   const delegating = open.length > 0 || liveLanes > 0;
   const latest = open[open.length - 1];
+  // Work the turn left in the background — a shell it started and did not wait for. Claude Code
+  // answers and then keeps the run open until that work ends, saying nothing meanwhile; that is
+  // said as the wait it is, soon, rather than four minutes later as a stall.
+  const background = tasks.length - open.length;
+  const waiting = background > 0 && !delegating && !cancelling && quietFor >= BACKGROUND_AFTER_SECONDS;
   // What the watchdog still allows, mirroring `gone_quiet`: three times the limit while a sub-agent
-  // is out. Said, so a quiet run reads as something that ends by itself — not a clock that runs on.
-  const allowed = idleLimit === null ? null : idleLimit * (delegating ? SUBAGENT_IDLE_FACTOR : 1);
+  // or a background task is out. Said, so a quiet run reads as something that ends by itself — not
+  // a clock that runs on.
+  const allowed = idleLimit === null ? null : idleLimit * (delegating || background > 0 ? SUBAGENT_IDLE_FACTOR : 1);
   const autoStopIn = allowed === null ? null : Math.max(0, allowed - quietFor);
 
   const phase: RunPhase = answering
@@ -259,7 +266,7 @@ function LiveRun({
       : lead === "think" && thinking
         ? "think"
         : phaseOfSteps(steps);
-  const stalled = quiet && !delegating;
+  const stalled = quiet && !delegating && background === 0;
 
   const headline = cancelling
     ? { id: "stopping", text: t("ai.stopping"), tone: "muted" as const }
@@ -267,7 +274,9 @@ function LiveRun({
       ? { id: "quiet", text: t("ai.quietFor", { time: formatElapsed(quietFor) }), tone: "warn" as const }
       : quiet && delegating
         ? { id: "subagents", text: t("ai.subagentsWorking", { n: Math.max(open.length, liveLanes) }), tone: "live" as const }
-        : label
+        : waiting
+          ? { id: "background", text: t("ai.backgroundWaiting", { n: background }), tone: "live" as const }
+          : label
           ? { id: "label", text: label, tone: "live" as const }
           : { id: phase, text: t(PHASE_LABEL[phase]), tone: "live" as const };
 
@@ -299,7 +308,7 @@ function LiveRun({
             type="button"
             onClick={() => setFolded((v) => !v)}
             disabled={!hasFeed}
-            title={quiet ? (delegating ? t("ai.subagentsHint") : t("ai.quietHint")) : undefined}
+            title={waiting ? t("ai.backgroundHint") : quiet ? (delegating ? t("ai.subagentsHint") : t("ai.quietHint")) : undefined}
             aria-expanded={hasFeed ? showFeed : undefined}
             className="flex min-w-0 flex-1 items-center gap-2 text-left"
           >
@@ -816,6 +825,10 @@ export function RunEngineChip({ runId }: { runId?: string }) {
  * cost of being early is crying stall on a model that was thinking.
  */
 const QUIET_AFTER_SECONDS = 240;
+
+/** Seconds of silence, with background work out, before the card says it is waiting on it — long
+ *  enough that a turn still writing its answer is not interrupted by the label. */
+const BACKGROUND_AFTER_SECONDS = 8;
 
 /** `ai_runs::SUBAGENT_IDLE_FACTOR`: how many times the silence the watchdog allows while a sub-agent
  *  is out. Mirrored so the countdown says what the backend will actually do. */

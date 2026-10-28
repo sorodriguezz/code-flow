@@ -44,7 +44,7 @@ impl KubeTarget {
     }
 
     /// `-n ns`, or `-A` for a list across all of them (never for one object).
-    fn scope_args(&self, list: bool) -> Vec<String> {
+    pub(crate) fn scope_args(&self, list: bool) -> Vec<String> {
         match self.namespace() {
             Some(ns) => vec!["-n".into(), ns.into()],
             None if list => vec!["-A".into()],
@@ -762,6 +762,23 @@ pub async fn exec(target: &KubeTarget, pod: &str, container: Option<&str>, comma
     }
     args.extend(["sh".into(), "-c".into(), command.to_string()]);
     cli::run(&program(), &args, None, timeout).await
+}
+
+/// `kubectl top pods|nodes`: CPU and memory now, from the cluster's metrics server — the busiest
+/// first. A cluster without one says so in words rather than kubectl's API error.
+pub async fn top(target: &KubeTarget, what: &str) -> Result<String, String> {
+    let nodes = what.trim().to_lowercase().starts_with("no");
+    let mut args = vec!["top".to_string(), if nodes { "nodes" } else { "pods" }.to_string(), "--sort-by=cpu".into(), "--request-timeout=15s".into()];
+    if !nodes {
+        args.extend(target.scope_args(true));
+    }
+    target.run(args, None, READ_TIMEOUT).await.map_err(|error| {
+        if error.to_lowercase().contains("metrics api not available") || error.contains("metrics.k8s.io") {
+            "this cluster has no metrics server (metrics-server), so its CPU and memory cannot be read".to_string()
+        } else {
+            error
+        }
+    })
 }
 
 /// Waits for a rollout to finish (or `timeout` to pass).

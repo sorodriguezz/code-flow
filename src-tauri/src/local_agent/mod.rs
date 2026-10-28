@@ -890,9 +890,12 @@ How to work:\n",
     if grants.run {
         system.push_str("- run_command runs a shell command in the project root; use it to run tests or builds when that helps. A command that deletes or overwrites something waits for the user's approval — if they say no, do not look for another way to do it. Never run interactive commands.\n");
     }
-    let app: Vec<&str> = offered.iter().copied().filter(|name| matches!(*name, "service_logs" | "terminal_output" | "db_query" | "http_request" | "run_with_secret")).collect();
+    let app: Vec<&str> = offered.iter().copied().filter(|name| matches!(*name, "service_logs" | "terminal_output" | "db_write" | "http_request" | "run_with_secret")).collect();
     if !app.is_empty() {
-        system.push_str("- Some tools reach the CodeFlow app around the project (the services it runs, its terminals). The ones that use something the user saved — a database connection, an API request, a keyring entry — ask the user first and never show you the secret; if the user says no, accept it.\n");
+        system.push_str("- Some tools reach the CodeFlow app around the project (the services it runs, its terminals). The ones that use something the user saved — a database write, an API request, a keyring entry — ask the user first and never show you the secret; if the user says no, accept it.\n");
+    }
+    if offered.iter().any(|name| matches!(*name, "db_read" | "kubernetes" | "azure" | "containers")) {
+        system.push_str("- db_read, kubernetes, azure and containers only look: use them to answer about the user's data, clusters, cloud and containers, then answer in words. Names need not be exact — a part of one finds it.\n");
     }
     if grounding {
         system.push_str("- When you are done, give your answer in exactly the format the task asks for, from what you read. Do not call tools in that last reply.");
@@ -1476,7 +1479,7 @@ mod tests {
         let toolbox = tools::Toolbox::new(dir.to_str().unwrap(), Grants { write: false, run: false, reach: Reach::Project }).unwrap();
         let schemas = toolbox.schemas();
         let names: Vec<&str> = schemas.iter().filter_map(|t| t.pointer("/function/name").and_then(Value::as_str)).collect();
-        for absent in ["edit_file", "write_file", "run_command", "service_logs", "db_query", "notify", "read_note"] {
+        for absent in ["edit_file", "write_file", "run_command", "service_logs", "db_read", "kubernetes", "notify", "read_note"] {
             assert!(!names.contains(&absent), "{absent} offered to a judging run: {names:?}");
         }
         let cost = budget::estimate_tokens(&Value::Array(schemas).to_string());

@@ -63,6 +63,10 @@ pub struct Ticket {
     /// monday's status column id — the one board whose state lives in a column of its own choosing.
     #[serde(default)]
     pub state_field: String,
+    /// Who it is assigned to, by display name; empty when nobody is. Only read where the list can
+    /// hold other people's work (Azure's «every ticket of my projects»).
+    #[serde(default)]
+    pub assigned_to: String,
 }
 
 /// A comment, rendered to HTML the frontend sanitises before showing it.

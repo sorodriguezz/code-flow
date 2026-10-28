@@ -2066,8 +2066,19 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_reference_repos(conn)?;
     add_on_demand_to_review_contexts(conn)?;
     add_api_mocks(conn)?;
+    add_source_to_db_history(conn)?;
     // Tickets → code (boards::ticket_links): the ticket ↔ branch ↔ pull request record.
     crate::boards::ticket_links::migrate(conn)?;
+    Ok(())
+}
+
+/// Who ran a statement of the database history: `""` the user, `ai` a chat or an agent through
+/// `db_read`/`db_write` (`agentcli::vault::db`) — so what a model queried is on record where the
+/// user already looks.
+pub(crate) fn add_source_to_db_history(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "db_query_history")? && !has_column(conn, "db_query_history", "source")? {
+        conn.execute_batch("ALTER TABLE db_query_history ADD COLUMN source TEXT NOT NULL DEFAULT '';")?;
+    }
     Ok(())
 }
 

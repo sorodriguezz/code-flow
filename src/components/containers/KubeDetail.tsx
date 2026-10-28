@@ -7,6 +7,8 @@ import { LogAnalysisPanel, LogTools } from "./LogTools";
 import { BackButton, DetailHeader, NO_ROWS } from "./ContainersDetail";
 import { DetailTabs, Facts, HeaderAction, RowAction, SectionTitle, StateDot, TextView, ago } from "./containerBits";
 import { kubeMenu, kubePorts } from "./containerActions";
+import { firstRead } from "./pageModel";
+import { LoadingLine } from "./ui";
 import { containersApply, containersText } from "../../lib/tauri/containersCommands";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { confirmAction } from "../../state/confirmStore";
@@ -48,6 +50,8 @@ export function KubeDetail({ selection }: { selection: ContainerSelection }) {
   const row = useContainersStore((s) =>
     ((s.lists[listKey("kubernetes", selection.context, namespace, kind)]?.rows ?? []) as KubeRow[]).find((r) => r.name === selection.id && (r.namespace || null) === (selection.namespace || null)),
   );
+  // Opened from the topology, the kind's list may still be on its way: loading, not "gone".
+  const listing = useContainersStore((s) => firstRead(s.lists[listKey("kubernetes", selection.context, namespace, kind)]));
   const act = useContainersStore((s) => s.act);
   const select = useContainersStore((s) => s.select);
   const tabs = tabsFor(kind);
@@ -59,7 +63,7 @@ export function KubeDetail({ selection }: { selection: ContainerSelection }) {
   /** What the log pane shows, as text — for its copy, save and «Analizar con IA». */
   const logText = useRef<(() => string) | null>(null);
   useEffect(() => setVisited((v) => (v.has(tab) ? v : new Set([...v, tab]))), [tab]);
-  if (!row) return <p className="p-4 text-[12px] text-[var(--cf-text-muted)]">{t("containers.gone")}</p>;
+  if (!row) return listing ? <LoadingLine /> : <p className="p-4 text-[12px] text-[var(--cf-text-muted)]">{t("containers.gone")}</p>;
 
   // Its actions go to the context it was selected in — never to whatever kubeconfig says now.
   const menu = kubeMenu({ kind, row, context: selection.context, t, act, select: () => select(selection) });

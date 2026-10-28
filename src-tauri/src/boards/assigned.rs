@@ -76,12 +76,28 @@ fn newest_last(mut comments: Vec<TicketComment>) -> Vec<TicketComment> {
 // ---------- Azure Boards ----------
 
 const AZURE_FIELDS: &str = "System.Id,System.Title,System.State,System.WorkItemType,System.TeamProject,\
-System.IterationPath,Microsoft.VSTS.Common.Priority,System.ChangedDate";
+System.IterationPath,Microsoft.VSTS.Common.Priority,System.ChangedDate,System.AssignedTo";
+
+/// The most open tickets one project lists when the section shows every ticket, not only yours.
+const MAX_PER_PROJECT: usize = 200;
+/// And the most across one organisation: past this a list is a search, and the filters are there.
+const MAX_OPEN: usize = 1000;
+/// Azure's work-item batch read takes at most this many ids per request.
+const AZURE_BATCH: usize = 200;
 
 /// The query: yours, across every project of the organisation, finished work left out by the
 /// state names every stock process uses for it.
 pub fn azure_wiql() -> String {
     "SELECT [System.Id] FROM WorkItems WHERE [System.AssignedTo] = @Me \
+     AND [System.State] NOT IN ('Closed', 'Done', 'Removed', 'Cut', 'Completed') \
+     ORDER BY [System.ChangedDate] DESC"
+        .to_string()
+}
+
+/// The query for «every ticket of my projects»: what is still open in one project, newest first.
+/// `@project` is the project the request's URL names.
+pub fn azure_open_wiql() -> String {
+    "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @project \
      AND [System.State] NOT IN ('Closed', 'Done', 'Removed', 'Cut', 'Completed') \
      ORDER BY [System.ChangedDate] DESC"
         .to_string()
@@ -123,6 +139,7 @@ pub fn parse_azure_items(org: &str, body: &Value) -> Vec<Ticket> {
                 url: format!("https://dev.azure.com/{org_enc}/_workitems/edit/{id}"),
                 updated_at: f("System.ChangedDate"),
                 state_field: String::new(),
+                assigned_to: fields.pointer("/System.AssignedTo/displayName").and_then(Value::as_str).unwrap_or_default().to_string(),
             }
         })
         .collect()
@@ -131,11 +148,17 @@ pub fn parse_azure_items(org: &str, body: &Value) -> Vec<Ticket> {
 async fn azure_assigned(org: &str, pat: &str) -> Result<Vec<Ticket>, String> {
     let org_enc = encode_segment(&normalize_org(org));
     let url = format!("https://dev.azure.com/{org_enc}/_apis/wit/wiql?$top={MAX_TICKETS}&api-version={API_VERSION}");
+    let ids = azure_query_ids(&url, &azure_wiql(), pat).await?;
+    azure_items(org, &ids, pat).await
+}
+
+/// The ids a WIQL query answers, in its order.
+async fn azure_query_ids(url: &str, query: &str, pat: &str) -> Result<Vec<i64>, String> {
     let res = ado_client()
-        .post(&url)
+        .post(url)
         .header("Authorization", auth_header(pat))
         .header("Content-Type", "application/json")
-        .body(json!({ "query": azure_wiql() }).to_string())
+        .body(json!({ "query": query }).to_string())
         .send()
         .await
         .map_err(|e| format!("couldn't reach Azure DevOps: {e}"))?;
@@ -145,23 +168,50 @@ async fn azure_assigned(org: &str, pat: &str) -> Result<Vec<Ticket>, String> {
         return Err(crate::ado::describe_failure(status, &text));
     }
     let found: Value = serde_json::from_str(&text).map_err(|e| format!("unexpected response from Azure DevOps: {e}"))?;
-    let ids: Vec<String> = found["workItems"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|r| r["id"].as_i64())
-        .take(MAX_TICKETS)
-        .map(|id| id.to_string())
-        .collect();
-    if ids.is_empty() {
-        return Ok(Vec::new());
+    Ok(found["workItems"].as_array().into_iter().flatten().filter_map(|r| r["id"].as_i64()).collect())
+}
+
+/// The work items behind `ids`, read in Azure's batch size and kept in the order asked.
+async fn azure_items(org: &str, ids: &[i64], pat: &str) -> Result<Vec<Ticket>, String> {
+    let org_enc = encode_segment(&normalize_org(org));
+    let mut out = Vec::new();
+    for chunk in ids.chunks(AZURE_BATCH) {
+        let list = chunk.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        let url = format!(
+            "https://dev.azure.com/{org_enc}/_apis/wit/workitems?ids={list}&fields={AZURE_FIELDS}&errorPolicy=omit&api-version={API_VERSION}"
+        );
+        let items: Value = ado_get_json(&url, pat).await?;
+        out.extend(parse_azure_items(org, &items));
     }
-    let url = format!(
-        "https://dev.azure.com/{org_enc}/_apis/wit/workitems?ids={}&fields={AZURE_FIELDS}&errorPolicy=omit&api-version={API_VERSION}",
-        ids.join(",")
-    );
-    let items: Value = ado_get_json(&url, pat).await?;
-    Ok(parse_azure_items(org, &items))
+    Ok(out)
+}
+
+/// Every open ticket of `projects` in the organisation — anyone's, not only yours — or of every
+/// project in it when `projects` is empty. (user, 2026-10-28: the section showed one project; the
+/// boards they work from are several, and most of their tickets are not assigned to them.)
+pub async fn azure_open(org: &str, pat: &str, projects: &[String]) -> Result<Vec<Ticket>, String> {
+    let names: Vec<String> = if projects.is_empty() {
+        crate::ado::list_projects(org, pat).await?.into_iter().map(|p| p.name).collect()
+    } else {
+        projects.to_vec()
+    };
+    let org_enc = encode_segment(&normalize_org(org));
+    let mut ids = Vec::new();
+    for name in &names {
+        let url = format!(
+            "https://dev.azure.com/{org_enc}/{}/_apis/wit/wiql?$top={MAX_PER_PROJECT}&api-version={API_VERSION}",
+            encode_segment(name)
+        );
+        // A project that went away, or one this token cannot read, costs that project, not the list.
+        if let Ok(found) = azure_query_ids(&url, &azure_open_wiql(), pat).await {
+            ids.extend(found.into_iter().take(MAX_PER_PROJECT));
+        }
+        if ids.len() >= MAX_OPEN {
+            break;
+        }
+    }
+    ids.truncate(MAX_OPEN);
+    azure_items(org, &ids, pat).await
 }
 
 pub fn parse_azure_comments(body: &Value) -> Vec<TicketComment> {
@@ -297,6 +347,7 @@ pub fn parse_jira_search(site: &str, body: &Value, sprint_field: Option<&str>) -
                 priority: s(fields, "/priority/name"),
                 updated_at: s(fields, "/updated"),
                 state_field: String::new(),
+                assigned_to: String::new(),
             }
         })
         .collect()
@@ -396,6 +447,7 @@ pub fn parse_linear_assigned(org: &str, data: &Value) -> Vec<Ticket> {
                 updated_at: s(node, "/updatedAt"),
                 key,
                 state_field: String::new(),
+                assigned_to: String::new(),
             }
         })
         .collect()
@@ -511,6 +563,7 @@ pub fn parse_tracker_assigned(provider: BoardProvider, host: &str, body: &Value)
                 },
                 updated_at: s(issue, "/updated_at"),
                 state_field: String::new(),
+                assigned_to: String::new(),
             })
         })
         .collect()
@@ -624,6 +677,7 @@ pub fn parse_monday_items(slug: &str, board_id: &str, board_name: &str, status_c
                 url: monday::item_url(slug, board_id, id),
                 updated_at: s(&item, "/updated_at"),
                 state_field: status_column.to_string(),
+                assigned_to: String::new(),
             })
         })
         .collect()
@@ -733,6 +787,20 @@ mod tests {
         assert_eq!(t.url, "https://dev.azure.com/acme/_workitems/edit/4821");
         assert_eq!(tickets[1].sprint, "", "the project root is no sprint");
         assert!(azure_wiql().contains("@Me"));
+    }
+
+    #[test]
+    fn every_open_ticket_of_a_project_says_whose_it_is() {
+        let body = json!({ "value": [
+            { "id": 12, "fields": { "System.Title": "Orders export", "System.State": "Active", "System.TeamProject": "Shop",
+                "System.AssignedTo": { "displayName": "Ana Example", "uniqueName": "ana@example.com" } } },
+            { "id": 13, "fields": { "System.Title": "Nobody's yet", "System.State": "New", "System.TeamProject": "Shop" } }
+        ]});
+        let tickets = parse_azure_items("acme", &body);
+        assert_eq!(tickets[0].assigned_to, "Ana Example");
+        assert_eq!(tickets[1].assigned_to, "", "unassigned reads as nobody");
+        let wiql = azure_open_wiql();
+        assert!(wiql.contains("@project") && !wiql.contains("@Me"), "the whole project, not only mine");
     }
 
     #[test]

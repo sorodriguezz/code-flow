@@ -3,6 +3,7 @@ import { CheckCircle2, Cloud, Crosshair, KeyRound, LogIn, Loader2, MoreHorizonta
 import { Button } from "../common/Button";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { RowAction, StateDot, ago } from "./containerBits";
+import { AiVisibilityToggle } from "./AiVisibility";
 import { kubeMenu } from "./containerActions";
 import { KubeTestLine, kubeHintText } from "./KubeAddCluster";
 import { DataTable, EmptyLine, LiveMark, LoadingLine, NO_ROWS, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
@@ -446,6 +447,7 @@ export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeIn
                   </Td>
                   <Td align="right">
                     <span className="flex items-center justify-end gap-1">
+                      <AiVisibilityToggle kind="kube" id={c.name} name={c.name} />
                       <Button
                         size="sm"
                         variant="ghost"

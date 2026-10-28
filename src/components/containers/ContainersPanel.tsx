@@ -4,6 +4,8 @@ import { ContainersNav, useNav } from "./ContainersNav";
 import { ContainersPage } from "./ContainersPage";
 import { ContainersDetail } from "./ContainersDetail";
 import { KubeKindPage, KubeOverviewPage } from "./KubePage";
+import { KubeTopologyPage } from "./KubeTopologyPage";
+import { AzurePane } from "./AzurePages";
 import { KubeAddCluster } from "./KubeAddCluster";
 import { AddEngineDialog } from "./AddEngineDialog";
 import { OverviewPage } from "./OverviewPage";
@@ -110,7 +112,9 @@ export function ContainersPane() {
   const nav = useNav();
   const runtime = runtimes.find((r) => r.id === nav.runtime);
   let page: ReactNode;
-  if (!detected) {
+  if (nav.runtime === "azure") {
+    page = <AzurePane section={nav.section} />;
+  } else if (!detected) {
     page = (
       <div className="flex flex-1 items-center justify-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
         <Loader2 size={13} className="animate-spin" />
@@ -124,7 +128,13 @@ export function ContainersPane() {
   } else if (runtime.id === "kubernetes") {
     // Disconnected, a kind's page has no cluster to read: the clusters' page is where one is picked.
     page =
-      nav.section === "overview" || !kubeContext ? <KubeOverviewPage runtime={runtime} onAddCluster={() => setDialog("cluster")} /> : <KubeKindPage kind={nav.section} />;
+      nav.section === "overview" || !kubeContext ? (
+        <KubeOverviewPage runtime={runtime} onAddCluster={() => setDialog("cluster")} />
+      ) : nav.section === "topology" ? (
+        <KubeTopologyPage />
+      ) : (
+        <KubeKindPage kind={nav.section} />
+      );
   } else {
     page = <EnginePage section={nav.section} runtimeId={runtime.id} />;
   }

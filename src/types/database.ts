@@ -40,6 +40,9 @@ export type DbSslMode = "disable" | "require" | "verify_full";
 /** What a connection's server is — see `DbConnectionConfig.environment`. */
 export type DbEnvironment = "" | "dev" | "test" | "prod";
 
+/** What the AI may do on a connection — see `DbConnectionConfig.ai_access`. */
+export type DbAiAccess = "" | "read" | "write";
+
 /** Each environment's colour, as a theme token; `""` draws nothing. */
 export const ENVIRONMENT_COLOR: Record<Exclude<DbEnvironment, "">, string> = {
   dev: "var(--cf-success)",
@@ -146,6 +149,13 @@ export interface DbConnectionConfig {
   /** `""` (unsaid), `dev`, `test` or `prod` — a colour on everything run against it, and `prod`
    *  asks before a statement that writes. A label; `read_only` is the guard. */
   environment: DbEnvironment;
+  /**
+   * «Acceso de IA»: `""` closed to every model (the default, and what every connection made before
+   * the setting keeps), `read` — chats and agents query it without asking, on a read-only session —
+   * or `write`, where each statement that changes data is approved by the user. Read by the backend
+   * from the spec (`agentcli::vault::AiAccess`).
+   */
+  ai_access: DbAiAccess;
   connect_timeout_ms: number;
   /**
    * Whether the tree's root lists every database on the server or only the one this connection is
@@ -662,6 +672,8 @@ export interface DbQueryHistoryEntry {
   /** Empty when the statement succeeded. */
   error: string;
   ran_at: string;
+  /** `""` the user ran it; `ai` a chat or an agent did. Absent on what the window records itself. */
+  source?: string;
 }
 
 /**
@@ -935,6 +947,7 @@ export function defaultConnectionConfig(kind: DbKind): DbConnectionConfig {
     options: [],
     read_only: false,
     environment: "",
+    ai_access: "",
     connect_timeout_ms: 15000,
     show_all_databases: false,
     visible_schemas: [],

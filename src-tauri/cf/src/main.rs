@@ -286,6 +286,24 @@ What is running
   cf wait <service> [--timeout S]   block until it is ready; exits 1 if it fails or times out
   cf term [panel] [--tail N]        another terminal's recent output; no name lists them
 
+Clusters and Azure, looked at (never changed; defaults: what the Contenedores panel has picked)
+  cf k8s get <kind> [name]          pods, deploy, svc, ing, events… [--context C] [-n ns | -A]
+  cf k8s describe|yaml <kind> <name>  one object (a Secret's values masked)
+  cf k8s logs <pod> [-c c] [--tail N] [--previous]   a deployment's name or part of one works too
+  cf k8s top [pods|nodes] [name]    CPU and memory now (needs the cluster's metrics server)
+  cf k8s topology                   how ingresses, services, workloads and config connect; problems
+  cf k8s contexts                   the clusters there are
+  cf azure resources|health         the resources with their state and Resource Health [--sub S] [-g G]
+  cf azure show <name|id>           one resource's properties (secrets dropped)
+  cf azure activity [name] [--hours H]  the activity log: who changed what, what failed
+  cf azure logs <name> [--tail N]   an App Service, Container App or Container Instance's logs
+  cf azure metrics <name> [--hours H] [--metric a,b]  CPU, memory, requests, errors: last, avg, peak
+  cf azure query <workspace> <KQL>  a Log Analytics query [--hours H]; cf azure workspaces lists them
+  cf azure topology                 how the resources connect (ids, hosts, settings by name)
+  cf azure subscriptions|groups
+  cf containers ps|images|volumes|networks|compose   the local engines' (Docker, Podman, nerdctl) [--engine E]
+  cf containers inspect <name> | logs <name> [--tail N] | stats [name]   env values masked
+
 The code, and what the app knows about it
   cf symbol <name>                  where a symbol is defined
   cf usages <name>                  where it is used
@@ -302,8 +320,13 @@ The code, and what the app knows about it
 The local model (nothing leaves the machine)
   cf llm <instruction> [< file]     ask the local model; what is piped in is the material
 
+Databases the user opened to AI (Acceso de IA): reads run at once, each write is approved
+  cf dbs                            the connections open to AI, and what you may do on each
+  cf dbschema <connection> [table]  tables, columns, keys and relationships [--database D] [--schema S]
+  cf db <connection> <SQL>          run it: a read at once (read-only session), a write once the
+                                    user approves it [--read refuses writes] [--max-rows N]
+
 Saved credentials: the app uses them and never shows them; every use is approved by the user
-  cf db <connection> <SQL>          run SQL on a saved database connection [--max-rows N]
   cf http <request> [--env <name>]  send a request saved in the API client (Collection/Folder/Name)
   cf secret <NAME> -- '<command>'   the app runs the command with the Llavero entry NAME in an
                                     environment variable named after it (GitHub token: $GITHUB_TOKEN;

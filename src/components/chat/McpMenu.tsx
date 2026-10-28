@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Plug } from "lucide-react";
 import { chatMcpServers, chatMcpSet, type McpServerView } from "../../lib/tauri/chatCommands";
 import { Checkbox } from "../common/Checkbox";
@@ -15,6 +15,23 @@ const STATUS: Record<string, { key: TranslationKey; color: string }> = {
   disabled: { key: "chat.mcpOffInCli", color: "var(--cf-text-muted)" },
   untrusted: { key: "chat.mcpUntrusted", color: "var(--cf-warning)" },
 };
+
+const WIDTH = 300;
+/** Breathing room kept between the menu and whatever would cut it. */
+const EDGE = 8;
+
+/** The horizontal room the menu may use: the window, narrowed by every ancestor that clips it. */
+function roomAround(node: HTMLElement): { left: number; right: number } {
+  let left = 0;
+  let right = window.innerWidth;
+  for (let el = node.parentElement; el; el = el.parentElement) {
+    if (getComputedStyle(el).overflowX === "visible") continue;
+    const rect = el.getBoundingClientRect();
+    left = Math.max(left, rect.left);
+    right = Math.min(right, rect.right);
+  }
+  return { left: left + EDGE, right: right - EDGE };
+}
 
 /**
  * The user's own MCP servers — the CLI's, not the app's — switched on or off for this conversation
@@ -55,6 +72,9 @@ export function McpMenu({
   const [open, setOpen] = useState(false);
   const [servers, setServers] = useState<McpServerView[]>([]);
   const box = useRef<HTMLDivElement>(null);
+  // Where the menu sits against its button: it opens from the button's left edge, but a button near
+  // the right side of a narrow pane (the panel's chat) would push it past the edge and cut it.
+  const [place, setPlace] = useState<{ shift: number; width: number } | null>(null);
   const { accountId = null, workspaceId = null, projectId = null, conversationId = null } = scope;
   // Switches need somewhere to live: a conversation's row, a repository's setting, or the caller's
   // hands until the conversation exists.
@@ -91,6 +111,18 @@ export function McpMenu({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  useLayoutEffect(() => {
+    if (!open || !box.current) {
+      setPlace(null);
+      return;
+    }
+    const anchor = box.current.getBoundingClientRect();
+    const room = roomAround(box.current);
+    const width = Math.min(WIDTH, Math.max(0, room.right - room.left));
+    const start = Math.max(room.left, Math.min(anchor.left, room.right - width));
+    setPlace({ shift: start - anchor.left, width });
+  }, [open]);
+
   // Nothing to show, or nowhere yet to keep a switch (a chat before its first message, unless the
   // caller holds them).
   if (servers.length === 0 || (!conversationId && !projectId && !holding)) return null;
@@ -125,7 +157,9 @@ export function McpMenu({
       </button>
 
       {open && (
-        <div className="absolute bottom-9 left-0 z-30 w-[300px] rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2 text-[12px] shadow-[var(--cf-shadow)]">
+        <div
+          style={{ left: place?.shift ?? 0, width: place?.width ?? WIDTH, visibility: place ? "visible" : "hidden" }}
+          className="absolute bottom-9 z-30 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2 text-[12px] shadow-[var(--cf-shadow)]">
           <p className="px-1 pb-1.5 text-[11px] font-semibold text-[var(--cf-text)]" title={t("chat.mcpHint")}>
             {t("chat.mcpHeading")}
           </p>

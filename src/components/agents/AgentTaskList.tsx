@@ -166,7 +166,7 @@ export function AgentTaskList({
     if (showArchived) {
       return filtered.length ? [{ key: "archived", label: t("agents.archived"), tasks: filtered }] : [];
     }
-    if (groupBy === "status" || groupBy === "board") {
+    if (groupBy === "status") {
       return STATUS_ORDER.map((status) => ({
         key: status,
         label: t(AGENT_STATUS[status].labelKey),
@@ -175,6 +175,10 @@ export function AgentTaskList({
     }
     return [];
   }, [filtered, groupBy, showArchived, t]);
+
+  // With the board filling the middle column, the rail shows the tree rather than the same tasks
+  // grouped by the same states a second time: folders, pinned work and tickets sit beside the board.
+  const treeRail = groupBy === "tree" || groupBy === "board";
 
   // Looked up rather than remembered, so a row deleted from elsewhere takes its menu with it.
   const menuTask = menu ? (tasks.find((candidate) => candidate.id === menu.id) ?? null) : null;
@@ -419,11 +423,14 @@ export function AgentTaskList({
           // there is nobody to hand a task to yet, so offering "new task" first would open a dialog
           // with an empty picker.
           <ListEmpty
+            // With the tickets drawn under it, a centred button filling the column pushed that
+            // section to the foot of the rail, and folding it left the button floating mid-air.
+            compact={treeRail && !showArchived}
             hint={t(roster.length === 0 ? "agents.rosterEmptyHint" : "agents.tasksEmptyHint")}
             actionLabel={t(roster.length === 0 ? "agents.newAgent" : "agents.newTask")}
             onAction={roster.length === 0 ? onNewAgent : () => onNewTask("")}
           />
-        ) : groupBy === "tree" && !showArchived ? (
+        ) : treeRail && !showArchived ? (
           <TaskTree
             tasks={filtered}
             query={query}
@@ -472,7 +479,7 @@ export function AgentTaskList({
         )}
         {/* The tree's last section: the tickets assigned to you, where most tasks start from
             (user, 2026-10-23). Drawn even before there is any task. */}
-        {!loading && groupBy === "tree" && !showArchived && <TicketsSection query={query} />}
+        {!loading && treeRail && !showArchived && <TicketsSection query={query} />}
       </div>
 
       {/* Out of the way at the foot, and only once something has been archived. */}
@@ -618,7 +625,32 @@ function NewSplitButton({
  * The list with nothing in it: just the way out. What the thing *is* — an agent, a task — goes in the
  * tooltip rather than in a heading and a paragraph over the button.
  */
-function ListEmpty({ hint, actionLabel, onAction }: { hint: string; actionLabel: string; onAction: () => void }) {
+function ListEmpty({
+  hint,
+  actionLabel,
+  onAction,
+  compact = false,
+}: {
+  hint: string;
+  actionLabel: string;
+  onAction: () => void;
+  /** A row at the top instead of a button centred in the column, for when something follows it. */
+  compact?: boolean;
+}) {
+  if (compact) {
+    return (
+      <Tooltip label={hint}>
+        <button
+          type="button"
+          onClick={onAction}
+          className="mt-1 flex w-full items-center gap-2 rounded-md border border-dashed border-[var(--cf-border)] px-2.5 py-2 text-left text-[12.5px] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent-line)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        >
+          <Plus size={14} className="shrink-0" />
+          {actionLabel}
+        </button>
+      </Tooltip>
+    );
+  }
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center p-6">
       <Tooltip label={hint}>

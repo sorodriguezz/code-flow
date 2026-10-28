@@ -183,6 +183,11 @@ pub fn command_line(request: &SessionRequest) -> Result<(String, Vec<String>), S
         Some(shell) => args.push(shell.to_string()),
         None => args.extend(["sh".into(), "-c".into(), FIND_SHELL.into()]),
     };
+    if request.kind == "azureLogs" {
+        // An Azure resource's own log stream — App Service, Container Apps, Container Instances —
+        // followed with `az`; the target is the resource's id.
+        return super::azure::log_command(&request.target, true, tail);
+    }
     if request.kind == "aksStart" {
         // An AKS cluster that was stopped (its API server's name then resolves to nothing): Azure's
         // own `az aks start`, which takes minutes and says so as it goes.
@@ -304,6 +309,7 @@ fn label(request: &SessionRequest) -> String {
         "pull" | "build" => request.kind.clone(),
         "kubeLogin" => "sign-in".to_string(),
         "aksStart" => return "az aks start".to_string(),
+        "azureLogs" => return format!("az logs {}", super::azure::parse_id(&request.target).map(|p| p.3).unwrap_or_default()),
         kind => match compose_action(kind) {
             Some(action) => format!("compose {action}"),
             None => "exec".to_string(),

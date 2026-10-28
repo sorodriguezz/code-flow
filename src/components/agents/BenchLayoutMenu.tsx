@@ -89,21 +89,31 @@ export function BenchLayoutMenu({ disabled }: { disabled: boolean }) {
       separated: layouts.length > 0,
       onClick: () => setEditing(true),
     },
-    // The repository's own, under the user's. `scriptCommandLine` is the same resolver the explorer's
-    // play buttons use, so a pnpm repo gets `pnpm run x` here too.
-    ...scripts.map((name, at) => ({
-      label: t("bench.scriptRun", { name }),
-      icon: Play,
-      separated: at === 0,
-      onClick: () => {
-        const line = scriptCommandLine(manager ?? "npm", name);
-        if (!workspaceId || !line || !project) return;
-        void useBenchStore
-          .getState()
-          .runPanes(workspaceId, [{ cwd: project.local_path, title: name, command: line }])
-          .catch(fail);
-      },
-    })),
+    // The repository's own, under the user's, in a submenu that names the repository: a flat list
+    // of «Run x» rows outgrew the window on a busy `package.json` and never said which repo it read.
+    // `scriptCommandLine` is the same resolver the explorer's play buttons use, so a pnpm repo gets
+    // `pnpm run x` here too.
+    ...(scripts.length > 0 && project
+      ? [
+          {
+            label: t("bench.scriptsOf", { name: project.name }),
+            icon: Play,
+            separated: true,
+            onClick: () => undefined,
+            children: scripts.map((name) => ({
+              label: name,
+              onClick: () => {
+                const line = scriptCommandLine(manager ?? "npm", name);
+                if (!workspaceId || !line) return;
+                void useBenchStore
+                  .getState()
+                  .runPanes(workspaceId, [{ cwd: project.local_path, title: name, command: line }])
+                  .catch(fail);
+              },
+            })),
+          },
+        ]
+      : []),
   ];
 
   return (

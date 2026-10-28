@@ -70,6 +70,39 @@ describe("sub-agents", () => {
   });
 });
 
+/** Lines Claude Code 2.1.312 printed around a `run_in_background` shell, trimmed. */
+const SHELL_LISTED = `{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"b78","task_type":"local_bash","description":"Run tests"}]}`;
+const SHELL_STARTED = `{"type":"system","subtype":"task_started","task_id":"b78","tool_use_id":"toolu_01","description":"Run tests","is_backgrounded":true,"task_type":"local_bash"}`;
+const SHELL_DONE = `{"type":"system","subtype":"task_notification","task_id":"b78","tool_use_id":"toolu_01","status":"completed","summary":"Background command \\"Run tests\\" completed (exit code 0)"}`;
+const NOTHING_LISTED = `{"type":"system","subtype":"background_tasks_changed","tasks":[]}`;
+
+describe("background shells", () => {
+  it("are open from their start until the CLI says they ended, and are not sub-agents", () => {
+    let open = trackSubagents({}, SHELL_LISTED);
+    expect(open).toEqual({ b78: { description: "Run tests", progress: null, background: true } });
+    expect(trackSubagents(open, SHELL_STARTED)).toEqual(open);
+    expect(trackSubagents(open, SHELL_DONE)).toEqual({});
+    open = trackSubagents({}, SHELL_STARTED);
+    expect(trackSubagents(open, NOTHING_LISTED)).toEqual({});
+  });
+
+  it("leave the CLI's list alone when it names nothing new", () => {
+    const open = trackSubagents({}, SHELL_LISTED);
+    expect(trackSubagents(open, SHELL_LISTED)).toBe(open);
+  });
+
+  it("do not close a sub-agent when the list of shells changes", () => {
+    const open = trackSubagents({}, STARTED);
+    expect(trackSubagents(open, NOTHING_LISTED)).toBe(open);
+  });
+
+  it("show in the log as their own kind of task", () => {
+    expect(formatAgentLogLine(SHELL_STARTED)).toMatch(/^· .*Run tests/);
+    expect(formatAgentLogLine(SHELL_DONE)).toMatch(/^· /);
+    expect(formatAgentLogLine(SHELL_DONE)).not.toBe(formatAgentLogLine(DONE));
+  });
+});
+
 describe("CodeFlow's own engine", () => {
   const line = (event: Record<string, unknown>) => formatAgentLogLine(JSON.stringify({ type: "codeflow", ...event }));
 

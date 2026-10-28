@@ -75,10 +75,20 @@ impl Access {
 const CODI_TOOLS: &[&str] = &["ui_state", "ui_actions", "ui_act"];
 
 /// The tools a workspace chat's token opens — see [`Access::workspace`].
-const WORKSPACE_TOOLS: &[&str] = &["search_knowledge", "recall", "read_note", "read_context"];
+const WORKSPACE_TOOLS: &[&str] = &["search_knowledge", "recall", "read_note", "read_context", "kubernetes", "azure", "containers"];
+
+/// Kubernetes and Azure, looked at ([`infra_tools_of`]) — read-only, so any run but a grounding one may
+/// have them, the workspace chat included: a cluster belongs to no one repository.
+#[cfg(test)]
+const INFRA_TOOLS: &[&str] = &["kubernetes", "azure", "containers"];
 
 /// The tools a run over someone else's material opens — see [`Access::grounding`].
 const GROUNDING_TOOLS: &[&str] = &["find_symbol", "find_usages", "file_outline", "project_map", "recall", "search_knowledge", "read_note"];
+
+/// The saved database connections the user opened to AI ([`db_tools`]): listed for any run but a
+/// grounding one — the workspace chat's too — and only where a connection is open. `db_write` only
+/// for a run that may act.
+const DB_TOOLS: &[&str] = &["db_connections", "db_schema", "db_read", "db_write"];
 
 /// The map's queries — the ones a reference repository answers too, given its name in `repo`.
 const MAP_TOOLS: &[&str] = &["find_symbol", "find_usages", "file_outline", "project_map"];
@@ -120,13 +130,14 @@ fn for_grounding_run(root: &str) -> Option<(LiveServer, Grant)> {
 
 /// The server for a workspace chat's turn: the knowledge of every repository of the workspace, its
 /// folders and notes, and its memories — queries only, so a read-only turn may have it too. `None`
-/// when the user switched the map off or the webhook server cannot listen.
-pub fn for_workspace_chat(workspace_id: &str) -> Option<(LiveServer, Grant)> {
+/// when the user switched the map off or the webhook server cannot listen. `acts`: the turn may
+/// write, so a database write (approved one by one) is offered too.
+pub fn for_workspace_chat(workspace_id: &str, acts: bool) -> Option<(LiveServer, Grant)> {
     if !enabled() {
         return None;
     }
     let root = crate::workspace_chat::working_dir(workspace_id).to_string_lossy().to_string();
-    serve(|token| Access { workspace: true, ..Access::new(&root, false, token) })
+    serve(|token| Access { workspace: true, ..Access::new(&root, acts, token) })
 }
 
 fn serve(access: impl FnOnce(&str) -> Access) -> Option<(LiveServer, Grant)> {
@@ -312,17 +323,31 @@ fn for_file_client(client: FileClient, cwd: &str) -> Option<FileGrant> {
     if !enabled() {
         return None;
     }
-    let root = repository_root(cwd)?;
+    // A repository, or a workspace chat's own folder — no repository, so that run's token opens
+    // what a workspace chat's does (`Access::workspace`) and the file is simply removed afterwards.
+    let (root, workspace) = match repository_root(cwd) {
+        Some(root) => (root, false),
+        None => {
+            crate::ai_usage::with_conn(|conn| crate::workspace_chat::workspace_of_dir(conn, cwd)).flatten()?;
+            (std::path::Path::new(cwd).canonicalize().ok()?, true)
+        }
+    };
     let app = crate::ai_usage::app()?;
     crate::flows::triggers::webhook::ensure_server(app).ok()?;
-    install(client, &root, crate::flows::triggers::webhook::port())
+    install_as(client, &root, crate::flows::triggers::webhook::port(), workspace)
 }
 
 /// Writes `client`'s file in `root`, or joins the runs already holding it. The token rides in the
 /// URL (`/mcp/code/<token>`): agy's transport sends no headers, and a URL is the one key every Grok
 /// config reader takes. A model that reads the file learns a token good for the map of the
 /// repository it is already working in, from this machine, until the last run here ends.
+#[cfg(test)]
 fn install(client: FileClient, root: &std::path::Path, port: u16) -> Option<FileGrant> {
+    install_as(client, root, port, false)
+}
+
+/// [`install`]; `workspace`: `root` is a workspace chat's folder, and the token opens that chat's tools.
+fn install_as(client: FileClient, root: &std::path::Path, port: u16, workspace: bool) -> Option<FileGrant> {
     let mut runs = FILE_RUNS.lock().ok()?;
     let key = (client, root.to_path_buf());
     if !runs.contains_key(&key) && !client.free(root) {
@@ -339,7 +364,7 @@ fn install(client: FileClient, root: &std::path::Path, port: u16) -> Option<File
     // From here every way out releases this run's hold.
     let grant = FileGrant { client, root: root.to_path_buf() };
     // Queries only: this token sits in a file in the repository while the run lasts.
-    RUNS.lock().ok()?.insert(token.clone(), Access::new(&root.to_string_lossy(), false, &token));
+    RUNS.lock().ok()?.insert(token.clone(), Access { workspace, ..Access::new(&root.to_string_lossy(), false, &token) });
     client.write(root, &format!("http://127.0.0.1:{port}{PATH}/{token}"))?;
     if crate::git_exclude::exclude(root, &client.exclude_line()).unwrap_or(false) {
         if let Some(entry) = FILE_RUNS.lock().ok()?.get_mut(&key) {
@@ -769,6 +794,7 @@ fn grounding_tools() -> Vec<Value> {
 pub fn tools_for(acts: bool) -> Vec<Value> {
     let mut all = tools();
     all.extend(app_read_tools().into_iter().map(read_only));
+    all.extend(infra_tools());
     if acts {
         all.extend(app_action_tools());
     }
@@ -836,6 +862,248 @@ fn app_read_tools() -> Vec<Value> {
     ]
 }
 
+/// The clusters and the Azure resources of the Contenedores panel, for looking only — each listed
+/// only where its CLI is installed, so a definition no run can use costs no tokens.
+fn infra_tools() -> Vec<Value> {
+    infra_tools_of(false)
+}
+
+/// [`infra_tools`]; `all`: every one, installed or not — the definitions the local agent's
+/// toolbox takes (it decides what to offer from its own inventory).
+pub(crate) fn infra_tools_of(all: bool) -> Vec<Value> {
+    let mut out = Vec::new();
+    // Short on purpose: these definitions ride along on every turn of every run that has them.
+    if all || kube_configured() {
+        out.push(json!({
+            "name": "kubernetes",
+            "description": "Read-only look at the user's Kubernetes clusters (defaults: the cluster and namespace picked in CodeFlow). Start with topology or events when asked why something fails. Secret values never shown.",
+            "inputSchema": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["contexts", "get", "describe", "yaml", "logs", "events", "top", "topology"], "description": "topology: ingress→service→workload→config and what is broken; top: CPU/memory now"},
+                "kind": {"type": "string", "description": "get/describe/yaml/top: pods, deploy, svc, ing, cm, pvc, nodes… (kubectl names)"},
+                "name": {"type": "string", "description": "describe/yaml/logs: exact name not needed — a deployment's name or part of one finds it; get: filter"},
+                "namespace": {"type": "string"},
+                "all_namespaces": {"type": "boolean"},
+                "context": {"type": "string"},
+                "container": {"type": "string", "description": "logs"},
+                "tail": {"type": "integer", "description": "logs: last lines (default 200)"},
+                "previous": {"type": "boolean", "description": "logs: the run before a crash"}
+            }, "required": ["action"]},
+        }));
+    }
+    if all || ["docker", "podman", "nerdctl"].iter().any(|cli| crate::containers::cli::find(cli).is_some()) {
+        out.push(json!({
+            "name": "containers",
+            "description": "Read-only look at the local Docker/Podman/nerdctl engines (default: the one on screen in CodeFlow). Env values masked.",
+            "inputSchema": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["engines", "ps", "images", "volumes", "networks", "compose", "inspect", "logs", "stats"]},
+                "name": {"type": "string", "description": "inspect/logs: the container (or image/volume/network); ps/stats: filter"},
+                "object": {"type": "string", "enum": ["container", "image", "volume", "network"], "description": "inspect"},
+                "engine": {"type": "string", "enum": ["docker", "podman", "nerdctl"]},
+                "context": {"type": "string"},
+                "tail": {"type": "integer", "description": "logs: last lines (default 200)"}
+            }, "required": ["action"]},
+        }));
+    }
+    if all || azure_configured() {
+        out.push(json!({
+            "name": "azure",
+            "description": "Read-only look at the user's Azure through their az login (defaults: the subscription and group picked in CodeFlow). topology says how resources connect; app setting values never shown.",
+            "inputSchema": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["subscriptions", "groups", "resources", "show", "health", "activity", "logs", "metrics", "workspaces", "query", "topology"], "description": "metrics: CPU, memory, requests, errors (last, avg, peak, trend); query: KQL on Log Analytics"},
+                "resource": {"type": "string", "description": "show/logs/activity/metrics: name (part of one works) or id"},
+                "metric": {"type": "string", "description": "metrics: Azure names, comma-separated. Optional"},
+                "subscription": {"type": "string"},
+                "group": {"type": "string"},
+                "workspace": {"type": "string", "description": "query: workspace name or GUID"},
+                "query": {"type": "string", "description": "query: the KQL"},
+                "hours": {"type": "integer", "description": "activity/query (default 24), metrics (default 1)"},
+                "tail": {"type": "integer", "description": "logs: last lines (default 200)"}
+            }, "required": ["action"]},
+        }));
+    }
+    out.into_iter().map(read_only).collect()
+}
+
+/// `kubectl` is installed and a kubeconfig names at least one context — the user's files (their
+/// `KUBECONFIG`, else `~/.kube/config`) or CodeFlow's own. File reads, no kubectl: this is asked on
+/// every turn's tool list.
+pub(crate) fn kube_configured() -> bool {
+    if crate::containers::cli::find("kubectl").is_none() {
+        return false;
+    }
+    let var = std::env::var("KUBECONFIG").ok().or_else(|| crate::containers::cli::engine_env_now().into_iter().find(|(k, _)| k == "KUBECONFIG").map(|(_, v)| v));
+    let mut files = crate::containers::kubeconfig::user_files(var.as_deref(), dirs::home_dir().as_deref());
+    files.push(crate::containers::kubeconfig::app_path());
+    files.iter().any(|file| std::fs::read_to_string(file).is_ok_and(|text| has_contexts(&text)))
+}
+
+/// A kubeconfig's text lists a context (YAML or JSON).
+fn has_contexts(text: &str) -> bool {
+    text.lines().any(|l| l.trim_start().starts_with("- context:")) || text.contains("\"contexts\": [{") || text.contains("\"contexts\":[{") || (text.contains("\"contexts\"") && text.contains("\"context\":"))
+}
+
+/// The Azure CLI is installed and signed in — its profile (`AZURE_CONFIG_DIR`, else `~/.azure`)
+/// lists a subscription. A file read, no `az`.
+pub(crate) fn azure_configured() -> bool {
+    if !crate::containers::azure::found() {
+        return false;
+    }
+    let dir = std::env::var("AZURE_CONFIG_DIR").ok().map(std::path::PathBuf::from).or_else(|| dirs::home_dir().map(|h| h.join(".azure")));
+    dir.and_then(|d| std::fs::read(d.join("azureProfile.json")).ok()).is_some_and(|bytes| String::from_utf8_lossy(&bytes).contains("\"isDefault\""))
+}
+
+/// The `cf k8s` / `cf azure` arguments of an `infra_tools` call.
+fn infra_args(name: &str, args: &Value) -> Vec<String> {
+    let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    let flag = |key: &str| args.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let number = |key: &str| args.get(key).and_then(Value::as_u64).map(|n| n.to_string());
+    let action = text("action");
+    let mut list = vec![action.clone()];
+    let valued = |list: &mut Vec<String>, key: &str, flag_name: &str| {
+        if !text(key).is_empty() {
+            list.extend([flag_name.to_string(), text(key)]);
+        }
+    };
+    if name == "containers" {
+        list.extend((!text("name").is_empty()).then(|| text("name")));
+        valued(&mut list, "object", "--object");
+        valued(&mut list, "engine", "--engine");
+        valued(&mut list, "context", "--context");
+        list.extend(number("tail").into_iter().flat_map(|n| ["--tail".to_string(), n]));
+    } else if name == "kubernetes" {
+        match action.as_str() {
+            "get" | "describe" | "yaml" | "top" => list.extend([text("kind"), text("name")].into_iter().filter(|v| !v.is_empty())),
+            "logs" => list.extend((!text("name").is_empty()).then(|| text("name"))),
+            _ => {}
+        }
+        valued(&mut list, "namespace", "--namespace");
+        valued(&mut list, "context", "--context");
+        valued(&mut list, "container", "--container");
+        list.extend(number("tail").into_iter().flat_map(|n| ["--tail".to_string(), n]));
+        if flag("all_namespaces") {
+            list.push("-A".into());
+        }
+        if flag("previous") {
+            list.push("--previous".into());
+        }
+    } else {
+        match action.as_str() {
+            "show" | "logs" | "activity" | "metrics" => list.extend((!text("resource").is_empty()).then(|| text("resource"))),
+            "query" => list.extend([text("workspace"), text("query")]),
+            _ => {}
+        }
+        valued(&mut list, "metric", "--metric");
+        valued(&mut list, "subscription", "--sub");
+        valued(&mut list, "group", "-g");
+        list.extend(number("hours").into_iter().flat_map(|n| ["--hours".to_string(), n]));
+        list.extend(number("tail").into_iter().flat_map(|n| ["--tail".to_string(), n]));
+    }
+    list
+}
+
+/// The `cf` verb and arguments of a data tool — the databases, the clusters, Azure, the engines —
+/// and whether it acts. Shared with the local agent (`local_agent::tools::app_verb`), so both build
+/// the same call. `None` for any other name.
+pub(crate) fn data_tool_call(name: &str, args: &Value) -> Option<Result<(&'static str, Vec<String>, bool), String>> {
+    let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    let number = |key: &str| match args.get(key) {
+        Some(Value::Number(n)) => n.as_u64().map(|n| n.to_string()),
+        Some(Value::String(s)) => s.trim().parse::<u64>().ok().map(|n| n.to_string()),
+        _ => None,
+    };
+    let need = |key: &str| {
+        let value = text(key);
+        if value.is_empty() { Err(format!("{key} is required")) } else { Ok(value) }
+    };
+    let mut list: Vec<String> = Vec::new();
+    Some(Ok(match name {
+        "kubernetes" | "azure" | "containers" => (match name { "kubernetes" => "k8s", "azure" => "azure", _ => "containers" }, infra_args(name, args), false),
+        "db_connections" => ("dbs", list, false),
+        "db_schema" => {
+            for key in ["database", "schema"] {
+                if !text(key).is_empty() {
+                    list.extend([format!("--{key}"), text(key)]);
+                }
+            }
+            list.push(match need("connection") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            list.extend((!text("table").is_empty()).then(|| text("table")));
+            ("dbschema", list, false)
+        }
+        "db_read" | "db_write" => {
+            let write = name == "db_write";
+            list.push(if write { "--write" } else { "--read" }.to_string());
+            list.extend(number("max_rows").into_iter().flat_map(|n| ["--max-rows".to_string(), n]));
+            list.push(match need("connection") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            list.push(match need("sql") { Ok(v) => v, Err(e) => return Some(Err(e)) });
+            ("db", list, write)
+        }
+        _ => return None,
+    }))
+}
+
+/// The database tools ([`DB_TOOLS`]): the connections the user opened to AI, their schema, reads
+/// (run at once, on a read-only session) and — for a run that may act — writes, each approved by the
+/// user. The app connects with the saved password; the model never sees it.
+pub(crate) fn db_tools(acts: bool) -> Vec<Value> {
+    // Short on purpose, like `infra_tools_of`: they ride along on every turn.
+    let mut tools: Vec<Value> = vec![
+        json!({
+            "name": "db_connections",
+            "description": "The database connections the user opened to AI: engine, environment, database, what you may do. Call first when the connection is not known.",
+            "inputSchema": {"type": "object", "properties": {}},
+        }),
+        json!({
+            "name": "db_schema",
+            "description": "A connection's tables, columns, keys and relations, one line per table. Without table: the whole database (a big one: names only).",
+            "inputSchema": {"type": "object", "properties": {
+                "connection": {"type": "string", "description": "Name, or part of one"},
+                "table": {"type": "string"},
+                "database": {"type": "string"},
+                "schema": {"type": "string"}
+            }, "required": ["connection"]},
+        }),
+        json!({
+            "name": "db_read",
+            "description": "Runs a read-only query (no approval; writes are refused) and returns rows. Answer the user in words; prefer COUNT/aggregates to fetching rows.",
+            "inputSchema": {"type": "object", "properties": {
+                "connection": {"type": "string"},
+                "sql": {"type": "string", "description": "In the connection's dialect"},
+                "max_rows": {"type": "integer", "description": "Default 50"}
+            }, "required": ["connection", "sql"]},
+        }),
+    ]
+    .into_iter()
+    .map(read_only)
+    .collect();
+    if acts {
+        tools.push(json!({
+            "name": "db_write",
+            "description": "Runs a statement that changes data or schema, on a connection open for writing. The user approves the exact statement first, every time: send the whole change in one call.",
+            "inputSchema": {"type": "object", "properties": {
+                "connection": {"type": "string"},
+                "sql": {"type": "string"}
+            }, "required": ["connection", "sql"]},
+            "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true},
+        }));
+    }
+    tools
+}
+
+/// Whether a run at `root` has a database connection open to AI — its project's workspace, or the
+/// workspace chat's — so the database tools are worth their definitions.
+fn db_open_here(root: &str) -> bool {
+    crate::ai_usage::with_conn(|conn| {
+        let workspace = crate::knowledge::owning_project(conn, root)
+            .map(|p| p.workspace_id)
+            .or_else(|| crate::workspace_chat::workspace_of_dir(conn, root))
+            .unwrap_or_default();
+        crate::db::datasource_queries::load_tree(conn, &workspace)
+            .map(|tree| tree.connections.iter().any(|c| crate::agentcli::AiAccess::of_spec(&c.spec) != crate::agentcli::AiAccess::None))
+            .unwrap_or(false)
+    })
+    .unwrap_or(false)
+}
+
 /// The app's tools that act — offered only to a run that may act ([`Access::acts`]).
 fn app_action_tools() -> Vec<Value> {
     let acts = |mut tool: Value, destructive: bool, open_world: bool| {
@@ -887,15 +1155,6 @@ fn app_action_tools() -> Vec<Value> {
                 "agent": {"type": "string", "description": "The roster agent's name. Optional: the first one ready otherwise."}
             }, "required": ["title"]},
         }), false, false),
-        acts(json!({
-            "name": "db_query",
-            "description": "Runs SQL on a database connection the user saved in CodeFlow, returning the rows as a table. The app connects with the saved password, which you never see; the user approves every statement in the app first (reads can be allowed for the rest of this turn).",
-            "inputSchema": {"type": "object", "properties": {
-                "connection": {"type": "string", "description": "The saved connection's name"},
-                "sql": {"type": "string", "description": "The statement(s)"},
-                "max_rows": {"type": "integer", "description": "At most this many rows (default 200)"}
-            }, "required": ["connection", "sql"]},
-        }), true, true),
         acts(json!({
             "name": "http_request",
             "description": "Sends a request saved in CodeFlow's API client, with its environment, auth and scripts, and returns the answer with every credential removed. The user approves it in the app first.",
@@ -949,7 +1208,16 @@ async fn app_tool(access: &Access, name: &str, args: &Value) -> Option<Result<St
     };
     let mut list: Vec<String> = Vec::new();
     let mut stdin = String::new();
-    let (verb, acting) = match name {
+    let (verb, acting) = if let Some(call) = data_tool_call(name, args) {
+        match call {
+            Ok((verb, args, acting)) => {
+                list = args;
+                (verb, acting)
+            }
+            Err(error) => return Some(Err(error)),
+        }
+    } else {
+        match name {
         "service_logs" => {
             list.extend((!text("service").is_empty()).then(|| text("service")));
             list.extend(number("tail").into_iter().flat_map(|n| ["--tail".to_string(), n]));
@@ -1010,12 +1278,6 @@ async fn app_tool(access: &Access, name: &str, args: &Value) -> Option<Result<St
             }
             ("task", true)
         }
-        "db_query" => {
-            list.push(match need("connection") { Ok(v) => v, Err(e) => return Some(Err(e)) });
-            list.extend(number("max_rows").into_iter().flat_map(|n| ["--max-rows".to_string(), n]));
-            list.push(match need("sql") { Ok(v) => v, Err(e) => return Some(Err(e)) });
-            ("db", true)
-        }
         "http_request" => {
             list.push(match need("request") { Ok(v) => v, Err(e) => return Some(Err(e)) });
             if !text("environment").is_empty() {
@@ -1035,6 +1297,7 @@ async fn app_tool(access: &Access, name: &str, args: &Value) -> Option<Result<St
             ("secret", true)
         }
         _ => return None,
+        }
     };
     if acting && !access.acts {
         return Some(Err(format!("{name} is not available to a read-only run")));
@@ -1056,7 +1319,7 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
             } else if access.workspace {
                 "CodeFlow's knowledge of this workspace: search_knowledge searches every repository's files and documentation, the document folders the user added and their notes, and names the repository of each passage; recall returns the memories the user approved for the workspace. Use them when the answer depends on what this workspace's projects do or decided and the conversation does not already say it; a general programming question, a greeting or a follow-up needs none of them."
             } else {
-                "CodeFlow's map of this repository: where each symbol is declared and which files really use it (imports resolved, namesakes left out). Prefer find_symbol over a text search to locate a definition, and find_usages before changing a signature. It also reaches the CodeFlow app around you: the logs of the services it runs and another terminal's output, the local model for cheap work, and — when this run may act — restarting a service, opening a file for the user, notifying them, proposing a memory or a task, and using the database connections, API requests and keyring entries the user saved, which the app uses for you after the user approves and never shows you. Reach for these when the question is about this repository or the app around it; a general programming question or a follow-up the conversation already answers needs none of them."
+                "CodeFlow's map of this repository: where each symbol is declared and which files really use it (imports resolved, namesakes left out). Prefer find_symbol over a text search to locate a definition, and find_usages before changing a signature. It also reaches the CodeFlow app around you: the logs of the services it runs and another terminal's output, the user's Kubernetes clusters, Azure resources and local containers (kubernetes, azure, containers: state, logs, events, how they connect — looking only), the local model for cheap work, and — when this run may act — restarting a service, opening a file for the user, notifying them, proposing a memory or a task, and using the API requests and keyring entries the user saved, which the app uses for you after the user approves and never shows you. Reach for these when the question is about this repository or the app around it; a general programming question or a follow-up the conversation already answers needs none of them."
             };
             // Said only where there is something to say: a workspace without reference repositories
             // is told nothing about them, nor one without contexts waiting about those.
@@ -1074,6 +1337,16 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
                      and read_reference_file reads a file of one. They are read-only, for comparison.",
                 );
             }
+            if !access.codi && !access.grounding && db_open_here(&access.root) {
+                instructions.push_str(if access.acts {
+                    " Database connections the user opened to AI are reachable too: db_connections lists them, db_schema reads their tables, \
+                     db_read answers a question about the data at once (read-only, no approval) and db_write changes data once the user \
+                     approves the exact statement. When asked about data, query it and answer in words."
+                } else {
+                    " Database connections the user opened to AI are reachable too: db_connections lists them, db_schema reads their tables \
+                     and db_read answers a question about the data at once (read-only). When asked about data, query it and answer in words."
+                });
+            }
             result_reply(
                 id,
                 json!({
@@ -1087,13 +1360,20 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
         "ping" => result_reply(id, json!({})),
         "tools/list" if access.codi => result_reply(id, json!({"tools": interface_tools(true)})),
         "tools/list" => {
-            let own = if access.workspace {
-                workspace_tools()
+            let mut own = if access.workspace {
+                let mut own = workspace_tools();
+                own.extend(infra_tools());
+                own
             } else if access.grounding {
                 grounding_tools()
             } else {
                 tools_for(access.acts)
             };
+            // The database tools only where a connection is open to AI, and never for a run that
+            // judges someone else's material.
+            if !access.grounding && db_open_here(&access.root) {
+                own.extend(db_tools(access.acts));
+            }
             // The reference tools only where the workspace has reference repositories — a definition
             // a run can never use is tokens it pays on every turn.
             let tools = if references_of(&access.root, true).await.is_empty() { own } else { with_references(own, access.workspace) };
@@ -1109,7 +1389,7 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
                 return Some(text_result(id, format!("{name} is not available to Codi: it drives the interface with ui_state, ui_actions and ui_act"), true));
             }
             let about_a_reference = REFERENCE_TOOLS.contains(&name) || (MAP_TOOLS.contains(&name) && args.get("repo").and_then(Value::as_str).is_some_and(|r| !r.trim().is_empty()));
-            if access.workspace && !WORKSPACE_TOOLS.contains(&name) && !about_a_reference {
+            if access.workspace && !WORKSPACE_TOOLS.contains(&name) && !DB_TOOLS.contains(&name) && !about_a_reference {
                 let why = if MAP_TOOLS.contains(&name) { "name a reference repository in repo — there is no single repository of its own here" } else { "there is no single repository here" };
                 return Some(text_result(id, format!("{name} is not available in the workspace chat: {why}"), true));
             }
@@ -1203,17 +1483,31 @@ mod tests {
         for query in ["find_symbol", "search_knowledge", "service_logs", "service_wait", "terminal_output", "local_llm"] {
             assert!(names.contains(&query.to_string()), "{query} missing from {names:?}");
         }
-        for action in ["service_restart", "open_in_editor", "notify", "propose_memory", "flag_memory", "add_task", "db_query", "http_request", "run_with_secret"] {
+        for action in ["service_restart", "open_in_editor", "notify", "propose_memory", "flag_memory", "add_task", "db_write", "http_request", "run_with_secret"] {
             assert!(!names.contains(&action.to_string()), "{action} offered to a read-only run");
         }
         let (actor, _a) = with_access("/tmp/repo", true);
         let (_, reply) = post(&actor, list).await;
         let names = tool_names(&reply);
-        assert!(names.contains(&"db_query".to_string()) && names.contains(&"run_with_secret".to_string()), "{names:?}");
+        assert!(names.contains(&"run_with_secret".to_string()), "{names:?}");
         let tools = reply["result"]["tools"].as_array().unwrap();
         let annotation = |name: &str| tools.iter().find(|t| t["name"] == name).unwrap()["annotations"]["readOnlyHint"].as_bool();
         assert_eq!(annotation("service_logs"), Some(true));
-        assert_eq!(annotation("db_query"), Some(false));
+        assert_eq!(annotation("run_with_secret"), Some(false));
+    }
+
+    /// Reading a database is a query any run may make; writing is an action, for a run that may act.
+    #[test]
+    fn the_database_tools_read_freely_and_write_only_when_the_run_may_act() {
+        let reading = db_tools(false);
+        let names: Vec<&str> = reading.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert_eq!(names, vec!["db_connections", "db_schema", "db_read"]);
+        assert!(reading.iter().all(|t| t["annotations"]["readOnlyHint"] == true));
+        let acting = db_tools(true);
+        let write = acting.iter().find(|t| t["name"] == "db_write").expect("db_write for a run that may act");
+        assert_eq!(write["annotations"]["readOnlyHint"], false);
+        assert!(DB_TOOLS.iter().all(|name| !GROUNDING_TOOLS.contains(name)), "never a run over someone else's material");
+        assert!(acting.iter().all(|t| DB_TOOLS.contains(&t["name"].as_str().unwrap())));
     }
 
     /// A workspace chat's token: the knowledge and the memories, read-only, and nothing that needs one
@@ -1227,7 +1521,9 @@ mod tests {
         headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
 
         let (_, reply) = post(&headers, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
-        assert_eq!(tool_names(&reply), vec!["search_knowledge", "recall", "read_note"]);
+        // Kubernetes, Azure and the engines are there too where their CLIs are: not counted here.
+        let own: Vec<String> = tool_names(&reply).into_iter().filter(|n| !INFRA_TOOLS.contains(&n.as_str())).collect();
+        assert_eq!(own, vec!["search_knowledge", "recall", "read_note"]);
         assert!(reply["result"]["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
 
         for name in ["find_symbol", "service_logs", "open_in_editor"] {
@@ -1242,7 +1538,7 @@ mod tests {
     async fn a_read_only_run_cannot_call_an_action_tool_and_arguments_are_checked() {
         let (reader, _r) = with_access("/tmp/repo", false);
         let call = |name: &str, arguments: Value| json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": arguments}});
-        let (_, reply) = post(&reader, call("db_query", json!({"connection": "prod", "sql": "select 1"}))).await;
+        let (_, reply) = post(&reader, call("db_write", json!({"connection": "prod", "sql": "delete from t"}))).await;
         assert_eq!(reply["result"]["isError"], true);
         assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains("read-only"), "{reply}");
         let (actor, _a) = with_access("/tmp/repo", true);
@@ -1261,7 +1557,7 @@ mod tests {
 
         let (_, reply) = post(&headers, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
         assert_eq!(tool_names(&reply), GROUNDING_TOOLS.to_vec());
-        for name in ["terminal_output", "service_logs", "local_llm", "db_query"] {
+        for name in ["terminal_output", "service_logs", "local_llm", "db_read"] {
             let call = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": {}}});
             let (_, reply) = post(&headers, call).await;
             assert_eq!(reply["result"]["isError"], true, "{name}");
@@ -1282,7 +1578,8 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         // The seven map, knowledge and note queries and the app's four read tools — no actions for
         // this token.
-        assert_eq!(reply["result"]["tools"].as_array().unwrap().len(), 11);
+        let counted = reply["result"]["tools"].as_array().unwrap().iter().filter(|t| !INFRA_TOOLS.contains(&t["name"].as_str().unwrap_or_default())).count();
+        assert_eq!(counted, 11);
 
         let (_, reply) = post(
             &headers,
@@ -1297,6 +1594,21 @@ mod tests {
         let (status, _) = post(&headers, json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"})).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "the token went with the run");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_cluster_and_azure_tools_only_read_and_map_to_their_verbs() {
+        for tool in infra_tools() {
+            assert_eq!(tool["annotations"]["readOnlyHint"], true, "{}", tool["name"]);
+        }
+        assert!(INFRA_TOOLS.iter().all(|name| WORKSPACE_TOOLS.contains(name)), "the workspace chat may look too");
+        assert!(INFRA_TOOLS.iter().all(|name| !GROUNDING_TOOLS.contains(name)), "never a run over someone else's material");
+        let args = |name: &str, value: Value| infra_args(name, &value);
+        assert_eq!(args("kubernetes", json!({"action": "logs", "name": "api-1", "container": "api", "previous": true, "tail": 50})), vec!["logs", "api-1", "--container", "api", "--tail", "50", "--previous"]);
+        assert_eq!(args("kubernetes", json!({"action": "get", "kind": "pods", "all_namespaces": true})), vec!["get", "pods", "-A"]);
+        assert_eq!(args("azure", json!({"action": "query", "workspace": "logs-ws", "query": "AppExceptions | take 5", "hours": 2})), vec!["query", "logs-ws", "AppExceptions | take 5", "--hours", "2"]);
+        assert_eq!(args("azure", json!({"action": "show", "resource": "web", "group": "rg-app"})), vec!["show", "web", "-g", "rg-app"]);
+        assert_eq!(args("containers", json!({"action": "logs", "name": "api", "engine": "podman", "tail": 20})), vec!["logs", "api", "--engine", "podman", "--tail", "20"]);
     }
 
     #[test]
@@ -1358,6 +1670,23 @@ mod tests {
         assert!(!root.join(".grok").exists(), "gone, with the folder it made");
         assert!(!excluded(&root).contains(".grok"), "{}", excluded(&root));
         assert!(RUNS.lock().unwrap().get(token).is_none(), "the token went with the last run");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A workspace chat's folder is no repository: Grok and Antigravity still get the server there,
+    /// with the workspace chat's tools and nothing that acts.
+    #[test]
+    fn a_workspace_chat_folder_gets_the_workspace_chats_token() {
+        let root = std::env::temp_dir().join(format!("codeflow-ws-chat-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let grant = install_as(FileClient::Grok, &root, 47811, true).unwrap();
+        let text = std::fs::read_to_string(root.join(".grok/config.toml")).unwrap();
+        let url = text.lines().find_map(|l| l.strip_prefix("url = \"")).and_then(|rest| rest.strip_suffix('"')).unwrap();
+        let token = url.rsplit('/').next().unwrap().to_string();
+        let access = RUNS.lock().unwrap().get(&token).cloned().unwrap();
+        assert!(access.workspace && !access.acts && !access.grounding, "{access:?}");
+        drop(grant);
+        assert!(!root.join(".grok").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 
