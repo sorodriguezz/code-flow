@@ -11,6 +11,7 @@
  */
 
 import { translate } from "../state/languageStore";
+import { planFromTodos, planLine } from "./runPlan";
 
 /** Fields that usually hold the interesting argument of a tool call, in order of preference. */
 const TOOL_ARG_KEYS = ["file_path", "path", "notebook_path", "command", "pattern", "url", "query", "prompt"];
@@ -60,6 +61,11 @@ function assistantLines(message: unknown): string[] {
       lines.push(truncate(part.text));
     } else if (part.type === "tool_use" && typeof part.name === "string") {
       lines.push(`⏵ ${toolCallLabel(part.name, part.input)}`);
+      // The agent's own plan, kept whole on a line of its own: the run card draws the newest one as a checklist.
+      if (part.name === "TodoWrite" && isRecord(part.input)) {
+        const plan = planFromTodos(part.input.todos);
+        if (plan) lines.push(planLine(plan));
+      }
     }
   }
   return lines;

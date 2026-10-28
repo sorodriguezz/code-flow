@@ -252,6 +252,99 @@ fn truncate(text: &str, max: usize) -> String {
     }
 }
 
+// ---------------------------------------------------------------- the secrets the app is holding
+
+/// The shortest value worth masking everywhere. Shorter than this and it is a word — a PIN, a
+/// two-letter user name — whose replacement would wreck every line that happens to contain it.
+const MIN_REGISTERED: usize = 6;
+/// A value longer than this is a document, not a secret (a private key is ~3 KB).
+const MAX_REGISTERED_BYTES: usize = 8 * 1024;
+/// How many distinct values are remembered. The oldest go first: a Llavero with hundreds of entries
+/// revealed in one sitting must not grow this without bound.
+const MAX_REGISTERED: usize = 256;
+
+static REGISTERED: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+
+/// Remembers a secret this process has just held — a Llavero value, a provider key — so that
+/// [`scrub`] masks it wherever it turns up afterwards: in an error message, a log line, a report.
+///
+/// The pattern rules in [`scrub`] catch what *looks* like a credential. They cannot catch one that
+/// does not — a password is whatever the person typed — so the values the app itself handled are
+/// registered here, by value. Each is kept in the forms output actually carries it in: as it is,
+/// escaped inside a JSON string, percent-encoded in a URL, and as the base64 of an
+/// `Authorization: Basic` header (see [`forms_of_secret`]).
+///
+/// Nothing is persisted: the list lives in memory and dies with the process.
+pub(crate) fn register_secret(value: &str) {
+    let value = value.trim();
+    if value.chars().count() < MIN_REGISTERED || value.len() > MAX_REGISTERED_BYTES {
+        return;
+    }
+    let Ok(mut known) = REGISTERED.get_or_init(Default::default).lock() else { return };
+    for form in forms_of_secret(value) {
+        if form.chars().count() >= MIN_REGISTERED && !known.contains(&form) {
+            known.push(form);
+        }
+    }
+    let excess = known.len().saturating_sub(MAX_REGISTERED);
+    if excess > 0 {
+        known.drain(..excess);
+    }
+}
+
+/// Registers every text and number inside a JSON value — an item with no «password» field comes back
+/// whole, as an object, and a card number is a number.
+pub(crate) fn register_secrets_in(value: &serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => register_secret(text),
+        serde_json::Value::Number(number) => register_secret(&number.to_string()),
+        serde_json::Value::Array(list) => list.iter().for_each(register_secrets_in),
+        serde_json::Value::Object(map) => map.values().for_each(register_secrets_in),
+        _ => {}
+    }
+}
+
+/// The value as a log line could carry it.
+fn forms_of_secret(value: &str) -> Vec<String> {
+    use base64::Engine;
+    let mut forms = vec![value.to_string()];
+    // Inside a JSON string: quotes, backslashes and control characters escaped.
+    if let Ok(json) = serde_json::to_string(value) {
+        let inner = json.trim_matches('"').to_string();
+        if inner != value {
+            forms.push(inner);
+        }
+    }
+    let encoded = percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC).to_string();
+    if encoded != value {
+        forms.push(encoded);
+    }
+    for engine in [&base64::engine::general_purpose::STANDARD, &base64::engine::general_purpose::URL_SAFE] {
+        let text = engine.encode(value);
+        forms.push(text.trim_end_matches('=').to_string());
+    }
+    forms
+}
+
+/// `text` with every registered secret replaced, longest first so one that contains another is
+/// masked whole.
+fn mask_registered(text: String) -> String {
+    let Some(known) = REGISTERED.get() else { return text };
+    let Ok(known) = known.lock() else { return text };
+    if known.is_empty() {
+        return text;
+    }
+    let mut ordered: Vec<&String> = known.iter().collect();
+    ordered.sort_by_key(|form| std::cmp::Reverse(form.len()));
+    let mut out = text;
+    for form in ordered {
+        if out.contains(form.as_str()) {
+            out = out.replace(form.as_str(), "***");
+        }
+    }
+    out
+}
+
 /// Takes the obvious secrets out of a line before it reaches the file.
 ///
 /// An error message is written by whatever threw it, and some of those carry what they were given:
@@ -278,7 +371,9 @@ pub(crate) fn scrub(text: &str) -> String {
         .filter_map(|(pattern, replacement)| regex::Regex::new(pattern).ok().map(|re| (re, replacement)))
         .collect()
     });
-    let mut out = text.to_string();
+    // The values the app itself handled go first, whole: a pattern rule that got to them first would
+    // mask a piece of one and leave the rest readable.
+    let mut out = mask_registered(text.to_string());
     for (re, replacement) in patterns {
         out = re.replace_all(&out, *replacement).into_owned();
     }
@@ -437,6 +532,36 @@ mod tests {
     }
 
     /// What the log must never hold, whatever an error message carried in.
+    #[test]
+    fn a_registered_secret_is_masked_in_every_form_a_log_carries_it() {
+        // Not a credential shape: nothing in `scrub`'s patterns would catch this on its own.
+        let secret = "correct horse battery";
+        assert_eq!(scrub(&format!("login with {secret} failed")), "login with correct horse battery failed");
+        register_secret(secret);
+        assert!(!scrub(&format!("login with {secret} failed")).contains("horse"));
+        let encoded = percent_encoding::utf8_percent_encode(secret, percent_encoding::NON_ALPHANUMERIC).to_string();
+        assert!(!scrub(&format!("GET /x?p={encoded}")).contains("horse"));
+        let json = serde_json::to_string(&serde_json::json!({ "note": "pa\"ss word \"quoted\" 12345" })).unwrap();
+        register_secret("pa\"ss word \"quoted\" 12345");
+        assert!(!scrub(&json).contains("quoted"));
+        use base64::Engine;
+        let basic = base64::engine::general_purpose::STANDARD.encode(secret);
+        assert!(!scrub(&format!("Authorization: Basic {basic}")).contains(basic.trim_end_matches('=')));
+    }
+
+    #[test]
+    fn a_short_value_is_not_registered() {
+        register_secret("abc");
+        assert_eq!(scrub("abc and the alphabet"), "abc and the alphabet");
+    }
+
+    #[test]
+    fn registering_every_leaf_of_a_json_item_covers_a_card_number_and_nested_values() {
+        register_secrets_in(&serde_json::json!({"number": 4111111111111111u64, "nested": {"pin": "Zq7!x-pin-value"}}));
+        assert!(!scrub("card 4111111111111111 declined").contains("4111111111111111"));
+        assert!(!scrub("used Zq7!x-pin-value").contains("pin-value"));
+    }
+
     #[test]
     fn secrets_are_scrubbed_before_they_are_written() {
         let line = scrub("clone failed: https://me:ghp_abcdefghijklmnopqrstuvwx@github.com/o/r.git");

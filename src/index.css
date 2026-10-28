@@ -503,6 +503,27 @@ textarea,
 
 /* Lightweight, GPU-only animations (opacity/transform) — no JS animation loop. */
 
+/* The bar of a task whose length nobody knows: a segment sliding across, never a made-up percentage. */
+@keyframes cf-indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+.cf-indeterminate {
+  animation: cf-indeterminate 1.3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cf-indeterminate {
+    animation: none;
+    width: 100%;
+  }
+}
+
 @keyframes cf-shimmer {
   0% {
     background-position: -200% 0;
@@ -5189,4 +5210,60 @@ svg.\-rotate-180 {
 }
 .arch-flow .react-flow__edge-path {
   transition: stroke-width 0.15s ease;
+}
+
+/* An answer's Mermaid diagram, above its code block. */
+.cf-chat-diagram {
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+  overflow-x: auto;
+  border: 1px solid var(--cf-border);
+  border-radius: 10px;
+  background: var(--cf-surface-raised);
+}
+
+.cf-chat-diagram svg {
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+  display: block;
+}
+
+.cf-chat-diagram-error {
+  margin: 0.25rem 0 0.5rem;
+  font-size: 11px;
+  color: var(--cf-text-muted);
+}
+
+/* An answer's displayed formula, on its own line, scrolling sideways rather than breaking the column. */
+.cf-markdown-chat .cf-math-block {
+  margin: 0.5rem 0;
+  overflow-x: auto;
+  text-align: center;
+}
+
+/* HTML from an answer, in a frame that runs nothing. */
+.cf-chat-html-preview-box {
+  margin: 0.5rem 0;
+  border: 1px solid var(--cf-border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fff;
+}
+
+.cf-chat-html-preview {
+  display: block;
+  width: 100%;
+  height: 280px;
+  border: 0;
+}
+
+/* An inline `path:line` in an answer that opens in the editor (see lib/codeRefs). */
+.cf-markdown-preview code.cf-code-ref {
+  cursor: pointer;
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.cf-markdown-preview code.cf-code-ref:hover {
+  color: var(--cf-accent);
 }

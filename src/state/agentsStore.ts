@@ -26,6 +26,7 @@ import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunAbout
 import type { ChatMessage } from "./chatStore";
 import { parseTrace, traceIdOf } from "../lib/turnTrace";
 import { translate } from "./languageStore";
+import { deleteWithUndo } from "../lib/undoableDelete";
 import { pushErrorToast, useToastStore } from "./toastStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
@@ -265,6 +266,8 @@ interface AgentsState {
   setStatus: (taskId: string, status: AgentTaskStatus) => Promise<void>;
   rename: (taskId: string, title: string) => Promise<void>;
   remove: (taskId: string) => Promise<void>;
+  /** Deletes a task with an Undo card instead of a confirmation: hidden at once, gone for real after the window. */
+  removeWithUndo: (taskId: string) => void;
   /** The task currently running in `projectId`, if any — the one-agent-per-repository guard. */
   runningInProject: (projectId: string, exceptTaskId?: string) => AgentTask | null;
   liveFor: (taskId: string | null) => AgentTaskLive;
@@ -934,6 +937,39 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     // The turns live in `activity_log`, which only cascades on project delete — without this the
     // task's transcript would outlive it and surface as an orphan conversation in the AI panel.
     await deleteChatConversation(task.project_id, task.conversation_id).catch(() => undefined);
+  },
+
+  removeWithUndo: (taskId) => {
+    const at = get().tasks.findIndex((candidate) => candidate.id === taskId);
+    const task = get().tasks[at];
+    if (!task) return;
+    const wasSelected = get().selectedId === taskId;
+    // A run still going is stopped **now**, not when the window closes: an agent must not keep editing a
+    // working copy behind a task the person has just deleted.
+    const runId = get().live[taskId]?.runId;
+    if (runId) void useAiRunStore.getState().cancel(runId);
+    deleteWithUndo({
+      message: translate("agents.taskDeleted", { name: task.title }),
+      hide: () =>
+        set((s) => ({
+          tasks: s.tasks.filter((candidate) => candidate.id !== taskId),
+          selectedId: s.selectedId === taskId ? null : s.selectedId,
+        })),
+      restore: () =>
+        set((s) => {
+          if (s.tasks.some((candidate) => candidate.id === taskId)) return {};
+          const tasks = [...s.tasks];
+          tasks.splice(Math.min(at, tasks.length), 0, task);
+          return { tasks, selectedId: wasSelected ? taskId : s.selectedId };
+        }),
+      // The task is no longer in the list, so the real deletion goes by what was kept.
+      commit: async () => {
+        const left = await deleteAgentTask(taskId);
+        // Its worktree still had changes nobody committed: the folder stays, and the user hears where.
+        if (left) useToastStore.getState().pushToast(translate("agents.worktreeLeft", { path: left }), "info");
+        await deleteChatConversation(task.project_id, task.conversation_id).catch(() => undefined);
+      },
+    });
   },
 }));
 

@@ -6,6 +6,7 @@ import { useSpeechStore } from "../../state/speechStore";
 import { speakable } from "../../lib/speech/speakable";
 import { splitAttachmentNote } from "../../lib/attachmentNote";
 import { renderMarkdown } from "../../lib/markdown";
+import { useRichChatBlocks } from "./richBlocks";
 import { parseClaudeError } from "../../lib/claudeError";
 import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
 import { useT } from "../../state/languageStore";
@@ -22,6 +23,12 @@ import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { fenceLabelOf, highlightCodeBlocks, languageOf } from "../../lib/codeHighlight";
 import { splitQuestions } from "../../lib/chatQuestions";
 import { QuestionCard } from "./QuestionCard";
+import { ContextBars } from "./ContextBars";
+import { useConversationStore } from "../../state/conversationStore";
+import { useUiStore } from "../../state/uiStore";
+import { focusEditorOn } from "../../lib/editorIslands";
+import { markCodeRefs } from "../../lib/codeRefs";
+import { parseContextBreakdown } from "../../lib/contextBreakdown";
 import { bodyForBlock, fileNameForBlock, pathFromFirstLine } from "../../lib/codeFileName";
 import { OutputBar } from "./OutputBar";
 import type { ChatOutput } from "../../lib/tauri/chatCommands";
@@ -229,6 +236,12 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
     [message.role, message.isError, streaming, copyText],
   );
   const body = streaming ? streamText : (asked?.text ?? copyText);
+  // What `/context` printed, drawn as bars under it. Only an answer that says so — a table of tokens
+  // in an ordinary answer is that answer's, not the CLI's.
+  const contextBreakdown = useMemo(
+    () => (message.role === "assistant" && !message.isError && !streaming && /context usage/i.test(copyText) ? parseContextBreakdown(copyText) : null),
+    [message.role, message.isError, streaming, copyText],
+  );
 
   // An answer with no text at all is what a CLI command replies with when it just *does* something —
   // Claude's `/clear` and `/compact` answer with an empty result. Said as done rather than drawn as a
@@ -238,7 +251,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   const html = useMemo(
     () =>
       message.role === "assistant" && !message.isError && !streaming
-        ? renderMarkdown(emptyReply ? `*${emptyText ?? t("chat.emptyReply")}*` : body)
+        ? markCodeRefs(renderMarkdown(emptyReply ? `*${emptyText ?? t("chat.emptyReply")}*` : body))
         : null,
     [message.role, message.isError, streaming, body, emptyReply, emptyText, t],
   );
@@ -282,6 +295,29 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
     apply: t("chat.applyCode"),
   }, codeTarget);
 
+  // A `path:line` in inline code opens in the editor, when the conversation belongs to a repository.
+  const repoId = useConversationStore((s) => (s.activeId ? (s.byConversation[s.activeId]?.projectId ?? null) : null));
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || !repoId) return;
+    const onClick = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target.closest<HTMLElement>("code[data-ref]") : null;
+      if (!target?.dataset.ref || window.getSelection()?.toString()) return;
+      const line = target.dataset.line ? Number(target.dataset.line) : undefined;
+      void focusEditorOn(repoId).then(() => useUiStore.getState().openInEditor(target.dataset.ref!, line));
+    };
+    el.addEventListener("click", onClick);
+    return () => el.removeEventListener("click", onClick);
+  }, [bodyRef, repoId, markup]);
+
+  // Mermaid as a diagram, `$…$` as KaTeX, HTML as a preview on request — after the code bars, which it hangs on.
+  const darkTheme = useThemeStore((s) => s.resolved) === "dark";
+  useRichChatBlocks(bodyRef, markup, darkTheme, {
+    preview: t("chat.htmlPreview"),
+    hidePreview: t("chat.htmlPreviewHide"),
+    diagramFailed: t("chat.diagramFailed"),
+  });
+
   const stampRow = <ChatStamp message={message} detail={stamp} />;
   const isUser = message.role === "user";
 
@@ -310,7 +346,11 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
    * the avatar's middle; the "Thought for…" line is nudged the same way.
    */
   const assistantTurn = (content: ReactNode) => (
-    <div className={`group grid grid-cols-[auto_minmax(0,1fr)] ${reading ? "gap-x-3" : "gap-x-2.5"}`}>
+    <div
+      className={`group grid grid-cols-[auto_minmax(0,1fr)] ${reading ? "gap-x-3" : "gap-x-2.5"} ${
+        message.isError ? "-ml-2 border-l-2 border-[var(--cf-danger)] pl-2" : ""
+      }`}
+    >
       <AssistantAvatar
         reading={reading}
         landedAt={message.createdAt}
@@ -504,6 +544,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
           body
         )}
       </div>
+      {contextBreakdown && <ContextBars breakdown={contextBreakdown} />}
       {asked && asked.questions.length > 0 && <QuestionCard questions={asked.questions} onAnswer={actions?.onAnswer} />}
       {/* The files the turn read or changed — its sources — then the files it wrote. Both are part
           of what this turn said; the row after them is what you *do* about it. */}

@@ -808,6 +808,43 @@ pub fn confirm_link(app: &AppHandle, flow_id: &str, node_id: &str, item: Value) 
     super::fire(app, flow_id, node_id, vec![Item::new(item)]).map(|_| ())
 }
 
+/// `codeflow://flow/<name>[?input=<json or text>]` — the flow a link names and what it was given, or
+/// `None` for any other shape. The name is cleaned the way a trigger's own is ([`link_name`]), so a link
+/// can only ever address a name a trigger could have, and nothing in it reaches further than that.
+pub fn link_from_url(url: &str) -> Option<(String, Value)> {
+    let rest = url.trim().strip_prefix("codeflow://")?;
+    let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let name = path.trim_matches('/').strip_prefix("flow/")?;
+    let name = link_name(&json!({ "linkName": percent_decode(name) }), "");
+    if name.is_empty() {
+        return None;
+    }
+    let input = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("input="))
+        .map(percent_decode)
+        .map(|raw| serde_json::from_str::<Value>(&raw).unwrap_or(Value::String(raw)))
+        .unwrap_or(Value::Null);
+    Some((name, input))
+}
+
+fn percent_decode(text: &str) -> String {
+    percent_encoding::percent_decode_str(&text.replace('+', " ")).decode_utf8_lossy().into_owned()
+}
+
+/// A `codeflow://` link opened by the OS: starts the flow it names. A link that is not one of ours, or
+/// names a flow that is not active, is logged and dropped — never an error in front of the person, since
+/// anything on the machine (a web page included) can open one.
+pub fn handle_url(app: &AppHandle, url: &str) {
+    let Some((name, input)) = link_from_url(url) else {
+        crate::applog::warn("flows: a codeflow:// link was not understood");
+        return;
+    };
+    if let Err(error) = open_link(app, &name, input) {
+        crate::applog::warn(&format!("flows: codeflow://flow/{name}: {error}"));
+    }
+}
+
 /// `codeflow --flow <name> [--input <json>]`, from a launch or a second launch: the flow it names.
 pub fn handle_args(app: &AppHandle, argv: &[String]) {
     let Some(at) = argv.iter().position(|arg| arg == "--flow") else { return };
@@ -820,6 +857,35 @@ pub fn handle_args(app: &AppHandle, argv: &[String]) {
         .unwrap_or(Value::Null);
     if let Err(error) = open_link(app, name, input) {
         crate::applog::warn(&format!("flows: --flow {name}: {error}"));
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn a_flow_link_names_the_flow_and_carries_its_input() {
+        assert_eq!(link_from_url("codeflow://flow/nightly-build"), Some(("nightly-build".into(), Value::Null)));
+        assert_eq!(link_from_url("codeflow://flow/nightly-build/"), Some(("nightly-build".into(), Value::Null)));
+        assert_eq!(
+            link_from_url("codeflow://flow/deploy?input=%7B%22env%22%3A%22prod%22%7D"),
+            Some(("deploy".into(), json!({"env": "prod"})))
+        );
+        assert_eq!(link_from_url("codeflow://flow/greet?input=hello+world"), Some(("greet".into(), json!("hello world"))));
+    }
+
+    #[test]
+    fn the_name_is_cleaned_like_a_triggers_so_a_link_cannot_name_anything_else() {
+        assert_eq!(link_from_url("codeflow://flow/My%20Flow!").map(|(n, _)| n), Some("my-flow".into()));
+        assert_eq!(link_from_url("codeflow://flow/..%2F..%2Fetc").map(|(n, _)| n), Some("etc".into()));
+    }
+
+    #[test]
+    fn anything_that_is_not_a_flow_link_is_ignored() {
+        for url in ["", "https://example.test/flow/x", "codeflow://", "codeflow://flow/", "codeflow://flow/!!!", "codeflow://settings/x", "codeflow:flow/x"] {
+            assert_eq!(link_from_url(url), None, "{url}");
+        }
     }
 }
 

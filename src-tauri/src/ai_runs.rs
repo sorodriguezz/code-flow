@@ -533,6 +533,13 @@ pub fn stop_all(grace: Duration) -> Vec<String> {
     stop_everything(grace)
 }
 
+/// Stops every AI run and CLI process the app has going **without** quitting: the same cancel-then-signal
+/// as [`stop_all`], but the quit flag stays down, so the app goes on and new runs can start. For the
+/// "Stop All Agents" menu item. Returns the ids of the runs that were in flight.
+pub fn stop_all_runs() -> Vec<String> {
+    stop_everything(Duration::from_secs(3))
+}
+
 /// [`stop_all`] without raising the quitting flag — the part that does the stopping, kept apart so
 /// a test can exercise it without telling the rest of the process it is quitting.
 fn stop_everything(grace: Duration) -> Vec<String> {

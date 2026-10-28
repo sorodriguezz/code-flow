@@ -3,6 +3,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useUpdateStore } from "../../state/updateStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { buttonClass } from "../common/Button";
+import { cancelIdleRestart, requestIdleRestart } from "../../lib/idleRestart";
+import type { TranslationKey } from "../../lib/i18n/translations";
 
 /** Where the support button goes. Opened in the system browser rather than the app's own webview,
  *  and that is not a detail: a payment page inside CodeFlow is a page with no address bar, and
@@ -44,6 +46,8 @@ export function UpdateSection({ bare = false }: { bare?: boolean }) {
   const checkNow = useUpdateStore((s) => s.checkNow);
   const install = useUpdateStore((s) => s.install);
   const restart = useUpdateStore((s) => s.restart);
+  const restartPending = useUpdateStore((s) => s.restartPending);
+  const restartBusy = useUpdateStore((s) => s.restartBusy);
   const openNotes = useUpdateStore((s) => s.openNotes);
 
   const btnPrimary = buttonClass({ variant: "primary", size: "md" });
@@ -157,10 +161,30 @@ export function UpdateSection({ bare = false }: { bare?: boolean }) {
             <Check size={14} />
             {t("settings.updateReady")}
           </p>
-          <button type="button" onClick={() => void restart()} className={`${btnPrimary} self-start`}>
-            <RotateCw size={14} />
-            {t("settings.restartNow")}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => void restart()} className={`${btnPrimary} self-start`}>
+              <RotateCw size={14} />
+              {t("settings.restartNow")}
+            </button>
+            {/* The gentler one: waits until no engine, plan or task is running, and says what it is waiting for. */}
+            {restartPending ? (
+              <button type="button" onClick={cancelIdleRestart} className="text-[12px] text-[var(--cf-text-muted)] underline-offset-2 hover:underline">
+                {t("settings.restartCancel")}
+              </button>
+            ) : (
+              <button type="button" onClick={requestIdleRestart} className="text-[12px] text-[var(--cf-text-muted)] underline-offset-2 hover:underline">
+                {t("settings.restartWhenIdle")}
+              </button>
+            )}
+          </div>
+          {restartPending && (
+            <p className="flex items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
+              <Loader2 size={12} className="animate-spin" />
+              {restartBusy.length === 0
+                ? t("settings.restartingNow")
+                : t("settings.restartWaiting", { reasons: restartBusy.map((reason) => t(`settings.restartBusy.${reason}` as TranslationKey)).join(", ") })}
+            </p>
+          )}
         </div>
       )}
 

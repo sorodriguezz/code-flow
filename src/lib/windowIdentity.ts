@@ -50,7 +50,7 @@ export const MAIN_LABEL = "main";
  * like `quick`, a satellite only mechanically — its own command builds it, it holds no screen of
  * the app and scopes to nothing. See `components/codi/CodiWindow`.
  */
-export type SatelliteKind = "app" | "repo" | "quick" | "file" | "codi";
+export type SatelliteKind = "app" | "repo" | "quick" | "file" | "codi" | "attention";
 
 /**
  * The kinds a window can be *detached into*, which is not all of them.
@@ -62,7 +62,7 @@ export type SatelliteKind = "app" | "repo" | "quick" | "file" | "codi";
  * generic builder would produce a window that looks like the ask box and behaves like a satellite.
  * Codi's window is the same case: `codi_open_window` builds it, frameless and always on top.
  */
-export type DetachableKind = Exclude<SatelliteKind, "quick" | "codi">;
+export type DetachableKind = Exclude<SatelliteKind, "quick" | "codi" | "attention">;
 
 export interface WindowIdentity {
   /** The platform's own window label — `"main"`, or `sat-app-notes`. */
@@ -111,7 +111,7 @@ export function parseIdentity(label: string, search: string): WindowIdentity {
     // except that it happens on a window that is working perfectly: the webview loads, the label is
     // right, and `SatelliteApp` is handed `satellite: null` and paints a skeleton forever.
     satellite:
-      (kind === "app" || kind === "repo" || kind === "quick" || kind === "file" || kind === "codi") && refId
+      (kind === "app" || kind === "repo" || kind === "quick" || kind === "file" || kind === "codi" || kind === "attention") && refId
         ? { kind, refId }
         : null,
   };

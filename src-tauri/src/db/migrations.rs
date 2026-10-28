@@ -420,6 +420,37 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_agent_chain_steps
             ON agent_chain_steps(chain_id, step_index);
 
+        -- A step that is a reviewer: its answer decides whether the plan goes on or goes back to the step
+        -- named by `on_fail` (see `chain_review`). A row's existence is what makes a step one, so the
+        -- step table itself keeps the shape it had. `exigence` is `correct` or `polished`.
+        CREATE TABLE IF NOT EXISTS agent_chain_reviews (
+            step_id   TEXT PRIMARY KEY REFERENCES agent_chain_steps(id) ON DELETE CASCADE,
+            exigence  TEXT NOT NULL DEFAULT 'correct',
+            max_laps  INTEGER NOT NULL DEFAULT 3,
+            -- Globs (one per line) of files the worker must not change — the tests and checks the plan
+            -- is judged by — and what those files held when the chain was created (`path` → hash, JSON),
+            -- so a file the person had already edited is not blamed on the worker.
+            protected_paths TEXT NOT NULL DEFAULT '',
+            baseline        TEXT NOT NULL DEFAULT ''
+        );
+
+        -- One row per time a reviewer sent the work back: how many blocking findings, a hash of what
+        -- they said and of the working tree it looked at. What tells "converging" from "going in circles".
+        CREATE TABLE IF NOT EXISTS agent_chain_laps (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            chain_id      TEXT NOT NULL REFERENCES agent_chains(id) ON DELETE CASCADE,
+            step_id       TEXT NOT NULL,
+            lap           INTEGER NOT NULL,
+            blocking      INTEGER NOT NULL,
+            must_count    INTEGER NOT NULL DEFAULT 0,
+            should_count  INTEGER NOT NULL DEFAULT 0,
+            findings_hash TEXT NOT NULL DEFAULT '',
+            state_hash    TEXT NOT NULL DEFAULT '',
+            summary       TEXT NOT NULL DEFAULT '',
+            created_at    TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_chain_laps ON agent_chain_laps(chain_id, step_id, lap);
+
         -- A reusable chain plan: the same three steps you run on every ticket, written once.
         --
         -- Unlike `agent_chains` these are **configuration**, not history — they belong to the
@@ -3960,6 +3991,8 @@ fn add_repos_to_agent_chains(conn: &Connection) -> rusqlite::Result<()> {
             ),
             ("on_pass", "ALTER TABLE workspace_chain_template_steps ADD COLUMN on_pass INTEGER NOT NULL DEFAULT -1;"),
             ("on_fail", "ALTER TABLE workspace_chain_template_steps ADD COLUMN on_fail INTEGER NOT NULL DEFAULT -1;"),
+            // A reviewer step's settings as JSON (`ReviewSpec`); empty for an ordinary step.
+            ("review", "ALTER TABLE workspace_chain_template_steps ADD COLUMN review TEXT NOT NULL DEFAULT '';"),
         ] {
             if table_exists(conn, "workspace_chain_template_steps")?
                 && !has_column(conn, "workspace_chain_template_steps", column)?
@@ -3978,6 +4011,16 @@ fn add_repos_to_agent_chains(conn: &Connection) -> rusqlite::Result<()> {
         ] {
             if !has_column(conn, "agent_chain_steps", column)? {
                 conn.execute_batch(ddl)?;
+            }
+        }
+        if table_exists(conn, "agent_chain_reviews")? {
+            for (column, ddl) in [
+                ("protected_paths", "ALTER TABLE agent_chain_reviews ADD COLUMN protected_paths TEXT NOT NULL DEFAULT '';"),
+                ("baseline", "ALTER TABLE agent_chain_reviews ADD COLUMN baseline TEXT NOT NULL DEFAULT '';"),
+            ] {
+                if !has_column(conn, "agent_chain_reviews", column)? {
+                    conn.execute_batch(ddl)?;
+                }
             }
         }
         // Idempotent and cheap: only the rows still saying nothing, which after the first run is

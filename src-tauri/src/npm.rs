@@ -161,6 +161,29 @@ pub async fn npm_package_versions(name: String) -> Result<PackageVersions, Strin
     })
 }
 
+/// The `latest` dist-tag of one package, through the registry's own `/latest` document — a single
+/// version's manifest, a few KB — rather than [`npm_package_versions`], which lists every version ever
+/// published (for a CLI released daily, hundreds of them) to answer the same question.
+pub async fn latest_version(name: &str) -> Result<String, String> {
+    if !valid_package_name(name) {
+        return Err(format!("Not a package name: {name}"));
+    }
+    #[derive(Deserialize)]
+    struct Manifest {
+        #[serde(default)]
+        version: String,
+    }
+    let response = client().get(format!("{REGISTRY}/{}/latest", path_segment(name))).send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("Registry answered {}", response.status()));
+    }
+    let manifest: Manifest = response.json().await.map_err(|e| e.to_string())?;
+    if manifest.version.is_empty() {
+        return Err(format!("{name} has no latest version"));
+    }
+    Ok(manifest.version)
+}
+
 /// One row of the batch: what is installed against what is current.
 #[derive(Debug, Clone, Serialize)]
 pub struct LatestVersion {

@@ -112,6 +112,25 @@ pub async fn architecture_scan_repo(path: String) -> Result<RepoScan, String> {
     tokio::task::spawn_blocking(move || sources::scan_repo(std::path::Path::new(&path))).await.map_err(|e| e.to_string())?
 }
 
+/// How the repositories connect, read from their code without a model: what each one is, the routes and
+/// queues linking them (each `verified`, `inferred`, or left `unresolved`) and the infrastructure they
+/// share. The same map generation starts from, for the dialog to show before anything is generated.
+#[tauri::command]
+pub async fn architecture_scan_system(paths: Vec<String>) -> Result<crate::architecture::system::SystemMap, String> {
+    tokio::task::spawn_blocking(move || crate::architecture::system::scan_system(&paths)).await.map_err(|e| e.to_string())?
+}
+
+/// A Mermaid sequence of what happens from one repository outward, over the same map. `None` when it
+/// calls nothing the map could place.
+#[tauri::command]
+pub async fn architecture_sequence_from(paths: Vec<String>, start: String) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::architecture::system::scan_system(&paths).map(|map| crate::architecture::system::sequence_from(&map, &start))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// The provider CLI's accounts / profiles / projects. A read of its own, authorized by its own click.
 #[tauri::command]
 pub async fn architecture_cloud_contexts(provider: String) -> Result<CloudContexts, String> {

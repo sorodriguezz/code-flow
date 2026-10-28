@@ -47,6 +47,7 @@ import { ThinkingOrb } from "../../common/ThinkingOrb";
 import { chipClass, fieldClass } from "../../common/recipes";
 import { mutate, currentDoc } from "../edits";
 import { useArchAskStore } from "../ai/archAi";
+import { ConnectionsPreview } from "./ConnectionsPreview";
 
 type Mode = "new" | "update";
 type SectionKey = "repos" | "documents" | "brief" | "cloud";
@@ -281,6 +282,7 @@ function Dialog({ mode }: { mode: Mode }) {
           <button type="button" className={iconButtonClass({ size: "xs" })} onClick={() => toggleRepo(path)} aria-label={t("arch.gen.remove")}><X size={12} /></button>
         </div>
       ))}
+      {repos.length >= 2 && <ConnectionsPreview repos={repos} />}
     </div>
   );
 

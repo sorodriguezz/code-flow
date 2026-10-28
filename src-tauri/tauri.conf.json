@@ -29,6 +29,11 @@
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["codeflow"]
+      }
+    },
     "updater": {
       "endpoints": [
         "https://github.com/sorodriguezz/code-flow/releases/latest/download/latest.json"

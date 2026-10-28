@@ -130,6 +130,11 @@ export type WindowMessage =
    */
   | { kind: "open-chat"; to: string; conversationId: string }
   /**
+   * Put this chain on screen, please — the «Te necesitan» window asking the shell to show the plan that is
+   * waiting. Addressed like `open-chat`: one window owns the Agents view and only it may act.
+   */
+  | { kind: "open-chain"; to: string; workspaceId: string; projectId: string; chainId: string }
+  /**
    * Open Settings on one pane, please — Codi's window asking the shell, the only window with a
    * Settings screen, when its mode chip is pressed. Addressed like the three above: one window has
    * Settings, and only it may act. `tab` is a pane id of `settingsCatalog`; the section falls back to

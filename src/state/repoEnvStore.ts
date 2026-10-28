@@ -96,11 +96,14 @@ export const useRepoEnvStore = create<RepoEnvState>((set, get) => {
   };
 });
 
+/** One shared empty list: a selector returning a fresh `[]` each read makes zustand re-render forever (React #185). */
+const NONE: string[] = [];
+
 /** The patterns the app reads by default: the saved ones, or the shipped list. */
 export function globalPatterns(state: Pick<RepoEnvState, "global" | "defaults">): string[] {
-  return state.global?.patterns ?? state.defaults?.patterns ?? [];
+  return state.global?.patterns ?? state.defaults?.patterns ?? NONE;
 }
 
 export function globalExclude(state: Pick<RepoEnvState, "global" | "defaults">): string[] {
-  return state.global?.exclude ?? state.defaults?.exclude ?? [];
+  return state.global?.exclude ?? state.defaults?.exclude ?? NONE;
 }

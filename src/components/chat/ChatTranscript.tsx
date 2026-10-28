@@ -63,6 +63,7 @@ export function ChatTranscript({
   onEditRequest,
   onQuoteReply,
   onQuoteNewChat,
+  onTransform,
 }: {
   /** Puts a past user turn back in the composer for editing. Lives in `ChatView` because the
    *  composer is a sibling, not a child — the transcript knows which turn, not where the caret is. */
@@ -72,6 +73,8 @@ export function ChatTranscript({
   onQuoteReply: (passage: string) => void;
   /** Carries a selected passage into a conversation that does not exist yet. */
   onQuoteNewChat: (passage: string) => void;
+  /** Quotes a passage with an instruction about it, for the composer. */
+  onTransform?: (kind: "explain" | "improve" | "shorten", passage: string) => void;
 }) {
   const t = useT();
   const locale = useLocale();
@@ -101,6 +104,9 @@ export function ChatTranscript({
   /** The pill's visibility, which *is* rendered — so it is state, and it only flips when the
    *  reader crosses the threshold rather than on every scroll event. */
   const [detached, setDetached] = useState(false);
+  /** How many messages the reader had been shown when they last were at the tail, so the pill can say
+   *  how many arrived while they were reading further up. */
+  const seenCount = useRef(0);
   /**
    * Where this conversation was compacted, if it was.
    *
@@ -174,6 +180,7 @@ export function ChatTranscript({
     if (stick.current) {
       const el = scrollRef.current;
       if (el) el.scrollTop = el.scrollHeight;
+      seenCount.current = count;
     }
   }, [count, pendingText, pendingThinking, session.sending]);
 
@@ -363,8 +370,18 @@ export function ChatTranscript({
       {/* Scoped to the scroller, so a selection in the sidebar or the composer is somebody else's.
           It portals to the body and positions itself from the viewport, which is why it can be a
           sibling here rather than inside the clipping scroll box. */}
-      <SelectionActions scope={scrollRef} onQuoteReply={onQuoteReply} onQuoteNewChat={onQuoteNewChat} />
+      <SelectionActions scope={scrollRef} onQuoteReply={onQuoteReply} onQuoteNewChat={onQuoteNewChat} onTransform={onTransform} />
       {textMenu.menu}
+
+      <TurnRail
+        marks={session.messages.filter((m) => m.role === "user").map((m) => ({ id: m.id, label: m.content }))}
+        onPick={(id) => {
+          const el = scrollRef.current?.querySelector<HTMLElement>(`[data-turn-id="${CSS.escape(id)}"]`);
+          if (!el) return;
+          stick.current = false;
+          el.scrollIntoView({ block: "start", behavior: "smooth" });
+        }}
+      />
 
       {detached && (
         <button
@@ -373,9 +390,33 @@ export function ChatTranscript({
           className="cf-fade-in absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 py-1.5 text-[12px] text-[var(--cf-text)] shadow-[var(--cf-shadow)]"
         >
           <ArrowDown size={12} />
-          {t("chat.jumpToLatest")}
+          {count > seenCount.current ? t("chat.jumpToLatestN", { n: count - seenCount.current }) : t("chat.jumpToLatest")}
         </button>
       )}
+    </div>
+  );
+}
+
+/**
+ * One tick per question on the right edge, for a long conversation: pressing one scrolls to it. Only
+ * from five questions on — in a short chat the scrollbar already says everything — and capped, since a
+ * hundred ticks are a texture, not a map.
+ */
+function TurnRail({ marks, onPick }: { marks: { id: string; label: string }[]; onPick: (id: string) => void }) {
+  if (marks.length < 5) return null;
+  const shown = marks.length > 40 ? marks.filter((_, i) => i % Math.ceil(marks.length / 40) === 0) : marks;
+  return (
+    <div className="pointer-events-none absolute right-1 top-1/2 hidden max-h-[60%] -translate-y-1/2 flex-col justify-center gap-1.5 overflow-hidden md:flex">
+      {shown.map((mark) => (
+        <button
+          key={mark.id}
+          type="button"
+          title={mark.label.slice(0, 80)}
+          aria-label={mark.label.slice(0, 80)}
+          onClick={() => onPick(mark.id)}
+          className="pointer-events-auto h-0.5 w-3 rounded-full bg-[var(--cf-border-strong,var(--cf-border))] transition-all hover:w-5 hover:bg-[var(--cf-accent)]"
+        />
+      ))}
     </div>
   );
 }
@@ -502,7 +543,7 @@ const TranscriptTurn = memo(function TranscriptTurn({
       )}
       {/* `group` here and not on the bubble: the hover row lives inside the bubble component but
           must reveal on hover of the whole turn, divider excluded. */}
-      <div className="group">
+      <div className="group" data-turn-id={message.role === "user" ? message.id : undefined}>
         <ChatMessageBubble message={bubble} variant="reading" actions={actions} outputs={produced} sessionId={engineSessionId} />
         {revealing && (
           // The typewriter is a courtesy, not a rule. An answer that is already whole on disk and

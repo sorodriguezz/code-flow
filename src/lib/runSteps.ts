@@ -1,5 +1,6 @@
 import type { AiRunLine } from "../state/aiRunStore";
 import type { RunPhase } from "./thinking/activity";
+import { PLAN_MARK } from "./runPlan";
 
 /**
  * A run's log, read as steps — what the run card shows as rows and what its headline says.
@@ -25,6 +26,24 @@ export interface RunStep {
   sub: boolean;
   /** Printed on stderr. */
   error: boolean;
+  /** When it was received (ms since the epoch), when the log was stamped. */
+  at?: number;
+  /** How long it took: until the next step began (see [`withDurations`]). */
+  ms?: number;
+}
+
+/**
+ * Fills each step's `ms` from the arrival times: a step lasted until the next one began, and the
+ * last one until `end` (the run's finish, or now while it is live). Steps without a stamp stay
+ * without one — a duration invented from nothing would put a bar on a row that never measured it.
+ * Pauses between a step and the next are the model thinking, which is time the step cost the person.
+ */
+export function withDurations(steps: RunStep[], end: number): RunStep[] {
+  return steps.map((step, i) => {
+    if (step.at === undefined) return step;
+    const next = steps.slice(i + 1).find((later) => later.at !== undefined)?.at ?? end;
+    return { ...step, ms: Math.max(0, next - step.at) };
+  });
 }
 
 const TOOL = /^⏵ ([^:]+?)(?:: (.*))?$/;
@@ -37,19 +56,21 @@ export function parseRunSteps(lines: readonly AiRunLine[] | undefined): RunStep[
   for (const line of lines) {
     for (const raw of line.text.split("\n")) {
       if (!raw.trim()) continue;
+      // The plan's own line (`runPlan`) is drawn as a checklist, never as a step.
+      if (raw.startsWith(PLAN_MARK)) continue;
       const sub = raw.startsWith(SUB);
       const text = sub ? raw.slice(SUB.length) : raw;
       const error = line.stream === "stderr";
       const tool = error ? null : TOOL.exec(text);
       if (tool) {
-        steps.push({ kind: "tool", tool: tool[1].trim(), arg: (tool[2] ?? "").trim(), text, sub, error });
+        steps.push({ kind: "tool", tool: tool[1].trim(), arg: (tool[2] ?? "").trim(), text, sub, error, ...(line.at === undefined ? {} : { at: line.at }) });
         continue;
       }
       const note = error ? null : NOTE.exec(text);
       // The first status a Claude run prints is the model it started on — the engine chip says
       // that already, so it is not a step.
       if (note && steps.length === 0 && !/\s/.test(note[1])) continue;
-      steps.push({ kind: note ? "note" : "text", tool: "", arg: note ? note[1] : text, text, sub, error });
+      steps.push({ kind: note ? "note" : "text", tool: "", arg: note ? note[1] : text, text, sub, error, ...(line.at === undefined ? {} : { at: line.at }) });
     }
   }
   return steps;

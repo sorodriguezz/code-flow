@@ -7,6 +7,7 @@ import { EffortPicker } from "./EffortPicker";
 import { useTextMenu } from "../common/TextMenu";
 import { AttachmentBar } from "./AttachmentBar";
 import { QueuedMessages, type ComposerQueue } from "./QueuedMessages";
+import { ComposerNotice } from "./ComposerNotice";
 import { ChatCapabilities } from "./ChatCapabilities";
 import { ContextMeter, type ContextReading } from "./ContextMeter";
 import { AnswerLengthPicker } from "./AnswerLengthPicker";
@@ -389,6 +390,9 @@ export function ChatComposer({
             </button>
           </div>
         )}
+
+        {/* Above everything that waits to be sent: what stops or threatens the next message. */}
+        {provider !== "flow" && <ComposerNotice provider={provider} onPickEngine={onPickEngine} />}
 
         {shownQueue && <QueuedMessages queue={shownQueue} />}
 

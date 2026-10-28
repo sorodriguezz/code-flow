@@ -361,6 +361,7 @@ pub fn task(request: &Request, app: &AppHandle) -> Reply {
     match created {
         Some(Ok((task, agent))) => {
             crate::remotectl::bridge::emit_desktop_change(app, "agentcli", crate::remotectl::dispatch::Invalidate::Tasks, Some(&project.id), None);
+            super::created(app, "task", &task.id, &task.title);
             Reply::ok(format!("added a draft task «{}» for {agent} in {}; the user starts it from the agents console", task.title, project.name))
         }
         Some(Err(error)) => Reply::no(error),

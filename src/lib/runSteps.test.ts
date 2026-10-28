@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseRunSteps, phaseOfSteps, phaseOfTool, touchedFiles } from "./runSteps";
+import { parseRunSteps, phaseOfSteps, phaseOfTool, touchedFiles, withDurations } from "./runSteps";
 
 const out = (text: string) => ({ stream: "stdout" as const, text });
 
@@ -60,5 +60,18 @@ describe("touchedFiles", () => {
       { path: "src/a.ts", edited: true },
       { path: "src/b.ts", edited: false },
     ]);
+  });
+});
+
+describe("withDurations", () => {
+  const step = (at?: number) => ({ kind: "tool" as const, tool: "Read", arg: "a", text: "", sub: false, error: false, ...(at === undefined ? {} : { at }) });
+
+  it("measures each step to the next one and the last to the end", () => {
+    const out = withDurations([step(1000), step(1500), step(4000)], 4200);
+    expect(out.map((s) => s.ms)).toEqual([500, 2500, 200]);
+  });
+
+  it("leaves an unstamped step without a duration", () => {
+    expect(withDurations([step(), step(10)], 20).map((s) => s.ms)).toEqual([undefined, 10]);
   });
 });

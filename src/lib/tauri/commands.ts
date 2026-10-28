@@ -6,6 +6,8 @@ import type {
   AdoRepo,
   BoardWorkItem,
   AgentChain,
+  ChainReviewInfo,
+  ParkedChain,
   AgentProject,
   AgentTask,
   AgentTaskStatus,
@@ -1064,6 +1066,19 @@ export const skipChainStep = (chainId: string) => invoke<AgentChain | null>("ski
 
 export const retryChainStep = (chainId: string) => invoke<AgentChain | null>("retry_chain_step", { chainId });
 
+/** A parked chain's step goes to the first entry of the user's backup list that can take it. `null` when none can. */
+export const chainUseBackup = (stepId: string) => invoke<AgentChain | null>("chain_use_backup", { stepId });
+
+/** The reviewers of a chain and the laps they have sent work back for. */
+export const chainReviewInfo = (chainId: string) => invoke<ChainReviewInfo>("chain_review_info", { chainId });
+
+/** One more lap for a chain a reviewer parked. `null` when the reviewer is already at its most laps. */
+export const chainExtraLap = (chainId: string, stepId: string) =>
+  invoke<AgentChain | null>("chain_extra_lap", { chainId, stepId });
+
+/** Chains parked on something only the person can resolve, in every workspace. */
+export const listParkedChains = () => invoke<ParkedChain[]>("list_parked_chains");
+
 export const resumeChain = (chainId: string) => invoke<AgentChain | null>("resume_chain", { chainId });
 
 export const abortChain = (chainId: string) => invoke<AgentChain | null>("abort_chain", { chainId });
@@ -1520,6 +1535,75 @@ export interface AiFailure {
 /** Classifies the error an AI run failed with, with the backend's one classifier
  *  (`ai::classify_failure`). Only ever pass it an error, never a reply. */
 export const aiClassifyFailure = (error: string) => invoke<AiFailure>("ai_classify_failure", { error });
+
+export type UserErrorKind =
+  | "network"
+  | "timeout"
+  | "permission"
+  | "auth"
+  | "rate_limit"
+  | "storage"
+  | "not_found"
+  | "conflict"
+  | "service"
+  | "unknown";
+
+/** What kind of failure a message was, a code that is safe to paste into a report, and whether trying again can work. */
+export interface UserError {
+  kind: UserErrorKind;
+  reference: string | null;
+  retryable: boolean;
+}
+
+/** A provider's most recent failure, kept until it answers again. See `provider_state.rs`. */
+export interface ProviderLastError {
+  at: number;
+  kind: string;
+  general: string | null;
+  reference: string | null;
+  message: string;
+}
+
+export const providerLastError = (provider: string) =>
+  invoke<ProviderLastError | null>("provider_last_error", { provider });
+export const providerClearError = (provider: string) => invoke<void>("provider_clear_error", { provider });
+export const providerDiagnostics = (provider: string) => invoke<string>("provider_diagnostics", { provider });
+
+/** One AI CLI with a newer version. See `cli_updates.rs`. */
+export interface CliUpdate {
+  provider: string;
+  label: string;
+  binary: string;
+  installed: string;
+  latest: string;
+}
+
+export interface CliUpdateResult {
+  provider: string;
+  outcome: "done" | "busy" | "failed" | "not_applied" | "broken";
+  versionAfter: string;
+  errorKind: UserErrorKind | null;
+  reference: string | null;
+  details: string;
+}
+
+export const cliUpdatesCheck = (force = false) => invoke<CliUpdate[]>("cli_updates_check", { force });
+export const cliUpdatesSkip = (provider: string, version: string) =>
+  invoke<void>("cli_updates_skip", { provider, version });
+export const cliUpdatesInstall = (provider: string, before: string) =>
+  invoke<CliUpdateResult>("cli_updates_install", { provider, before });
+
+/** `cf run` from outside the app: switch it on or off (persisted) and read where it stands. See `agentcli/automation.rs`. */
+export const automationSetEnabled = (enabled: boolean) => invoke<boolean>("automation_set_enabled", { enabled });
+export const automationStatus = () => invoke<[boolean, string]>("automation_status");
+
+/** Where the app's disk space goes, and what it is safe to give back. See `storage.rs`. */
+export const storageUsage = () =>
+  invoke<{ categories: { id: string; path: string; bytes: number; files: number; clearable: boolean }[]; free_bytes: number; total_bytes: number }>("storage_usage");
+/** Clears what the app rebuilds by itself (`cache`, old `logs`) and returns the bytes freed. */
+export const storageClear = (id: string) => invoke<number>("storage_clear", { id });
+
+export const userErrorClassify = (error: string) => invoke<UserError>("user_error_classify", { error });
 
 export interface AiCheckpoint {
   id: string;
@@ -3240,3 +3324,28 @@ export const notifyStateChange = (
     projectId: projectId ?? null,
     conversationId: conversationId ?? null,
   }).catch(() => undefined);
+
+/** One connection between two repositories, read from their code. `via` is what carries it. */
+export interface SystemLink {
+  from: string;
+  to: string;
+  channel: "http" | "queue" | "timer";
+  via: string;
+  confidence: "verified" | "inferred" | "unresolved";
+  from_at: string;
+  to_at: string;
+}
+
+export interface SystemMap {
+  cards: { name: string; path: string; role: string; role_reason: string }[];
+  links: SystemLink[];
+  unresolved: { from: string; via: string; at: string }[];
+  shared: { kind: string; repos: string[] }[];
+}
+
+/** How the repositories connect, without a model: verified, inferred, or left unresolved. */
+export const architectureScanSystem = (paths: string[]) => invoke<SystemMap>("architecture_scan_system", { paths });
+
+/** A Mermaid sequence of what happens from one repository outward, or `null` when it calls nothing placed. */
+export const architectureSequenceFrom = (paths: string[], start: string) =>
+  invoke<string | null>("architecture_sequence_from", { paths, start });

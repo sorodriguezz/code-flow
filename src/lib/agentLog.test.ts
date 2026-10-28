@@ -99,3 +99,22 @@ describe("CodeFlow's own engine", () => {
     expect(line({ event: "unknown" })).toBeNull();
   });
 });
+
+describe("formatAgentLogLine — the agent's plan", () => {
+  const todoCall = JSON.stringify({
+    type: "assistant",
+    message: { content: [{ type: "tool_use", name: "TodoWrite", input: { todos: [{ content: "Fix it", status: "in_progress" }, { content: "Test it", status: "pending" }] } }] },
+  });
+
+  it("keeps the whole plan on a line of its own beside the tool's step", () => {
+    const text = formatAgentLogLine(todoCall) ?? "";
+    const lines = text.split("\n");
+    expect(lines[0]).toMatch(/^⏵ TodoWrite/);
+    expect(lines[1]).toBe('≡ [{"text":"Fix it","status":"active"},{"text":"Test it","status":"pending"}]');
+  });
+
+  it("a TodoWrite with nothing usable is only its step", () => {
+    const empty = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "TodoWrite", input: { todos: [] } }] } });
+    expect((formatAgentLogLine(empty) ?? "").split("\n")).toHaveLength(1);
+  });
+});

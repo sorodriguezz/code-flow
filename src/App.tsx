@@ -28,6 +28,9 @@ import { DictationOverlay } from "./components/dictation/DictationOverlay";
 import { MeetingSuggestion } from "./components/notes/meetings/MeetingSuggestion";
 import { TitleTooltips } from "./components/common/TitleTooltips";
 import { NotificationPopups } from "./components/layout/NotificationPopups";
+import { CliUpdateCards } from "./components/layout/CliUpdateCards";
+import { CreatedCards } from "./components/layout/CreatedCards";
+import { startCliUpdateCheck } from "./state/cliUpdatesStore";
 import { ConfirmModal } from "./components/common/ConfirmModal";
 import { PromptModal } from "./components/common/PromptModal";
 import { AgentAskModal } from "./components/agents/AgentAskModal";
@@ -77,7 +80,7 @@ import { useRequirementsStore } from "./state/requirementsStore";
 import { useBlameStore } from "./state/blameStore";
 import { useChainStore } from "./state/chainStore";
 import { useAgentsStore } from "./state/agentsStore";
-import { notify } from "./state/notificationStore";
+import { followTarget, notify } from "./state/notificationStore";
 import { pushErrorToast, pushSuccessToast } from "./state/toastStore";
 import { confirmAction } from "./state/confirmStore";
 import type { Project } from "./types/domain";
@@ -712,6 +715,8 @@ export default function App() {
         // The daily check for new advisories on what the repositories use («Salud de dependencias»);
         // its first tick waits a few minutes, so this only arms it.
         Promise.resolve(startDepsAlerts()),
+        // A new version of an AI CLI, offered top right once, a little after launch.
+        Promise.resolve(startCliUpdateCheck()),
         useLanguageOverrideStore.getState().init(),
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.
@@ -882,6 +887,15 @@ export default function App() {
             // It has already brought this window forward (`showMainWindow`); this opens the pane.
             if (message.to !== WINDOW.label) break;
             useUiStore.getState().openSettingsAt(message.section, message.tab);
+            break;
+          case "open-chain":
+            // The «Te necesitan» window pointing at a plan that is waiting.
+            if (message.to !== WINDOW.label) break;
+            void followTarget(message.workspaceId, {
+              view: "agents",
+              projectId: message.projectId || undefined,
+              select: { kind: "chain", id: message.chainId },
+            }).catch((e: unknown) => pushErrorToast(String(e)));
             break;
           case "open-chat":
             // "Open in CodeFlow" in the hotkey ask box, in the ordinary case where the chat
@@ -1393,6 +1407,9 @@ export default function App() {
       {/* Watches the notification store rather than being pushed to, so every `notify` gets a card
           — including the ones a paired phone raises, which no call site here knows about. */}
       <NotificationPopups />
+      {/* A newer version of an AI CLI, with one click to install it. See `cliUpdatesStore`. */}
+      <CliUpdateCards />
+      <CreatedCards />
       <ConfirmModal />
       <PromptModal />
       {/* A question an agent asked with `cf ask`. Beside the other two because it is the same kind

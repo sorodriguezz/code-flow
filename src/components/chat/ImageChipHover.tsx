@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { scrollMoves } from "../../lib/scrollMoves";
 import { chatAttachmentPreview } from "../../lib/tauri/chatCommands";
 import { OPEN_DELAY, TooltipBubble, tooltipClosed, tooltipIsWarm } from "../common/Tooltip";
+import { ImageLightbox } from "./ImageLightbox";
 
 /** The picture's box inside the bubble (whose content is 17rem less its padding). */
 const MAX_W = 252;
@@ -65,6 +66,8 @@ export function ImageChipHover({
   const hovering = useRef(false);
   const shown = useRef(false);
   const [tip, setTip] = useState<{ rect: DOMRect; picture: Picture | null } | null>(null);
+  /** The full-size viewer, opened by a click on the chip. */
+  const [opened, setOpened] = useState<string | null>(null);
 
   const hide = () => {
     hovering.current = false;
@@ -114,8 +117,15 @@ export function ImageChipHover({
       }}
       onPointerLeave={hide}
       onPointerDown={hide}
+      onClick={(e) => {
+        // The chip holds its own controls (the composer's "remove"): their clicks are theirs.
+        if ((e.target as HTMLElement).closest("button, a, input")) return;
+        // The same decoded picture the hover used; a file that cannot be previewed opens nothing.
+        void picture(path).then((loaded) => loaded && setOpened(loaded.src));
+      }}
     >
       {children}
+      {opened && <ImageLightbox src={opened} name={name} onClose={() => setOpened(null)} />}
       {tip && (
         <TooltipBubble
           anchor={tip.rect}

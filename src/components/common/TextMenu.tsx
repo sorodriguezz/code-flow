@@ -5,6 +5,7 @@ import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useSpeechStore } from "../../state/speechStore";
 import { speakNow } from "../../lib/speech/speakAnswer";
+import { gridToCsv, gridToMarkdown, tableGrid } from "../../lib/tableCopy";
 
 type TextField = HTMLTextAreaElement | HTMLInputElement;
 
@@ -121,8 +122,22 @@ export function useTextMenu(extra?: (passage: string) => MenuItem[]): {
     // A field inside the area answers for itself.
     const target = event.target;
     if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) return;
+    // A table offers itself whole, whether or not anything inside it is selected.
+    const table = target instanceof Element ? target.closest("table") : null;
+    const tableItems: MenuItem[] =
+      table instanceof HTMLTableElement && event.currentTarget.contains(table)
+        ? [
+            { label: t("textMenu.copyTableMarkdown"), icon: Copy, separated: true, onClick: () => copy(gridToMarkdown(tableGrid(table))) },
+            { label: t("textMenu.copyTableCsv"), icon: Copy, onClick: () => copy(gridToCsv(tableGrid(table))) },
+          ]
+        : [];
     const selection = window.getSelection();
     const passage = selection?.toString() ?? "";
+    if (tableItems.length > 0 && (!selection || selection.isCollapsed || !passage.trim())) {
+      event.preventDefault();
+      setOpen({ x: event.clientX, y: event.clientY, items: tableItems.map((item) => ({ ...item, separated: false })) });
+      return;
+    }
     if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !passage.trim()) return;
     if (!event.currentTarget.contains(selection.getRangeAt(0).commonAncestorContainer)) return;
     event.preventDefault();
@@ -133,6 +148,7 @@ export function useTextMenu(extra?: (passage: string) => MenuItem[]): {
         { label: t("textMenu.copy"), icon: Copy, onClick: () => copy(passage) },
         ...(readSelection ? [readAloud(passage)] : []),
         ...(extra?.(passage.trim()) ?? []),
+        ...tableItems,
       ],
     });
   };

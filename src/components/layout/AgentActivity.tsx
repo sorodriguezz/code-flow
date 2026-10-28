@@ -9,7 +9,9 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import { followTarget, type NotificationTarget } from "../../state/notificationStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { attentionOpen } from "../../lib/tauri/windows";
 import { useT } from "../../state/languageStore";
+import type { TranslationKey } from "../../lib/i18n/translations";
 
 /** Wider than it was, and the workspace line is why: three lines of text in 268px left the middle
  *  one — the thing the run is *acting on* — truncated on almost every row. */
@@ -165,6 +167,17 @@ export function AgentActivity() {
                 {waiting.map((run) => (
                   <RunRow key={run.key} run={run} onOpen={() => setOpen(false)} />
                 ))}
+                {/* The same list in a small window that stays on top, with the buttons to answer it. */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOpen(false);
+                    void attentionOpen().catch((e: unknown) => pushErrorToast(String(e)));
+                  }}
+                  className="mx-3 mt-1 text-left text-[11px] text-[var(--cf-accent)] hover:underline"
+                >
+                  {t("attention.openWindow")}
+                </button>
               </Section>
             )}
             {running.length > 0 && (
@@ -308,6 +321,17 @@ function RunRow({ run, onOpen }: { run: LiveRun; onOpen: () => void }) {
  * for an answer has **no engine running**, so `aiRunStore` cannot know about it, and it is the one
  * state in the app that is genuinely asking the user for something.
  */
+/** What a parked plan is waiting for, in the activity list's words. Keyed by the reason it is parked under. */
+const PARKED_KIND_KEY: Record<string, TranslationKey> = {
+  "chain.pausedQuota": "agents.liveKindQuota",
+  "chain.pausedAuth": "agents.liveKindSignIn",
+  "chain.pausedCliMissing": "agents.liveKindCliMissing",
+  "chain.pausedLocalModel": "agents.liveKindLocalModel",
+  "chain.lapsExhausted": "agents.liveKindReviewStop",
+  "chain.noProgress": "agents.liveKindReviewStop",
+  "chain.stalled": "agents.liveKindReviewStop",
+};
+
 function useLiveRuns(): LiveRun[] {
   const active = useAiRunStore((s) => s.active);
   const aboutByRun = useAiRunStore((s) => s.aboutByRun);
@@ -319,6 +343,9 @@ function useLiveRuns(): LiveRun[] {
   // gate files no notification either, so nothing else would have said so. See
   // `chainStore.gatedChains`.
   const gatedChains = useChainStore((s) => s.gatedChains);
+  // Plans parked on the person for another reason than a gate: a spent plan, a signed-out CLI, a
+  // reviewer that stopped the loop. They file no notification either.
+  const parkedChains = useChainStore((s) => s.parkedChains);
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   // Every workspace's project list this session has loaded — the map that turns a run's `projectId`
@@ -394,6 +421,27 @@ function useLiveRuns(): LiveRun[] {
       });
     }
 
+    for (const parked of parkedChains) {
+      const home = parked.workspace_id;
+      const workspace = named(home);
+      const target: NotificationTarget = {
+        view: "agents",
+        projectId: parked.project_id || undefined,
+        select: { kind: "chain", id: parked.chain_id },
+      };
+      rows.push({
+        key: `parked:${parked.chain_id}`,
+        kind: t(PARKED_KIND_KEY[parked.reason] ?? "agents.liveKindParked"),
+        detail: parked.title || parked.goal,
+        attention: true,
+        providerId: null,
+        engineLabel: "",
+        workspace,
+        foreign: home !== null && home !== activeWorkspaceId,
+        go: workspace ? follow(home, target) : null,
+      });
+    }
+
     for (const [runId, running] of Object.entries(active)) {
       if (!running) continue;
       const about = aboutByRun[runId];
@@ -431,6 +479,7 @@ function useLiveRuns(): LiveRun[] {
     aboutByRun,
     engineByRun,
     gatedChains,
+    parkedChains,
     activeWorkspaceId,
     workspaces,
     projectsByWorkspace,

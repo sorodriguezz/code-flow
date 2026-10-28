@@ -14,12 +14,19 @@ import {
   Star,
   X,
 } from "lucide-react";
+import { AUTO_RESUME_QUOTA_KEY } from "../../lib/chainPause";
 import {
   CLAUDE_CHAT_PLUGINS_OFF_KEY,
   claudeChatPlugins,
   getSetting,
+  automationSetEnabled,
+  automationStatus,
+  providerClearError,
+  providerDiagnostics,
+  providerLastError,
   setSetting,
   type ClaudeChatPlugin,
+  type ProviderLastError,
 } from "../../lib/tauri/commands";
 import { AI_PROVIDERS, isAgenticProvider, modelDisplayLabel, type AiProviderOption } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
@@ -28,6 +35,7 @@ import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useProviderStatusStore } from "../../state/providerStatusStore";
 import { useAiModelsStore } from "../../state/aiModelsStore";
 import { useToastStore } from "../../state/toastStore";
+import { useCliUpdatesStore } from "../../state/cliUpdatesStore";
 import { useUiStore } from "../../state/uiStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -242,6 +250,68 @@ function BuiltInStatus({ available, detail }: { available: boolean | undefined; 
  * disturbs another — which is what made the old shared-tab form feel like it moved things on
  * its own.
  */
+/**
+ * What went wrong the last time this provider was used, kept after the toast is gone — with a code that
+ * is safe to paste into a report and a button that copies a diagnostic with no account, path or
+ * conversation in it. Nothing until there is an error; it clears itself the next time the provider answers.
+ */
+function LastErrorNote({ providerId }: { providerId: string }) {
+  const t = useT();
+  const pushToast = useToastStore((s) => s.pushToast);
+  const [error, setError] = useState<ProviderLastError | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    providerLastError(providerId)
+      .then((found) => live && setError(found))
+      .catch(() => live && setError(null));
+    return () => {
+      live = false;
+    };
+  }, [providerId]);
+
+  if (!error) return null;
+  const kindKey = `settings.providerErrorKind.${error.general ?? error.kind}` as TranslationKey;
+  const known = t(kindKey) !== kindKey;
+  const when = new Date(error.at * 1000).toLocaleString();
+
+  const copy = async () => {
+    const text = await providerDiagnostics(providerId).catch(() => "");
+    if (!text) return;
+    await navigator.clipboard.writeText(text).catch(() => {});
+    pushToast(t("settings.providerDiagnosticsCopied"), "success");
+  };
+  const dismiss = () => {
+    setError(null);
+    void providerClearError(providerId).catch(() => {});
+  };
+
+  return (
+    <div className="rounded-md border border-[color-mix(in_oklab,var(--cf-danger)_35%,transparent)] bg-[color-mix(in_oklab,var(--cf-danger)_8%,transparent)] px-2.5 py-2 text-[12px] leading-snug">
+      <div className="flex items-center gap-2">
+        <CircleAlert size={13} className="shrink-0 text-[var(--cf-danger)]" />
+        <span className="font-medium">{known ? t(kindKey) : t("settings.providerLastError")}</span>
+        {error.reference && <span className={chipClass("neutral", "font-mono")}>{error.reference}</span>}
+        <span className="ml-auto shrink-0 text-[11px] text-[var(--cf-text-faint)]">{when}</span>
+        <button
+          type="button"
+          onClick={dismiss}
+          aria-label={t("settings.providerDismissError")}
+          title={t("settings.providerDismissError")}
+          className="inline-flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
+        >
+          <X size={12} />
+        </button>
+      </div>
+      <p className="mt-1 break-words text-[var(--cf-text-muted)]">{error.message}</p>
+      <button type="button" onClick={() => void copy()} className={buttonClass({ variant: "ghost", size: "sm", className: "mt-1" })}>
+        <Copy size={12} />
+        {t("settings.providerCopyDiagnostics")}
+      </button>
+    </div>
+  );
+}
+
 function ProviderRow({ provider }: { provider: AiProviderOption }) {
   const t = useT();
   const defaultProviderId = useAiProviderStore((s) => s.providerId);
@@ -422,6 +492,8 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
             </>
           ) : (
             <>
+              <LastErrorNote providerId={provider.id} />
+
               {provider.builtIn && <BuiltInStatus available={status?.available} detail={status?.detail ?? ""} />}
 
               {!provider.builtIn && status && !status.available && (
@@ -816,6 +888,229 @@ function IdleTimeoutField() {
   );
 }
 
+/**
+ * Whether a chain that parked on a spent plan carries on by itself when the window reopens. On by
+ * default; the chain's own banner still shows the time and a checkbox to take it back.
+ */
+function AutoResumeQuotaField() {
+  const t = useT();
+  const [on, setOn] = useState(true);
+
+  useEffect(() => {
+    let live = true;
+    void getSetting(AUTO_RESUME_QUOTA_KEY)
+      .then((raw) => live && setOn(raw !== "false"))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  return (
+    <label title={t("settings.autoResumeQuotaHint")} className="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+      <Checkbox
+        checked={on}
+        onChange={() => {
+          setOn(!on);
+          void setSetting(AUTO_RESUME_QUOTA_KEY, on ? "false" : "true");
+        }}
+      />
+      {t("settings.autoResumeQuotaLabel")}
+    </label>
+  );
+}
+
+/**
+ * Lets a script or a CI job outside the app start one of the saved plans with `cf run` and wait for how
+ * it ended. Off until switched on here; turning it off removes the connection file at once. It opens
+ * three verbs (list the plans, start one, read its status) and nothing else.
+ */
+function AutomationField() {
+  const t = useT();
+  const pushToast = useToastStore((s) => s.pushToast);
+  const [on, setOn] = useState(false);
+  const [dir, setDir] = useState("");
+
+  useEffect(() => {
+    let live = true;
+    void automationStatus()
+      .then(([enabled, folder]) => {
+        if (!live) return;
+        setOn(enabled);
+        setDir(folder);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  return (
+    <label title={dir ? `${t("automation.hint")}\n${dir}` : t("automation.hint")} className="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+      <Checkbox
+        checked={on}
+        onChange={() => {
+          const next = !on;
+          setOn(next);
+          void automationSetEnabled(next).catch((error: unknown) => {
+            setOn(!next);
+            pushToast(String(error), "error");
+          });
+        }}
+      />
+      {t("automation.label")}
+    </label>
+  );
+}
+
+/** Mirrors `cli_updates::ENABLED_KEY`. */
+const CLI_UPDATES_ENABLED_KEY = "cli_updates_enabled";
+
+/** Whether the app looks for newer versions of the AI CLIs when it opens, and a way to look now. */
+function CliUpdatesField() {
+  const t = useT();
+  const [on, setOn] = useState(true);
+  const [looking, setLooking] = useState(false);
+  const check = useCliUpdatesStore((s) => s.check);
+
+  useEffect(() => {
+    let live = true;
+    void getSetting(CLI_UPDATES_ENABLED_KEY)
+      .then((raw) => live && setOn(raw !== "false"))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  return (
+    <div className="flex items-center gap-3">
+      <label className="flex cursor-pointer items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+        <Checkbox
+          checked={on}
+          onChange={() => {
+            setOn(!on);
+            void setSetting(CLI_UPDATES_ENABLED_KEY, on ? "false" : "true");
+          }}
+        />
+        {t("cliUpdates.setting")}
+      </label>
+      <button
+        type="button"
+        disabled={looking}
+        onClick={() => {
+          setLooking(true);
+          void check(true).finally(() => setLooking(false));
+        }}
+        className={buttonClass({ variant: "ghost", size: "sm" })}
+      >
+        {looking ? <Loader2 size={13} className="animate-spin" /> : <RotateCw size={13} />}
+        {t("cliUpdates.checkNow")}
+      </button>
+    </div>
+  );
+}
+
+/** Mirrors `backup_models::KEY` and `MAX`. */
+const BACKUP_MODELS_KEY = "ai_backup_models";
+const MAX_BACKUPS = 8;
+
+interface BackupEntry {
+  provider: string;
+  model: string;
+}
+
+/**
+ * The ordered list a chain step goes down when its provider says its plan is spent. Saved as JSON in
+ * one setting; the backend reads it leniently (`backup_models::parse`), so an entry it cannot use is
+ * dropped there rather than breaking a run.
+ */
+function BackupModelsField() {
+  const t = useT();
+  const [entries, setEntries] = useState<BackupEntry[]>([]);
+  const choices = AI_PROVIDERS.filter((provider) => provider.available && isAgenticProvider(provider.id));
+
+  useEffect(() => {
+    let live = true;
+    void getSetting(BACKUP_MODELS_KEY)
+      .then((raw) => {
+        if (!live || !raw) return;
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            setEntries(
+              parsed
+                .filter((entry): entry is BackupEntry => typeof entry?.provider === "string")
+                .map((entry) => ({ provider: entry.provider, model: String(entry.model ?? "") })),
+            );
+          }
+        } catch {
+          /* an unreadable list is an empty one */
+        }
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const save = (next: BackupEntry[]) => {
+    setEntries(next);
+    void setSetting(BACKUP_MODELS_KEY, JSON.stringify(next.filter((entry) => entry.provider)));
+  };
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span title={t("settings.backupModelsHint")} className="text-[12px] font-medium text-[var(--cf-text-muted)]">
+          {t("settings.backupModelsTitle")}
+        </span>
+        {entries.length < MAX_BACKUPS && (
+          <button
+            type="button"
+            onClick={() => save([...entries, { provider: choices[0]?.id ?? "", model: "" }])}
+            className={buttonClass({ variant: "ghost", size: "sm" })}
+          >
+            {t("settings.backupModelsAdd")}
+          </button>
+        )}
+      </div>
+      {entries.map((entry, at) => (
+        <div key={at} className="flex items-center gap-1.5">
+          <span className="w-4 shrink-0 text-center text-[11px] text-[var(--cf-text-faint)]">{at + 1}</span>
+          <select
+            value={entry.provider}
+            onChange={(e) => save(entries.map((x, i) => (i === at ? { ...x, provider: e.target.value } : x)))}
+            className={fieldClass({ size: "sm", className: "w-40" })}
+          >
+            {choices.map((provider) => (
+              <option key={provider.id} value={provider.id}>
+                {provider.label ?? (provider.labelKey ? t(provider.labelKey) : provider.id)}
+              </option>
+            ))}
+          </select>
+          <input
+            value={entry.model}
+            placeholder={t("settings.backupModelsModel")}
+            onChange={(e) => setEntries(entries.map((x, i) => (i === at ? { ...x, model: e.target.value } : x)))}
+            onBlur={() => save(entries)}
+            className={fieldClass({ size: "sm", className: "min-w-0 flex-1 font-mono" })}
+          />
+          <button
+            type="button"
+            onClick={() => save(entries.filter((_, i) => i !== at))}
+            aria-label={t("settings.backupModelsRemove")}
+            title={t("settings.backupModelsRemove")}
+            className="inline-flex h-[26px] w-[26px] items-center justify-center rounded text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
+          >
+            <X size={13} />
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** The "which engines do I have" half of the AI settings: every provider, its availability, and
  * its configuration — separate from the "which engine runs what" routing table below it. */
 export function ProvidersSection() {
@@ -831,6 +1126,7 @@ export function ProvidersSection() {
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <IdleTimeoutField />
+        <AutoResumeQuotaField />
         <button
           onClick={() => void checkAll()}
           disabled={checking}
@@ -840,6 +1136,9 @@ export function ProvidersSection() {
           {t("settings.providerRecheck")}
         </button>
       </div>
+      <CliUpdatesField />
+      <AutomationField />
+      <BackupModelsField />
       {AI_PROVIDERS.filter((p) => p.available).map((provider) => (
         <ProviderRow key={provider.id} provider={provider} />
       ))}

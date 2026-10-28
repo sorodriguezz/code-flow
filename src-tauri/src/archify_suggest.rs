@@ -153,6 +153,14 @@ fn next_route(path: &str) -> Option<String> {
     Some(join_path("", &url.join("/")))
 }
 
+/// The HTTP routes a source file declares, as `(METHOD, path)`. For `architecture::system`, which links
+/// the services of several repositories by the routes one exposes and another calls.
+pub(crate) fn exposed_routes(rel: &str, text: &str) -> Vec<(String, String)> {
+    let mut found = Vec::new();
+    routes_in(rel, text, &mut found);
+    found.into_iter().map(|route| (route.method, route.path)).collect()
+}
+
 fn routes_in(rel: &str, text: &str, found: &mut Vec<Route>) {
     let language = ext(rel);
     // Next.js: the file *is* the route, and its exports are the methods.

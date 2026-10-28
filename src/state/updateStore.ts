@@ -60,6 +60,11 @@ interface UpdateState {
    */
   dismissedVersion: string;
 
+  /** Whether a restart is waiting for the running work to finish, and what is still in the way. See `lib/idleRestart`. */
+  restartPending: boolean;
+  restartBusy: string[];
+  setIdleRestart: (pending: boolean, busy: string[]) => void;
+
   loadCurrentVersion: () => Promise<void>;
   checkNow: (manual?: boolean) => Promise<void>;
   install: () => Promise<void>;
@@ -85,9 +90,13 @@ export const useUpdateStore = create<UpdateState>((set, get) => ({
   error: "",
   noBuildForPlatform: false,
   installError: "",
+  restartPending: false,
+  restartBusy: [],
   lastCheckedAt: null,
   notesOpen: false,
   dismissedVersion: "",
+
+  setIdleRestart: (pending, busy) => set({ restartPending: pending, restartBusy: busy }),
 
   loadCurrentVersion: async () => {
     const version = await getVersion().catch(() => "");

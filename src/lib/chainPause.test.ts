@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isEnginePause, resumeInstant } from "./chainPause";
+import { isEnginePause, quotaResumeAt, RESUME_GRACE_MS, resumeInstant } from "./chainPause";
 
 const at = (iso: string) => Date.parse(iso);
 
@@ -57,5 +57,35 @@ describe("isEnginePause", () => {
     expect(isEnginePause("chain.interrupted")).toBe(false);
     expect(isEnginePause("chain.stopped")).toBe(false);
     expect(isEnginePause("")).toBe(false);
+  });
+});
+
+describe("quotaResumeAt", () => {
+  const now = Date.UTC(2026, 9, 27, 18, 0, 0);
+  const parked = { status: "paused", last_reason: "chain.pausedQuota", resume_at: 0 };
+  const reopens = { resets: "in 2 hours", resets_at: null };
+
+  it("arms a spent plan at the instant it reopens, plus the grace", () => {
+    expect(quotaResumeAt(parked, reopens, now, true)).toBe(now + 2 * 3_600_000 + RESUME_GRACE_MS);
+  });
+
+  it("does nothing while the standing consent is off", () => {
+    expect(quotaResumeAt(parked, reopens, now, false)).toBeNull();
+  });
+
+  it("only arms a quota pause, not a sign-in or a missing CLI", () => {
+    expect(quotaResumeAt({ ...parked, last_reason: "chain.pausedAuth" }, reopens, now, true)).toBeNull();
+    expect(quotaResumeAt({ ...parked, last_reason: "chain.pausedCliMissing" }, reopens, now, true)).toBeNull();
+    expect(quotaResumeAt({ ...parked, status: "running" }, reopens, now, true)).toBeNull();
+  });
+
+  it("never guesses a time it cannot read", () => {
+    expect(quotaResumeAt(parked, { resets: "soon", resets_at: null }, now, true)).toBeNull();
+    expect(quotaResumeAt(parked, { resets: null, resets_at: null }, now, true)).toBeNull();
+  });
+
+  it("leaves a time somebody already chose alone, and ignores one in the past", () => {
+    expect(quotaResumeAt({ ...parked, resume_at: now / 1000 + 60 }, reopens, now, true)).toBeNull();
+    expect(quotaResumeAt(parked, { resets: null, resets_at: now / 1000 - 10 }, now, true)).toBeNull();
   });
 });

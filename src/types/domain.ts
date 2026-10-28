@@ -687,6 +687,25 @@ export interface GatedChain {
   project_id: string;
   title: string;
   goal: string;
+  /** `chain`, `story` or `hybrid`: only an ordinary plan's gate is a plain "go on". */
+  kind?: string;
+  /** The step the gate is in front of. */
+  step_id?: string;
+}
+
+/** A chain parked on something only the person can resolve, other than a gate: a spent plan, a
+ * signed-out or missing CLI, or a reviewer that stopped the loop. Shown and opened, never approved —
+ * which is why it is not a `GatedChain`. */
+export interface ParkedChain {
+  chain_id: string;
+  workspace_id: string;
+  project_id: string;
+  title: string;
+  goal: string;
+  /** The translation key it is parked under (`chain.pausedQuota`, `chain.lapsExhausted`…). */
+  reason: string;
+  /** When it resumes by itself, in seconds since the epoch; `0` when it waits for the person. */
+  resume_at: number;
 }
 
 export interface AgentChainStep {
@@ -774,8 +793,41 @@ export function blankChainStep(patch: Partial<NewChainStep> = {}): NewChainStep 
     check_command: "",
     on_pass: -1,
     on_fail: -1,
+    review: null,
     ...patch,
   };
+}
+
+/** Makes a step a reviewer: its answer decides whether the plan goes on or goes back. See `chain_review.rs`. */
+export interface ReviewSpec {
+  /** `correct` sends work back only for what is wrong; `polished` also for what could be better. */
+  exigence: "correct" | "polished";
+  /** Laps before the plan stops for the person to decide. 1 to 8. */
+  max_laps: number;
+  /** Globs of files the worker must not change (like the test files); changing one sends the plan back. */
+  protected_paths: string[];
+}
+
+export interface ReviewInfo {
+  step_id: string;
+  exigence: string;
+  max_laps: number;
+}
+
+export interface LapInfo {
+  step_id: string;
+  lap: number;
+  blocking: number;
+  must_count: number;
+  should_count: number;
+  summary: string;
+  created_at: string;
+}
+
+/** The reviewers of a chain and the laps they have sent work back for. */
+export interface ChainReviewInfo {
+  reviews: ReviewInfo[];
+  laps: LapInfo[];
 }
 
 /** One step as the dialog authors it, before anything is snapshotted. */
@@ -796,6 +848,8 @@ export interface NewChainStep {
   /** Where to continue when the check fails. `-1` retries this step. A value below its own position
    * is the loop — the reviewer sending the implementer back. */
   on_fail: number;
+  /** `null` for an ordinary step. Set, the step reviews the work before it and may send the plan back. */
+  review: ReviewSpec | null;
 }
 
 /** What a step's declared check said when it ran.
@@ -880,6 +934,8 @@ export interface ChainTemplateStep {
   check_command: string;
   on_pass: number;
   on_fail: number;
+  /** Makes the step a reviewer when the template is applied. */
+  review?: ReviewSpec | null;
 }
 
 export interface WorkspaceSkill {

@@ -217,6 +217,9 @@ impl Engine {
 /// Returns `Ok(None)` — not an error — while a start is in progress. The caller is a completion
 /// request, and "not yet" is a normal answer to that: it means show no ghost text this time and
 /// try again on the next keystroke, which is a second away.
+/// Failed starts in a row, shared with the executor: one machine, one reason it cannot start.
+pub(crate) static START_BREAKER: super::breaker::Breaker = super::breaker::Breaker::new();
+
 pub async fn ensure(spec: &ModelSpec, model_path: PathBuf) -> Result<Option<Arc<Engine>>, String> {
     let slot = ENGINE.get_or_init(|| AsyncMutex::new(None));
 
@@ -248,16 +251,23 @@ pub async fn ensure(spec: &ModelSpec, model_path: PathBuf) -> Result<Option<Arc<
         stop_locked(&mut guard).await;
     }
 
+    // A start that keeps failing is not retried on every keystroke: see `breaker`. "Not yet" is the
+    // answer this function already gives a caller that is only asking for ghost text.
+    if START_BREAKER.allow().is_err() {
+        return Ok(None);
+    }
     set_status(Status::Starting { model_id: spec.id.to_string() });
     match Engine::spawn(spec, model_path).await {
         Ok(engine) => {
             let engine = Arc::new(engine);
             *guard = Some(engine.clone());
+            START_BREAKER.succeeded();
             set_status(Status::Ready { model_id: spec.id.to_string() });
             spawn_reaper();
             Ok(Some(engine))
         }
         Err(message) => {
+            START_BREAKER.failed();
             set_status(Status::Failed { message: message.clone() });
             Err(message)
         }

@@ -3031,6 +3031,7 @@ async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Resu
     if engine.in_process() {
         let outcome = crate::local_agent::run(&inv, &ctx, &mut cancel).await;
         record_usage(engine, &inv, &outcome, "", None);
+        crate::provider_state::note_outcome(engine.id(), &outcome);
         return outcome;
     }
 
@@ -3258,6 +3259,8 @@ async fn spawn_once(
         Ok(_) => record_usage(engine, inv, &outcome, &stdout_text, Some(&program)),
         Err(_) => record_failed_usage(engine, inv, &stdout_text, &stderr_text),
     }
+    // What the provider's row in Settings shows after the toast is gone.
+    crate::provider_state::note_outcome(engine.id(), &outcome);
     outcome
 }
 
@@ -3383,6 +3386,17 @@ pub(crate) fn aux_command_resolved(binary: &str) -> (tokio::process::Command, St
     (cmd, program)
 }
 
+/// A command that runs a CLI's **own update subcommand** — prepared like every other child (resolved
+/// binary, widened `PATH`, no console window), minus the one thing [`aux_command_resolved`] adds for
+/// Claude: `DISABLE_AUTOUPDATER`. That switch exists so a process started to write a commit message
+/// can never be the one that replaces the executable under another run; this command is started by
+/// the person pressing "update", on purpose, with no run in flight.
+pub(crate) fn update_command(binary: &str) -> (tokio::process::Command, String) {
+    let (mut cmd, program) = aux_command_resolved(binary);
+    cmd.env_remove("DISABLE_AUTOUPDATER");
+    (cmd, program)
+}
+
 /// Keeps a Claude Code process this app starts from updating itself.
 ///
 /// The updater replaces the executable in place, and on Windows that leaves a window in which
@@ -3432,6 +3446,20 @@ pub async fn list_models(engine: &dyn AiEngine, binary: &str) -> Result<Vec<Stri
     Ok(engine.parse_models(&String::from_utf8_lossy(&output.stdout)))
 }
 
+fn version_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Drops what [`engine_version`] remembered about `binary`, so the next call asks the CLI again. For
+/// after an update, and before a check for one: a CLI the user updated in a terminal while the app
+/// was open is not the version this process read an hour ago.
+pub(crate) fn forget_engine_version(binary: &str) {
+    if let Ok(mut cache) = version_cache().lock() {
+        cache.remove(binary);
+    }
+}
+
 /// The engine CLI's own version — what a chat turn records next to its model, so "which build
 /// answered this?" is still answerable in a conversation reopened weeks later.
 ///
@@ -3439,12 +3467,11 @@ pub async fn list_models(engine: &dyn AiEngine, binary: &str) -> Result<Vec<Stri
 /// extra process spawn, and a CLI doesn't change version underneath a running app. A failed probe
 /// is cached too (as `None`), so a missing/older binary isn't re-spawned on every message.
 pub async fn engine_version(binary: &str) -> Option<String> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
     // An engine with no binary (CodeFlow's own, which runs in this process) has no banner to read.
     if binary.trim().is_empty() {
         return None;
     }
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = version_cache();
     if let Some(hit) = cache.lock().ok().and_then(|c| c.get(binary).cloned()) {
         return hit;
     }

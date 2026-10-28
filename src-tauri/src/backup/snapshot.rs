@@ -188,6 +188,9 @@ pub const TABLES: &[&str] = &[
     "agent_chains",
     "agent_chain_repos",
     "agent_chain_steps",
+    // A reviewer step's settings and the laps it has sent work back for. Hang off steps and chains.
+    "agent_chain_reviews",
+    "agent_chain_laps",
     // A hybrid run's configuration and its plan, both hanging off the chain they belong to.
     "hybrid_runs",
     "hybrid_items",
@@ -467,6 +470,8 @@ pub const GROUPS: &[Group] = &[
             "agent_chains",
             "agent_chain_repos",
             "agent_chain_steps",
+            "agent_chain_reviews",
+            "agent_chain_laps",
             "hybrid_runs",
             "hybrid_items",
         ],

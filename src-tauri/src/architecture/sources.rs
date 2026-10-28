@@ -65,6 +65,8 @@ const FACTS_BUDGET: usize = 28_000;
 const ADR_BUDGET: usize = 16_000;
 const ADR_CHARS: usize = 3_000;
 const MAX_ADRS: usize = 10;
+/// The system map's own share, taken whole: it is the part nothing else supplies.
+const SYSTEM_BUDGET: usize = 30_000;
 /// A source never gets less than this when several share one budget.
 const MIN_SHARE: usize = 8_000;
 
@@ -805,6 +807,22 @@ pub async fn read_all(sources: &[ArchSource], include_cloud: bool) -> Result<Vec
     for source in sources {
         if let Some(read) = read_one(source, include_cloud).await? {
             out.push(read);
+        }
+    }
+    // Two or more repositories are a system: how they connect is read from their code, first, so the
+    // model describes connections that were found and never has to invent one. A failure here leaves
+    // the per-repository digests, which is what generation always had.
+    let repos: Vec<String> = sources
+        .iter()
+        .filter_map(|source| match source {
+            ArchSource::Repo { path } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    if repos.len() >= 2 {
+        if let Ok(Ok(map)) = tokio::task::spawn_blocking(move || super::system::scan_system(&repos)).await {
+            let text = crate::secret_scan::redact(&super::system::digest(&map, SYSTEM_BUDGET)).0;
+            out.insert(0, ReadSource { kind: "system", name: "system map".to_string(), cite: "system:<repo> → <repo> — verified | inferred | unresolved", text });
         }
     }
     Ok(out)

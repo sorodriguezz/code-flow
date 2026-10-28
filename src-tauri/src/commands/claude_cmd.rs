@@ -568,13 +568,77 @@ pub fn ai_classify_failure(error: String) -> ai::AiFailure {
     ai::classify_failure(&error)
 }
 
+/// The provider's most recent failure, kept until it answers again — what its row in Settings shows
+/// once the toast is gone. See `provider_state`.
+#[tauri::command]
+pub fn provider_last_error(provider: String) -> Option<crate::provider_state::LastError> {
+    crate::provider_state::last_error(&provider)
+}
+
+/// Forgets it: the person dismissed the row's error.
+#[tauri::command]
+pub fn provider_clear_error(provider: String) {
+    crate::provider_state::clear(&provider);
+}
+
+/// Text to paste into an issue about this provider: its last failure and the app's version, and
+/// nothing that identifies an account, a path or a conversation.
+#[tauri::command]
+pub fn provider_diagnostics(app: tauri::AppHandle, provider: String) -> String {
+    crate::provider_state::diagnostics(&provider, &app.package_info().version.to_string())
+}
+
+/// Where the app's disk space goes (the database, models, caches, chat files…) and how much is free.
+/// See `storage`.
+#[tauri::command]
+pub async fn storage_usage() -> Result<crate::storage::Usage, String> {
+    tokio::task::spawn_blocking(crate::storage::usage).await.map_err(|e| e.to_string())
+}
+
+/// Gives back what the app rebuilds by itself (`cache`, old `logs`) and returns the bytes freed.
+#[tauri::command]
+pub async fn storage_clear(id: String) -> Result<u64, String> {
+    tokio::task::spawn_blocking(move || crate::storage::clear(&id)).await.map_err(|e| e.to_string())?
+}
+
+/// Any other failure — a clone over a dead network, a file the OS refused, a full disk — as a kind
+/// and a copyable reference. See `user_errors`.
+#[tauri::command]
+pub fn user_error_classify(error: String) -> crate::user_errors::UserError {
+    crate::user_errors::classify(&error)
+}
+
 #[tauri::command]
 pub fn ai_read_only_engines() -> Vec<String> {
-    ["claude", "gemini", "codex", "grok", "opencode", "cline", crate::local_agent::PROVIDER_ID]
-        .into_iter()
-        .filter(|id| ai::engine_for(id).enforces_read_only())
-        .map(str::to_string)
-        .collect()
+    crate::provider_caps::read_only_ids()
+}
+
+/// Which AI CLIs have a newer version. Quiet by design: empty on any failure. See `cli_updates`.
+#[tauri::command]
+pub async fn cli_updates_check(force: Option<bool>) -> Vec<crate::cli_updates::CliUpdate> {
+    crate::cli_updates::check_all(force.unwrap_or(false)).await
+}
+
+/// "Skip this version": no card for it until a newer one is published.
+#[tauri::command]
+pub fn cli_updates_skip(provider: String, version: String) {
+    crate::cli_updates::skip(&provider, &version);
+}
+
+/// Runs the CLI's own update command. `before` is the version the card showed.
+#[tauri::command]
+pub async fn cli_updates_install(
+    app: tauri::AppHandle,
+    provider: String,
+    before: String,
+) -> Result<crate::cli_updates::UpdateResult, String> {
+    crate::cli_updates::update(&app, &provider, &before).await
+}
+
+/// Every provider's capabilities and how its CLI updates itself. See `provider_caps`.
+#[tauri::command]
+pub fn provider_caps() -> Vec<crate::provider_caps::ProviderCaps> {
+    crate::provider_caps::all()
 }
 
 /// Lists the models a provider's CLI reports as actually available (e.g. `opencode models`), so the
@@ -1224,6 +1288,8 @@ pub async fn send_chat_message(
         // loop with no task of the review's own to implement. Each promise used to be a sentence in
         // an instruction; here the CLI enforces it. See `chat_with_repo`.
         let analysis = match step.as_ref() {
+            // A reviewer reads and judges; it must not be the step that edits what it is judging.
+            Some(s) if queries::review_config(&conn, &s.step_id).is_some() => true,
             Some(s) if s.kind == "story" => s.phase == "analyze",
             Some(s) if s.kind == "hybrid" && s.phase == "plan" => true,
             Some(s) if s.kind == "hybrid" && s.phase == "review" => hybrid_queries::get_run(&conn, &s.chain_id)

@@ -11,13 +11,18 @@ import {
   runChainStepCheck,
   createAgentChain,
   createContinuationChain,
+  aiClassifyFailure,
+  chainExtraLap,
+  chainUseBackup,
   createStoryChain,
   deleteChain,
   deleteChainTemplate,
   getChainDetail,
+  getSetting,
   harvestChainStep,
   listAgentChains,
   listGatedChains,
+  listParkedChains,
   listChainTemplates,
   listWorkspaceChainSteps,
   listScheduledResumes,
@@ -33,7 +38,7 @@ import {
   skipChainStep,
   upsertChainTemplate,
 } from "../lib/tauri/commands";
-import { isEnginePause } from "../lib/chainPause";
+import { AUTO_RESUME_QUOTA_KEY, isEnginePause, quotaResumeAt } from "../lib/chainPause";
 import {
   approveHybridPlan,
   createHybridTask,
@@ -42,11 +47,12 @@ import {
   type HybridItemEdit,
 } from "../lib/tauri/hybridCommands";
 import { onTurnSettled } from "./agentEvents";
+import { deleteWithUndo } from "../lib/undoableDelete";
 import { useAgentsStore } from "./agentsStore";
 import { newRunId, useAiRunStore } from "./aiRunStore";
 import { translate } from "./languageStore";
 import { notify } from "./notificationStore";
-import { pushErrorToast } from "./toastStore";
+import { pushErrorToast, useToastStore } from "./toastStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type {
   AgentChain,
@@ -55,6 +61,7 @@ import type {
   ChainRepo,
   ChainStepBrief,
   GatedChain,
+  ParkedChain,
   ChainTemplate,
   HybridTemplateConfig,
   NewChainStep,
@@ -130,6 +137,8 @@ interface ChainState {
    * workspace by construction. Deliberately **not** cleared by `setWorkspace`.
    */
   gatedChains: GatedChain[];
+  /** Plans parked on the person for another reason than a gate. See `ParkedChain`. */
+  parkedChains: ParkedChain[];
   /** Re-reads the cross-workspace gate list. Cheap and idempotent; called wherever a chain's status
    *  can have changed, local or remote. */
   refreshGates: () => Promise<void>;
@@ -232,8 +241,12 @@ interface ChainState {
    * engine. Consent to one pause: the backend drops it on any transition and on a restart.
    */
   setAutoResume: (chainId: string, at: number | null) => Promise<void>;
+  /** A chain a reviewer parked goes back to the worker once more (see `chain_extra_lap`). */
+  extraLap: (chainId: string, stepId: string) => Promise<void>;
   abort: (chainId: string) => Promise<void>;
   remove: (chainId: string) => Promise<void>;
+  /** Deletes a plan with an Undo card instead of a confirmation. See `deleteWithUndo`. */
+  removeWithUndo: (chainId: string) => void;
   /** Stops anything live and aborts every chain of a repository that is about to be deleted. */
   abortForProject: (projectId: string) => Promise<void>;
   /** Files the chain under an `AgentProject`, or unfiles it with `""` — a folder, not the
@@ -382,6 +395,7 @@ export const useChainStore = create<ChainState>((set, get) => ({
   workspaceId: null,
   chains: [],
   gatedChains: [],
+  parkedChains: [],
   templates: [],
   stepsByChain: {},
   briefsByChain: {},
@@ -474,12 +488,16 @@ export const useChainStore = create<ChainState>((set, get) => ({
     // resolving out of order would leave the older answer on screen. The counter is bookkeeping,
     // not state: nothing renders it.
     const seq = ++gatesSeq;
-    const gates = await listGatedChains().catch(() => null);
+    const [gates, parked] = await Promise.all([
+      listGatedChains().catch(() => null),
+      listParkedChains().catch(() => null),
+    ]);
     // A read that did not come back leaves the previous answer standing rather than emptying the
     // bar. "Nothing is waiting on you" is a claim, and one failed query is not grounds for making
     // it — the row the user would stop seeing is the one they most need.
-    if (!gates || seq !== gatesSeq) return;
-    set({ gatedChains: gates });
+    if (seq !== gatesSeq) return;
+    if (gates) set({ gatedChains: gates });
+    if (parked) set({ parkedChains: parked });
   },
 
   reloadChains: async () => {
@@ -777,6 +795,17 @@ export const useChainStore = create<ChainState>((set, get) => ({
     void get().pump(chainId, { remote: opts?.unattended });
   },
 
+  extraLap: async (chainId, stepId) => {
+    forgetTimers(chainId);
+    const chain = await chainExtraLap(chainId, stepId).catch((e: unknown) => {
+      pushErrorToast(String(e));
+      return null;
+    });
+    if (!chain) return;
+    applyChain(chain, set);
+    void get().pump(chainId);
+  },
+
   setAutoResume: async (chainId, at) => {
     const seconds = at === null ? 0 : Math.max(1, Math.floor(at / 1000));
     const chain = await setChainResumeAt(chainId, seconds).catch((e: unknown) => {
@@ -828,6 +857,37 @@ export const useChainStore = create<ChainState>((set, get) => ({
         // rather than re-read: the row is gone, and that is knowable without a round trip.
         gatedChains: s.gatedChains.filter((g) => g.chain_id !== chainId),
       };
+    });
+  },
+
+  removeWithUndo: (chainId) => {
+    const chain = get().chains.find((candidate) => candidate.id === chainId);
+    if (!chain) return;
+    const at = get().chains.findIndex((candidate) => candidate.id === chainId);
+    const wasSelected = get().selectedId === chainId;
+    // A plan still moving is stopped **now**: an agent must not keep editing behind a deleted plan.
+    void get().abort(chainId);
+    deleteWithUndo({
+      message: translate("agents.chainDeleted", { name: chain.title }),
+      // Only the lists are filtered: the steps stay in memory so that the real deletion, and an Undo,
+      // both find the plan whole.
+      hide: () =>
+        set((s) => ({
+          chains: s.chains.filter((candidate) => candidate.id !== chainId),
+          selectedId: s.selectedId === chainId ? null : s.selectedId,
+          gatedChains: s.gatedChains.filter((gate) => gate.chain_id !== chainId),
+          parkedChains: s.parkedChains.filter((parked) => parked.chain_id !== chainId),
+        })),
+      restore: () => {
+        set((s) => {
+          if (s.chains.some((candidate) => candidate.id === chainId)) return {};
+          const chains = [...s.chains];
+          chains.splice(Math.min(at, chains.length), 0, chain);
+          return { chains, selectedId: wasSelected ? chainId : s.selectedId };
+        });
+        void get().refreshGates();
+      },
+      commit: () => get().remove(chainId),
     });
   },
 
@@ -1032,6 +1092,50 @@ function applyChain(chain: AgentChain, set: SetState) {
   notifyStateChange("chains");
 }
 
+/**
+ * A step has just parked its chain on a spent quota. First choice is not to wait: if the user named a
+ * backup provider, that one takes the step and the plan goes on at once (`chain_use_backup`, which
+ * also decides who is allowed to). Only when nobody can does the chain stay parked, and then the
+ * automatic resume takes over.
+ */
+async function afterQuotaPark(
+  chain: AgentChain,
+  stepId: string,
+  message: string,
+  get: () => ChainState,
+  set: SetState,
+): Promise<void> {
+  if (chain.status !== "paused" || chain.last_reason !== "chain.pausedQuota") return;
+  const moved = await chainUseBackup(stepId).catch(() => null);
+  if (!moved) return armQuotaResume(chain, message, get);
+  applyChain(moved, set);
+  const step = (await getChainDetail(chain.id).catch(() => null))?.steps.find((candidate) => candidate.id === stepId);
+  if (step) {
+    useToastStore
+      .getState()
+      .pushToast(translate("chain.usedBackupToast", { provider: step.provider, model: step.model }), "info");
+  }
+  void get().pump(chain.id);
+}
+
+/**
+ * Arms the automatic resume of a chain that has just parked on its quota. See `quotaResumeAt` for
+ * what makes it safe to do without asking each time. Best effort: a failure here leaves the chain
+ * exactly as it was — parked, with the checkbox in its banner for the user to tick.
+ */
+async function armQuotaResume(chain: AgentChain, message: string, get: () => ChainState): Promise<void> {
+  if (chain.status !== "paused" || chain.last_reason !== "chain.pausedQuota") return;
+  try {
+    const enabled = (await getSetting(AUTO_RESUME_QUOTA_KEY).catch(() => null)) !== "false";
+    if (!enabled) return;
+    const failure = await aiClassifyFailure(message);
+    const at = quotaResumeAt(chain, failure, Date.now(), enabled);
+    if (at !== null) await get().setAutoResume(chain.id, at);
+  } catch {
+    /* parked is a fine place to stay */
+  }
+}
+
 /** Reports a finished step and, when the chain is ready to move again, moves it. */
 async function settleStep(
   stepId: string,
@@ -1064,6 +1168,9 @@ async function settleStep(
     chain = await completeChainStep(stepId, "error", "", outcome.message).catch(() => null);
   }
   if (chain) applyChain(chain, set);
+  // A plan that parked on a spent quota carries on by itself once the window reopens, when the
+  // standing consent is on and the provider said exactly when.
+  if (chain && outcome.kind === "error" && !outcome.busy) void afterQuotaPark(chain, stepId, outcome.message, get, set);
   // The chain row did not come back, but the *step* still moved — and a phone with the chain detail
   // open is reading step rows, not the chain's. `applyChain` is the only other notifier, so without
   // this the one case where it did not run would go out silently.

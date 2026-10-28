@@ -49,6 +49,8 @@ fn main() {
     match verb.as_str() {
         "hook" => hook(&rest),
         "guard" => guard::run(),
+        // From outside the app: a script or a CI job starting a saved plan (see `outside`).
+        "templates" | "run" | "status" if std::env::var("CODEFLOW_PORT").is_err() || verb != "status" => outside(&verb, &rest),
         "" => {
             println!("{USAGE}");
             std::process::exit(1);
@@ -100,6 +102,154 @@ fn main() {
     }
 }
 
+// ------------------------------------------------------------------------------------ outside
+
+/// Exit codes of the verbs that run from outside CodeFlow. A script branches on these, so they are a
+/// contract: `3` is "a person has to decide" and `4` is "still going, I stopped waiting" — the two
+/// that a plain pass/fail could not tell apart from a failure.
+mod exit {
+    pub const DONE: i32 = 0;
+    pub const FAILED: i32 = 1;
+    pub const USAGE: i32 = 2;
+    pub const NEEDS_PERSON: i32 = 3;
+    pub const TIMED_OUT: i32 = 4;
+    pub const NO_APP: i32 = 5;
+}
+
+/// Where the app wrote how to reach it, for a process it did not start. `CODEFLOW_AUTOMATION_DIR` wins;
+/// otherwise the app's state folder (`paths::state_dir` in the app) under `automation`.
+fn automation_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("CODEFLOW_AUTOMATION_DIR").filter(|dir| !dir.is_empty()) {
+        return Some(dir.into());
+    }
+    let home = || std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let base = if cfg!(target_os = "macos") {
+        home()?.join("Library/Application Support")
+    } else if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from)?
+    } else {
+        std::env::var_os("XDG_DATA_HOME").filter(|dir| !dir.is_empty()).map(std::path::PathBuf::from).or_else(|| home().map(|h| h.join(".local/share")))?
+    };
+    Some(base.join("CodeFlow").join("automation"))
+}
+
+/// `(port, token)` out of `connection.json`.
+fn read_connection(text: &str) -> Option<(String, String)> {
+    let port: String = text.split("\"port\"").nth(1)?.trim_start().strip_prefix(':')?.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+    let token = json_string(text, "token", 200)?;
+    (!port.is_empty() && !token.is_empty()).then_some((port, token))
+}
+
+/// `30m`, `90s`, `2h`, or bare seconds. `None` for anything else — a typo must not become "wait forever".
+fn parse_duration(text: &str) -> Option<Duration> {
+    let text = text.trim();
+    let (number, unit) = match text.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((at, _)) => text.split_at(at),
+        None => (text, "s"),
+    };
+    let amount: u64 = number.parse().ok()?;
+    let seconds = match unit {
+        "s" | "" => amount,
+        "m" => amount.checked_mul(60)?,
+        "h" => amount.checked_mul(3600)?,
+        _ => return None,
+    };
+    (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
+/// How a chain's `status` reply maps to an exit code, or `None` while it is still going.
+fn exit_for(reply: &str) -> Option<i32> {
+    if reply.contains("\"needs_person\":true") {
+        return Some(exit::NEEDS_PERSON);
+    }
+    match json_string(reply, "status", 40).as_deref() {
+        Some("done") => Some(exit::DONE),
+        Some("failed") | Some("aborted") => Some(exit::FAILED),
+        _ => None,
+    }
+}
+
+/// `cf templates | run <template> [--repo p] [--goal g] [--wait] [--timeout 30m] | status <chain>`,
+/// from a process CodeFlow did not start. Reads the connection file the app wrote when the person
+/// turned this on; with it off, or the app closed, there is no file and the exit code says so (`5`).
+fn outside(verb: &str, args: &[String]) -> ! {
+    let Some(dir) = automation_dir() else { fail("cf: cannot tell where CodeFlow keeps its connection file", exit::NO_APP) };
+    let Ok(text) = std::fs::read_to_string(dir.join("connection.json")) else {
+        fail("cf: CodeFlow is not running, or running plans from outside is off (Ajustes › Herramientas de IA)", exit::NO_APP)
+    };
+    let Some((port, token)) = read_connection(&text) else { fail("cf: the connection file is unreadable", exit::NO_APP) };
+
+    // Flags that are this client's own, taken out before the rest goes to the app.
+    let mut rest = Vec::new();
+    let (mut wait, mut timeout) = (false, Duration::from_secs(30 * 60));
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--wait" => wait = true,
+            "--timeout" => {
+                let Some(parsed) = iter.next().and_then(|value| parse_duration(value)) else {
+                    fail("cf: --timeout takes a duration like 90s, 30m or 2h", exit::USAGE)
+                };
+                timeout = parsed;
+            }
+            _ => rest.push(arg.clone()),
+        }
+    }
+    if (verb == "run" || verb == "status") && rest.is_empty() {
+        fail(if verb == "run" { "usage: cf run <template> [--repo <path>] [--goal <text>] [--wait] [--timeout 30m]" } else { "usage: cf status <chain>" }, exit::USAGE);
+    }
+
+    let ask = |verb: &str, args: &[String]| -> Result<(bool, String), String> {
+        let endpoint = Endpoint { port: port.clone(), token: token.clone(), session: String::new() };
+        let reply = call(&endpoint.port, &endpoint.body(verb, &args.join(" "), args, ""))?;
+        Ok((reply.contains("\"ok\":true"), field(&reply, "text")))
+    };
+    let answer = |verb: &str, args: &[String]| match ask(verb, args) {
+        Ok((true, text)) => text,
+        Ok((false, text)) => fail(&format!("cf: {}", if text.is_empty() { "refused" } else { &text }), if text == "not from this app" { exit::NO_APP } else { exit::FAILED }),
+        Err(error) => fail(&format!("cf: {error}"), exit::NO_APP),
+    };
+
+    match verb {
+        "templates" => {
+            println!("{}", answer("templates", &[]));
+            std::process::exit(exit::DONE);
+        }
+        "status" => {
+            let text = answer("status", &rest);
+            println!("{text}");
+            // Still going is `4`, the same word a `--wait` that gave up says.
+            std::process::exit(exit_for(&text).unwrap_or(exit::TIMED_OUT));
+        }
+        _ => {
+            let started = answer("run", &rest);
+            println!("{started}");
+            if !wait {
+                std::process::exit(exit::DONE);
+            }
+            let chain = json_string(&started, "chain", 80).unwrap_or_default();
+            let until = std::time::Instant::now() + timeout;
+            loop {
+                let text = answer("status", &[chain.clone()]);
+                if let Some(code) = exit_for(&text) {
+                    println!("{text}");
+                    std::process::exit(code);
+                }
+                if std::time::Instant::now() >= until {
+                    println!("{text}");
+                    std::process::exit(exit::TIMED_OUT);
+                }
+                std::thread::sleep(Duration::from_secs(3));
+            }
+        }
+    }
+}
+
+fn fail(message: &str, code: i32) -> ! {
+    eprintln!("{message}");
+    std::process::exit(code)
+}
+
 /// The most of a pipe `cf llm` sends. The app cuts it again to what the local model can read; this
 /// only keeps a `cat` of something enormous from becoming an enormous request.
 const STDIN_LIMIT: usize = 2 << 20;
@@ -112,6 +262,13 @@ Asking the user
   cf notify <text>                  put a line in the app, wherever the user is
   cf progress <text>                your status line on this terminal's agent card (3/7 tests)
   cf done [text]                    your work is finished: marks the card and tells the user
+
+From outside CodeFlow (a script, CI; turn it on in Ajustes › Herramientas de IA)
+  cf templates                      the saved plans, as JSON
+  cf run <plan> [--repo <path>] [--goal <text>] [--wait] [--timeout 30m]
+                                    start one in a repository CodeFlow has; --wait blocks until it ends
+  cf status <chain>                 how it is going, as JSON
+                                    exit: 0 done · 1 failed · 2 usage · 3 needs a person · 4 still going / timed out · 5 app unreachable
 
 Driving the app's interface
   cf ui state                       what every window shows, as JSON
@@ -374,6 +531,46 @@ mod tests {
         let reply = "HTTP/1.1 200 OK\r\n\r\n{\"ok\":true,\"text\":\"a\\u0009b \\\"q\\\" \\u00e9\\nlast\"}";
         assert_eq!(field(reply, "text"), "a\tb \"q\" é\nlast");
         assert_eq!(field("{\"ok\":false}", "text"), "");
+    }
+
+    #[test]
+    fn durations_are_read_strictly() {
+        assert_eq!(parse_duration("90s"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_duration("30m"), Some(Duration::from_secs(1800)));
+        assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
+        assert_eq!(parse_duration("45"), Some(Duration::from_secs(45)));
+        // A typo is an error, never "forever".
+        for bad in ["", "m", "0s", "-5s", "3d", "1.5m", "soon"] {
+            assert_eq!(parse_duration(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_chains_status_becomes_an_exit_code_and_a_person_is_not_a_failure() {
+        assert_eq!(exit_for(r#"{"status":"done","needs_person":false}"#), Some(exit::DONE));
+        assert_eq!(exit_for(r#"{"status":"failed","needs_person":false}"#), Some(exit::FAILED));
+        assert_eq!(exit_for(r#"{"status":"aborted","needs_person":false}"#), Some(exit::FAILED));
+        assert_eq!(exit_for(r#"{"status":"gated","needs_person":true}"#), Some(exit::NEEDS_PERSON));
+        assert_eq!(exit_for(r#"{"status":"paused","needs_person":true}"#), Some(exit::NEEDS_PERSON));
+        assert_eq!(exit_for(r#"{"status":"running","needs_person":false}"#), None);
+        assert_eq!(exit_for(r#"{"status":"queued","needs_person":false}"#), None);
+    }
+
+    #[test]
+    fn the_connection_file_is_read_for_its_port_and_token() {
+        assert_eq!(read_connection(r#"{"port":51234,"token":"abc-123"}"#), Some(("51234".into(), "abc-123".into())));
+        assert_eq!(read_connection(r#"{"port": 7 , "token" : "t"}"#), Some(("7".into(), "t".into())));
+        assert_eq!(read_connection("{}"), None);
+        assert_eq!(read_connection(r#"{"port":1,"token":""}"#), None);
+    }
+
+    #[test]
+    fn the_automation_folder_can_be_overridden_and_otherwise_follows_the_platform() {
+        std::env::set_var("CODEFLOW_AUTOMATION_DIR", "/tmp/somewhere");
+        assert_eq!(automation_dir(), Some(std::path::PathBuf::from("/tmp/somewhere")));
+        std::env::remove_var("CODEFLOW_AUTOMATION_DIR");
+        let dir = automation_dir().unwrap();
+        assert!(dir.ends_with("CodeFlow/automation") || dir.ends_with("CodeFlow\\automation"), "{dir:?}");
     }
 
     #[test]

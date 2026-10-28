@@ -19,6 +19,13 @@ mod ai_prompt_files;
 mod ai_quota;
 mod ai_runs;
 mod ai_usage;
+mod user_errors;
+mod provider_state;
+mod provider_caps;
+mod backup_models;
+mod cli_updates;
+mod chain_review;
+mod storage;
 mod local_agent;
 mod backup;
 /// Opening the database at startup without a panic, and the watchdog for a frontend that never loads.
@@ -488,8 +495,17 @@ pub fn run() {
                 crate::flows::triggers::watchers::handle_args(app, &argv);
                 return;
             }
+            // Windows and Linux hand a `codeflow://` link to a second launch as an argument; macOS
+            // delivers it to the running app through the deep-link plugin (see `setup`).
+            let links: Vec<&String> = argv.iter().filter(|arg| arg.starts_with("codeflow://")).collect();
+            if !links.is_empty() {
+                links.into_iter().for_each(|link| crate::flows::triggers::watchers::handle_url(app, link));
+                return;
+            }
             tray::show_main_window(app);
         }))
+        // The `codeflow://` scheme: registered with the OS here, opened in `setup`.
+        .plugin(tauri_plugin_deep_link::init())
         // A meeting's recording, streamed from disk to the player — see `meetings_cmd::serve_audio`.
         .register_asynchronous_uri_scheme_protocol("cf-meeting", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
@@ -604,6 +620,17 @@ pub fn run() {
                 let handle = app.handle().clone();
                 shutdown::install_exit_hook(app.handle(), move || {
                     shutdown::run_outside_runtime(|| shutdown::shutdown_cleanup(&handle));
+                });
+            }
+            // A `codeflow://flow/<name>` link opened by the OS while the app is running (macOS), or the one
+            // that launched it. Only ever starts a flow whose trigger asks first by default.
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        crate::flows::triggers::watchers::handle_url(&handle, url.as_str());
+                    }
                 });
             }
             if boot_guard::take_over(app.handle()) {
@@ -1085,6 +1112,7 @@ sharded_invoke_handler! {
         windows::list_satellites,
         windows::restore_satellites,
         windows::quick_ask_open,
+        windows::attention_open,
         windows::quick_ask_close,
         windows::show_main_window,
         windows::register_quick_ask_shortcut,
@@ -1491,6 +1519,14 @@ sharded_invoke_handler! {
         commands::agents_cmd::approve_chain_gate,
         commands::agents_cmd::skip_chain_step,
         commands::agents_cmd::retry_chain_step,
+        commands::agents_cmd::chain_use_backup,
+        commands::agents_cmd::chain_review_info,
+        commands::agents_cmd::list_parked_chains,
+        agentcli::automation_set_enabled,
+        commands::architecture_cmd::architecture_scan_system,
+        commands::architecture_cmd::architecture_sequence_from,
+        agentcli::automation_status,
+        commands::agents_cmd::chain_extra_lap,
     ]
     shard_10 => [
         commands::agents_cmd::resume_chain,
@@ -1582,6 +1618,16 @@ sharded_invoke_handler! {
         commands::claude_cmd::cancel_ai_run,
         commands::claude_cmd::ai_read_only_engines,
         commands::claude_cmd::ai_classify_failure,
+        commands::claude_cmd::user_error_classify,
+        commands::claude_cmd::provider_last_error,
+        commands::claude_cmd::provider_caps,
+        commands::claude_cmd::storage_usage,
+        commands::claude_cmd::storage_clear,
+        commands::claude_cmd::cli_updates_check,
+        commands::claude_cmd::cli_updates_skip,
+        commands::claude_cmd::cli_updates_install,
+        commands::claude_cmd::provider_clear_error,
+        commands::claude_cmd::provider_diagnostics,
         commands::claude_cmd::inline_edit_with_ai,
         commands::notebook_cmd::notebook_discover_kernels,
         commands::notebook_cmd::notebook_kernel_start,

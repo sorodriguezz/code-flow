@@ -92,6 +92,7 @@ const QuickAskWindow = lazy(() =>
 );
 // Its own chunk, and small: the voice assistant's window draws a face, two switches and a log.
 const CodiWindow = lazy(() => import("./components/codi/CodiWindow").then((m) => ({ default: m.CodiWindow })));
+const AttentionWindow = lazy(() => import("./components/layout/AttentionWindow").then((m) => ({ default: m.AttentionWindow })));
 const GraphView = lazy(() => import("./components/git/GraphView").then((m) => ({ default: m.GraphView })));
 const ChangesPanel = lazy(() => import("./components/git/ChangesPanel").then((m) => ({ default: m.ChangesPanel })));
 const EditorView = lazy(() => import("./components/editor/EditorView").then((m) => ({ default: m.EditorView })));
@@ -599,6 +600,21 @@ export default function SatelliteApp() {
       // One sheet and no frame, so see-through it is a single layer — see `.cf-glass-solo`.
       <div className="cf-glass-solo flex h-screen flex-col overflow-hidden">
         <QuickWindow refId={spec.refId} />
+        <TitleTooltips />
+      </div>
+    );
+  }
+
+  // «Te necesitan»: frameless, always on top, one sheet — see `AttentionWindow`.
+  if (ready && spec && kind === "attention") {
+    return (
+      <div className="cf-glass-solo flex h-screen flex-col overflow-hidden">
+        <ErrorBoundary resetKey={spec.refId}>
+          <Suspense fallback={<ViewSkeleton />}>
+            <AttentionWindow />
+          </Suspense>
+        </ErrorBoundary>
+        <ToastContainer />
         <TitleTooltips />
       </div>
     );

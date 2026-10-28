@@ -53,7 +53,10 @@ export function SelectionActions({
   scope,
   onQuoteReply,
   onQuoteNewChat,
+  onTransform,
 }: {
+  /** Quotes the passage with an instruction about it — explain, improve, shorten — left in the composer to send. */
+  onTransform?: (kind: "explain" | "improve" | "shorten", passage: string) => void;
   /** The element a selection has to be inside to count. Anything outside — the sidebar, the
    *  composer, another pane — is somebody else's text. */
   scope: React.RefObject<HTMLElement | null>;
@@ -229,6 +232,12 @@ export function SelectionActions({
         <MessageSquarePlus size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
         {t("chat.quoteNewChat")}
       </button>
+      {onTransform &&
+        (["explain", "improve", "shorten"] as const).map((kind) => (
+          <button key={kind} type="button" onClick={(event) => act(event, (passage) => onTransform(kind, passage))} className={buttonClass({ variant: "ghost", size: "sm" })}>
+            {t(`chat.selection.${kind}` as const)}
+          </button>
+        ))}
     </div>,
     document.body,
   );

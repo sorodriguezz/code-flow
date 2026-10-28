@@ -1037,11 +1037,8 @@ function menuItemsFor(
           label: t("agents.deleteTask"),
           icon: Trash2,
           danger: true,
-          onClick: () => {
-            void confirmAction(t("agents.deleteConfirm", { name: task.title })).then((ok) => {
-              if (ok) void store().remove(task.id);
-            });
-          },
+          // No "are you sure?": it goes at once and the card that says so has an Undo.
+          onClick: () => store().removeWithUndo(task.id),
         },
       ],
     );
@@ -1082,11 +1079,7 @@ function menuItemsFor(
           label: t("agents.deleteChain"),
           icon: Trash2,
           danger: true,
-          onClick: () => {
-            void confirmAction(t("agents.deleteChainConfirm", { name: chain.title })).then((ok) => {
-              if (ok) void store().remove(chain.id);
-            });
-          },
+          onClick: () => store().removeWithUndo(chain.id),
         },
       ],
     );

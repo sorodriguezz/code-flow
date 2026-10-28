@@ -18,7 +18,7 @@ component's own licence wins — which is what section 6 says.
 | What ships | Count |
 |---|---|
 | npm packages (production tree) | 350 resolved versions of 321 packages |
-| Rust crates (resolved for macOS and Windows) | 878 resolved versions of 773 crates |
+| Rust crates (resolved for macOS and Windows) | 880 resolved versions of 774 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
 | Fonts | 11 |
@@ -694,7 +694,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### Apache-2.0 OR MIT — 448 crates
+### Apache-2.0 OR MIT — 449 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -1058,6 +1058,7 @@ because there the order carries meaning.
 | `tauri-macros` | 2.6.3 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/tauri> |
 | `tauri-plugin` | 2.6.3 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/tauri> |
 | `tauri-plugin-autostart` | 2.5.1 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/plugins-workspace> |
+| `tauri-plugin-deep-link` | 2.4.10 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/plugins-workspace> |
 | `tauri-plugin-dialog` | 2.7.2 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/plugins-workspace> |
 | `tauri-plugin-fs` | 2.5.1 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/plugins-workspace> |
 | `tauri-plugin-global-shortcut` | 2.3.2 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/plugins-workspace> |
@@ -1130,7 +1131,7 @@ because there the order carries meaning.
 | `windows-interface` | 0.56.0, 0.59.3 | Apache-2.0 OR MIT | <https://github.com/microsoft/windows-rs> |
 | `windows-link` | 0.1.3, 0.2.1 | Apache-2.0 OR MIT | <https://github.com/microsoft/windows-rs> |
 | `windows-numerics` | 0.2.0, 0.3.1 | Apache-2.0 OR MIT | <https://github.com/microsoft/windows-rs> |
-| `windows-registry` | 0.6.1 | Apache-2.0 OR MIT | <https://github.com/microsoft/windows-rs> |
+| `windows-registry` | 0.5.3, 0.6.1 | Apache-2.0 OR MIT | <https://github.com/microsoft/windows-rs> |
 | `windows-result` | 0.1.2, 0.3.4, 0.4.1 | Apache-2.0 OR MIT | <https://github.com/microsoft/windows-rs> |
 | `windows-strings` | 0.4.2, 0.5.1 | Apache-2.0 OR MIT | <https://github.com/microsoft/windows-rs> |
 | `windows-sys` | 0.48.0, 0.59.0, 0.60.2, 0.61.2 | Apache-2.0 OR MIT | <https://github.com/microsoft/windows-rs> |

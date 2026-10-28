@@ -27,7 +27,7 @@ import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore
 import { useWindowStore } from "../../state/windowStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast } from "../../state/toastStore";
-import { useT } from "../../state/languageStore";
+import { translate, useT } from "../../state/languageStore";
 
 /** One shared empty array, so a conversation with no attachments hands the composer the *same*
  *  reference on every render. A fresh `[]` would be a new prop each time and would defeat every
@@ -499,6 +499,16 @@ export function ChatView() {
     [setDraft],
   );
 
+  /** Explain / improve / shorten a passage: the quote and the instruction go to the composer, not to the engine. */
+  const onTransform = useCallback(
+    (kind: "explain" | "improve" | "shorten", passage: string) => {
+      const instruction = translate(`chat.selection.${kind}Ask` as const);
+      setDraft((current) => `${appendQuote(current, passage)}\n\n${instruction}`);
+      useUiStore.setState((s) => ({ chatComposerFocus: s.chatComposerFocus + 1 }));
+    },
+    [setDraft],
+  );
+
   /**
    * "Enviar a otro chat" — the passage starts a conversation of its own.
    *
@@ -871,6 +881,7 @@ export function ChatView() {
               onEditRequest={onEditRequest}
               onQuoteReply={onQuoteReply}
               onQuoteNewChat={onQuoteNewChat}
+              onTransform={onTransform}
             />
             {editingTurn !== null && (
               // Said out loud, because the composer looks identical either way and what is about

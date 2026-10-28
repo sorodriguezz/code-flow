@@ -24,8 +24,9 @@
 /// Every id this menu's own items carry. Anything else reaching the handler is another menu's item
 /// — the tray's, which Tauri delivers to every global menu listener — and must be left alone: see
 /// `tray::tray_action` for what answering it used to do.
-const APP_MENU_IDS: [&str; 8] = [
+const APP_MENU_IDS: [&str; 9] = [
     "quit",
+    "stop-agents",
     "settings",
     "check-updates",
     "shortcuts",
@@ -45,6 +46,7 @@ struct MenuText {
     about: &'static str,
     check_updates: &'static str,
     settings: &'static str,
+    stop_agents: &'static str,
     services: &'static str,
     hide: &'static str,
     hide_others: &'static str,
@@ -79,6 +81,7 @@ fn text(spanish: bool) -> MenuText {
             about: "Acerca de CodeFlow",
             check_updates: "Buscar actualizaciones…",
             settings: "Configuración…",
+            stop_agents: "Detener todos los agentes",
             services: "Servicios",
             hide: "Ocultar CodeFlow",
             hide_others: "Ocultar otros",
@@ -108,6 +111,7 @@ fn text(spanish: bool) -> MenuText {
             about: "About CodeFlow",
             check_updates: "Check for Updates…",
             settings: "Settings…",
+            stop_agents: "Stop All Agents",
             services: "Services",
             hide: "Hide CodeFlow",
             hide_others: "Hide Others",
@@ -156,6 +160,9 @@ fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     // the menu is the only way that chord can work at all — the same reason the Edit menu exists.
     let settings = MenuItem::with_id(app, "settings", words.settings, true, Some("Cmd+,"))?;
     let check_updates = MenuItem::with_id(app, "check-updates", words.check_updates, true, None::<&str>)?;
+    // Every AI run the app has going, stopped at once: a runaway agent should not need a hunt through
+    // the Agents view for its Stop button. Handled here in Rust (see the event handler).
+    let stop_agents = MenuItem::with_id(app, "stop-agents", words.stop_agents, true, Some("Cmd+Alt+."))?;
 
     let shortcuts = MenuItem::with_id(app, "shortcuts", words.shortcuts, true, Some("Cmd+Alt+K"))?;
     let tour = MenuItem::with_id(app, "tour", words.tour, true, None::<&str>)?;
@@ -172,6 +179,7 @@ fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &check_updates,
             &PredefinedMenuItem::separator(app)?,
             &settings,
+            &stop_agents,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, Some(words.services))?,
             &PredefinedMenuItem::separator(app)?,
@@ -257,6 +265,14 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             return;
         }
 
+        if id == "stop-agents" {
+            // Every tracked run is cancelled and every CLI process is signalled; the quit flag is not
+            // raised, so the app carries on and the person can start again.
+            let stopped = crate::ai_runs::stop_all_runs();
+            crate::applog::info(&format!("menu: stopped {} AI run(s)", stopped.len()));
+            return;
+        }
+
         if id == "reveal-logs" {
             // The one item that is genuinely a Rust action: it opens a folder this side owns and
             // the frontend has no path to. Best effort — a machine with no file manager association
@@ -309,7 +325,7 @@ mod tests {
         for spanish in [false, true] {
             let words = text(spanish);
             for label in [
-                words.about, words.check_updates, words.settings, words.services, words.hide,
+                words.about, words.check_updates, words.settings, words.stop_agents, words.services, words.hide,
                 words.hide_others, words.show_all, words.quit, words.edit, words.undo, words.redo,
                 words.cut, words.copy, words.paste, words.select_all, words.window, words.minimize,
                 words.zoom, words.fullscreen, words.close_window, words.help, words.shortcuts,

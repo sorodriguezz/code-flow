@@ -202,6 +202,7 @@ export function NewChainModal({
           check_command: step.check_command,
           on_pass: step.on_pass,
           on_fail: step.on_fail,
+          review: step.review ? { ...step.review, protected_paths: step.review.protected_paths ?? [] } : null,
         }),
       })),
     );
@@ -239,8 +240,8 @@ export function NewChainModal({
         description: goal.trim(),
         // Repository and phase are dropped on the way in: a template is applied in whatever
         // workspace it is opened in, and an id from another one resolves to nothing there.
-        steps: steps.map(({ agent_id, instruction, gate, check_command, on_pass, on_fail }) =>
-          blankChainStep({ agent_id, instruction, gate, check_command, on_pass, on_fail }),
+        steps: steps.map(({ agent_id, instruction, gate, check_command, on_pass, on_fail, review }) =>
+          blankChainStep({ agent_id, instruction, gate, check_command, on_pass, on_fail, review }),
         ),
       });
       // `null` means the store had no workspace to save into — announcing success there would be a
@@ -268,7 +269,7 @@ export function NewChainModal({
         projectIds,
         title: title.trim() || goal.trim().split("\n")[0].slice(0, 64) || t("agents.newChain"),
         goal,
-        steps: steps.map(({ agent_id, instruction, gate, project_id, phase, check_command, on_pass, on_fail }) => ({
+        steps: steps.map(({ agent_id, instruction, gate, project_id, phase, check_command, on_pass, on_fail, review }) => ({
           agent_id,
           instruction,
           gate,
@@ -277,6 +278,7 @@ export function NewChainModal({
           check_command,
           on_pass,
           on_fail,
+          review,
         })),
         agentProjectId,
         start,
@@ -573,7 +575,7 @@ export function NewChainModal({
                     this go when it fails" on a step that cannot fail is a question with no meaning.
                     Only backwards, too — the loop is the thing worth having, and a forward jump on
                     failure is a plan skipping the work it just proved it needs. */}
-                {step.check_command.trim() !== "" && index > 0 && (
+                {(step.check_command.trim() !== "" || step.review) && index > 0 && (
                   <div className="mt-1.5 flex items-center gap-1.5">
                     <Undo2 size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
                     <Select
@@ -582,7 +584,8 @@ export function NewChainModal({
                       ariaLabel={t("agents.stepOnFail")}
                       onChange={(value) => patch(step.key, { on_fail: Number(value) })}
                       options={[
-                        { value: "-1", label: t("agents.stepOnFailRetry") },
+                        // A reviewer's default is the step before it; a check's is to try again.
+                        { value: "-1", label: step.review ? t("agents.stepReviewBack") : t("agents.stepOnFailRetry") },
                         ...steps.slice(0, index).map((earlier, at) => ({
                           value: String(at),
                           label: t("agents.stepOnFailGoto", {
@@ -602,6 +605,65 @@ export function NewChainModal({
                     <Checkbox checked={step.gate} onChange={(on) => patch(step.key, { gate: on })} />
                     {t("agents.gateBefore")}
                   </label>
+                )}
+                {/* A reviewer: reads the work, answers with findings, and the plan goes back to the step
+                    before it when something must change. Not on the first step (nothing to review) nor
+                    on an "every repository" one, which is N rows and has no single place to go back from. */}
+                {index > 0 && step.project_id !== ALL_REPOS && (
+                  <div className="mt-1.5 space-y-1.5">
+                    <label className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
+                      <Checkbox
+                        checked={step.review !== null}
+                        onChange={(on) => patch(step.key, { review: on ? { exigence: "correct", max_laps: 3, protected_paths: [] } : null })}
+                      />
+                      {t("agents.stepReviewer")}
+                    </label>
+                    {step.review && (
+                      <div className="flex items-center gap-1.5 pl-5">
+                        <Select
+                          size="sm"
+                          value={step.review.exigence}
+                          ariaLabel={t("agents.stepExigence")}
+                          onChange={(value) =>
+                            patch(step.key, { review: { ...step.review!, exigence: value === "polished" ? "polished" : "correct" } })
+                          }
+                          options={[
+                            { value: "correct", label: t("agents.exigenceCorrect") },
+                            { value: "polished", label: t("agents.exigencePolished") },
+                          ]}
+                        />
+                        <label className="flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)]">
+                          {t("agents.stepMaxLaps")}
+                          <input
+                            type="number"
+                            min={1}
+                            max={8}
+                            value={step.review.max_laps}
+                            onChange={(e) =>
+                              patch(step.key, {
+                                review: { ...step.review!, max_laps: Math.min(8, Math.max(1, Math.floor(Number(e.target.value)) || 3)) },
+                              })
+                            }
+                            className={fieldClass({ size: "sm", className: "w-14 tabular-nums" })}
+                          />
+                        </label>
+                      </div>
+                    )}
+                    {step.review && (
+                      <input
+                        type="text"
+                        value={step.review.protected_paths.join(", ")}
+                        onChange={(e) =>
+                          patch(step.key, {
+                            review: { ...step.review!, protected_paths: e.target.value.split(",").map((glob) => glob.trim()).filter(Boolean) },
+                          })
+                        }
+                        placeholder={t("agents.stepProtected")}
+                        aria-label={t("agents.stepProtected")}
+                        className={fieldClass({ size: "sm", className: "ml-5 w-[calc(100%-1.25rem)] font-mono" })}
+                      />
+                    )}
+                  </div>
                 )}
               </div>
             ))}

@@ -54,7 +54,7 @@ export function catalogueFor(identity: WindowIdentity): CodiAction[] {
     ];
   }
   const spec = identity.satellite;
-  if (!spec || spec.kind === "quick" || spec.kind === "codi") return [];
+  if (!spec || spec.kind === "quick" || spec.kind === "codi" || spec.kind === "attention") return [];
   const common = [...uiActions(), ...islandSatelliteActions(), ...textSatelliteActions(spec.kind, spec.refId)];
   if (spec.kind === "app") {
     return [...common, ...workspaceActions(), ...appActionsFor(spec.refId)];

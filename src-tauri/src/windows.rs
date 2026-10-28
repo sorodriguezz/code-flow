@@ -80,9 +80,20 @@ pub enum SatelliteKind {
     /// window, not counted against the ceilings (like `Quick`), but put away with the desk — and
     /// closing it closes the microphone: nothing listens unseen.
     Codi,
+    /// «Te necesitan»: a small window that stays on top and lists what is waiting for a person — a plan
+    /// parked at a gate, a spent quota, a reviewer that stopped — with the buttons to answer it, so an
+    /// agent is not blocked until somebody finds the main window. One window, not counted against the
+    /// ceilings (like `Quick` and `Codi`), and put away with the desk.
+    Attention,
 }
 
 impl SatelliteKind {
+    /// Whether it counts as part of the desk — the screens the person arranged — rather than a
+    /// summoned utility. The ask box, Codi and this one outlive the desk and are never counted.
+    fn is_utility(self) -> bool {
+        matches!(self, SatelliteKind::Quick | SatelliteKind::Codi | SatelliteKind::Attention)
+    }
+
     fn slug(self) -> &'static str {
         match self {
             SatelliteKind::App => "app",
@@ -90,6 +101,7 @@ impl SatelliteKind {
             SatelliteKind::Quick => "quick",
             SatelliteKind::File => "file",
             SatelliteKind::Codi => "codi",
+            SatelliteKind::Attention => "attention",
         }
     }
 }
@@ -168,7 +180,7 @@ impl SatelliteRegistry {
     /// The satellites that count against the ceilings — every one but the ask box. See
     /// [`SatelliteKind::Quick`].
     fn counted(held: &HashMap<String, SatelliteInfo>) -> usize {
-        held.values().filter(|info| !matches!(info.kind, SatelliteKind::Quick | SatelliteKind::Codi)).count()
+        held.values().filter(|info| !info.kind.is_utility()).count()
     }
 
     /// Parks the desk and says what to do with each window: the half of [`close_all`] that needs no
@@ -183,7 +195,7 @@ impl SatelliteRegistry {
         let mut plan = PutAway::default();
         if let Ok(held) = self.open.lock() {
             let mut desk: Vec<&SatelliteInfo> =
-                held.values().filter(|info| !matches!(info.kind, SatelliteKind::Quick | SatelliteKind::Codi)).collect();
+                held.values().filter(|info| !info.kind.is_utility()).collect();
             // A stable order, so the windows come back in the same one every time.
             desk.sort_by(|a, b| a.label.cmp(&b.label));
             for info in desk {
@@ -259,7 +271,7 @@ pub fn satellite_labels(registry: &SatelliteRegistry) -> Vec<String> {
     registry
         .open
         .lock()
-        .map(|held| held.values().filter(|info| !matches!(info.kind, SatelliteKind::Quick | SatelliteKind::Codi)).map(|info| info.label.clone()).collect())
+        .map(|held| held.values().filter(|info| !info.kind.is_utility()).map(|info| info.label.clone()).collect())
         .unwrap_or_default()
 }
 
@@ -992,6 +1004,77 @@ pub async fn open_codi(app: AppHandle) -> Result<String, String> {
     Ok(label)
 }
 
+/// The «Te necesitan» window's id.
+pub const ATTENTION_REF_ID: &str = "attention";
+
+/// Opens the attention window, or brings it forward. Built like Codi's (claimed before it is built, for the
+/// same reason: two presses of a chord must not make two windows), small and on every desktop.
+pub async fn open_attention(app: AppHandle) -> Result<String, String> {
+    let label = label_for(SatelliteKind::Attention, ATTENTION_REF_ID);
+    if let Some(existing) = app.get_webview_window(&label) {
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(label);
+    }
+    let registry = app.state::<SatelliteRegistry>();
+    {
+        let mut held = registry.open.lock().map_err(|e| e.to_string())?;
+        if held.contains_key(&label) {
+            return Ok(label);
+        }
+        held.insert(
+            label.clone(),
+            SatelliteInfo { label: label.clone(), kind: SatelliteKind::Attention, ref_id: ATTENTION_REF_ID.to_string(), title: "CodeFlow".to_string() },
+        );
+    }
+    let url = format!("window.html?kind={}&ref={}", SatelliteKind::Attention.slug(), ATTENTION_REF_ID);
+    let look = crate::glass::stored(&app);
+    let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        .enable_clipboard_access()
+        .transparent(true)
+        .title("CodeFlow")
+        .inner_size(380.0, 320.0)
+        .min_inner_size(300.0, 160.0)
+        .always_on_top(true)
+        // Summoned and dismissed, like the ask box: not a destination to alt-tab into.
+        .skip_taskbar(true)
+        .decorations(false)
+        .resizable(true);
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.visible_on_all_workspaces(true);
+    }
+    // Top-right of the primary screen's work area, where a notice would be, instead of the middle of what the
+    // person is doing.
+    builder = match app.primary_monitor() {
+        Ok(Some(monitor)) => {
+            let scale = monitor.scale_factor();
+            let size = monitor.size().to_logical::<f64>(scale);
+            let origin = monitor.position().to_logical::<f64>(scale);
+            builder.position(origin.x + size.width - 380.0 - 16.0, origin.y + 48.0)
+        }
+        _ => builder.center(),
+    };
+    if let Some(script) = crate::glass::init_script(&look) {
+        builder = builder.initialization_script(script);
+    }
+    match builder.build() {
+        Ok(window) => {
+            crate::glass::round_corners(&window, CODI_CORNER_RADIUS);
+            crate::glass::on_create(&window, &look);
+        }
+        Err(e) => {
+            if let Ok(mut held) = registry.open.lock() {
+                held.remove(&label);
+            }
+            return Err(e.to_string());
+        }
+    }
+    announce(&app);
+    Ok(label)
+}
+
 /// What Codi asked the ask box to start with (`quick.open`): taken once by the box, on its first
 /// mount or on `quick-ask:codi`.
 static QUICK_DRAFT: Mutex<Option<Option<String>>> = Mutex::new(None);
@@ -1019,6 +1102,12 @@ pub fn quick_ask_take_draft() -> Option<QuickDraft> {
 #[tauri::command]
 pub async fn quick_ask_open(app: AppHandle) -> Result<String, String> {
     open_quick_ask(app).await
+}
+
+/// Opens the «Te necesitan» window (or brings it forward). See [`open_attention`].
+#[tauri::command]
+pub async fn attention_open(app: AppHandle) -> Result<String, String> {
+    open_attention(app).await
 }
 
 /// Puts the main window back on screen, from a window that is not it.
@@ -1232,6 +1321,20 @@ mod tests {
             }
         }
         app
+    }
+
+    /// The summoned windows are not part of the desk: they are never counted against the ceilings and are
+    /// not put away with it. The «Te necesitan» window joins the ask box and Codi in that.
+    #[test]
+    fn the_utility_windows_are_not_the_desk() {
+        for kind in [SatelliteKind::Quick, SatelliteKind::Codi, SatelliteKind::Attention] {
+            assert!(kind.is_utility(), "{kind:?}");
+        }
+        for kind in [SatelliteKind::App, SatelliteKind::Repo, SatelliteKind::File] {
+            assert!(!kind.is_utility(), "{kind:?}");
+        }
+        assert_eq!(SatelliteKind::Attention.slug(), "attention");
+        assert_eq!(label_for(SatelliteKind::Attention, ATTENTION_REF_ID), "sat-attention-attention");
     }
 
     const NOTES: (&str, SatelliteKind, &str) = ("sat-app-notes", SatelliteKind::App, "notes");

@@ -403,6 +403,16 @@ export interface AgentCliDone {
 export const onAgentCliNotify = (handler: (text: string) => void) =>
   listen<string>("agentcli:notify", (e) => handler(e.payload));
 
+/** Something an agent made through `cf`: a draft task or a proposed memory. */
+export interface AgentCliCreated {
+  kind: "task" | "memory";
+  id: string;
+  title: string;
+}
+
+export const onAgentCliCreated = (handler: (created: AgentCliCreated) => void) =>
+  listen<AgentCliCreated>("agentcli:created", (e) => handler(e.payload));
+
 export const onAgentCliAsk = (handler: (ask: AgentCliAsk) => void) =>
   listen<AgentCliAsk>("agentcli:ask", (e) => handler(e.payload));
 

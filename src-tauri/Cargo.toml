@@ -481,6 +481,9 @@ rskafka = { version = "0.6", default-features = false, features = ["transport-tl
 # Flujos — «Convertir a Markdown»: Word, PowerPoint, Excel, OpenDocument, RTF, EPUB, CSV and PDF
 # with text, in-process and with no network.
 anydoc = "0.2.4"
+# `codeflow://flow/<name>` — the same «Enlace o terminal» trigger `codeflow --flow <name>` starts, from
+# Raycast, Shortcuts or a browser. Registers the scheme with the OS; the link only ever asks.
+tauri-plugin-deep-link = "2"
 
 # Sending a signal to a *process group*, which is what stopping an AI run needs: `child.kill()`
 # reaches the CLI and nothing it started, and every one of these CLIs is a Node process that spawns

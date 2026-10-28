@@ -30,6 +30,7 @@
 //! reading it — cold start is cheap enough that keeping the process alive "just in case" would be
 //! the wrong trade for a gigabyte of resident memory.
 
+pub mod breaker;
 pub mod catalogue;
 pub mod complete;
 pub mod download;

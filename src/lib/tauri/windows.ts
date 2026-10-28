@@ -79,6 +79,9 @@ export const setWindowUnsaved = (unsaved: boolean) => invoke<void>("set_window_u
 /** Raises the hotkey ask box, building it if needed. */
 export const quickAskOpen = () => invoke<string>("quick_ask_open");
 
+/** The «Te necesitan» window: what is waiting for a person, with the buttons to answer it. */
+export const attentionOpen = () => invoke<string>("attention_open");
+
 /** The quick-ask hotkey as stored: the chord bound now (`null` when switched off), and this
  *  platform's default. */
 export interface QuickAskShortcut {

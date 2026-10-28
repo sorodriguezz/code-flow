@@ -73,13 +73,16 @@ interface ToastGroup {
   raise: number;
   /** Where the most recent raise sits in the store: the newest card is the one that opens. */
   order: number;
+  action?: Toast["action"];
+  lifetimeMs?: number;
 }
 
-export function groupToasts(toasts: readonly Pick<Toast, "id" | "message" | "type">[]): ToastGroup[] {
+export function groupToasts(toasts: readonly Pick<Toast, "id" | "message" | "type" | "action" | "lifetimeMs">[]): ToastGroup[] {
   const byText = new Map<string, ToastGroup>();
   toasts.forEach((toast, order) => {
-    // `type` is one of three plain words, so `type|message` can't collide across types.
-    const text = `${toast.type}|${toast.message}`;
+    // `type` is one of three plain words, so `type|message` can't collide across types. A toast with an
+    // action is its own group: each one undoes a different thing.
+    const text = toast.action ? `action|${toast.id}` : `${toast.type}|${toast.message}`;
     const group = byText.get(text);
     if (group) {
       group.ids.push(toast.id);
@@ -94,13 +97,15 @@ export function groupToasts(toasts: readonly Pick<Toast, "id" | "message" | "typ
         fits: fitsInPill(toast.message),
         raise: 0,
         order,
+        action: toast.action,
+        lifetimeMs: toast.lifetimeMs,
       });
     }
   });
   return [...byText.values()];
 }
 
-const durationOf = (group: ToastGroup) => (group.type === "error" ? DURATION_ERROR_MS : DURATION_MS);
+const durationOf = (group: ToastGroup) => group.lifetimeMs ?? (group.type === "error" ? DURATION_ERROR_MS : DURATION_MS);
 
 function ToastCard({
   group,
@@ -125,8 +130,8 @@ function ToastCard({
   return (
     <MorphToast
       tone={group.type}
-      title={fits ? group.message : t(LABEL[group.type])}
-      titleKey={fits ? group.message : group.type}
+      title={group.action ? `${group.message} · ${group.action.label}` : fits ? group.message : t(LABEL[group.type])}
+      titleKey={group.action ? `${group.message}|${group.action.label}` : fits ? group.message : group.type}
       body={
         fits ? undefined : (
           // Selectable: an error is often something to paste somewhere.
@@ -143,6 +148,16 @@ function ToastCard({
       leaving={leaving}
       urgent={group.type === "error"}
       onHoverChange={onHoverChange}
+      // A card with an action *is* the button: pressing it runs the action and closes the card.
+      onActivate={
+        group.action
+          ? () => {
+              group.action?.run();
+              onDismiss();
+            }
+          : undefined
+      }
+      activateLabel={group.action?.label}
       trailing={
         <button
           type="button"

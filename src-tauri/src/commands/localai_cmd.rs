@@ -88,6 +88,8 @@ pub async fn localai_set_enabled(db: State<'_, Db>, enabled: bool) -> Result<(),
     // wakes. Turning it *on* deliberately starts nothing — see the lazy table in `engine`.
     if !enabled {
         engine::shutdown().await;
+    } else {
+        engine::START_BREAKER.reset();
     }
     Ok(())
 }
@@ -105,6 +107,8 @@ pub async fn localai_set_model(db: State<'_, Db>, model_id: String) -> Result<()
     // one. Stopping here rather than letting the next request notice keeps a gigabyte of the
     // *previous* model from sitting resident until someone types.
     engine::shutdown().await;
+    // Choosing a model is the person acting: a pause for repeated failed starts ends here.
+    engine::START_BREAKER.reset();
     Ok(())
 }
 

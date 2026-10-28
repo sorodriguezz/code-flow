@@ -606,6 +606,33 @@ pub struct GatedChain {
     pub project_id: String,
     pub title: String,
     pub goal: String,
+    /// `chain`, `story` or `hybrid`. Only an ordinary plan's gate is a plain "go on": a story's is a
+    /// decision about several repositories and a hybrid's is its plan, so those are answered where they
+    /// are shown.
+    #[serde(default)]
+    pub kind: String,
+    /// The step the gate is in front of, so an approval can say which it was looking at.
+    #[serde(default)]
+    pub step_id: String,
+}
+
+/// A chain parked on something only the person can resolve, other than a gate: its engine's plan is spent,
+/// its CLI is signed out or missing, or a reviewer stopped the loop and is waiting to be told what to do.
+///
+/// Its own list rather than more rows of [`GatedChain`] because a gate has one meaning on every client —
+/// "approve this" — and a phone that offered Approve on a chain whose engine is out of quota would be
+/// offering something that cannot work. This one is only ever *shown*, and opened.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParkedChain {
+    pub chain_id: String,
+    pub workspace_id: String,
+    pub project_id: String,
+    pub title: String,
+    pub goal: String,
+    /// The translation key the chain is parked under (`chain.pausedQuota`, `chain.lapsExhausted`…).
+    pub reason: String,
+    /// When it resumes by itself, in seconds since the epoch; `0` when it waits for the person.
+    pub resume_at: i64,
 }
 
 /// One step as the frontend authors it, before anything is snapshotted or persisted.
@@ -640,6 +667,50 @@ pub struct NewChainStep {
     /// See [`AgentChainStep::on_fail`].
     #[serde(default = "minus_one")]
     pub on_fail: i64,
+    /// Makes this step a reviewer. `None` for every step authored before reviewers existed.
+    #[serde(default)]
+    pub review: Option<ReviewSpec>,
+}
+
+/// How strict a reviewer step is and how many times it may send the work back. See `chain_review`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReviewSpec {
+    /// `correct` (only what is wrong goes back) or `polished` (what could be better too).
+    #[serde(default)]
+    pub exigence: String,
+    /// Laps before the plan stops for the person to decide. 1..=8; 3 when absent.
+    #[serde(default)]
+    pub max_laps: i64,
+    /// Globs of files the worker must not change (`**/*.test.ts`, `tests/**`). Empty for none.
+    #[serde(default)]
+    pub protected_paths: Vec<String>,
+}
+
+/// A reviewer step's settings, as the detail pane reads them.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewInfo {
+    pub step_id: String,
+    pub exigence: String,
+    pub max_laps: i64,
+}
+
+/// One lap a reviewer sent work back for.
+#[derive(Debug, Clone, Serialize)]
+pub struct LapInfo {
+    pub step_id: String,
+    pub lap: i64,
+    pub blocking: i64,
+    pub must_count: i64,
+    pub should_count: i64,
+    pub summary: String,
+    pub created_at: String,
+}
+
+/// The reviewers of a chain and the laps they have sent back.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainReviewInfo {
+    pub reviews: Vec<ReviewInfo>,
+    pub laps: Vec<LapInfo>,
 }
 
 /// `-1` — "the default target", which is not what `i64::default()` gives.
@@ -661,6 +732,7 @@ impl Default for NewChainStep {
             check_command: String::new(),
             on_pass: -1,
             on_fail: -1,
+            review: None,
         }
     }
 }
@@ -768,6 +840,9 @@ pub struct ChainTemplateStep {
     /// See [`AgentChainStep::on_fail`].
     #[serde(default = "minus_one")]
     pub on_fail: i64,
+    /// Makes the step a reviewer when the template is applied. Workspace-neutral, so it travels.
+    #[serde(default)]
+    pub review: Option<ReviewSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

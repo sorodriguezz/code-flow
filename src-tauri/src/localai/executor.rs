@@ -181,16 +181,21 @@ pub async fn ensure_ready(entry: &ExecModelSpec, model_path: PathBuf, launch: La
         stop_locked(&mut guard).await;
     }
 
+    if let Err(seconds) = engine::START_BREAKER.allow() {
+        return Err(super::breaker::paused_message(seconds));
+    }
     set_status(Status::Starting { model_id: launch.model_id.clone() });
     match ExecEngine::spawn(entry, model_path, launch.clone()).await {
         Ok(engine) => {
             let engine = Arc::new(engine);
             *guard = Some(engine.clone());
+            engine::START_BREAKER.succeeded();
             set_status(Status::Ready { model_id: launch.model_id });
             spawn_reaper();
             Ok(engine)
         }
         Err(message) => {
+            engine::START_BREAKER.failed();
             set_status(Status::Failed { message: message.clone() });
             Err(message)
         }

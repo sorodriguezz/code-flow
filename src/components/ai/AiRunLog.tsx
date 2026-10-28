@@ -6,7 +6,9 @@ import { ThinkingOrb } from "../common/ThinkingOrb";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { RunPhase } from "../../lib/thinking/activity";
-import { parseRunSteps, phaseOfSteps, phaseOfTool, touchedFiles, type RunStep } from "../../lib/runSteps";
+import { parseRunSteps, phaseOfSteps, phaseOfTool, touchedFiles, withDurations, type RunStep } from "../../lib/runSteps";
+import { latestPlan } from "../../lib/runPlan";
+import { PlanChecklist } from "./PlanChecklist";
 import { lanesOf, type SubagentLane } from "../../lib/subagentLanes";
 
 /**
@@ -96,27 +98,36 @@ export function AiRunLog({
   const lines = explicitLines ?? liveLines;
   const allSteps = useMemo(() => parseRunSteps(lines), [lines]);
   const { lanes } = useMemo(() => lanesOf(lines), [lines]);
-  const steps = useMemo(
-    () => (lanes.length > 0 ? parseRunSteps(mainFeedOf(lines)).filter((step) => !step.sub) : allSteps),
-    [allSteps, lanes, lines],
-  );
+  const steps = useMemo(() => {
+    const base = lanes.length > 0 ? parseRunSteps(mainFeedOf(lines)).filter((step) => !step.sub) : allSteps;
+    // A live run's last step is still going: measured to now (as of this render), not left unmeasured.
+    const lastAt = base.reduce((latest, step) => Math.max(latest, step.at ?? 0), 0);
+    return withDurations(base, running ? Date.now() : lastAt);
+  }, [allSteps, lanes, lines, running]);
   const laneSpan = { lanes, stepTotal: allSteps.length };
+  // The agent's own plan, pinned above the run: where it is, without reading its whole log.
+  const plan = useMemo(() => latestPlan(lines), [lines]);
 
   if (!running) {
     if (allSteps.length === 0 && !thinking?.trim()) return null;
     return (
-      <FinishedRun
-        steps={steps}
-        laneSpan={laneSpan}
-        thinking={thinking}
-        durationMs={durationMs}
-        label={label}
-        density={density}
-        defaultOpen={defaultOpen}
-      />
+      <>
+        {plan && <PlanChecklist plan={plan} compact />}
+        <FinishedRun
+          steps={steps}
+          laneSpan={laneSpan}
+          thinking={thinking}
+          durationMs={durationMs}
+          label={label}
+          density={density}
+          defaultOpen={defaultOpen}
+        />
+      </>
     );
   }
   return (
+    <>
+    {plan && <PlanChecklist plan={plan} compact />}
     <LiveRun
       runId={runId}
       steps={steps}
@@ -131,6 +142,7 @@ export function AiRunLog({
     >
       {children}
     </LiveRun>
+    </>
   );
 }
 
@@ -347,6 +359,7 @@ function LiveRun({
                       key={i}
                       step={step}
                       status={i === lastIndex ? lastStatus : "ok"}
+                      slowest={slowestOf(steps)}
                       compact={!reading}
                     />
                   ))}
@@ -416,6 +429,13 @@ function LiveRun({
   );
 }
 
+/** The longest measured step, or `undefined` when none was measured. */
+function slowestOf(steps: RunStep[]): number | undefined {
+  let longest = 0;
+  for (const step of steps) if (step.ms !== undefined && step.ms > longest) longest = step.ms;
+  return longest > 0 ? longest : undefined;
+}
+
 /** A finished run: one line that opens to the reasoning and every step, wrapped and selectable. */
 function FinishedRun({
   steps,
@@ -474,7 +494,7 @@ function FinishedRun({
           )}
           <ul className="grid min-w-0 grid-cols-[minmax(0,1fr)]">
             {steps.map((step, i) => (
-              <StepRow key={i} step={step} status="ok" compact wrap />
+              <StepRow key={i} step={step} status="ok" compact wrap slowest={slowestOf(steps)} />
             ))}
           </ul>
           {lanes.length > 0 && (
@@ -599,7 +619,20 @@ const STATUS_KEY: Record<StepStatus, TranslationKey> = {
  * says how it went; the model's own words and the CLI's statuses are plain text under a faint dot.
  * `compact` drops the status word (narrow panels), `wrap` lets long lines wrap (finished traces).
  */
-function StepRow({ step, status, compact, wrap }: { step: RunStep; status: StepStatus; compact?: boolean; wrap?: boolean }) {
+function StepRow({
+  step,
+  status,
+  compact,
+  wrap,
+  slowest,
+}: {
+  step: RunStep;
+  status: StepStatus;
+  compact?: boolean;
+  wrap?: boolean;
+  /** The longest step of the run, for the bar's scale: the slowest reads full width. */
+  slowest?: number;
+}) {
   const t = useT();
   const dot =
     step.error
@@ -630,6 +663,16 @@ function StepRow({ step, status, compact, wrap }: { step: RunStep; status: StepS
           }`}
         >
           {step.arg}
+        </span>
+      )}
+      {step.kind === "tool" && step.ms !== undefined && step.ms >= 1000 && (
+        <span className="relative flex shrink-0 items-center gap-1 font-mono text-[10px] text-[var(--cf-text-faint)]" title={`${step.ms} ms`}>
+          <span
+            aria-hidden
+            className="h-1 rounded-full bg-[var(--cf-ai-a)] opacity-60"
+            style={{ width: `${Math.max(3, Math.round((Math.min(step.ms, slowest ?? step.ms) / (slowest ?? step.ms)) * 36))}px` }}
+          />
+          {formatThoughtTime(step.ms)}
         </span>
       )}
       {!compact && step.kind === "tool" && (

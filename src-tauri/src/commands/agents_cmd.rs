@@ -529,9 +529,23 @@ pub fn create_agent_chain(
     if queries::expanded_step_count(&steps, &project_ids) > queries::MAX_CHAIN_ROWS {
         return Err("chain.tooManySteps".to_string());
     }
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::create_agent_chain(&conn, &project_ids, &title, &goal, &steps, &agent_project_id)
-        .map_err(|e| e.to_string())
+    let detail = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::create_agent_chain(&conn, &project_ids, &title, &goal, &steps, &agent_project_id).map_err(|e| e.to_string())?
+    };
+    // What the protected files hold now, before any worker has touched them: a file the person had
+    // already edited is then not blamed on the plan. `git` runs, so not under the lock.
+    let (protecting, roots) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        (queries::protecting_reviews(&conn, &detail.chain.id), queries::chain_repo_paths(&conn, &detail.chain.id).unwrap_or_default())
+    };
+    for (step_id, globs) in protecting {
+        let roots = roots.clone();
+        let baseline = crate::chain_review::protected_state(&roots, &globs);
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::set_review_baseline(&conn, &step_id, &baseline).map_err(|e| e.to_string())?;
+    }
+    Ok(detail)
 }
 
 /// A story run: one work item, N candidate repositories, and the two agents that will read it and
@@ -623,18 +637,40 @@ pub fn claim_next_chain_step(db: State<Db>, chain_id: String, run_id: String) ->
 /// exists so the *next* agent can read it with its own tools. A repository that has gone read-only
 /// must not turn a completed engine run into a failed one.
 #[tauri::command]
-pub fn complete_chain_step(
-    db: State<Db>,
+pub async fn complete_chain_step(
+    db: State<'_, Db>,
     step_id: String,
     outcome: String,
     output_text: String,
     reason: String,
 ) -> Result<Option<AgentChain>, String> {
+    // A reviewer's answer is read against the disk and the working copies — `git` runs — so that
+    // happens here, before the lock: a connection held across a process freezes every other command
+    // for as long as `git diff` takes on a large repository.
+    let env = {
+        let reviewer_repos = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            match (outcome == "done", queries::review_config(&conn, &step_id)) {
+                (true, Some(_)) => queries::chain_step_note(&conn, &step_id)
+                    .map_err(|e| e.to_string())?
+                    .map(|(chain_id, _, _)| (queries::chain_repo_paths(&conn, &chain_id).unwrap_or_default(), queries::review_protection(&conn, &step_id))),
+                _ => None,
+            }
+        };
+        match reviewer_repos {
+            Some((roots, (globs, baseline))) => {
+                let answer = output_text.clone();
+                Some(tokio::task::spawn_blocking(move || crate::chain_review::prepare(&answer, &roots, &globs, &baseline)).await.map_err(|e| e.to_string())?)
+            }
+            None => None,
+        }
+    };
+
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     // Read before the write: `complete_chain_step` can send the plan backwards, and a backward jump
     // resets this step to `pending`, which would leave nothing to name the note after.
     let filed = queries::chain_step_note(&conn, &step_id).map_err(|e| e.to_string())?;
-    let chain = queries::complete_chain_step(&conn, &step_id, &outcome, &output_text, &reason)
+    let chain = queries::complete_chain_step_reviewed(&conn, &step_id, &outcome, &output_text, &reason, env.as_ref())
         .map_err(|e| e.to_string())?;
 
     if let (Some((chain_id, step_index, agent_name)), true) = (filed, !output_text.trim().is_empty()) {
@@ -651,6 +687,30 @@ pub fn complete_chain_step(
         }
     }
     Ok(chain)
+}
+
+/// Chains parked on something only the person can resolve — a spent plan, a signed-out CLI, a reviewer
+/// that stopped the loop — in every workspace. Shown, never approved: see `ParkedChain`.
+#[tauri::command]
+pub fn list_parked_chains(db: State<Db>) -> Result<Vec<crate::db::models::ParkedChain>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::list_parked_chains(&conn).map_err(|e| e.to_string())
+}
+
+/// The reviewers of a chain and the laps they have sent work back for. See `chain_review`.
+#[tauri::command]
+pub fn chain_review_info(db: State<Db>, chain_id: String) -> Result<crate::db::models::ChainReviewInfo, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::chain_review_info(&conn, &chain_id).map_err(|e| e.to_string())
+}
+
+/// "One more lap": a chain a reviewer parked goes back to the worker once more. `None` when the
+/// reviewer is already at the most laps it may ever have.
+#[tauri::command]
+pub fn chain_extra_lap(db: State<Db>, chain_id: String, step_id: String) -> Result<Option<AgentChain>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let note = "You asked for one more lap: the reviewer's last findings still stand. Fix them.";
+    queries::grant_extra_lap(&conn, &chain_id, &step_id, note).map_err(|e| e.to_string())
 }
 
 /// Clears the gate a chain is parked at.
@@ -687,6 +747,23 @@ pub fn skip_chain_step(db: State<Db>, chain_id: String) -> Result<Option<AgentCh
 pub fn retry_chain_step(db: State<Db>, chain_id: String) -> Result<Option<AgentChain>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     queries::retry_chain_step(&conn, &chain_id).map_err(|e| e.to_string())
+}
+
+/// A chain's step has just parked it on a spent plan: gives that step to the first entry of the
+/// user's backup list that can take it (`backup_models`), and queues the plan again. `None` — and
+/// nothing changed — when there is no list, nobody on it can take the step, or the chain is not
+/// parked on a quota.
+#[tauri::command]
+pub fn chain_use_backup(db: State<Db>, step_id: String) -> Result<Option<AgentChain>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let raw = queries::get_setting(&conn, crate::backup_models::KEY).map_err(|e| e.to_string())?.unwrap_or_default();
+    let list = crate::backup_models::parse(&raw);
+    if list.is_empty() {
+        return Ok(None);
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    queries::use_backup_for_step(&conn, &step_id, &list, &|provider| crate::backup_models::held(provider, now))
+        .map_err(|e| e.to_string())
 }
 
 /// "Do that again, but…" — the plan from one step onward, carrying the user's own words into it.

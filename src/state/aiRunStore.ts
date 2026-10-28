@@ -42,6 +42,9 @@ const MAX_TRACE_LINES = 300;
 export interface AiRunLine {
   stream: "stdout" | "stderr";
   text: string;
+  /** When the window received it (ms since the epoch) — what the trace's durations are measured from.
+   *  Absent on lines that were not stamped (a persisted trace). */
+  at?: number;
   /** The sub-agent lanes this line speaks of (`lib/subagentLanes`) — Claude Code's only. */
   lanes?: LaneMark[];
 }
@@ -232,6 +235,7 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
       // stored log is what the user actually saw — and the noise never takes up a slot. Done for
       // the whole batch first so the `set` below is a single, plain append.
       const added: AiRunLine[] = [];
+      const stamp = Date.now();
       const logged = get().linesByRun[event.run_id];
       let last = logged?.[logged.length - 1]?.text;
       const openBefore = get().subagentsByRun[event.run_id] ?? NO_SUBAGENTS;
@@ -245,7 +249,7 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
         open = trackSubagents(open, entry.line);
         const line = readRunLine(reader, entry.stream, entry.line, last);
         if (line === null) continue;
-        added.push(line);
+        added.push({ ...line, at: stamp });
         // A line that only marks a lane's end prints nothing, and is not what the next repeats.
         if (line.text) last = line.text;
       }

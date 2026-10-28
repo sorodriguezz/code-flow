@@ -40,13 +40,13 @@ import { useChainStore } from "../../state/chainStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
-import { aiClassifyFailure, openExternalUrl, type AiFailure } from "../../lib/tauri/commands";
+import { aiClassifyFailure, chainReviewInfo, openExternalUrl, type AiFailure } from "../../lib/tauri/commands";
 import { isEnginePause, resumeInstant } from "../../lib/chainPause";
 import { pushErrorToast } from "../../state/toastStore";
 import { openWorkspaceChat } from "../../lib/aiPanelNav";
 import { useAiPanelStore } from "../../state/aiPanelStore";
 import { useT } from "../../state/languageStore";
-import type { AgentChain, AgentChainStep, ChainRepo, ChainStepPhase, ChainStepStatus } from "../../types/domain";
+import type { AgentChain, AgentChainStep, ChainRepo, ChainReviewInfo, ChainStepPhase, ChainStepStatus } from "../../types/domain";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
 /**
@@ -73,6 +73,20 @@ export function ChainDetail({ chainId }: { chainId: string }) {
     const ids = new Set(steps.map((step) => step.task_id).filter(Boolean));
     return costText(allTasks.filter((task) => ids.has(task.id)), t);
   }, [steps, allTasks, t]);
+
+  /** The reviewers this plan has and the laps they have sent work back for. Re-read whenever the chain
+   * moves: a lap is written by the same call that moves it. */
+  const [reviews, setReviews] = useState<ChainReviewInfo | null>(null);
+  const chainStamp = chain?.updated_at ?? "";
+  useEffect(() => {
+    let live = true;
+    void chainReviewInfo(chainId)
+      .then((info) => live && setReviews(info))
+      .catch(() => live && setReviews(null));
+    return () => {
+      live = false;
+    };
+  }, [chainId, chainStamp]);
 
   /** The gate's message, editable. Seeded once per gate so typing is never overwritten. */
   const [draft, setDraft] = useState<string | null>(null);
@@ -275,6 +289,8 @@ export function ChainDetail({ chainId }: { chainId: string }) {
           </p>
         )
       )}
+
+      {reviews && reviews.reviews.length > 0 && <ReviewPanel chain={chain} info={reviews} />}
 
       {/* No `space-y` any more: the gap between two steps is the rail, and a margin on top of it
           would break the line the rail exists to draw. The plan reads down one column of a
@@ -495,6 +511,61 @@ function formatResume(at: number): string {
  * read exactly, it also offers to carry on by itself then — opt-in, only while the app stays open,
  * and cancelled by any other move (see `setAutoResume`).
  */
+/** The reasons a reviewer stops the loop for the person to decide. Written by `chain_review::Stop::reason`. */
+const REVIEW_STOPS = ["chain.lapsExhausted", "chain.noProgress", "chain.stalled"];
+
+/**
+ * Where the reviewers stand: which lap, and how many blocking findings each one found. When one has
+ * stopped the loop, the person's three answers are here — accept the work as it is (resume), give it
+ * one more lap, or stop (the chain's own Stop).
+ */
+function ReviewPanel({ chain, info }: { chain: AgentChain; info: ChainReviewInfo }) {
+  const t = useT();
+  const stopped = chain.status === "paused" && REVIEW_STOPS.includes(chain.last_reason);
+  // The reviewer that last sent work back is the one the stop belongs to.
+  const byTime = [...info.laps].sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const latest = byTime[byTime.length - 1];
+  return (
+    <div className="shrink-0 space-y-1 border-b border-[var(--cf-border)] px-4 py-2 text-[12px]">
+      {info.reviews.map((review) => {
+        const laps = info.laps.filter((lap) => lap.step_id === review.step_id);
+        if (laps.length === 0) return null;
+        return (
+          <div key={review.step_id}>
+            <p className="flex flex-wrap items-center gap-x-2 text-[var(--cf-text)]">
+              <span className="font-medium">{t("agents.reviewLaps", { lap: laps.length, max: review.max_laps })}</span>
+              <span className="font-mono text-[var(--cf-text-muted)]">{laps.map((lap) => lap.blocking).join(" → ")}</span>
+            </p>
+            {laps[laps.length - 1].summary && (
+              <p className="truncate text-[11px] text-[var(--cf-text-muted)]" title={laps[laps.length - 1].summary}>
+                {laps[laps.length - 1].summary}
+              </p>
+            )}
+          </div>
+        );
+      })}
+      {stopped && latest && (
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={() => void useChainStore.getState().resume(chain.id)}
+            className={buttonClass({ variant: "secondary", size: "sm" })}
+          >
+            {t("agents.reviewAcceptAsIs")}
+          </button>
+          <button
+            type="button"
+            onClick={() => void useChainStore.getState().extraLap(chain.id, latest.step_id)}
+            className={buttonClass({ variant: "ghost", size: "sm" })}
+          >
+            {t("agents.reviewOneMoreLap")}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EnginePause({ chain, steps }: { chain: AgentChain; steps: AgentChainStep[] }) {
   const t = useT();
   // The step that bounced: the pause hands it back to `pending` with the error still on it.

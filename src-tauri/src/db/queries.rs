@@ -4,8 +4,8 @@ use uuid::Uuid;
 
 use super::models::{
     ActivityLogEntry, AgentChain, AgentChainStep, AgentProject, AgentTask, BenchTab, ChainClaim, ChainDetail,
-    ChainRepo, ChainStepBrief, ChainTemplate, ChainTemplateStep, ChatConversationSummary, DocPage,
-    GatedChain, HarvestOutcome,
+    ChainRepo, ChainStepBrief, ChainTemplate, ChainTemplateStep, ReviewSpec, ChatConversationSummary, DocPage,
+    GatedChain, HarvestOutcome, ParkedChain,
     JobHistoryEntry, NewChainStep, NewProject, NewStoryWorkItem, Project, ReviewContext, ReviewRunDetail,
     ReviewRunSummary, StoryBatch, StoryBatchDetail, StoryDraft, Workspace, WorkspaceActivityEntry,
     WorkspaceAgent, WorkspaceSkill, WorkspaceTerminal, WorkItemReviewRow,
@@ -1680,6 +1680,16 @@ found it so nobody has to look twice.\n\n"
 /// and none of its steps gets the shared-memory block, whose standing instruction asks for a prose
 /// handoff the plan's JSON answer and the review's verdict line both contradict.
 fn compose_step_message(conn: &Connection, chain: &AgentChain, step: &AgentChainStep) -> rusqlite::Result<String> {
+    let message = compose_step_message_plain(conn, chain, step)?;
+    // A reviewer is told the shape it answers in and what sends the work back, at the end of what it
+    // reads, where it is the last thing before it writes.
+    Ok(match review_config(conn, &step.id) {
+        Some((exigence, _)) => format!("{message}\n\n{}", crate::chain_review::instruction(exigence)),
+        None => message,
+    })
+}
+
+fn compose_step_message_plain(conn: &Connection, chain: &AgentChain, step: &AgentChainStep) -> rusqlite::Result<String> {
     if chain.kind == "hybrid" && step.phase == "execute" {
         return hybrid_plan_text(conn, &chain.id);
     }
@@ -1983,6 +1993,300 @@ pub fn set_chain_resume_at(conn: &Connection, chain_id: &str, resume_at: i64) ->
     chain_row(conn, chain_id)
 }
 
+// ---------- reviewer steps ----------
+
+/// A reviewer step's settings, or `None` when the step is an ordinary one. `max_laps` is clamped to
+/// what `chain_review` allows, whatever a row says.
+pub fn review_config(conn: &Connection, step_id: &str) -> Option<(crate::chain_review::Exigence, i64)> {
+    conn.query_row(
+        "SELECT exigence, max_laps FROM agent_chain_reviews WHERE step_id = ?1",
+        params![step_id],
+        |row| {
+            let exigence: String = row.get(0)?;
+            let laps: i64 = row.get(1)?;
+            Ok((crate::chain_review::Exigence::parse(&exigence), laps.clamp(1, crate::chain_review::MAX_LAPS_CAP)))
+        },
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// Makes `step_id` a reviewer. Replaces what was there.
+pub fn set_review_config(conn: &Connection, step_id: &str, spec: &crate::db::models::ReviewSpec) -> rusqlite::Result<()> {
+    let exigence = crate::chain_review::Exigence::parse(&spec.exigence);
+    let laps = if spec.max_laps <= 0 { crate::chain_review::DEFAULT_MAX_LAPS } else { spec.max_laps.min(crate::chain_review::MAX_LAPS_CAP) };
+    conn.execute(
+        "INSERT INTO agent_chain_reviews (step_id, exigence, max_laps, protected_paths) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(step_id) DO UPDATE SET exigence = excluded.exigence, max_laps = excluded.max_laps,
+            protected_paths = excluded.protected_paths",
+        params![step_id, exigence.as_str(), laps, spec.protected_paths.iter().map(|g| g.trim()).filter(|g| !g.is_empty()).collect::<Vec<_>>().join("\n")],
+    )?;
+    Ok(())
+}
+
+/// A reviewer's protected globs and the baseline taken when the chain was created.
+pub fn review_protection(conn: &Connection, step_id: &str) -> (Vec<String>, std::collections::BTreeMap<String, String>) {
+    conn.query_row("SELECT protected_paths, baseline FROM agent_chain_reviews WHERE step_id = ?1", params![step_id], |row| {
+        let globs: String = row.get(0)?;
+        let baseline: String = row.get(1)?;
+        Ok((
+            globs.lines().map(str::to_string).filter(|g| !g.is_empty()).collect(),
+            serde_json::from_str(&baseline).unwrap_or_default(),
+        ))
+    })
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or_default()
+}
+
+/// The reviewer steps of a chain that protect something, with their globs.
+pub fn protecting_reviews(conn: &Connection, chain_id: &str) -> Vec<(String, Vec<String>)> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT r.step_id, r.protected_paths FROM agent_chain_reviews r JOIN agent_chain_steps s ON s.id = r.step_id
+          WHERE s.chain_id = ?1 AND r.protected_paths <> ''",
+    ) else {
+        return Vec::new();
+    };
+    stmt.query_map(params![chain_id], |row| {
+        let globs: String = row.get(1)?;
+        Ok((row.get::<_, String>(0)?, globs.lines().map(str::to_string).collect::<Vec<_>>()))
+    })
+    .map(|rows| rows.flatten().collect())
+    .unwrap_or_default()
+}
+
+/// Records what the protected files held when the chain began. Called once, right after creation.
+pub fn set_review_baseline(conn: &Connection, step_id: &str, baseline: &std::collections::BTreeMap<String, String>) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_chain_reviews SET baseline = ?2 WHERE step_id = ?1",
+        params![step_id, serde_json::to_string(baseline).unwrap_or_default()],
+    )?;
+    Ok(())
+}
+
+/// The laps a reviewer has already sent work back for, oldest first.
+pub fn laps_of(conn: &Connection, step_id: &str) -> rusqlite::Result<Vec<crate::chain_review::Lap>> {
+    let mut stmt = conn.prepare(
+        "SELECT lap, blocking, findings_hash, state_hash FROM agent_chain_laps WHERE step_id = ?1 ORDER BY lap",
+    )?;
+    let rows = stmt.query_map(params![step_id], |row| {
+        Ok(crate::chain_review::Lap { lap: row.get(0)?, blocking: row.get(1)?, findings_hash: row.get(2)?, state_hash: row.get(3)? })
+    })?;
+    rows.collect()
+}
+
+fn record_lap(
+    conn: &Connection,
+    chain_id: &str,
+    step_id: &str,
+    lap: &crate::chain_review::Lap,
+    findings: &[crate::chain_review::Finding],
+    summary: &str,
+) -> rusqlite::Result<()> {
+    use crate::chain_review::Severity;
+    let count = |severity: Severity| findings.iter().filter(|found| found.severity == severity).count() as i64;
+    conn.execute(
+        "INSERT INTO agent_chain_laps (chain_id, step_id, lap, blocking, must_count, should_count, findings_hash, state_hash, summary, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![chain_id, step_id, lap.lap, lap.blocking, count(Severity::Must), count(Severity::Should), lap.findings_hash, lap.state_hash, summary, now()],
+    )?;
+    Ok(())
+}
+
+/// The reviewers of a chain and the laps they have sent back — what the detail pane draws.
+pub fn chain_review_info(conn: &Connection, chain_id: &str) -> rusqlite::Result<crate::db::models::ChainReviewInfo> {
+    use crate::db::models::{ChainReviewInfo, LapInfo, ReviewInfo};
+    let mut reviews = conn.prepare(
+        "SELECT r.step_id, r.exigence, r.max_laps FROM agent_chain_reviews r
+           JOIN agent_chain_steps s ON s.id = r.step_id WHERE s.chain_id = ?1 ORDER BY s.step_index",
+    )?;
+    let reviews = reviews
+        .query_map(params![chain_id], |row| Ok(ReviewInfo { step_id: row.get(0)?, exigence: row.get(1)?, max_laps: row.get(2)? }))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut laps = conn.prepare(
+        "SELECT step_id, lap, blocking, must_count, should_count, summary, created_at
+           FROM agent_chain_laps WHERE chain_id = ?1 ORDER BY step_id, lap",
+    )?;
+    let laps = laps
+        .query_map(params![chain_id], |row| {
+            Ok(LapInfo {
+                step_id: row.get(0)?,
+                lap: row.get(1)?,
+                blocking: row.get(2)?,
+                must_count: row.get(3)?,
+                should_count: row.get(4)?,
+                summary: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(ChainReviewInfo { reviews, laps })
+}
+
+/// "One more lap": allows the reviewer one more round than it was configured for — never past the cap
+/// — and sends the plan back to where the reviewer would have sent it, with `note`. A person deciding
+/// to spend more is the one override of the stop rules, which is why it exists at all.
+pub fn grant_extra_lap(conn: &Connection, chain_id: &str, review_step_id: &str, note: &str) -> rusqlite::Result<Option<AgentChain>> {
+    let Some(step) = step_row(conn, review_step_id)? else { return Ok(None) };
+    let Some((_, max_laps)) = review_config(conn, review_step_id) else { return Ok(None) };
+    if step.chain_id != chain_id || max_laps >= crate::chain_review::MAX_LAPS_CAP {
+        return Ok(None);
+    }
+    conn.execute("UPDATE agent_chain_reviews SET max_laps = ?2 WHERE step_id = ?1", params![review_step_id, max_laps + 1])?;
+    // The ledger is cleared of the stop that parked the plan: the same findings or the same tree are
+    // exactly what the person has just decided to let the worker try again on.
+    conn.execute(
+        "DELETE FROM agent_chain_laps WHERE step_id = ?1 AND lap = (SELECT MAX(lap) FROM agent_chain_laps WHERE step_id = ?1)
+           AND EXISTS (SELECT 1 FROM agent_chains WHERE id = ?2 AND last_reason IN ('chain.noProgress','chain.stalled'))",
+        params![review_step_id, chain_id],
+    )?;
+    let target = review_target(&step);
+    rerun_chain_from(conn, chain_id, target, note)
+}
+
+/// Where a reviewer sends the plan back to: its own `on_fail` when that points earlier, else the step
+/// before it. `None`-like (`-1`) for the first step, which has nowhere to go back to.
+fn review_target(step: &AgentChainStep) -> i64 {
+    if step.on_fail >= 0 && step.on_fail < step.step_index {
+        step.on_fail
+    } else {
+        step.step_index - 1
+    }
+}
+
+/// What a reviewer's answer did to the plan.
+enum Reviewed {
+    /// Nothing to send back: the step is done like any other.
+    Pass,
+    /// The plan was moved (back a lap, re-asked, or parked): this is the chain as it stands.
+    Moved(Option<AgentChain>),
+}
+
+/// Judges a reviewer step's answer. Everything that decides is in `chain_review`; this applies it.
+///
+/// - **Unreadable** (no `VERDICT:`): the reviewer is asked again, through the same move a failed check
+///   makes. An answer nobody can read is not an approval.
+/// - **Nothing blocking** after anchoring and severity: pass. A `FIX` whose findings all name files that
+///   are not there, or are only `nit`s, is an `OK`.
+/// - **Something blocking**: record the lap and either go back or, when a stop rule fires, park for the
+///   person to choose (accept as is = Resume, another lap, or stop).
+fn settle_review(
+    conn: &Connection,
+    step: &AgentChainStep,
+    output_text: &str,
+    exigence: crate::chain_review::Exigence,
+    max_laps: i64,
+    env: &crate::chain_review::ReviewEnv,
+) -> rusqlite::Result<Reviewed> {
+    use crate::chain_review as review;
+    let (clamped, truncated) = clamp_handoff(output_text.trim());
+    let chain_id = step.chain_id.as_str();
+
+    if env.review.is_none() {
+        conn.execute(
+            "UPDATE agent_chain_steps SET output_text = ?2, output_truncated = ?3, run_id = '',
+                last_error = 'chain.reviewUnreadable', updated_at = ?4 WHERE id = ?1",
+            params![step.id, clamped, truncated, now()],
+        )?;
+        let note = "Your last answer could not be read: it had no `VERDICT:` line. Answer again in the requested shape.".to_string();
+        jump_to(conn, chain_id, step.step_index, step.step_index, &note)?;
+        set_chain_state(conn, chain_id, "queued", "chain.reviewUnreadable")?;
+        return Ok(Reviewed::Moved(chain_row(conn, chain_id)?));
+    }
+
+    let mut blocking = review::blocking(&env.grounded, exigence);
+    // A protected file the worker changed blocks whatever the reviewer said, and at any exigence.
+    for found in review::protected_findings(&env.protected_changed) {
+        if !blocking.iter().any(|b| b.file == found.file) {
+            blocking.push(found);
+        }
+    }
+    let target = review_target(step);
+    // Nothing to send back, or nowhere to send it: the first step has no step before it.
+    if blocking.is_empty() || target < 0 {
+        return Ok(Reviewed::Pass);
+    }
+
+    let done = laps_of(conn, &step.id)?;
+    let now_lap = review::Lap {
+        lap: done.len() as i64 + 1,
+        blocking: blocking.len() as i64,
+        findings_hash: review::findings_hash(&blocking),
+        state_hash: env.state_hash.clone(),
+    };
+    let summary = blocking.iter().take(3).map(|found| format!("{}: {}", found.file, found.problem)).collect::<Vec<_>>().join(" · ");
+    record_lap(conn, chain_id, &step.id, &now_lap, &blocking, &summary)?;
+
+    conn.execute(
+        "UPDATE agent_chain_steps SET status = 'done', output_text = ?2, output_truncated = ?3, run_id = '',
+            last_error = '', updated_at = ?4 WHERE id = ?1",
+        params![step.id, clamped, truncated, now()],
+    )?;
+
+    if let Some(stop) = review::stop_reason(&done, &now_lap, max_laps) {
+        // Parked, not failed: the work is probably mostly right, and what to do next is the person's.
+        set_chain_state(conn, chain_id, "paused", stop.reason())?;
+        return Ok(Reviewed::Moved(chain_row(conn, chain_id)?));
+    }
+
+    let note = review::note_for_worker(&blocking, &done, now_lap.lap);
+    jump_to(conn, chain_id, step.step_index, target, &note)?;
+    // A lap is the plan working, not a retry: from the step it returns to, the attempts start over.
+    // `MAX_CHAIN_DISPATCHES` is still the bound that nothing here can raise.
+    conn.execute(
+        "UPDATE agent_chain_steps SET attempts = 0, gate_cleared = 1, updated_at = ?3 WHERE chain_id = ?1 AND step_index >= ?2",
+        params![chain_id, target, now()],
+    )?;
+    set_chain_state(conn, chain_id, "queued", "chain.reviewRejected")?;
+    Ok(Reviewed::Moved(chain_row(conn, chain_id)?))
+}
+
+/// Hands a step whose provider just refused for quota to the next entry of the user's backup list,
+/// and puts the plan back in the queue. `None` when nothing applies: the chain is not parked on a
+/// quota, the step is not waiting to be re-sent, the list has nobody who can take it, or the one
+/// that could has no model to run (a step needs both a provider and a model — see
+/// `claim_next_chain_step`).
+///
+/// What is rewritten is the step's own routing: its provider and model, its account (the old one
+/// belongs to the old provider) and its task, because a task carries the provider's session and a
+/// session cannot move between engines. The brief it was about to send stays as it was, so the new
+/// engine gets exactly what the first one would have. Nothing the plan already finished is touched.
+pub fn use_backup_for_step(
+    conn: &Connection,
+    step_id: &str,
+    list: &[crate::backup_models::Backup],
+    held: &dyn Fn(&str) -> bool,
+) -> rusqlite::Result<Option<AgentChain>> {
+    let Some(step) = step_row(conn, step_id)? else { return Ok(None) };
+    let Some(chain) = chain_row(conn, &step.chain_id)? else { return Ok(None) };
+    if chain.status != "paused" || chain.last_reason != "chain.pausedQuota" || step.status != "pending" {
+        return Ok(None);
+    }
+    // The analysis half of a story only reads: it keeps that limit on whoever takes it.
+    let needs_read_only = step.phase == "analyze";
+    let Some(next) = crate::backup_models::pick(list, (&step.provider, &step.model), needs_read_only, held) else {
+        return Ok(None);
+    };
+    let model = if next.model.is_empty() {
+        get_setting(conn, &format!("{}_model", next.provider))?.unwrap_or_default().trim().to_string()
+    } else {
+        next.model.clone()
+    };
+    if model.is_empty() {
+        return Ok(None);
+    }
+    conn.execute(
+        "UPDATE agent_chain_steps SET provider = ?2, model = ?3, account_id = NULL, task_id = '',
+            last_error = '', updated_at = ?4
+         WHERE id = ?1",
+        params![step.id, next.provider, model, now()],
+    )?;
+    set_chain_state(conn, &step.chain_id, "queued", "chain.usedBackup")?;
+    chain_row(conn, &step.chain_id)
+}
+
 /// Every chain waiting on an automatic resume, in **every** workspace — `(chain id, epoch seconds)`.
 ///
 /// Unscoped for the reason [`list_gated_chains`] is: a timer the user armed in one workspace has to
@@ -2028,7 +2332,10 @@ pub fn list_gated_chains(conn: &Connection) -> rusqlite::Result<Vec<GatedChain>>
                       WHERE s.chain_id = c.id AND s.status = 'pending' AND s.project_id <> ''
                       ORDER BY s.step_index DESC LIMIT 1),
                     c.project_id
-                )
+                ),
+                c.kind,
+                COALESCE((SELECT s.id FROM agent_chain_steps s WHERE s.chain_id = c.id AND s.status = 'pending'
+                           ORDER BY s.step_index LIMIT 1), '')
          FROM agent_chains c JOIN projects p ON p.id = c.project_id
          WHERE c.status = 'gated'
          ORDER BY c.updated_at DESC, c.created_at DESC",
@@ -2040,6 +2347,45 @@ pub fn list_gated_chains(conn: &Connection) -> rusqlite::Result<Vec<GatedChain>>
             title: row.get(2)?,
             goal: row.get(3)?,
             project_id: row.get(4)?,
+            kind: row.get(5)?,
+            step_id: row.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// The `last_reason`s that mean a paused chain is waiting on the person rather than on time. The first
+/// four are the engine pauses (see [`chain_pause_reason`]); the last three are `chain_review::Stop`.
+const PARKED_REASONS: [&str; 7] = [
+    "chain.pausedQuota",
+    "chain.pausedAuth",
+    "chain.pausedCliMissing",
+    "chain.pausedLocalModel",
+    "chain.lapsExhausted",
+    "chain.noProgress",
+    "chain.stalled",
+];
+
+/// Chains parked on something only the person can resolve, in **every** workspace — see [`ParkedChain`].
+/// Scoped like [`list_gated_chains`] and for the same reason: the person is looking at one workspace
+/// and the plan that needs them may be in another.
+pub fn list_parked_chains(conn: &Connection) -> rusqlite::Result<Vec<ParkedChain>> {
+    let reasons = PARKED_REASONS.iter().map(|reason| format!("'{reason}'")).collect::<Vec<_>>().join(", ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT c.id, p.workspace_id, c.project_id, c.title, c.goal, c.last_reason, c.resume_at
+         FROM agent_chains c JOIN projects p ON p.id = c.project_id
+         WHERE c.status = 'paused' AND c.last_reason IN ({reasons})
+         ORDER BY c.updated_at DESC, c.created_at DESC"
+    ))?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ParkedChain {
+            chain_id: row.get(0)?,
+            workspace_id: row.get(1)?,
+            project_id: row.get(2)?,
+            title: row.get(3)?,
+            goal: row.get(4)?,
+            reason: row.get(5)?,
+            resume_at: row.get(6)?,
         })
     })?;
     rows.collect()
@@ -2268,6 +2614,7 @@ fn create_chain_inner(
 
     for (index, (step, target)) in rows.iter().enumerate() {
         let agent = roster.iter().find(|a| a.id == step.agent_id);
+        let step_id = Uuid::new_v4().to_string();
         tx.execute(
             "INSERT INTO agent_chain_steps (id, chain_id, step_index, project_id, phase, agent_id,
                 agent_name, provider, model, prompt, instruction, gate, gate_cleared, pending_input,
@@ -2277,7 +2624,7 @@ fn create_chain_inner(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 0, '', '', '', -1, '', 0,
                 'pending', 0, '', ?14, ?15, ?16, '', ?13, ?13, ?17)",
             params![
-                Uuid::new_v4().to_string(),
+                step_id,
                 chain.id,
                 index as i64,
                 target,
@@ -2296,6 +2643,11 @@ fn create_chain_inner(
                 agent.and_then(|a| a.account_id.clone()),
             ],
         )?;
+        // A `"*"` step is expanded into one row per repository, and a reviewer of "every repository"
+        // is not a thing: the setting only applies to a step that is one row.
+        if let Some(spec) = step.review.as_ref().filter(|_| step.project_id != "*") {
+            set_review_config(&tx, &step_id, spec)?;
+        }
     }
     tx.commit()?;
     let steps = steps_of(conn, &chain.id)?;
@@ -3235,6 +3587,20 @@ pub fn complete_chain_step(
     output_text: &str,
     reason: &str,
 ) -> rusqlite::Result<Option<AgentChain>> {
+    complete_chain_step_reviewed(conn, step_id, outcome, output_text, reason, None)
+}
+
+/// [`complete_chain_step`], with what a reviewer's answer needs to be judged: the answer parsed, its
+/// findings anchored in the repositories, and the working tree's fingerprint — all read by the caller
+/// outside the database lock. `None` completes a reviewer step like any other.
+pub fn complete_chain_step_reviewed(
+    conn: &Connection,
+    step_id: &str,
+    outcome: &str,
+    output_text: &str,
+    reason: &str,
+    env: Option<&crate::chain_review::ReviewEnv>,
+) -> rusqlite::Result<Option<AgentChain>> {
     let Some(step) = step_row(conn, step_id)? else { return Ok(None) };
     let chain_id = step.chain_id.clone();
 
@@ -3335,6 +3701,15 @@ pub fn complete_chain_step(
             loop_back_to_execute(conn, &chain_id)?;
             set_chain_state(conn, &chain_id, "queued", "")?;
             return chain_row(conn, &chain_id);
+        }
+    }
+    // A reviewer's answer is judged before the step is called done: it may send the plan back.
+    if outcome == "done" {
+        if let (Some((exigence, max_laps)), Some(env)) = (review_config(conn, &step.id), env) {
+            match settle_review(conn, &step, output_text, exigence, max_laps, env)? {
+                Reviewed::Pass => {}
+                Reviewed::Moved(chain) => return Ok(chain),
+            }
         }
     }
     let pending_verdict = outcome == "done"
@@ -3907,7 +4282,7 @@ pub fn recover_after_restart(conn: &Connection) -> rusqlite::Result<()> {
 
 fn template_steps(conn: &Connection, template_id: &str) -> rusqlite::Result<Vec<ChainTemplateStep>> {
     let mut stmt = conn.prepare(
-        "SELECT id, template_id, step_index, agent_id, instruction, gate, check_command, on_pass, on_fail
+        "SELECT id, template_id, step_index, agent_id, instruction, gate, check_command, on_pass, on_fail, review
          FROM workspace_chain_template_steps WHERE template_id = ?1 ORDER BY step_index",
     )?;
     let rows = stmt.query_map(params![template_id], |row| {
@@ -3921,6 +4296,7 @@ fn template_steps(conn: &Connection, template_id: &str) -> rusqlite::Result<Vec<
             check_command: row.get(6)?,
             on_pass: row.get(7)?,
             on_fail: row.get(8)?,
+            review: serde_json::from_str::<ReviewSpec>(&row.get::<_, String>(9)?).ok(),
         })
     })?;
     rows.collect()
@@ -3989,8 +4365,8 @@ pub fn upsert_chain_template(
     for (index, step) in steps.iter().enumerate() {
         tx.execute(
             "INSERT INTO workspace_chain_template_steps (id, template_id, step_index, agent_id,
-                instruction, gate, check_command, on_pass, on_fail)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                instruction, gate, check_command, on_pass, on_fail, review)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 Uuid::new_v4().to_string(),
                 template_id,
@@ -4001,6 +4377,7 @@ pub fn upsert_chain_template(
                 step.check_command.trim(),
                 step.on_pass,
                 step.on_fail,
+                step.review.as_ref().map(|spec| serde_json::to_string(spec).unwrap_or_default()).unwrap_or_default(),
             ],
         )?;
     }
@@ -7752,6 +8129,277 @@ ok", "").unwrap().unwrap();
         assert_eq!(steps[0].output_text, "el plan", "the failed attempt left no residue on it");
     }
 
+    // ---- reviewer steps -------------------------------------------------------------------------
+
+    /// worker → reviewer → closer. The reviewer sends the plan back to the worker.
+    fn reviewed_plan(conn: &Connection, project: &str, exigence: &str, max_laps: i64) -> ChainDetail {
+        let workspace: String =
+            conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0)).unwrap();
+        let agent = upsert_workspace_agent(conn, None, &workspace, "Bot", "role", "claude", "sonnet", "", true, None).unwrap();
+        let step = |instruction: &str, review: Option<crate::db::models::ReviewSpec>| NewChainStep {
+            agent_id: agent.id.clone(),
+            instruction: instruction.into(),
+            review,
+            ..Default::default()
+        };
+        let spec = crate::db::models::ReviewSpec { exigence: exigence.into(), max_laps, ..Default::default() };
+        let detail = create_agent_chain(
+            conn,
+            &[project.to_string()],
+            "plan",
+            "objetivo",
+            &[step("build it", None), step("review it", Some(spec)), step("ship it", None)],
+            "",
+        )
+        .unwrap();
+        resume_chain(conn, &detail.chain.id).unwrap();
+        detail
+    }
+
+    fn finding(severity: crate::chain_review::Severity, file: &str, problem: &str) -> crate::chain_review::Finding {
+        crate::chain_review::Finding { severity, file: file.into(), line: Some(3), problem: problem.into(), check: String::new() }
+    }
+
+    fn review_env(found: Vec<crate::chain_review::Finding>, state: &str) -> crate::chain_review::ReviewEnv {
+        crate::chain_review::ReviewEnv {
+            review: Some(crate::chain_review::Review { ok: found.is_empty(), findings: found.clone() }),
+            grounded: found,
+            state_hash: state.into(),
+            protected_changed: Vec::new(),
+        }
+    }
+
+    /// Runs the worker, then the reviewer with `env`, and returns what the plan looks like after.
+    fn work_then_review(conn: &Connection, chain_id: &str, env: &crate::chain_review::ReviewEnv) -> AgentChain {
+        let worker = claim_next_chain_step(conn, chain_id, "run-w").unwrap().step.unwrap();
+        assert_eq!(worker.step_index, 0);
+        complete_chain_step(conn, &worker.id, "done", "built", "").unwrap();
+        let reviewer = claim_next_chain_step(conn, chain_id, "run-r").unwrap().step.unwrap();
+        assert_eq!(reviewer.step_index, 1);
+        complete_chain_step_reviewed(conn, &reviewer.id, "done", "VERDICT: FIX", "", Some(env)).unwrap().unwrap()
+    }
+
+    #[test]
+    fn a_reviewer_that_finds_a_must_sends_the_plan_back_to_the_step_before_it() {
+        use crate::chain_review::Severity::Must;
+        let (conn, project) = fixture();
+        let chain_id = reviewed_plan(&conn, &project, "correct", 3).chain.id;
+        let env = review_env(vec![finding(Must, "src/a.rs", "divides by zero")], "tree-1");
+        let chain = work_then_review(&conn, &chain_id, &env);
+        assert_eq!((chain.status.as_str(), chain.last_reason.as_str()), ("queued", "chain.reviewRejected"));
+
+        let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
+        assert_eq!(steps[0].status, "pending", "the worker goes again");
+        assert!(steps[0].feedback.contains("src/a.rs") && steps[0].feedback.contains("divides by zero"), "{}", steps[0].feedback);
+        assert_eq!(steps[1].status, "pending", "and the reviewer after it");
+
+        let info = chain_review_info(&conn, &chain_id).unwrap();
+        assert_eq!(info.laps.len(), 1);
+        assert_eq!((info.laps[0].lap, info.laps[0].blocking, info.laps[0].must_count), (1, 1, 1));
+    }
+
+    #[test]
+    fn a_lap_is_not_a_retry_so_the_workers_attempts_start_over() {
+        use crate::chain_review::Severity::Must;
+        let (conn, project) = fixture();
+        let chain_id = reviewed_plan(&conn, &project, "correct", 3).chain.id;
+        work_then_review(&conn, &chain_id, &review_env(vec![finding(Must, "a", "one")], "t1"));
+        for step in get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps {
+            assert_eq!(step.attempts, 0, "step {} starts over", step.step_index);
+        }
+        // ...and the dispatch budget, the bound nothing here can raise, keeps counting.
+        assert!(chain_row(&conn, &chain_id).unwrap().unwrap().dispatches >= 2);
+    }
+
+    #[test]
+    fn nothing_anchored_and_blocking_is_a_pass() {
+        use crate::chain_review::Severity::{Nit, Should};
+        let (conn, project) = fixture();
+        // Only a `should` under the default exigence, and a nit: neither sends work back.
+        let chain_id = reviewed_plan(&conn, &project, "correct", 3).chain.id;
+        let env = review_env(vec![finding(Should, "a", "could be nicer"), finding(Nit, "b", "taste")], "t1");
+        let chain = work_then_review(&conn, &chain_id, &env);
+        assert_eq!(chain.status, "queued");
+        assert_ne!(chain.last_reason, "chain.reviewRejected");
+        let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
+        assert_eq!(steps[1].status, "done");
+        assert!(chain_review_info(&conn, &chain_id).unwrap().laps.is_empty());
+    }
+
+    #[test]
+    fn a_changed_protected_file_sends_the_plan_back_even_when_the_reviewer_approved() {
+        let (conn, project) = fixture();
+        let chain_id = reviewed_plan(&conn, &project, "correct", 3).chain.id;
+        let mut env = review_env(Vec::new(), "t1");
+        env.protected_changed = vec!["src/a.test.ts".to_string()];
+        let chain = work_then_review(&conn, &chain_id, &env);
+        assert_eq!(chain.last_reason, "chain.reviewRejected");
+        let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
+        assert!(steps[0].feedback.contains("src/a.test.ts") && steps[0].feedback.contains("protected"), "{}", steps[0].feedback);
+    }
+
+    #[test]
+    fn protected_globs_and_the_baseline_round_trip() {
+        let (conn, project) = fixture();
+        let chain_id = reviewed_plan(&conn, &project, "correct", 3).chain.id;
+        let reviewer = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps.pop().unwrap().id;
+        set_review_config(&conn, &reviewer, &crate::db::models::ReviewSpec { exigence: "correct".into(), max_laps: 3, protected_paths: vec![" **/*.test.ts ".into(), "".into(), "tests/**".into()] }).unwrap();
+        assert_eq!(protecting_reviews(&conn, &chain_id), vec![(reviewer.clone(), vec!["**/*.test.ts".to_string(), "tests/**".to_string()])]);
+        let baseline: std::collections::BTreeMap<String, String> = [("0:a.test.ts".to_string(), "h".to_string())].into();
+        set_review_baseline(&conn, &reviewer, &baseline).unwrap();
+        assert_eq!(review_protection(&conn, &reviewer), (vec!["**/*.test.ts".to_string(), "tests/**".to_string()], baseline));
+        // Re-saving the config keeps the baseline.
+        set_review_config(&conn, &reviewer, &crate::db::models::ReviewSpec { exigence: "correct".into(), max_laps: 3, protected_paths: vec!["tests/**".into()] }).unwrap();
+        assert_eq!(review_protection(&conn, &reviewer).1.len(), 1);
+    }
+
+    #[test]
+    fn a_template_keeps_the_reviewer_and_its_protected_paths() {
+        let (conn, project) = fixture();
+        let workspace: String = conn.query_row("SELECT workspace_id FROM projects WHERE id = ?1", params![project], |r| r.get(0)).unwrap();
+        let agent = upsert_workspace_agent(&conn, None, &workspace, "Bot", "role", "claude", "sonnet", "", true, None).unwrap();
+        let step = |review: Option<crate::db::models::ReviewSpec>| NewChainStep { agent_id: agent.id.clone(), instruction: "x".into(), review, ..Default::default() };
+        let spec = crate::db::models::ReviewSpec { exigence: "polished".into(), max_laps: 4, protected_paths: vec!["tests/**".into()] };
+        let saved = upsert_chain_template(&conn, None, &workspace, "t", "", &[step(None), step(Some(spec))]).unwrap();
+        let listed = list_chain_templates(&conn, &workspace).unwrap();
+        let steps = &listed.iter().find(|t| t.id == saved.id).unwrap().steps;
+        assert!(steps[0].review.is_none());
+        let review = steps[1].review.as_ref().unwrap();
+        assert_eq!((review.exigence.as_str(), review.max_laps, review.protected_paths.clone()), ("polished", 4, vec!["tests/**".to_string()]));
+    }
+
+    #[test]
+    fn a_polished_reviewer_also_sends_back_a_should() {
+        use crate::chain_review::Severity::Should;
+        let (conn, project) = fixture();
+        let chain_id = reviewed_plan(&conn, &project, "polished", 3).chain.id;
+        let chain = work_then_review(&conn, &chain_id, &review_env(vec![finding(Should, "a", "could be nicer")], "t1"));
+        assert_eq!(chain.last_reason, "chain.reviewRejected");
+    }
+
+    #[test]
+    fn a_review_nobody_can_read_asks_again_and_is_never_an_approval() {
+        let (conn, project) = fixture();
+        let chain_id = reviewed_plan(&conn, &project, "correct", 3).chain.id;
+        let unreadable = crate::chain_review::ReviewEnv { review: None, grounded: Vec::new(), state_hash: "t".into(), protected_changed: Vec::new() };
+        let chain = work_then_review(&conn, &chain_id, &unreadable);
+        assert_eq!(chain.last_reason, "chain.reviewUnreadable");
+        let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
+        assert_eq!(steps[1].status, "pending", "the reviewer is asked again");
+        assert_eq!(steps[0].status, "done", "the worker is not sent back for it");
+        assert!(steps[1].feedback.contains("VERDICT"));
+    }
+
+    #[test]
+    fn the_same_working_tree_twice_parks_the_plan_for_the_person() {
+        use crate::chain_review::Severity::Must;
+        let (conn, project) = fixture();
+        let chain_id = reviewed_plan(&conn, &project, "correct", 8).chain.id;
+        work_then_review(&conn, &chain_id, &review_env(vec![finding(Must, "a", "first problem")], "same-tree"));
+        // The worker "fixed" it and changed nothing; a different complaint, the same tree.
+        let worker = claim_next_chain_step(&conn, &chain_id, "run-w2").unwrap().step.unwrap();
+        complete_chain_step(&conn, &worker.id, "done", "built again", "").unwrap();
+        let reviewer = claim_next_chain_step(&conn, &chain_id, "run-r2").unwrap().step.unwrap();
+        let env = review_env(vec![finding(Must, "a", "another problem")], "same-tree");
+        let chain = complete_chain_step_reviewed(&conn, &reviewer.id, "done", "VERDICT: FIX", "", Some(&env)).unwrap().unwrap();
+        assert_eq!((chain.status.as_str(), chain.last_reason.as_str()), ("paused", "chain.noProgress"));
+        // Parked, not failed: nothing the plan did is thrown away.
+        assert_eq!(get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps[1].status, "done");
+    }
+
+    #[test]
+    fn the_configured_laps_are_a_hard_stop_that_parks_rather_than_fails() {
+        use crate::chain_review::Severity::Must;
+        let (conn, project) = fixture();
+        let chain_id = reviewed_plan(&conn, &project, "correct", 1).chain.id;
+        work_then_review(&conn, &chain_id, &review_env(vec![finding(Must, "a", "p1")], "t1"));
+        let worker = claim_next_chain_step(&conn, &chain_id, "run-w2").unwrap().step.unwrap();
+        complete_chain_step(&conn, &worker.id, "done", "again", "").unwrap();
+        let reviewer = claim_next_chain_step(&conn, &chain_id, "run-r2").unwrap().step.unwrap();
+        let env = review_env(vec![finding(Must, "b", "p2 is different")], "t2");
+        let chain = complete_chain_step_reviewed(&conn, &reviewer.id, "done", "VERDICT: FIX", "", Some(&env)).unwrap().unwrap();
+        assert_eq!((chain.status.as_str(), chain.last_reason.as_str()), ("paused", "chain.lapsExhausted"));
+    }
+
+    #[test]
+    fn one_more_lap_raises_the_cap_by_one_and_sends_the_worker_back() {
+        use crate::chain_review::Severity::Must;
+        let (conn, project) = fixture();
+        let chain_id = reviewed_plan(&conn, &project, "correct", 1).chain.id;
+        work_then_review(&conn, &chain_id, &review_env(vec![finding(Must, "a", "p1")], "t1"));
+        let worker = claim_next_chain_step(&conn, &chain_id, "run-w2").unwrap().step.unwrap();
+        complete_chain_step(&conn, &worker.id, "done", "again", "").unwrap();
+        let reviewer = claim_next_chain_step(&conn, &chain_id, "run-r2").unwrap().step.unwrap();
+        let env = review_env(vec![finding(Must, "b", "p2 is different")], "t2");
+        complete_chain_step_reviewed(&conn, &reviewer.id, "done", "VERDICT: FIX", "", Some(&env)).unwrap();
+
+        let chain = grant_extra_lap(&conn, &chain_id, &reviewer.id, "go again").unwrap().unwrap();
+        assert_eq!(chain.status, "queued");
+        assert_eq!(review_config(&conn, &reviewer.id).unwrap().1, 2);
+        assert_eq!(get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps[0].status, "pending");
+    }
+
+    #[test]
+    fn chains_waiting_on_the_person_are_listed_apart_from_gates() {
+        use crate::chain_review::Severity::Must;
+        let (conn, project) = fixture();
+        // Parked on a spent quota.
+        let quota = queued_chain(&conn, &project, 1).chain.id;
+        let step = claim_next_chain_step(&conn, &quota, "run-q").unwrap().step.unwrap();
+        complete_chain_step(&conn, &step.id, "error", "", "QUOTA_EXCEEDED::limit").unwrap();
+        // Stopped by a reviewer: the same tree twice.
+        let stopped = reviewed_plan(&conn, &project, "correct", 8).chain.id;
+        work_then_review(&conn, &stopped, &review_env(vec![finding(Must, "a", "first")], "same"));
+        let worker = claim_next_chain_step(&conn, &stopped, "run-w2").unwrap().step.unwrap();
+        complete_chain_step(&conn, &worker.id, "done", "again", "").unwrap();
+        let reviewer = claim_next_chain_step(&conn, &stopped, "run-r2").unwrap().step.unwrap();
+        complete_chain_step_reviewed(&conn, &reviewer.id, "done", "VERDICT: FIX", "", Some(&review_env(vec![finding(Must, "a", "second")], "same"))).unwrap();
+        // An ordinary running plan is neither.
+        let running = queued_chain(&conn, &project, 1).chain.id;
+
+        let parked = list_parked_chains(&conn).unwrap();
+        let reasons: std::collections::HashMap<_, _> = parked.iter().map(|p| (p.chain_id.clone(), p.reason.clone())).collect();
+        assert_eq!(reasons.get(&quota).map(String::as_str), Some("chain.pausedQuota"));
+        assert_eq!(reasons.get(&stopped).map(String::as_str), Some("chain.noProgress"));
+        assert!(!reasons.contains_key(&running));
+        // None of them is a gate: a client that offers "Approve" on a gate must never see these there.
+        assert!(list_gated_chains(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_reviewer_cannot_be_given_more_laps_than_the_cap() {
+        use crate::chain_review::{MAX_LAPS_CAP, Severity::Must};
+        let (conn, project) = fixture();
+        let chain_id = reviewed_plan(&conn, &project, "correct", 100).chain.id;
+        let reviewer = steps_of(&conn, &chain_id).unwrap()[1].id.clone();
+        assert_eq!(review_config(&conn, &reviewer).unwrap().1, MAX_LAPS_CAP, "clamped when it was stored");
+        let _ = Must;
+        assert!(grant_extra_lap(&conn, &chain_id, &reviewer, "x").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_reviewer_step_is_told_what_to_answer_with() {
+        let (conn, project) = fixture();
+        let chain_id = reviewed_plan(&conn, &project, "polished", 3).chain.id;
+        let worker = claim_next_chain_step(&conn, &chain_id, "run-w").unwrap().step.unwrap();
+        complete_chain_step(&conn, &worker.id, "done", "built", "").unwrap();
+        let reviewer = claim_next_chain_step(&conn, &chain_id, "run-r").unwrap();
+        assert!(reviewer.message.contains("VERDICT: OK | FIX"));
+        assert!(reviewer.message.contains("`must` and `should`"));
+    }
+
+    #[test]
+    fn deleting_a_chain_takes_its_reviewers_and_laps_with_it() {
+        use crate::chain_review::Severity::Must;
+        let (conn, project) = fixture();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        let chain_id = reviewed_plan(&conn, &project, "correct", 3).chain.id;
+        work_then_review(&conn, &chain_id, &review_env(vec![finding(Must, "a", "p")], "t1"));
+        delete_chain(&conn, &chain_id).unwrap();
+        let rows: i64 = conn.query_row("SELECT (SELECT COUNT(*) FROM agent_chain_reviews) + (SELECT COUNT(*) FROM agent_chain_laps)", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0);
+    }
+
     /// Out of quota, signed out or with no CLI, a chain **parks and waits** — it does not retry
     /// itself to death. This is the bug the three instant attempts produced: a plan that hit the
     /// quota halfway was `failed` within seconds, with "Reintentar" left pointing at a step whose
@@ -7797,6 +8445,73 @@ ok", "").unwrap().unwrap();
         let chain = complete_chain_step(&conn, &step.id, "error", "", "API Error: 529 Overloaded").unwrap().unwrap();
         assert_eq!(chain.status, "queued");
         assert_eq!(step_row(&conn, &step.id).unwrap().unwrap().attempts, 1);
+    }
+
+    /// The backup list takes over a step whose provider ran out, and only that step.
+    #[test]
+    fn a_spent_quota_hands_the_step_to_the_next_provider_on_the_list() {
+        use crate::backup_models::Backup;
+        let (conn, project) = fixture();
+        let chain_id = queued_chain(&conn, &project, 2).chain.id;
+        let step = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
+        let (before, before_model) = (step.provider.clone(), step.model.clone());
+        complete_chain_step(&conn, &step.id, "error", "", "QUOTA_EXCEEDED::You've hit your session limit").unwrap();
+        assert_eq!(chain_row(&conn, &chain_id).unwrap().unwrap().status, "paused");
+
+        let backups = vec![
+            // The very one that failed is never its own backup.
+            Backup { provider: before.clone(), model: before_model },
+            Backup { provider: "codex".into(), model: "gpt-x".into() },
+        ];
+        let none_held = |_: &str| false;
+        let chain = use_backup_for_step(&conn, &step.id, &backups, &none_held).unwrap().unwrap();
+        assert_eq!(chain.status, "queued");
+        assert_eq!(chain.last_reason, "chain.usedBackup");
+
+        let moved = step_row(&conn, &step.id).unwrap().unwrap();
+        assert_eq!((moved.provider.as_str(), moved.model.as_str()), ("codex", "gpt-x"));
+        assert_eq!(moved.status, "pending");
+        assert_eq!(moved.task_id, "", "a session cannot move between engines");
+        assert!(moved.account_id.is_none(), "the old account belonged to the old provider");
+
+        // The next claim hands the same step to the new engine; the second step is untouched.
+        let again = claim_next_chain_step(&conn, &chain_id, "run-2").unwrap();
+        assert_eq!(again.kind, "run");
+        assert_eq!(again.step.unwrap().id, step.id);
+        let steps = get_chain_detail(&conn, &chain_id).unwrap().unwrap().steps;
+        assert_eq!(steps[1].provider, before, "only the step that failed moved");
+    }
+
+    #[test]
+    fn the_backup_list_does_nothing_unless_the_chain_is_parked_on_a_quota() {
+        use crate::backup_models::Backup;
+        let (conn, project) = fixture();
+        let chain_id = queued_chain(&conn, &project, 1).chain.id;
+        let step = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
+        let backups = vec![Backup { provider: "codex".into(), model: "gpt-x".into() }];
+        let none_held = |_: &str| false;
+        // Running, not parked.
+        assert!(use_backup_for_step(&conn, &step.id, &backups, &none_held).unwrap().is_none());
+        // Parked on a sign-in: a second provider would not fix who is signed in to the first.
+        complete_chain_step(&conn, &step.id, "error", "", "Failed to authenticate: OAuth session expired and could not be refreshed").unwrap();
+        assert!(use_backup_for_step(&conn, &step.id, &backups, &none_held).unwrap().is_none());
+        assert_eq!(step_row(&conn, &step.id).unwrap().unwrap().provider, step.provider);
+    }
+
+    #[test]
+    fn an_entry_with_no_model_uses_the_providers_own_or_is_skipped() {
+        use crate::backup_models::Backup;
+        let (conn, project) = fixture();
+        let chain_id = queued_chain(&conn, &project, 1).chain.id;
+        let step = claim_next_chain_step(&conn, &chain_id, "run-1").unwrap().step.unwrap();
+        complete_chain_step(&conn, &step.id, "error", "", "QUOTA_EXCEEDED::limit").unwrap();
+        let backups = vec![Backup { provider: "grok".into(), model: String::new() }];
+        let none_held = |_: &str| false;
+        // No model named and none configured for grok: nothing to run, so nothing changes.
+        assert!(use_backup_for_step(&conn, &step.id, &backups, &none_held).unwrap().is_none());
+        set_setting(&conn, "grok_model", "grok-x").unwrap();
+        use_backup_for_step(&conn, &step.id, &backups, &none_held).unwrap().unwrap();
+        assert_eq!(step_row(&conn, &step.id).unwrap().unwrap().model, "grok-x");
     }
 
     /// "Reintentar" is a person deciding to spend more, and it has to work once the plan has given

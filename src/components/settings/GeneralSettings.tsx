@@ -31,6 +31,7 @@ import { pipelinesAvailable, useVcsConnectionsStore } from "../../state/vcsConne
 // Shared with the backup panel, which formats the same kind of number for the same reason.
 import { formatBytes } from "../../lib/tauri/backupCommands";
 import { UpdateSection } from "./UpdateSection";
+import { StorageBlock } from "./StorageBlock";
 import { PaneBlock, RailSection } from "./settingsNav";
 
 // Language names stay in their own language (endonyms) — "English"/"Español" don't change
@@ -431,6 +432,10 @@ export function GeneralSettings() {
                     {t("settings.quitApp")}
                   </button>
                 </div>
+              </PaneBlock>
+
+              <PaneBlock title={t("storage.title")} hint={t("storage.hint")}>
+                <StorageBlock />
               </PaneBlock>
 
               {/* Where the files are.

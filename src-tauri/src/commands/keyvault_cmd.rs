@@ -1038,8 +1038,12 @@ fn open_secret(
     }
     let opened = session.with_key(|dek| crypto::open(dek, id, nonce, blob))?;
     let bytes = opened.map_err(String::from)?;
-    serde_json::from_slice(&bytes)
-        .map_err(|e| format!("this entry's contents could not be read back: {e}"))
+    let secret: Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("this entry's contents could not be read back: {e}"))?;
+    // Every decrypted entry passes through here, whoever asked for it (the Llavero, `cf secret`, a
+    // flow): from now on no log line or error report written by this process carries its value.
+    crate::applog::register_secrets_in(&secret);
+    Ok(secret)
 }
 
 // ---------------------------------------------------------------------------

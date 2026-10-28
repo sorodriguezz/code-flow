@@ -100,6 +100,11 @@ const REASON_KEYS = new Set<string>([
   "chain.planUnreadable",
   "chain.hybridPending",
   "chain.reviewUnreadable",
+  "chain.reviewRejected",
+  "chain.lapsExhausted",
+  "chain.noProgress",
+  "chain.stalled",
+  "chain.usedBackup",
   "chain.noSteps",
   "chain.tooManySteps",
 ]);

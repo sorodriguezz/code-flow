@@ -17,6 +17,18 @@ describe("groupToasts", () => {
     ]);
   });
 
+  it("never merges toasts that carry an action: each one undoes a different thing", () => {
+    const withAction = (id: string) => ({ ...toast(id, "Task deleted", "info"), action: { label: "Undo", run: () => {} } });
+    expect(groupToasts([withAction("a"), withAction("b")])).toHaveLength(2);
+  });
+
+  it("carries a toast's own lifetime and action into its card", () => {
+    const run = () => {};
+    const [group] = groupToasts([{ ...toast("a", "Task deleted", "info"), action: { label: "Undo", run }, lifetimeMs: 8000 }]);
+    expect(group.lifetimeMs).toBe(8000);
+    expect(group.action?.label).toBe("Undo");
+  });
+
   it("keeps the same text in two kinds apart", () => {
     expect(groupToasts([toast("a", "x", "error"), toast("b", "x", "info")])).toHaveLength(2);
   });

@@ -16,6 +16,8 @@
 //! authorization).
 
 pub mod cloud;
+pub mod repo_card;
+pub mod system;
 mod skills_table;
 pub mod sources;
 
@@ -336,6 +338,14 @@ pub fn generate_payload(sources: &str, document: Option<&str>, focus: &str, engl
     out.push_str(if english { "=== SOURCES ===\n" } else { "=== FUENTES ===\n" });
     out.push_str(sources.trim());
     out.push('\n');
+    // The system map is read from the code, so it outranks anything inferred from a summary.
+    if sources.contains("kind=\"system\"") {
+        out.push_str(if english {
+            "\nA `system` source lists how the repositories connect, found in their code. Draw every `verified` connection; draw an `inferred` one as uncertain and say why; never connect an `unresolved` call to a guess — list it as a call to something outside these repositories.\n"
+        } else {
+            "\nUna fuente `system` lista cómo se conectan los repositorios, encontrado en su código. Dibuja toda conexión `verified`; dibuja una `inferred` como incierta y di por qué; nunca conectes una llamada `unresolved` a una suposición — lista como una llamada a algo fuera de estos repositorios.\n"
+        });
+    }
     out
 }
 

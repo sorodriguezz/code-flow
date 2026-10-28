@@ -20,6 +20,38 @@ export function isEnginePause(reason: string): boolean {
   return (ENGINE_PAUSE_REASONS as readonly string[]).includes(reason.trim());
 }
 
+/** Setting that turns the standing consent on or off. On unless it reads `"false"`. */
+export const AUTO_RESUME_QUOTA_KEY = "chain_auto_resume_quota";
+
+/** Slack after the window reopens: a clock that is a few seconds off must not resume into a refusal. */
+export const RESUME_GRACE_MS = 30_000;
+
+/**
+ * When a chain that has just parked on a spent plan should carry on by itself — or `null` for "wait
+ * for the user".
+ *
+ * Arming used to be a checkbox the user ticked on every pause, because an automatic resume at the
+ * wrong hour is an engine started against a working copy nobody expected. That risk is the reason
+ * the **time** is never guessed here — [`resumeInstant`] answers `null` for a phrase it cannot read
+ * exactly — and the reason only a quota pause is armed: the other two engine pauses (signed out, no
+ * CLI) need the person to do something first, so a timer would only fail again.
+ *
+ * `enabled` is the standing form of that consent (see [`AUTO_RESUME_QUOTA_KEY`]).
+ */
+export function quotaResumeAt(
+  chain: { status: string; last_reason: string; resume_at: number },
+  failure: Pick<AiFailure, "resets" | "resets_at">,
+  now: number,
+  enabled: boolean,
+): number | null {
+  if (!enabled || chain.status !== "paused" || chain.last_reason !== "chain.pausedQuota") return null;
+  // Already armed — by the user, or by the previous call: never move a time somebody chose.
+  if (chain.resume_at > 0) return null;
+  const at = resumeInstant(failure, now);
+  if (at === null || at <= now) return null;
+  return at + RESUME_GRACE_MS;
+}
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;

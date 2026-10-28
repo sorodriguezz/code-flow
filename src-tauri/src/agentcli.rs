@@ -49,6 +49,7 @@
 //! exactly as strong as "you were started by this app" and no stronger. Bound to loopback, so
 //! nothing off this machine can even connect.
 
+mod automation;
 mod knowhow;
 mod place;
 mod vault;
@@ -74,6 +75,11 @@ const MAX_REQUEST: usize = 3 << 20;
 
 /// Where the endpoint is listening and the token that opens it. `None` until `start` has bound.
 static ENDPOINT: OnceLock<(u16, String)> = OnceLock::new();
+
+/// The second token, for `cf` run **outside** the app (`automation`). Made at start like the first, and
+/// only honoured while [`AUTOMATION_ON`] — the person's switch — says so.
+static AUTOMATION_TOKEN: OnceLock<String> = OnceLock::new();
+static AUTOMATION_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// What the user said to a `cf ask`: yes or no, and whatever they typed with it.
 ///
@@ -373,6 +379,16 @@ pub fn start(app: &AppHandle) {
         };
         let token = uuid::Uuid::new_v4().to_string();
         let _ = ENDPOINT.set((port, token.clone()));
+        // Off unless the person turned it on; when they did, the file `cf` reads from outside is
+        // written again, because the port and the token are new every launch.
+        let automation = uuid::Uuid::new_v4().to_string();
+        let _ = AUTOMATION_TOKEN.set(automation.clone());
+        if crate::ai_usage::setting(automation::ENABLED_KEY).as_deref() == Some("true") {
+            AUTOMATION_ON.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Err(error) = automation::write_connection(port, &automation) {
+                crate::applog::warn(&format!("agentcli: could not write the automation file ({error})"));
+            }
+        }
         crate::applog::info(&format!("agentcli: listening on 127.0.0.1:{port}"));
 
         loop {
@@ -455,10 +471,41 @@ async fn handle(body: &str, app: &AppHandle, token: &str) -> Reply {
     // The token never leaves this machine and a wrong one is a process the app did not start, but
     // any local process can knock on the port: compared in constant time, so the knocking learns
     // nothing about it, and a mismatch says nothing either.
-    if !same_secret(&request.token, token) {
-        return Reply::no("not from this app");
+    if same_secret(&request.token, token) {
+        return dispatch(request, app).await;
     }
-    dispatch(request, app).await
+    // The second door: a script outside the app, holding the token from the file, while the person has
+    // it switched on. Three verbs, and `serve` refuses the rest.
+    let outside = AUTOMATION_TOKEN.get().is_some_and(|automation| same_secret(&request.token, automation));
+    if outside && AUTOMATION_ON.load(std::sync::atomic::Ordering::SeqCst) {
+        return automation::serve(&request, app).await;
+    }
+    Reply::no("not from this app")
+}
+
+/// Switches `cf` from outside the app on or off, and says where it stands. Persisted, so it survives a
+/// restart; turning it off removes the file at once rather than at the next launch.
+#[tauri::command]
+pub fn automation_set_enabled(db: tauri::State<crate::db::Db>, enabled: bool) -> Result<bool, String> {
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        crate::db::queries::set_setting(&conn, automation::ENABLED_KEY, if enabled { "true" } else { "false" }).map_err(|e| e.to_string())?;
+    }
+    AUTOMATION_ON.store(enabled, std::sync::atomic::Ordering::SeqCst);
+    if !enabled {
+        automation::remove_connection();
+        return Ok(false);
+    }
+    match (ENDPOINT.get(), AUTOMATION_TOKEN.get()) {
+        (Some((port, _)), Some(token)) => automation::write_connection(*port, token).map(|_| true).map_err(|e| e.to_string()),
+        _ => Err("the endpoint is not up".to_string()),
+    }
+}
+
+/// Whether `cf` from outside is on, and the folder its connection file lives in.
+#[tauri::command]
+pub fn automation_status() -> (bool, String) {
+    (AUTOMATION_ON.load(std::sync::atomic::Ordering::SeqCst), automation::directory().display().to_string())
 }
 
 /// A verb on behalf of a chat's MCP call (`codemap::mcp`) instead of a `cf` in a shell — the same
@@ -632,6 +679,13 @@ pub(crate) fn pick<T>(items: Vec<T>, wanted: &str, name: impl Fn(&T) -> &str) ->
 /// Best effort on every step. A window the platform refuses to focus — macOS does this when the app
 /// is not the active one and has no user gesture behind the request — is still unminimised and
 /// shown, which is the part that matters for a question nobody can otherwise answer.
+/// Tells the window that an agent just made something of the user's — a draft task, a proposed
+/// memory — so it can say so with a card that opens it or takes it back, instead of leaving the user
+/// to find out from the agent's prose. `kind` is `task` or `memory`.
+fn created(app: &AppHandle, kind: &str, id: &str, title: &str) {
+    let _ = app.emit("agentcli:created", serde_json::json!({ "kind": kind, "id": id, "title": title }));
+}
+
 fn raise(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else { return };
     let _ = window.unminimize();

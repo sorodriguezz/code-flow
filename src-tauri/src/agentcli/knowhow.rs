@@ -97,10 +97,13 @@ pub fn remember(request: &Request, app: &AppHandle) -> Reply {
         ..Default::default()
     };
     match crate::ai_usage::with_conn(|conn| crate::ai_memory::propose(conn, input)) {
-        Some(Ok((memory, crate::ai_memory::Remembered::New))) => Reply::ok(format!(
-            "proposed «{}»; models read it only after the user approves it in Settings › Local intelligence › Memory",
-            memory.title
-        )),
+        Some(Ok((memory, crate::ai_memory::Remembered::New))) => {
+            super::created(app, "memory", &memory.id, &memory.title);
+            Reply::ok(format!(
+                "proposed «{}»; models read it only after the user approves it in Settings › Local intelligence › Memory",
+                memory.title
+            ))
+        }
         Some(Ok((memory, _))) if memory.status == "candidate" => Reply::ok(format!(
             "already proposed as «{}» (waiting for the user's approval); your wording was added to it",
             memory.title
