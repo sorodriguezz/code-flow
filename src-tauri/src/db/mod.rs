@@ -56,7 +56,12 @@ thread_local! {
 }
 
 impl DbMutex {
+    /// `#[track_caller]` so a slow wait or a long hold is logged with the line that locked — see
+    /// [`crate::slow`].
+    #[track_caller]
     pub fn lock(&self) -> LockResult<DbGuard<'_>> {
+        let site = std::panic::Location::caller();
+        let asked = std::time::Instant::now();
         if HOLDS_DB.with(Cell::get) {
             let why = "database: Db locked again on the thread that already holds it — this deadlocks; \
                        take what you need before the lock block, or pass the held connection down";
@@ -65,15 +70,26 @@ impl DbMutex {
             }
             crate::applog::error(&format!("{why}\n{}", std::backtrace::Backtrace::force_capture()));
         }
-        self.0.lock().map(DbGuard::held).map_err(|poisoned| PoisonError::new(DbGuard::held(poisoned.into_inner())))
+        let locked = self.0.lock();
+        let waited = asked.elapsed();
+        if waited > crate::slow::DB_THRESHOLD {
+            crate::slow::report(format!("db-wait {site}"), || {
+                format!("database: {site} waited {} ms for the connection", crate::slow::ms(waited))
+            });
+        }
+        locked
+            .map(|inner| DbGuard::held(inner, site))
+            .map_err(|poisoned| PoisonError::new(DbGuard::held(poisoned.into_inner(), site)))
     }
 
     /// Never waits, so never deadlocks: a second take from the holding thread is `WouldBlock`.
+    #[track_caller]
     pub fn try_lock(&self) -> TryLockResult<DbGuard<'_>> {
+        let site = std::panic::Location::caller();
         match self.0.try_lock() {
-            Ok(inner) => Ok(DbGuard::held(inner)),
+            Ok(inner) => Ok(DbGuard::held(inner, site)),
             Err(TryLockError::Poisoned(poisoned)) => {
-                Err(TryLockError::Poisoned(PoisonError::new(DbGuard::held(poisoned.into_inner()))))
+                Err(TryLockError::Poisoned(PoisonError::new(DbGuard::held(poisoned.into_inner(), site))))
             }
             Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
         }
@@ -83,18 +99,29 @@ impl DbMutex {
 /// [`DbMutex::lock`]'s guard: the connection, and the thread's mark cleared when it goes.
 pub struct DbGuard<'a> {
     inner: MutexGuard<'a, Connection>,
+    site: &'static std::panic::Location<'static>,
+    since: std::time::Instant,
 }
 
 impl<'a> DbGuard<'a> {
-    fn held(inner: MutexGuard<'a, Connection>) -> Self {
+    fn held(inner: MutexGuard<'a, Connection>, site: &'static std::panic::Location<'static>) -> Self {
         HOLDS_DB.with(|held| held.set(true));
-        DbGuard { inner }
+        DbGuard { inner, site, since: std::time::Instant::now() }
     }
 }
 
 impl Drop for DbGuard<'_> {
     fn drop(&mut self) {
         HOLDS_DB.with(|held| held.set(false));
+        // Measured to here, but logged after nothing more than a clock read: the connection is
+        // released when `inner` drops right after this, and a report never touches the database.
+        let held = self.since.elapsed();
+        if held > crate::slow::DB_THRESHOLD {
+            let site = self.site;
+            crate::slow::report(format!("db-hold {site}"), || {
+                format!("database: {site} held the connection for {} ms", crate::slow::ms(held))
+            });
+        }
     }
 }
 
@@ -175,9 +202,13 @@ pub fn stamp_version(stamp: i64) -> String {
 /// itself), and a row that would have failed the check gets in instead of failing the launch.
 ///
 /// **A step that opens its own transaction** cannot run inside this one: `BEGIN` inside `BEGIN` is an
-/// error in SQLite. Rather than turn that into a launch that fails forever, the attempt is rolled
-/// back and the list runs once more the way it always used to, statement by statement, with a
-/// warning in the log naming the problem — such a step should use a `SAVEPOINT`, which nests.
+/// error in SQLite, and such a step must use a `SAVEPOINT`, which nests. The attempt is rolled back
+/// and the launch fails. It used to run the list again statement by statement instead. That was a
+/// real path, not a hypothetical one: `seed_manual_flow_order` took it on the first launch after an
+/// upgrade. And the boot guard carries on when its pre-migration copy fails *because* this is one
+/// transaction, so the fallback meant a half-applied schema with no copy to go back to. Rolled back,
+/// the previous version still opens the database. `every_step_of_the_real_list_nests` keeps the
+/// real list honest.
 ///
 /// `VACUUM` and `PRAGMA journal_mode` cannot run in a transaction either. Neither is a migration
 /// step: the journal mode is [`configure`]'s, and the pre-migration copy (`VACUUM INTO`) is taken by the
@@ -198,18 +229,15 @@ fn migrate_with(
     let restored = conn.execute_batch("PRAGMA foreign_keys = ON;");
     match attempt {
         Ok(()) => restored,
-        Err(e) if opens_its_own_transaction(&e) => {
-            crate::applog::warn(&format!(
-                "database: a migration step opens its own transaction ({e}), so the list ran \
-                 without one — that step should use a SAVEPOINT"
-            ));
-            steps(conn)?;
-            if let Some(stamp) = stamp {
-                write_stamp(conn, stamp)?;
+        Err(e) => {
+            if opens_its_own_transaction(&e) {
+                crate::applog::error(&format!(
+                    "database: a migration step opens its own transaction ({e}); nothing was \
+                     changed — that step must use a SAVEPOINT"
+                ));
             }
-            conn.execute_batch("PRAGMA foreign_keys = ON;")
+            Err(e)
         }
-        Err(e) => Err(e),
     }
 }
 
@@ -463,21 +491,40 @@ mod tests {
         assert_eq!(scalar(&conn, "PRAGMA foreign_keys"), 1);
     }
 
-    /// A step that opens a transaction of its own cannot nest inside the wrapper's; the list still has
-    /// to migrate, the way it did before there was a wrapper.
+    /// A step that opens a transaction of its own cannot nest inside the wrapper's. It fails the
+    /// migration whole rather than running the list without a transaction: what ran before it is
+    /// rolled back and the stamp stays where it was.
     #[test]
-    fn a_step_with_its_own_transaction_still_migrates() {
+    fn a_step_with_its_own_transaction_fails_without_changing_anything() {
         let conn = Connection::open_in_memory().unwrap();
-        migrate_with(&conn, Some(2_000_005), |conn| {
+        conn.execute_batch("PRAGMA user_version = 2000004;").unwrap();
+        let failed = migrate_with(&conn, Some(2_000_005), |conn| {
             conn.execute_batch("CREATE TABLE IF NOT EXISTS seeded (x TEXT);")?;
             let tx = conn.unchecked_transaction()?;
             tx.execute("INSERT INTO seeded (x) VALUES ('once')", [])?;
             tx.commit()
-        })
-        .unwrap();
-        assert_eq!(scalar(&conn, "SELECT COUNT(*) FROM seeded"), 1);
-        assert_eq!(read_stamp(&conn).unwrap(), 2_000_005);
+        });
+        assert!(failed.as_ref().is_err_and(opens_its_own_transaction), "{failed:?}");
+        assert!(!table_exists(&conn, "seeded"));
+        assert_eq!(read_stamp(&conn).unwrap(), 2_000_004);
         assert_eq!(scalar(&conn, "PRAGMA foreign_keys"), 1);
+        assert!(conn.is_autocommit());
+    }
+
+    /// The real list, over a database from before manual flow order (no marker index): the one step
+    /// that used to open its own transaction must nest, or every upgrade from such a database would
+    /// now fail to launch.
+    #[test]
+    fn every_step_of_the_real_list_nests() {
+        let conn = configure(Connection::open_in_memory().unwrap()).unwrap();
+        migrate(&conn, Some(2_000_005)).unwrap();
+        conn.execute_batch("DROP INDEX idx_flows_manual_order;").unwrap();
+        migrate(&conn, Some(2_000_006)).unwrap();
+        assert_eq!(read_stamp(&conn).unwrap(), 2_000_006);
+        assert_eq!(
+            scalar(&conn, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_flows_manual_order'"),
+            1
+        );
         assert!(conn.is_autocommit());
     }
 

@@ -291,15 +291,25 @@ jobs:
       # where the release stops taking as long as both builds put together.
       matrix:
         include:
+          # `arch` is the suffix tauri-action gives the macOS updater archive
+          # (`CodeFlow_<arch>.app.tar.gz`); the fallback upload and `updater-json` key on it.
           - platform: windows-latest
             args: ""
-          # Apple Silicon only, and deliberately not `universal-apple-darwin`: the app bundles a
-          # Java runtime for the IRIS driver, and `jlink` builds a runtime for exactly one
-          # architecture. A universal Rust binary paired with an arm64 JRE would install fine on an
-          # Intel Mac and then fail the moment an IRIS connection was opened — a broken feature is
-          # worse than an absent build.
+            arch: x64
+          # One native leg per Mac architecture, and deliberately not `universal-apple-darwin`:
+          # the bundled `llama-server` is a single-architecture download, and a universal Rust
+          # binary paired with it would install fine on the other kind of Mac and then fail the
+          # moment the feature was used. The Java runtime is fetched per architecture at run time.
+          #
+          # The Intel leg exists because v1.9.2 dropped the universal DMG and every Intel Mac was
+          # left with "CodeFlow is not supported on this Mac" from the first launch — macOS 26 is
+          # the last release Intel Macs get, so they are still a real share of users.
           - platform: macos-latest
             args: ""
+            arch: aarch64
+          - platform: macos-15-intel
+            args: ""
+            arch: x64
     runs-on: ${{ matrix.platform }}
     # The default is six hours, which is what a bundler waiting on a prompt that will never come
     # costs. 90, not 60: v2.3.31's Windows leg changed a `windows-sys` feature, which recompiles
@@ -394,7 +404,7 @@ jobs:
           path: |
             src-tauri/resources/llama
             src-tauri/target/llama-build
-          key: llama-runtime-${{ runner.os }}-${{ hashFiles('scripts/build-llama-runtime.mjs', 'scripts/assets/llama.cpp-LICENSE') }}
+          key: llama-runtime-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-llama-runtime.mjs', 'scripts/assets/llama.cpp-LICENSE') }}
 
       # Again for the log, and this one has already earned it: v1.18.6 died here, inside
       # `beforeBuildCommand`, on the Windows leg, after vite had built twice and jlink had run —
@@ -510,8 +520,8 @@ jobs:
           args: --config src-tauri/tauri.ci.conf.json ${{ matrix.args }}
 
       # Uploads what `tauri-action` built but could not upload, under the names it would have used
-      # (`updater-json` maps signatures by name): the macOS updater archive gains `_aarch64`, the
-      # rest keep theirs. Each upload deletes a same-named asset first, inside the retry, so an
+      # (`updater-json` maps signatures by name): the macOS updater archive gains `_<matrix.arch>`,
+      # the rest keep theirs. Each upload deletes a same-named asset first, inside the retry, so an
       # upload that landed but lost its response is not a 422 on the next attempt.
       - name: Upload the bundles (fallback)
         if: steps.build.outcome == 'failure'
@@ -520,6 +530,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           RELEASE_ID: ${{ needs.create-release.outputs.release-id }}
+          ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           bundle=src-tauri/target/release/bundle
@@ -558,8 +569,8 @@ jobs:
           for f in "${files[@]}"; do
             name=$(basename "$f")
             case "$name" in
-              *.app.tar.gz)     name="${name%.app.tar.gz}_aarch64.app.tar.gz" ;;
-              *.app.tar.gz.sig) name="${name%.app.tar.gz.sig}_aarch64.app.tar.gz.sig" ;;
+              *.app.tar.gz)     name="${name%.app.tar.gz}_${ARCH}.app.tar.gz" ;;
+              *.app.tar.gz.sig) name="${name%.app.tar.gz.sig}_${ARCH}.app.tar.gz.sig" ;;
             esac
             echo "Uploading $name"
             retry upload "$f" "$name"
@@ -659,7 +670,7 @@ jobs:
           done < assets.tsv
           ls -la sigs || true
 
-          # Reproduces `tauri-action`'s own mapping (src/upload-version-json.ts) for the two targets
+          # Reproduces `tauri-action`'s own mapping (src/upload-version-json.ts) for the three targets
           # this repo builds, and nothing else. Three details are load-bearing:
           #
           #  · It emits both the bare `<os>-<arch>` key and the `<os>-<arch>-<bundle>` one, because
@@ -675,6 +686,8 @@ jobs:
             [ -e "$sig" ] || { echo "::error::no updater signatures on the release"; exit 1; }
             target=$(basename "$sig" .sig)
             case "$target" in
+              # Most specific first: `_x64` is the Intel leg, every other archive the Apple Silicon one.
+              *_x64.app.tar.gz) key=darwin-x86_64; bundle=app; prio=0 ;;
               *.app.tar.gz) key=darwin-aarch64;  bundle=app;  prio=0   ;;
               *.msi)        key=windows-x86_64;  bundle=msi;  prio=100 ;;
               *-setup.exe)  key=windows-x86_64;  bundle=nsis; prio=99  ;;
@@ -701,7 +714,7 @@ jobs:
           # The gate the serialized design never had, and the reason this is worth doing at all:
           # half a latest.json is worse than none, because the missing platform stops receiving
           # updates and nothing anywhere goes red.
-          for key in darwin-aarch64 windows-x86_64; do
+          for key in darwin-aarch64 darwin-x86_64 windows-x86_64; do
             jq -e --arg k "$key" '.platforms[$k].signature | length > 0' latest.json >/dev/null \
               || { echo "::error::latest.json is missing $key"; jq 'del(.platforms[].signature)' latest.json; exit 1; }
           done

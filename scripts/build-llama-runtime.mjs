@@ -41,7 +41,7 @@ const WORK = join(ROOT, "src-tauri", "target", "llama-build");
  * A tag and not "latest", for the reason every other pinned dependency here is pinned: llama.cpp
  * tags several builds a day, and a release whose engine is whatever was current at build time is a
  * release nobody can reproduce. Bumping it is a deliberate act — change the tag, re-run with
- * `--force`, replace the four hashes below with what it prints, and try a completion.
+ * `--force`, replace the hashes below with what it prints, and try a completion.
  */
 const BUILD = "b10587";
 
@@ -51,15 +51,20 @@ const BUILD = "b10587";
  * The hash is the load-bearing part. These binaries are fetched over the network and shipped
  * inside an installer, and a tag alone trusts whatever the URL serves on the day of the build.
  *
- * Only the two platforms the release matrix actually produces. macOS is arm64 only — see the
- * comment on the matrix in `.github/workflows/release.yml`, which made the same call for the JRE:
- * a universal binary paired with a single-architecture runtime installs fine on an Intel Mac and
- * then fails the moment the feature is used, and a missing feature beats a broken one.
+ * Only the platforms the release matrix actually produces: one native leg per Mac architecture
+ * plus Windows — see the comment on the matrix in `.github/workflows/release.yml`. A universal
+ * binary paired with a single-architecture runtime installs fine on the other kind of Mac and then
+ * fails the moment the feature is used, so each leg fetches its own.
  */
 const ASSETS = {
   "darwin-arm64": {
     file: `llama-${BUILD}-bin-macos-arm64.tar.gz`,
     sha256: "7695344d6f4d09296fb7f0d75ebcb722cf6cc92a2d052de867b75b5bbc3eeb3c",
+  },
+  // Intel Macs. No Metal backend in this build — the engine runs on the CPU (with Accelerate's BLAS).
+  "darwin-x64": {
+    file: `llama-${BUILD}-bin-macos-x64.tar.gz`,
+    sha256: "69514df3ab7cfc162e6752ead1b06f0995866e9d0654ec621e038a9cb5596379",
   },
   // The Vulkan build, not the CPU one. Same files, byte for byte, plus `ggml-vulkan.dll`: ggml's
   // backend loader opens it at runtime and uses any GPU with a Vulkan driver — NVIDIA, AMD and Intel
@@ -105,6 +110,23 @@ const KEEP = {
       "libggml-cpu.0.dylib",
       "libggml-blas.0.dylib",
       "libggml-metal.0.dylib",
+      "libggml-rpc.0.dylib",
+      "libggml-base.0.dylib",
+    ],
+    prefixes: [],
+    executable: ["llama-server"],
+  },
+  // The arm64 closure less `libggml-metal`, which the x64 build neither ships nor links.
+  "darwin-x64": {
+    exact: [
+      "llama-server",
+      "libllama-server-impl.dylib",
+      "libllama-common.0.dylib",
+      "libmtmd.0.dylib",
+      "libllama.0.dylib",
+      "libggml.0.dylib",
+      "libggml-cpu.0.dylib",
+      "libggml-blas.0.dylib",
       "libggml-rpc.0.dylib",
       "libggml-base.0.dylib",
     ],

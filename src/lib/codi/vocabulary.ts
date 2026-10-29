@@ -114,6 +114,7 @@ const SECTION_EXTRA: Record<string, Partial<Spoken>> = {
   voice: { es: ["voz", "voz y sonido", "sonido", "microfono", "dictado"], en: ["voice", "voice and sound", "sound", "microphone", "dictation"] },
   codi: { es: ["codi", "asistente de voz", "configuracion de codi", "rutinas"], en: ["codi", "voice assistant", "codi settings", "routines"] },
   backup: { es: ["respaldo", "respaldos", "copia de seguridad", "backup"], en: ["backup", "backups"] },
+  statistics: { es: ["estadisticas", "metricas", "uso de la app"], en: ["statistics", "stats", "metrics", "app usage"] },
   projects: { es: ["workspaces", "proyectos", "workspaces y proyectos"], en: ["workspaces", "projects"] },
   editor: { es: ["editor", "editor de codigo"], en: ["editor", "code editor"] },
   terminal: { es: ["terminal", "consola", "shell"], en: ["terminal", "console", "shell"] },

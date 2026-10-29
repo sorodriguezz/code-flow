@@ -2069,6 +2069,8 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_source_to_db_history(conn)?;
     // Tickets → code (boards::ticket_links): the ticket ↔ branch ↔ pull request record.
     crate::boards::ticket_links::migrate(conn)?;
+    // Settings › Estadísticas: per-day usage counters (`usage_stats`).
+    crate::usage_stats::migrate(conn)?;
     Ok(())
 }
 
@@ -2494,21 +2496,33 @@ pub(crate) fn seed_manual_flow_order(conn: &Connection) -> rusqlite::Result<()> 
     if done {
         return Ok(());
     }
-    let tx = conn.unchecked_transaction()?;
-    renumber_by_name(
-        &tx,
-        "SELECT id, name, workspace_id FROM flow_folders",
-        "UPDATE flow_folders SET sort_order = ?2 WHERE id = ?1",
-    )?;
-    renumber_by_name(
-        &tx,
-        "SELECT id, name, workspace_id || '/' || COALESCE(folder_id, '') FROM flows",
-        "UPDATE flows SET sort_order = ?2 WHERE id = ?1",
-    )?;
-    tx.execute_batch(&format!(
-        "CREATE INDEX IF NOT EXISTS {FLOW_ORDER_INDEX} ON flows (workspace_id, folder_id, sort_order);"
-    ))?;
-    tx.commit()
+    // A SAVEPOINT, not a transaction: this runs inside `db::migrate`'s own, and `BEGIN` there is an
+    // error. Outside one (a test calling it directly) a savepoint acts as a transaction of its own.
+    conn.execute_batch("SAVEPOINT seed_manual_flow_order;")?;
+    let seeded = (|| {
+        renumber_by_name(
+            conn,
+            "SELECT id, name, workspace_id FROM flow_folders",
+            "UPDATE flow_folders SET sort_order = ?2 WHERE id = ?1",
+        )?;
+        renumber_by_name(
+            conn,
+            "SELECT id, name, workspace_id || '/' || COALESCE(folder_id, '') FROM flows",
+            "UPDATE flows SET sort_order = ?2 WHERE id = ?1",
+        )?;
+        conn.execute_batch(&format!(
+            "CREATE INDEX IF NOT EXISTS {FLOW_ORDER_INDEX} ON flows (workspace_id, folder_id, sort_order);"
+        ))
+    })();
+    match seeded {
+        Ok(()) => conn.execute_batch("RELEASE seed_manual_flow_order;"),
+        Err(e) => {
+            let _ = conn.execute_batch(
+                "ROLLBACK TO seed_manual_flow_order; RELEASE seed_manual_flow_order;",
+            );
+            Err(e)
+        }
+    }
 }
 
 /// Renumbers the rows `select` lists — `(id, name, group)` — by name within each group, from zero.

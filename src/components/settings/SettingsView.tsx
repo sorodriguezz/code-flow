@@ -12,6 +12,7 @@ import { VoiceSoundSettings } from "./VoiceSoundSettings";
 import { CodiSection } from "./CodiSettings";
 import { DatabasesSettings } from "./DatabasesSettings";
 import { GitSettings } from "./GitSettings";
+import { StatisticsSettings } from "./StatisticsSettings";
 import { TerminalSettings } from "./TerminalSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { BackupSettings } from "./BackupSettings";
@@ -727,6 +728,7 @@ export function SettingsView() {
               {section === "voice" && <VoiceSoundSettings />}
               {section === "codi" && <CodiSection />}
               {section === "backup" && <BackupSettings />}
+              {section === "statistics" && <StatisticsSettings />}
               {section === "projects" && <ProjectsSection />}
               {section === "editor" && <EditorSettings />}
               {section === "terminal" && <TerminalSettings />}

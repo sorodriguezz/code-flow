@@ -52,6 +52,11 @@ export interface WorkspaceApp {
   stage?: "alpha" | "beta";
   /** What the stage means for this app, as the chip's tooltip in the title row. */
   stageHintKey?: TranslationKey;
+  /**
+   * Not scoped to the workspace: the same rows whichever one is active. The title row's crumb says
+   * «Global» for it instead of naming a workspace it does not belong to.
+   */
+  global?: true;
 }
 
 /** Everything that belongs to the workspace rather than to the selected repository. Adding the
@@ -128,6 +133,7 @@ export const APPS: WorkspaceApp[] = [
   // closing comment.
   {
     id: "vault",
+    global: true,
     icon: KeyRound,
     labelKey: "tabbar.vault",
     descriptionKey: "tabbar.vaultDescription",
@@ -143,6 +149,7 @@ export const APPS: WorkspaceApp[] = [
   // is what earns it a place in `WORKSPACE_VIEWS` rather than among the repository tabs.
   {
     id: "chat",
+    global: true,
     icon: MessagesSquare,
     labelKey: "tabbar.chat",
     descriptionKey: "tabbar.chatDescription",
@@ -169,6 +176,7 @@ export const APPS: WorkspaceApp[] = [
   // machine. Newest, so last (user, 2026-10-23: «métele un montón de herramientas altiro»).
   {
     id: "toolbox",
+    global: true,
     icon: Wrench,
     labelKey: "tabbar.toolbox",
     descriptionKey: "tabbar.toolboxDescription",

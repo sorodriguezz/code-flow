@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { createPortal } from "react-dom";
-import { AlertOctagon, AlertTriangle, MapPin, ShieldAlert } from "lucide-react";
+import { AlertOctagon, AlertTriangle, MapPin, ShieldAlert, ShieldQuestion } from "lucide-react";
 import type { SecretHit } from "../../types/domain";
 import { useT } from "../../state/languageStore";
 import { buttonClass } from "../common/Button";
@@ -30,15 +30,25 @@ const SEVERITY_STYLE: Record<SecretHit["severity"], { icon: typeof AlertOctagon;
  * DOM order and put this gate over the confirm. The layers are app chrome (unnumbered) < dialogs
  * like this one (`z-40`) < the app-root overlays — Settings, the command palette, toasts (`z-50`) <
  * `ConfirmModal` (`z-[60]`) < popovers (`z-[9999]`).
+ *
+ * **`unverified` is the second way here: the scan itself failed.** A failed scan must not block
+ * committing, but it used to fall straight through to the commit, which looked exactly like a
+ * clean one. Now the same gate says the staged changes of `repo` could not be checked, shows why,
+ * and offers Retry next to «commit anyway» — the safe default is still Cancel.
  */
 export function SecretScanModal({
   hits,
+  unverified,
   onCancel,
   onCommitAnyway,
+  onRetry,
 }: {
   hits: SecretHit[];
+  /** Set when the scan errored instead of answering: the repository's name and what went wrong. */
+  unverified?: { repo: string; error: string };
   onCancel: () => void;
   onCommitAnyway: () => void;
+  onRetry?: () => void;
 }) {
   const t = useT();
 
@@ -59,17 +69,36 @@ export function SecretScanModal({
         className="flex max-h-[80vh] w-[560px] max-w-[92vw] flex-col rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
       >
         <div className="flex items-start gap-3 border-b border-[var(--cf-border)] p-4">
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_oklab,var(--cf-danger)_16%,transparent)] text-[var(--cf-danger)]">
-            <ShieldAlert size={16} />
-          </span>
+          {unverified ? (
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_16%,transparent)] text-[var(--cf-warning)]">
+              <ShieldQuestion size={16} />
+            </span>
+          ) : (
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[color-mix(in_oklab,var(--cf-danger)_16%,transparent)] text-[var(--cf-danger)]">
+              <ShieldAlert size={16} />
+            </span>
+          )}
           <div className="min-w-0 flex-1">
-            <h2 className="text-[14px] font-semibold text-[var(--cf-text)]">{t("secrets.title")}</h2>
+            <h2 className="text-[14px] font-semibold text-[var(--cf-text)]">
+              {t(unverified ? "secrets.unverifiedTitle" : "secrets.title")}
+            </h2>
             <p className="mt-0.5 text-[12px] text-[var(--cf-text-muted)]">
-              {t("secrets.subtitle", { n: hits.length })}
+              {unverified
+                ? t("secrets.unverifiedSubtitle", { repo: unverified.repo })
+                : t("secrets.subtitle", { n: hits.length })}
             </p>
           </div>
         </div>
 
+        {unverified && (
+          <div className="p-3">
+            <code className="block max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-[var(--cf-hover)] px-2 py-1.5 font-mono text-[11px] text-[var(--cf-text)]">
+              {unverified.error}
+            </code>
+          </div>
+        )}
+
+        {!unverified && (
         <ul className="min-h-0 flex-1 space-y-1.5 overflow-auto p-3">
           {hits.map((hit, i) => {
             const style = SEVERITY_STYLE[hit.severity];
@@ -103,10 +132,15 @@ export function SecretScanModal({
             );
           })}
         </ul>
+        )}
 
         <div className="flex items-center justify-between gap-2 border-t border-[var(--cf-border)] p-3">
           <span className="text-[11px] text-[var(--cf-text-muted)]">
-            {criticalCount > 0 ? t("secrets.criticalCount", { n: criticalCount }) : t("secrets.reviewHint")}
+            {unverified
+              ? t("secrets.unverifiedHint")
+              : criticalCount > 0
+                ? t("secrets.criticalCount", { n: criticalCount })
+                : t("secrets.reviewHint")}
           </span>
           <div className="flex gap-2">
             <button
@@ -115,6 +149,11 @@ export function SecretScanModal({
             >
               {t("secrets.commitAnyway")}
             </button>
+            {onRetry && (
+              <button onClick={onRetry} className={buttonClass({ variant: "secondary" })}>
+                {t("secrets.retry")}
+              </button>
+            )}
             <button
               onClick={onCancel}
               autoFocus

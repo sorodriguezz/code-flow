@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from "react";
-import { ChevronRight, Code2, FolderGit2, GitBranch, History, Layers, Network, Route, ShieldCheck, SquareAsterisk, type LucideIcon } from "lucide-react";
+import { ChevronRight, Code2, Globe, FolderGit2, GitBranch, History, Layers, Network, Route, ShieldCheck, SquareAsterisk, type LucideIcon } from "lucide-react";
 import { REPO_VIEWS, useUiStore, type MainView } from "../../state/uiStore";
 import { useRepoStore } from "../../state/repoStore";
 import { pipelinesAvailable, useVcsConnectionsStore } from "../../state/vcsConnectionsStore";
@@ -17,6 +17,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import { APPS } from "../../lib/railApps";
 import { StageChip } from "../common/StageChip";
 import { setChromeSlot } from "./ChromeSlot";
+import { WORKSPACE_ICONS } from "./WorkspaceGlyph";
 
 interface Tab {
   id: MainView;
@@ -211,7 +212,13 @@ export function ChromeScope() {
   return (
     <div className="flex min-w-0 items-center gap-1">
       <Tooltip
-        label={workspace ? t("tabbar.scopeWorkspaceHint", { name: workspace.name }) : t("tabbar.scopeWorkspaceNone")}
+        label={
+          app?.global
+            ? t("tabbar.scopeGlobalHint")
+            : workspace
+              ? t("tabbar.scopeWorkspaceHint", { name: workspace.name })
+              : t("tabbar.scopeWorkspaceNone")
+        }
         description={t("tabbar.scopeWorkspaceReset")}
       >
         <button
@@ -221,11 +228,19 @@ export function ChromeScope() {
           <span
             aria-hidden
             className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px]"
-            style={monogramStyle(color)}
+            style={monogramStyle(app?.global ? "var(--cf-text-muted)" : color)}
           >
-            <Layers size={12} />
+            {/* The workspace's own glyph, as on the rail's tile — `Layers` only when it has none. An
+                app that belongs to no workspace says so instead of naming the active one: its rows
+                stay the same when the workspace changes, and the crumb should not suggest otherwise. */}
+            {(() => {
+              const Icon = app?.global ? Globe : (workspace && WORKSPACE_ICONS[workspace.icon]) || Layers;
+              return <Icon size={12} />;
+            })()}
           </span>
-          <span className="max-w-[200px] truncate">{workspace?.name ?? t("tabbar.scopeWorkspace")}</span>
+          <span className="max-w-[200px] truncate">
+            {app?.global ? t("tabbar.scopeGlobal") : workspace?.name ?? t("tabbar.scopeWorkspace")}
+          </span>
         </button>
       </Tooltip>
       <ChevronRight size={14} className="shrink-0 text-[var(--cf-text-faint)]" />

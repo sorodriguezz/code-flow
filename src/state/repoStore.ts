@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { repoFromArgs, trackUsage } from "../lib/usageTracker";
 import * as api from "../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "./toastStore";
 import { notify } from "./notificationStore";
@@ -210,8 +211,11 @@ interface RepoState {
    * Resolves whether the commit landed — the message box is only cleared when it did. A commit that
    * failed for want of a name and email opens the identity form and retries once it is filled in.
    */
-  /** `amend`: replace the last commit with the index and this message (an empty one keeps the old). */
-  commitChanges: (message: string, opts?: { amend?: boolean }) => Promise<boolean>;
+  /** `amend`: replace the last commit with the index and this message (an empty one keeps the old).
+   *  `repoPath`: the repository the commit was asked for, read when the user clicked — the commit
+   *  runs there however the active one has moved since, and is cancelled rather than retried if
+   *  the identity form was answered with a different repository on screen. */
+  commitChanges: (message: string, opts?: { amend?: boolean; repoPath?: string }) => Promise<boolean>;
 
   checkoutBranch: (name: string) => Promise<void>;
   checkoutDetached: (refname: string) => Promise<void>;
@@ -259,7 +263,10 @@ interface RepoState {
    */
   fetchBranch: (name: string) => Promise<void>;
   pullBranch: (name: string) => Promise<void>;
-  push: (setUpstream?: boolean) => Promise<void>;
+  /** `repoPath`: the repository the push was asked for. Every step of a push reads the active
+   *  repository's branches and status, so one aimed at a repository that is no longer active is
+   *  cancelled, with a toast naming it, rather than pushed from whatever is on screen now. */
+  push: (setUpstream?: boolean, opts?: { repoPath?: string }) => Promise<void>;
 }
 
 /**
@@ -348,6 +355,49 @@ function notificationDetail(state: Pick<RepoState, "repoPath" | "status">): stri
   const repo = state.repoPath?.split(/[/\\]/).filter(Boolean).pop() ?? "";
   const branch = state.status?.current_branch ?? "";
   return [repo, branch].filter(Boolean).join(" · ");
+}
+
+/** A repository's folder name — what a toast calls it. */
+export function repoDisplayName(repoPath: string): string {
+  return repoPath.split(/[/\\]/).filter(Boolean).pop() ?? repoPath;
+}
+
+/**
+ * Where a commit was aimed when the user clicked: the repository, and the branch (or detached
+ * HEAD) checked out in it.
+ *
+ * A commit is not one call. The secret scan, the secret gate, the pushed-amend confirm and the
+ * identity form all wait on something, and the repository on screen can change during any of
+ * them. Read at the click and checked before each step that writes, so an operation started in
+ * one repository ends there or is cancelled — it never lands on the one switched to.
+ */
+export interface CommitTarget {
+  repoPath: string;
+  branch: string | null;
+  detached: boolean;
+}
+
+export function commitTargetOf(state: Pick<RepoState, "repoPath" | "status">): CommitTarget | null {
+  if (!state.repoPath) return null;
+  return {
+    repoPath: state.repoPath,
+    branch: state.status?.current_branch ?? null,
+    detached: state.status?.is_detached ?? false,
+  };
+}
+
+/** What moved since `target` was read: another repository is active, another branch is checked
+ *  out in the same one, or nothing (`null`). A status not loaded yet is not a branch change. */
+export function commitTargetDrift(
+  target: CommitTarget,
+  state: Pick<RepoState, "repoPath" | "status">,
+): "repo" | "branch" | null {
+  if (state.repoPath !== target.repoPath) return "repo";
+  const status = state.status;
+  if (!status) return null;
+  if (status.is_detached !== target.detached) return "branch";
+  if (!target.detached && (status.current_branch ?? null) !== target.branch) return "branch";
+  return null;
 }
 
 /**
@@ -1366,7 +1416,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   },
 
   commitChanges: async (message, opts) => {
-    const { repoPath } = get();
+    const repoPath = opts?.repoPath ?? get().repoPath;
     if (!repoPath) return false;
     // Not `guarded`: that swallows the outcome, and the caller clears the message box on it — a
     // commit that failed used to take the message down with it.
@@ -1381,10 +1431,18 @@ export const useRepoStore = create<RepoState>((set, get) => ({
         // git has no name or email to sign with. Ask for them — the message is still in the box —
         // and retry once they are saved, instead of showing libgit2's sentence about a config key.
         if (!(await useGitDialogStore.getState().askIdentity())) return false;
+        // The form may have been answered with another repository on screen — and may have saved
+        // the identity there. Cancel rather than commit into a repository the user has left.
+        if (opts?.repoPath && get().repoPath !== repoPath) {
+          pushErrorToast(translate("changes.commitCancelledRepo", { repo: repoDisplayName(repoPath) }));
+          return false;
+        }
         await run();
       }
       committed = true;
-      await get().refreshAll();
+      // The lists on screen are the active repository's; re-reading them for a commit made
+      // elsewhere would answer for the wrong one.
+      if (get().repoPath === repoPath) await get().refreshAll();
       return true;
     } catch (e) {
       const text = describeError(e);
@@ -1624,6 +1682,8 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     const workspaceId = repoWorkspaceId(get());
     try {
       await api.gitFetch(repoPath);
+      // Only the fetch somebody asked for: the timed one is `silentFetch` and would drown the rest.
+      trackUsage("git", "fetch", {}, workspaceId, repoFromArgs({ repoPath }));
       autoFetchFailing.delete(repoPath);
       await get().refreshBranches();
       notify({ source: "git", titleKey: "notifications.gitFetched", status: "success", detail: where, workspaceId });
@@ -1785,8 +1845,12 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     }
   },
 
-  push: async (setUpstream = false) => {
+  push: async (setUpstream = false, opts) => {
     const { repoPath, remoteOp } = get();
+    if (opts?.repoPath && opts.repoPath !== repoPath) {
+      pushErrorToast(translate("changes.pushCancelledRepo", { repo: repoDisplayName(opts.repoPath) }));
+      return;
+    }
     if (!repoPath || remoteOp) return;
     set({ remoteOp: "push" });
     const where = notificationDetail(get());

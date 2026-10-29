@@ -892,6 +892,12 @@ pub fn commit(
         let author = author_name.zip(author_email);
         return super::features::commit_via_cli(path, Some(message), super::features::CliCommit::New, author);
     }
+    // The in-process commit takes the write lock the other writes take; the CLI one above does not.
+    // That one can run hooks for a minute, and git's own `index.lock` already turns a stage clicked
+    // meanwhile into an error. This one is milliseconds, and without the lock a checkout or a
+    // stage from another window could land between reading the index and finishing a merge's
+    // state, which libgit2 does in several steps.
+    let _write = super::write_lock();
     let repo = open(path)?;
 
     let sig = match (author_name, author_email) {

@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { create } from "zustand";
+import { create, type StoreApi } from "zustand";
 import {
   notesCountLinks,
   notesCreateBook,
@@ -61,6 +61,30 @@ import type {
   NoteViewMode,
 } from "../types/notes";
 import { registerIslandApp } from "../lib/islandSync";
+
+/**
+ * What `flush` reports about the open draft once it is done: `"saved"` when nothing it holds is
+ * missing from SQLite (or there is no draft), `"pending"` when it is still dirty — the write failed,
+ * the file moved under it, or the user out-typed `MAX_FLUSH_PASSES`.
+ *
+ * A result rather than a throw because every caller has already been told whatever there was to
+ * tell (the toast, the conflict question); what they need is the one bit that decides whether the
+ * draft may be replaced. Before this existed `flush` resolved the same way for both, and every
+ * caller took that as "saved" and dropped the only copy of the text.
+ */
+export type FlushResult = "saved" | "pending";
+
+/**
+ * An unsaved draft that had to leave the editor before its save landed — see `parked`.
+ *
+ * `version` is decided when it is parked, because the retry may run from another workspace where
+ * the note's metadata (and so whether it mirrors a file at all) is no longer in memory.
+ */
+export interface ParkedNote {
+  workspaceId: string | null;
+  draft: NoteDraft;
+  version: NoteFileVersion | null;
+}
 
 /**
  * The Notes workspace's state.
@@ -299,6 +323,21 @@ interface NotesState {
   fileConflict: string | null;
   /** Why the open note's file could not be read when it opened, or `""`. */
   fileError: string;
+  /**
+   * Drafts whose save had not landed when something replaced them — a workspace switch, opening
+   * another note, closing, a new note — keyed by note id.
+   *
+   * A workspace switch cannot be refused (the workspace store has already moved on, and this store
+   * following it is what keeps the two in step), so "keep the draft" has to mean somewhere other
+   * than the editor. Every `flush` retries these before the open draft, quietly — the failure was
+   * already toasted once — and `openNote` hands one back as the open draft, still dirty, so the
+   * editor shows the unsaved text rather than the row's older copy. Returning to the workspace
+   * reopens it on its own. The quit guard lists them, so quitting cannot drop them either.
+   *
+   * Deliberately absent from `clearedWorkspaceState`, like `aiByNote` and for the same reason: it
+   * exists to outlive the view it was typed in.
+   */
+  parked: Record<string, ParkedNote>;
 
   /**
    * Points the whole workspace at `workspaceId`, dropping everything the outgoing one had on
@@ -339,7 +378,7 @@ interface NotesState {
    * (`interactive`, the default) — reload or overwrite; the quit guard passes `false` and leaves the
    * draft unsaved instead. `force` is the "overwrite" answer.
    */
-  flush: (options?: { interactive?: boolean; force?: boolean }) => Promise<void>;
+  flush: (options?: { interactive?: boolean; force?: boolean }) => Promise<FlushResult>;
 
   /**
    * Re-reads the open note's file when it mirrors one — on a change in the working tree. A clean
@@ -566,6 +605,135 @@ function stopNoteAiRuns(runs: Record<string, NoteAiRun>, noteIds: Iterable<strin
   }
 }
 
+/** What `flush` tells its caller — read off the draft, which is the only thing that knows. */
+function openDraftResult(get: () => NotesState): FlushResult {
+  return get().draft?.dirty ? "pending" : "saved";
+}
+
+/**
+ * Moves the open draft into `parked` if it is still unsaved, for a caller about to replace it.
+ *
+ * Keyed by note id, so parking the same note twice keeps the newer copy. The draft itself is left
+ * in place — the caller is about to overwrite it, and one that then fails (a create that errors)
+ * keeps showing it; `drainParked` drops a parked copy whose note is open again, since the open one
+ * is that copy or newer.
+ */
+function parkOpenDraft(get: () => NotesState, set: StoreApi<NotesState>["setState"]): void {
+  const { draft, workspaceId, fileVersions, notes } = get();
+  if (!draft?.dirty) return;
+  const linked = isLinkedNote(notes.find((n) => n.id === draft.id));
+  set((state) => ({
+    parked: {
+      ...state.parked,
+      [draft.id]: {
+        workspaceId,
+        draft: { ...draft },
+        version: linked ? (fileVersions[draft.id] ?? null) : null,
+      },
+    },
+  }));
+}
+
+/** The parked copy of `id`, taken out of `parked` — the caller is making it the open draft. */
+function takeParked(
+  get: () => NotesState,
+  set: StoreApi<NotesState>["setState"],
+  id: string,
+): ParkedNote | undefined {
+  const entry = get().parked[id];
+  if (!entry) return undefined;
+  set((state) => {
+    const parked = { ...state.parked };
+    delete parked[id];
+    return { parked };
+  });
+  return entry;
+}
+
+/** Reopens a draft parked in `workspaceId`, if nothing else is open and its note is still listed. */
+function offerParked(get: () => NotesState, workspaceId: string): void {
+  if (get().activeId !== null) return;
+  const listed = new Set(get().notes.map((n) => n.id));
+  const id = Object.keys(get().parked).find(
+    (key) => get().parked[key].workspaceId === workspaceId && listed.has(key),
+  );
+  if (id) void get().openNote(id);
+}
+
+/**
+ * Retries every parked draft once, quietly.
+ *
+ * Quietly because each one was toasted when its save first failed, and a backend that is still
+ * failing would otherwise toast on every autosave of whatever is open now. A draft that lands is
+ * dropped from `parked` and, when its workspace is the one on screen, folded into the list the way
+ * `flush` folds the open note; one that fails again simply stays. A note deleted meanwhile
+ * (`meta: null`) has nowhere to go, the same answer `flush` gives the open draft.
+ */
+async function drainParked(
+  get: () => NotesState,
+  set: StoreApi<NotesState>["setState"],
+): Promise<void> {
+  const drop = (id: string, entry: ParkedNote) =>
+    set((state) => {
+      // Only the copy this pass wrote: one parked again meanwhile is newer and still owed.
+      if (state.parked[id] !== entry) return {};
+      const parked = { ...state.parked };
+      delete parked[id];
+      return { parked };
+    });
+  for (const [id, entry] of Object.entries(get().parked)) {
+    if (get().draft?.id === id) {
+      drop(id, entry);
+      continue;
+    }
+    try {
+      const { draft } = entry;
+      const answer = await notesSaveNote(
+        id,
+        draft.title,
+        draft.content,
+        serializeTags(draft.tags),
+        entry.version,
+        false,
+      );
+      if (get().parked[id] !== entry) continue;
+      drop(id, entry);
+      const meta = answer.meta;
+      if (!meta || get().workspaceId !== entry.workspaceId) continue;
+      const note = toNote(meta);
+      const version = answer.version;
+      set((state) => ({
+        notes: withSavedMeta(state.notes, note),
+        fileVersions: version ? { ...state.fileVersions, [id]: version } : state.fileVersions,
+        ...cacheBody(state, id, draft.content),
+      }));
+    } catch {
+      // Stays parked; the next flush, or reopening the note, is the retry.
+    }
+  }
+}
+
+/**
+ * `notes` with a save's answer folded in — **only the fields a save owns.** `save_note` re-reads the
+ * whole row, so its answer also carries `pinned` and `book_id` as they were when *it* ran — and a pin
+ * or a drag issued while the write was in flight would be rolled back on screen while the database
+ * kept it. Merging the five columns the save actually wrote leaves the optimistic ones alone.
+ */
+function withSavedMeta(notes: Note[], note: Note): Note[] {
+  return notes.map((existing) =>
+    existing.id === note.id
+      ? {
+          ...existing,
+          title: note.title,
+          excerpt: note.excerpt,
+          tags: note.tags,
+          word_count: note.word_count,
+          updated_at: note.updated_at,
+        }
+      : existing,
+  );
+}
+
 export const useNotesStore = create<NotesState>((set, get) => ({
   workspaceId: null,
   loading: false,
@@ -595,6 +763,7 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   fileVersions: {},
   fileConflict: null,
   fileError: "",
+  parked: {},
 
   setWorkspace: async (workspaceId) => {
     if (pendingLoad?.workspaceId === workspaceId) return pendingLoad.promise;
@@ -602,7 +771,9 @@ export const useNotesStore = create<NotesState>((set, get) => ({
 
     // The outgoing workspace's unsaved draft, written before anything is dropped. A note is a
     // document: losing the last sentence to a workspace switch is data loss, not a stale cache.
-    await get().flush();
+    // When the write did not land the draft is parked under the workspace it belongs to rather than
+    // cleared with the rest — the switch itself cannot be refused, see `parked`.
+    if ((await get().flush()) === "pending") parkOpenDraft(get, set);
 
     // Any body search still pending against the *outgoing* workspace. Without both lines a
     // debounced search fires after the switch, reads the new `workspaceId` at call time, and scans
@@ -650,6 +821,9 @@ export const useNotesStore = create<NotesState>((set, get) => ({
           galleryView: galleryView === "list" || galleryView === "graph" ? galleryView : "grid",
           sort: (sort as NoteSort | null) ?? "manual",
         });
+        // A draft left here unsaved on the way out comes back as the open note, still dirty, so
+        // the first thing on screen is the text the person was writing — and its autosave retries.
+        offerParked(get, workspaceId);
 
         /**
          * The six shipped templates, written in as ordinary rows the first time this workspace is
@@ -812,6 +986,25 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     // where the answer can still keep the note open.
     await get().flush({ interactive: false });
     if (!(await settledBeforeLeaving(get))) return;
+    parkOpenDraft(get, set);
+
+    // A draft parked unsaved is the newest text this note has, newer than the row and the file —
+    // so it is what opens, still dirty, checked on save against the version it was typed over.
+    const parkedCopy = takeParked(get, set, id);
+    if (parkedCopy) {
+      set((state) => ({
+        activeId: id,
+        draft: { ...parkedCopy.draft, dirty: true },
+        savedAt: null,
+        fileError: "",
+        fileVersions: parkedCopy.version
+          ? { ...state.fileVersions, [id]: parkedCopy.version }
+          : state.fileVersions,
+      }));
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => void get().flush(), AUTOSAVE_MS);
+      return;
+    }
 
     // A note that mirrors a file opens from the file, never from the cache: the working tree is
     // where its latest text is, and a body cached before a pull would reopen as it was.
@@ -1024,6 +1217,7 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   closeNote: async () => {
     await get().flush({ interactive: false });
     if (!(await settledBeforeLeaving(get))) return;
+    parkOpenDraft(get, set);
     set({ activeId: null, draft: null, savedAt: null, fileError: "" });
   },
 
@@ -1044,12 +1238,22 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     // A second caller joins the write already under way rather than starting a parallel one. Two
     // concurrent `notes_save_note` calls for the same row would be a last-writer-wins race over
     // the same content, and the loop below already guarantees the newest draft is the one that
-    // ends up written — so joining is both safer and less work.
-    if (pendingFlush) return pendingFlush;
+    // ends up written — so joining is both safer and less work. The joiner reads the outcome off
+    // the draft like the caller that started it does, so both are told the same thing.
+    if (pendingFlush) {
+      await pendingFlush;
+      return openDraftResult(get);
+    }
 
     // Set when this run is the one that found the file moved — asked about once it is over.
     let refused: string | null = null;
     const run = (async () => {
+      // Parked drafts first: each is older than anything the editor holds now, so writing them
+      // after the open draft could put an older copy of the same note back over a newer one.
+      // Skipped outright when there are none, so the open draft is still read in the same tick
+      // `flush` was called in, as it always has been.
+      if (Object.keys(get().parked).length > 0) await drainParked(get, set);
+
       // **A loop, not a single write, and this is the whole point of the function.**
       //
       // Every caller that awaits `flush()` goes on to *replace* the draft — `openNote` swaps in
@@ -1096,23 +1300,7 @@ export const useNotesStore = create<NotesState>((set, get) => ({
           }
           const note = toNote(saved);
           set((state) => ({
-            // **Only the fields this save owns.** `save_note` re-reads the whole row, so `saved`
-            // also carries `pinned` and `book_id` as they were when *it* ran — and a pin or a
-            // drag issued while this write was in flight would be rolled back on screen while the
-            // database kept it. Merging the five columns the save actually wrote leaves the
-            // optimistic ones alone.
-            notes: state.notes.map((existing) =>
-              existing.id === note.id
-                ? {
-                    ...existing,
-                    title: note.title,
-                    excerpt: note.excerpt,
-                    tags: note.tags,
-                    word_count: note.word_count,
-                    updated_at: note.updated_at,
-                  }
-                : existing,
-            ),
+            notes: withSavedMeta(state.notes, note),
             savedAt: note.updated_at,
             ...cacheBody(state, draft.id, draft.content),
           }));
@@ -1152,6 +1340,7 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     // awaited: the debounce that got here has nobody waiting on it. Leaving the note — the one
     // caller that must wait for the answer — flushes quietly and asks through `settledBeforeLeaving`.
     if (refused && interactive) void askFileConflict(get, refused);
+    return openDraftResult(get);
   },
 
   // ---------- the AI writes ----------
@@ -1223,7 +1412,8 @@ export const useNotesStore = create<NotesState>((set, get) => ({
   createNote: async (bookId, template) => {
     const { workspaceId } = get();
     if (!workspaceId) return null;
-    await get().flush();
+    // Parked when it did not land: the new note takes the editor either way.
+    if ((await get().flush()) === "pending") parkOpenDraft(get, set);
     const title = template ? template.name : translate("notes.untitled");
     const content = template?.content ?? "";
     const tags = template?.tags ?? [];
@@ -1266,7 +1456,11 @@ export const useNotesStore = create<NotesState>((set, get) => ({
         // `stopNoteAiRuns` — because leaving it going is not a neutral choice.
         const aiByNote = { ...state.aiByNote };
         delete aiByNote[id];
+        // A parked copy goes with the note, for the reason the draft below does.
+        const parked = { ...state.parked };
+        delete parked[id];
         return {
+          parked,
           notes: state.notes.filter((n) => n.id !== id),
           bodies,
           aiByNote,
@@ -2054,7 +2248,9 @@ useWorkspaceStore.subscribe((state, previous) => {
  *  again on the way back — see `lib/islandSync`. */
 registerIslandApp(["notes"], {
   isLoaded: () => useNotesStore.getState().workspaceId !== null || useNotesStore.getState().loading,
-  flush: () => useNotesStore.getState().flush({ interactive: false }),
+  flush: async () => {
+    await useNotesStore.getState().flush({ interactive: false });
+  },
   release: () => {
     if (searchTimer) clearTimeout(searchTimer);
     searchToken++;
@@ -2084,21 +2280,28 @@ function unsavedNote(state: NotesState): { label: string } | null {
   return { label: draft.title.trim() || translate("notes.untitled") };
 }
 
+/** The open draft and every parked one, as the quit guard names them. */
+function unsavedNotes(state: NotesState): { label: string }[] {
+  const open = unsavedNote(state);
+  const parked = Object.entries(state.parked)
+    .filter(([id]) => id !== state.draft?.id)
+    .map(([, entry]) => ({ label: entry.draft.title.trim() || translate("notes.untitled") }));
+  return open ? [open, ...parked] : parked;
+}
+
 registerUnsavedProvider({
   id: "notes",
-  unsaved: () => {
-    const item = unsavedNote(useNotesStore.getState());
-    return item ? [{ ...item, detail: translate("notes.title") }] : [];
-  },
+  unsaved: () =>
+    unsavedNotes(useNotesStore.getState()).map((item) => ({ ...item, detail: translate("notes.title") })),
   saveAll: async () => {
     for (let pass = 0; pass < MAX_FLUSH_PASSES; pass++) {
       // Quietly: a note whose file moved on disk is reported as unsaved — which keeps the app open
-      // with the draft intact — rather than asked about inside the quit's own question.
+      // with the draft intact — rather than asked about inside the quit's own question. Each pass
+      // also retries the parked drafts (`drainParked`).
       await useNotesStore.getState().flush({ interactive: false });
-      if (!unsavedNote(useNotesStore.getState())) return [];
+      if (unsavedNotes(useNotesStore.getState()).length === 0) return [];
     }
-    const left = unsavedNote(useNotesStore.getState());
-    return left ? [left.label] : [];
+    return unsavedNotes(useNotesStore.getState()).map((item) => item.label);
   },
   discard: () => {
     // Nothing is journalled; the only thing to stop is a debounced write racing the exit.
@@ -2112,7 +2315,7 @@ registerUnsavedProvider({
 useNotesStore.subscribe((state, previous) => {
   const now = unsavedNote(state) ? state.draft?.id : null;
   const before = unsavedNote(previous) ? previous.draft?.id : null;
-  if (now !== before) notifyUnsavedChanged();
+  if (now !== before || state.parked !== previous.parked) notifyUnsavedChanged();
 });
 
 /**

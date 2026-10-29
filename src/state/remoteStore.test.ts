@@ -202,3 +202,78 @@ describe("an unknown host key", () => {
     expect(useHostKeyStore.getState().target).toBeNull();
   });
 });
+
+describe("a tree read answering after a workspace switch", () => {
+  const hostOf = (workspaceId: string, id = `host-${workspaceId}`) => ({ ...HOST, id, workspace_id: workspaceId });
+
+  /**
+   * `remote_load_tree` answers each workspace with a host of its own; the first call for any
+   * workspace named in `hold` hangs until its release is called — so a stale answer is both late
+   * and recognisable.
+   */
+  function treeBackend(hold: string[], second: Record<string, string> = {}) {
+    const releases: (() => void)[] = [];
+    const pending = new Set(hold);
+    answers.remote_load_tree = (args) => {
+      const ws = String(args.workspaceId);
+      const tree = { hosts: [hostOf(ws, second[ws] ?? `host-${ws}`)], groups: [], snippets: [] };
+      if (!pending.has(ws)) return tree;
+      pending.delete(ws);
+      return new Promise((resolve) => releases.push(() => resolve(tree)));
+    };
+    return async () => {
+      releases.shift()?.();
+      await new Promise((r) => setTimeout(r, 0));
+    };
+  }
+
+  const hostIds = () => useRemoteStore.getState().hosts.map((host) => host.id);
+
+  it("drops a refresh asked in A once the store is on B", async () => {
+    const release = treeBackend(["w1"]);
+    const refresh = useRemoteStore.getState().refresh();
+    await useRemoteStore.getState().setWorkspace("w2");
+    expect(hostIds()).toEqual(["host-w2"]);
+
+    await release();
+    await refresh;
+    expect(useRemoteStore.getState().workspaceId).toBe("w2");
+    expect(hostIds()).toEqual(["host-w2"]);
+  });
+
+  it("drops the first visit's refresh after A → B → A", async () => {
+    // The second read of w1 answers with a host the first never had.
+    const release = treeBackend(["w1"]);
+    const refresh = useRemoteStore.getState().refresh();
+    await useRemoteStore.getState().setWorkspace("w2");
+    answers.remote_load_tree = () => ({ hosts: [hostOf("w1", "host-w1-again")], groups: [], snippets: [] });
+    await useRemoteStore.getState().setWorkspace("w1");
+    expect(hostIds()).toEqual(["host-w1-again"]);
+
+    await release();
+    await refresh;
+    expect(hostIds()).toEqual(["host-w1-again"]);
+  });
+
+  it("drops a superseded switch's load, and leaves the newer one in charge of `loading`", async () => {
+    const release = treeBackend(["w2"]);
+    const first = useRemoteStore.getState().setWorkspace("w2");
+    await useRemoteStore.getState().setWorkspace("w3");
+    expect(hostIds()).toEqual(["host-w3"]);
+
+    await release();
+    await first;
+    expect(useRemoteStore.getState().workspaceId).toBe("w3");
+    expect(hostIds()).toEqual(["host-w3"]);
+    expect(useRemoteStore.getState().loading).toBe(false);
+  });
+
+  it("still applies a refresh when nothing moved", async () => {
+    const release = treeBackend(["w1"]);
+    useRemoteStore.setState({ hosts: [] });
+    const refresh = useRemoteStore.getState().refresh();
+    await release();
+    await refresh;
+    expect(hostIds()).toEqual(["host-w1"]);
+  });
+});

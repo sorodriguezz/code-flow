@@ -119,6 +119,9 @@ export function AppRail() {
     Object.keys(s.active).some((id) => s.active[id] && AGENT_RUN_KINDS.has(s.aboutByRun[id]?.kindKey ?? "")),
   );
 
+  const unsaved = useParkedDrafts();
+  const scroll = useScrollEdges();
+
   const apps = ordered(railOrder);
   // The gesture is shared with the sidebar's repositories; the preview below is not. This rail is
   // six identical squares, so it can afford to slide its neighbours out of the way to show where
@@ -160,7 +163,7 @@ export function AppRail() {
       // On the frame, like the projects panel across the window: no fill and no rule of its own —
       // the sheets on either side draw the edges. Lit while an icon is lifted, since it is then the
       // one thing left above the scrim.
-      className={`group/rail relative flex w-12 shrink-0 flex-col items-center pb-2 pt-0.5 ${
+      className={`group/rail relative flex min-h-0 w-12 shrink-0 flex-col items-center pb-2 pt-0.5 ${
         drag ? "z-[9999] rounded-lg bg-[var(--cf-bg)] shadow-[-10px_0_28px_rgba(0,0,0,0.35)]" : ""
       }`}
     >
@@ -177,6 +180,24 @@ export function AppRail() {
           `relative` is also what the drop marker below is positioned against — see `HoldDrag.ghost`,
           which is measured in this container's coordinates. It has no border and never scrolls,
           which is what makes those coordinates the same ones `top` is resolved in. */}
+      {/* The list scrolls; the foot below it does not. At the window's minimum height, or with the
+          system's text scaled up, the apps are taller than the rail, and the column used to be cut
+          off at the window's edge — the assistant and the tour first, since they sit at the bottom.
+          The scroll is this wrapper's, not the list's own, so the list keeps the coordinates
+          `HoldDrag.ghost` is measured in; and it is held still while an icon is lifted, because the
+          slots a drag compares the pointer with were read when the hold began. No bar: the rail is
+          48px wide, and a wheel, a trackpad or Tab reaches the hidden icons all the same. */}
+      <div
+        ref={scroll.ref}
+        onScroll={scroll.update}
+        // With no scroll bar, the fade is what says there is more: only on the side that has icons
+        // past the edge. A mask rather than a painted gradient, so it is right over the see-through
+        // window too, where the frame has no single colour to paint with.
+        style={scrollFade(scroll.above, scroll.below)}
+        className={`flex min-h-0 w-full flex-1 flex-col items-center [scrollbar-width:none] [&::-webkit-scrollbar]:hidden ${
+          drag ? "overflow-hidden" : "overflow-y-auto overflow-x-hidden"
+        }`}
+      >
       <div ref={reorder.listRef} data-tour="workspace-tools" className="relative flex flex-col items-center gap-1">
         <Tooltip side="left" label={scopeHint} description={t("tabbar.scopeWorkspaceReset")}>
           <button
@@ -252,6 +273,9 @@ export function AppRail() {
               description={
                 <>
                   {detachedTo ? t("windows.focusWindow") : t(app.descriptionKey)}
+                  {unsaved.has(app.id) && !detachedTo && (
+                    <span className="mt-1 block text-[var(--cf-warning)]">{t("tabbar.unsavedDrafts")}</span>
+                  )}
                   {/* The only announcement the hold gets. Quieter than the description
                       above it: it is about the rail rather than about this app, and it is read
                       once. */}
@@ -338,6 +362,14 @@ export function AppRail() {
                   className="pointer-events-none absolute bottom-1 right-1 h-[7px] w-[7px] rounded-full bg-[var(--cf-success)] shadow-[0_0_0_2px_var(--cf-bg)]"
                 />
               )}
+              {/* A save that did not land: the draft is parked, still unsaved, until it does — a
+                  dot in the warning colour so it is seen from any other app, where it matters. */}
+              {unsaved.has(app.id) && !detachedTo && (
+                <span
+                  aria-hidden
+                  className="pointer-events-none absolute bottom-1 right-1 h-[7px] w-[7px] rounded-full bg-[var(--cf-warning)] shadow-[0_0_0_2px_var(--cf-bg)]"
+                />
+              )}
               {reorder.arming === key && <HoldProgress shape="ring" />}
               {/* The corner mark, and the one control on this rail that is not the app itself.
                   Always drawn rather than revealed on hover: this rail is reachable by touch and by
@@ -394,6 +426,7 @@ export function AppRail() {
         })}
 
       </div>
+      </div>
 
       {/* Pinned to the foot of the rail rather than trailing the apps: the apps above are a list
           you pick from and neither of these is one of them, so a fixed corner tells them apart
@@ -407,7 +440,7 @@ export function AppRail() {
           tour, which left the three repository views with an empty corner and their tour up in the
           title bar — the split this button exists to have ended. A control that is always in the
           same place is the whole argument for putting it here. */}
-      <div className="mt-auto flex w-full flex-col items-center gap-1 pt-2">
+      <div className="flex w-full shrink-0 flex-col items-center gap-1 pt-2">
         <AssistantButton />
         <span className="my-1 h-px w-5 bg-[var(--cf-border)]" />
         <TourLauncher />
@@ -537,4 +570,83 @@ function AssistantButton() {
       </button>
     </Tooltip>
   );
+}
+
+/**
+ * Which rail apps hold a parked draft — a note or diagram whose save failed and is waiting to be
+ * retried (see `parked` in `notesStore` / `diagramsStore`). Both stores are imported lazily, as the
+ * views are: the rail is on screen from the first frame and must not pull them in to draw a dot.
+ */
+function useParkedDrafts(): ReadonlySet<string> {
+  const [ids, setIds] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    let live = true;
+    const unsubscribes: (() => void)[] = [];
+    const state = { notes: false, diagrams: false };
+    const publish = () => {
+      if (!live) return;
+      setIds((prev) => {
+        const next = new Set<string>();
+        if (state.notes) next.add("notes");
+        if (state.diagrams) next.add("diagrams");
+        return prev.size === next.size && [...next].every((id) => prev.has(id)) ? prev : next;
+      });
+    };
+    void Promise.all([import("../../state/notesStore"), import("../../state/diagramsStore")]).then(
+      ([{ useNotesStore }, { useDiagramsStore }]) => {
+        if (!live) return;
+        const watch = (id: "notes" | "diagrams", parked: () => Record<string, unknown>, subscribe: (f: () => void) => () => void) => {
+          const read = () => {
+            state[id] = Object.keys(parked()).length > 0;
+            publish();
+          };
+          read();
+          unsubscribes.push(subscribe(read));
+        };
+        watch("notes", () => useNotesStore.getState().parked, useNotesStore.subscribe);
+        watch("diagrams", () => useDiagramsStore.getState().parked, useDiagramsStore.subscribe);
+      },
+    );
+    return () => {
+      live = false;
+      unsubscribes.forEach((off) => off());
+    };
+  }, []);
+  return ids;
+}
+
+function scrollFade(above: boolean, below: boolean): CSSProperties | undefined {
+  if (!above && !below) return undefined;
+  const mask = `linear-gradient(to bottom, ${above ? "transparent, black 24px" : "black"}, ${
+    below ? "black calc(100% - 24px), transparent" : "black"
+  })`;
+  return { maskImage: mask, WebkitMaskImage: mask };
+}
+
+/** Whether the rail's list has icons hidden above or below — re-read on scroll and on resize. */
+function useScrollEdges() {
+  const [edges, setEdges] = useState({ above: false, below: false });
+  const node = useRef<HTMLDivElement | null>(null);
+  const update = useCallback(() => {
+    const el = node.current;
+    if (!el) return;
+    const above = el.scrollTop > 1;
+    const below = el.scrollTop + el.clientHeight < el.scrollHeight - 1;
+    setEdges((prev) => (prev.above === above && prev.below === below ? prev : { above, below }));
+  }, []);
+  const observer = useRef<ResizeObserver | null>(null);
+  const ref = useCallback(
+    (el: HTMLDivElement | null) => {
+      observer.current?.disconnect();
+      node.current = el;
+      if (!el) return;
+      // The list's own size changes too (an app switched on or off), not only the window's.
+      observer.current = new ResizeObserver(update);
+      observer.current.observe(el);
+      if (el.firstElementChild) observer.current.observe(el.firstElementChild);
+      update();
+    },
+    [update],
+  );
+  return { ref, update, ...edges };
 }

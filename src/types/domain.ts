@@ -1233,6 +1233,136 @@ export interface Requirement {
   detail: string;
 }
 
+/** `git` or an AI CLI, as the first-launch setup and Settings' «Instalar» see it. See `tool_setup.rs`. */
+export interface ToolStatus {
+  id: string;
+  label: string;
+  installed: boolean;
+  detail: string;
+  /** What «Instalar» runs here; `null` when there is no command for this platform. */
+  command: string | null;
+  /** A program the command needs that is missing (`npm`, `winget`, `brew`). */
+  missingPrerequisite: string | null;
+  url: string;
+}
+
+export type ToolInstallOutcome = "done" | "busy" | "failed" | "not_detected" | "handed_off";
+
+export interface ToolInstallResult {
+  id: string;
+  outcome: ToolInstallOutcome;
+  detail: string;
+  errorKind: string | null;
+  reference: string | null;
+  details: string;
+}
+
+/** One increment of Settings › Estadísticas' counters. See `usage_stats.rs`. */
+export type UsageKind =
+  | "view"
+  | "feature"
+  | "session"
+  | "chat"
+  | "chat_engine"
+  | "action"
+  | "error"
+  | "shortcut"
+  | "command"
+  | "settings"
+  | "ai"
+  | "ai_provider"
+  | "ai_model"
+  | "ai_outcome"
+  | "ai_tokens"
+  | "git"
+  | "git_lines";
+
+export interface UsageEvent {
+  kind: UsageKind;
+  key: string;
+  workspaceId: string | null;
+  /** A project id; `""` for none. */
+  repo: string;
+  count: number;
+  seconds: number;
+  day: string;
+  hour: number;
+}
+
+export interface UsageKeyStat {
+  kind: UsageKind;
+  key: string;
+  count: number;
+  seconds: number;
+  tokens: number;
+  costUsd: number;
+  days: number;
+}
+
+export interface UsageDayStat {
+  day: string;
+  views: number;
+  seconds: number;
+  aiRuns: number;
+  gitOps: number;
+  tokens: number;
+  costUsd: number;
+  actions: number;
+  errors: number;
+}
+
+export interface UsageTotals {
+  seconds: number;
+  views: number;
+  aiRuns: number;
+  tokens: number;
+  costUsd: number;
+  gitOps: number;
+  actions: number;
+  chats: number;
+  errors: number;
+}
+
+/** A workspace's or a repository's share of a window. */
+export interface UsageGroupStat {
+  id: string;
+  views: number;
+  seconds: number;
+  aiRuns: number;
+  tokens: number;
+  costUsd: number;
+  gitOps: number;
+  actions: number;
+}
+
+export interface UsageReport {
+  keys: UsageKeyStat[];
+  daily: UsageDayStat[];
+  workspaces: UsageGroupStat[];
+  repos: UsageGroupStat[];
+  /** `[weekday, Monday first][hour]`. */
+  heatSeconds: number[][];
+  heatEvents: number[][];
+  totals: UsageTotals;
+  previous: UsageTotals | null;
+  since: string | null;
+  activeDays: number;
+  streak: number;
+  longestStreak: number;
+}
+
+export interface UsageRawRow {
+  day: string;
+  workspaceId: string;
+  repo: string;
+  kind: UsageKind;
+  key: string;
+  count: number;
+  seconds: number;
+  tokens: number;
+  costUsd: number;
+}
+
 /** A shell the terminal can be opened with. `builtin` profiles are detected on this machine at
  * every launch and aren't editable; the rest are the user's own, persisted in app settings. */
 export interface ShellProfile {

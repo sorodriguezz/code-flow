@@ -34,14 +34,14 @@ const SERIES_COLOURS = [
 ];
 
 /** The small uppercase heading over each card. */
-const SECTION_LABEL = "text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]";
+export const SECTION_LABEL = "text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]";
 
 function colourFor(provider: string): string {
   const at = AI_PROVIDERS.findIndex((candidate) => candidate.id === provider);
   return SERIES_COLOURS[(at === -1 ? AI_PROVIDERS.length : at) % SERIES_COLOURS.length];
 }
 
-function providerLabel(provider: string): string {
+export function providerLabel(provider: string): string {
   // The hybrid task's local execution: not an engine of the list (nothing to install or sign in
   // to), but spend this screen should still name rather than print as an id.
   if (provider === "local-exec") return translate("localexec.title");
@@ -219,7 +219,7 @@ export function UsageStatsSection() {
   );
 }
 
-function Tile({
+export function Tile({
   icon: Icon,
   label,
   value,
@@ -552,7 +552,7 @@ const TASK_LABELS: Record<string, TranslationKey> = {
   other: "usage.task.other",
 };
 
-function taskLabel(id: string, t: (key: TranslationKey) => string): string {
+export function taskLabel(id: string, t: (key: TranslationKey) => string): string {
   if (id === "") return t("usage.task.unlabelled");
   const key = TASK_LABELS[id];
   return key ? t(key) : id;

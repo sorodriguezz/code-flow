@@ -61,6 +61,61 @@ const INSTALLS: [Install; 8] = [
     Install { id: crate::custom::PROVIDER_ID, npm_package: None, update_args: None },
 ];
 
+/// How a CLI that is **not installed yet** gets installed, per platform — the first-launch setup
+/// (`crate::tool_setup`) and the «Instalar» button in Settings run exactly these.
+///
+/// Each line is the vendor's own documented one-liner, checked 2026-10-29: Claude Code's native
+/// installer, opencode's and Grok's install scripts, and the npm packages the vendors publish where
+/// there is no native installer (or none for Windows). Antigravity (`agy`) documents no command-line
+/// install, so it has none and the setup links to its page instead. Unlike updating — which the CLI
+/// does by itself, see [`Install::update_args`] — a first install has no CLI yet to ask.
+pub struct Setup {
+    pub id: &'static str,
+    /// macOS and Linux, run by `bash -c`.
+    pub unix: Option<&'static str>,
+    /// Windows, run by PowerShell.
+    pub windows: Option<&'static str>,
+    /// The page to send someone to when there is no command, or it failed.
+    pub url: &'static str,
+}
+
+pub const SETUPS: [Setup; 8] = [
+    Setup {
+        id: "claude",
+        unix: Some("curl -fsSL https://claude.ai/install.sh | bash"),
+        windows: Some("irm https://claude.ai/install.ps1 | iex"),
+        url: "https://docs.claude.com/en/docs/claude-code/setup",
+    },
+    Setup {
+        id: "codex",
+        unix: Some("npm install -g @openai/codex"),
+        windows: Some("npm install -g @openai/codex"),
+        url: "https://developers.openai.com/codex/",
+    },
+    Setup { id: "gemini", unix: None, windows: None, url: "https://antigravity.google" },
+    Setup {
+        id: "grok",
+        unix: Some("curl -fsSL https://x.ai/cli/install.sh | bash"),
+        windows: Some("npm install -g @xai-official/grok"),
+        url: "https://x.ai/cli",
+    },
+    Setup {
+        id: "opencode",
+        unix: Some("curl -fsSL https://opencode.ai/install | bash"),
+        windows: Some("npm install -g opencode-ai"),
+        url: "https://opencode.ai/docs/",
+    },
+    Setup { id: "cline", unix: Some("npm install -g cline"), windows: Some("npm install -g cline"), url: "https://cline.bot" },
+    // Nothing to install: the in-process engine and the user's own command.
+    Setup { id: crate::local_agent::PROVIDER_ID, unix: None, windows: None, url: "" },
+    Setup { id: crate::custom::PROVIDER_ID, unix: None, windows: None, url: "" },
+];
+
+/// The install row of `id`.
+pub fn setup_of(id: &str) -> Option<&'static Setup> {
+    SETUPS.iter().find(|row| row.id == id)
+}
+
 /// One provider's capabilities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -131,6 +186,37 @@ mod tests {
             assert_eq!(INSTALLS.iter().filter(|row| row.id == id).count(), 1, "{id} needs one row in INSTALLS");
         }
         assert_eq!(INSTALLS.len(), PROVIDER_IDS.len(), "a row in INSTALLS names no provider");
+    }
+
+    #[test]
+    fn every_provider_has_exactly_one_setup_row() {
+        for id in PROVIDER_IDS {
+            assert_eq!(SETUPS.iter().filter(|row| row.id == id).count(), 1, "{id} needs one row in SETUPS");
+        }
+        assert_eq!(SETUPS.len(), PROVIDER_IDS.len(), "a row in SETUPS names no provider");
+    }
+
+    #[test]
+    fn every_cli_has_an_install_command_or_a_page_and_only_https_sources() {
+        for caps in all() {
+            let row = setup_of(&caps.id).unwrap();
+            if caps.in_process || caps.id == crate::custom::PROVIDER_ID {
+                assert!(row.unix.is_none() && row.windows.is_none(), "{} has nothing to install", caps.id);
+                continue;
+            }
+            assert!(row.url.starts_with("https://"), "{}: a CLI needs a page to fall back to", caps.id);
+            for command in [row.unix, row.windows].into_iter().flatten() {
+                for word in command.split_whitespace().filter(|word| word.contains("://")) {
+                    assert!(word.starts_with("https://"), "{}: {word} is not https", caps.id);
+                }
+                // The npm route installs the package the update check reads its version from.
+                if let Some(rest) = command.strip_prefix("npm install -g ") {
+                    assert_eq!(Some(rest), caps.npm_package.as_deref(), "{}: installs another package", caps.id);
+                }
+            }
+        }
+        assert!(setup_of("gemini").unwrap().unix.is_none(), "agy documents no command-line install");
+        assert_eq!(setup_of("claude").unwrap().unix, Some("curl -fsSL https://claude.ai/install.sh | bash"));
     }
 
     #[test]

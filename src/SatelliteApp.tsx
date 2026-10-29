@@ -35,6 +35,7 @@ import { getProject, startWatching, stopWatching } from "./lib/tauri/commands";
 import { followRepoChanges } from "./lib/repoRefresh";
 import { pipelinesAvailable, useVcsConnectionsStore } from "./state/vcsConnectionsStore";
 import { WINDOW } from "./lib/windowIdentity";
+import { startSatelliteUsageTracking } from "./lib/usageTracker";
 import { startCodiBus } from "./lib/codi/bus";
 import { startWindowBoundsTracking } from "./lib/windowControls";
 import { useFloatingEditorShortcuts, useRemoteActionShortcuts } from "./lib/useGlobalShortcuts";
@@ -159,6 +160,8 @@ function useSatelliteBoot(): boolean {
         useGlassStore.getState().init(),
         useMotionStore.getState().init(),
         usePowerSaveStore.getState().init(),
+        // Settings › Estadísticas: what is done in this window (actions, chats, shortcuts), not time.
+        Promise.resolve(startSatelliteUsageTracking(WINDOW.satellite?.kind ?? "app")),
         useLanguageOverrideStore.getState().init(),
         // The satellite draws its own title bar too, so the maximize button needs the same
         // rectangle tracking the main window's does.

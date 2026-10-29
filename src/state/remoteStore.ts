@@ -471,6 +471,24 @@ let pendingLoad: { workspaceId: string; promise: Promise<void> } | null = null;
  */
 let holdsEpoch = 0;
 
+/**
+ * Which visit to a workspace a tree read belongs to — bumped by every `setWorkspace`.
+ *
+ * `refresh` and the switch's own load both capture it with the workspace before their first await
+ * and drop the answer if either has moved. A read asked in A that lands after a switch to B would
+ * otherwise put A's hosts under a store that says B (and every host created next would be filed
+ * under B beside them). The workspace alone is not enough: after A → B → A it matches again, and the
+ * first visit's slow answer would overwrite whatever the second has loaded or added since. Same idea
+ * as `searchToken` in `notesStore`.
+ */
+let loadGeneration = 0;
+
+/** A check for "is this still the context the call started in", taken before the first await. */
+function captureContext(workspaceId: string): () => boolean {
+  const generation = loadGeneration;
+  return () => generation === loadGeneration && useRemoteStore.getState().workspaceId === workspaceId;
+}
+
 export function ensureRemoteStoreLoaded(): Promise<void> {
   const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
   if (workspaceId === null) return Promise.resolve();
@@ -641,6 +659,8 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
       history: [],
     });
 
+    loadGeneration++;
+    const current = captureContext(workspaceId);
     const promise = (async () => {
       try {
         const [tree, collapsed, hostView, history] = await Promise.all([
@@ -649,6 +669,9 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
           loadSetting(HOST_VIEW_KEY),
           loadSetting(historyKey(workspaceId)),
         ]);
+        // A switch made while this was in flight has cleared the view and started its own load;
+        // this answer describes a workspace that is no longer on screen.
+        if (!current()) return;
         set({
           hosts: tree.hosts,
           groups: tree.groups,
@@ -659,10 +682,14 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
         });
         await get().pollForwards();
       } catch (error) {
-        pushErrorToast(`${translate("remote.loadFailed")}: ${String(error)}`);
+        if (current()) pushErrorToast(`${translate("remote.loadFailed")}: ${String(error)}`);
       } finally {
-        set({ loading: false });
-        pendingLoad = null;
+        // Only the latest load owns these: a superseded one clearing them would mark the incoming
+        // workspace loaded while its read is still in flight, and drop the latch that dedupes it.
+        if (current()) {
+          set({ loading: false });
+          pendingLoad = null;
+        }
       }
     })();
 
@@ -673,11 +700,13 @@ export const useRemoteStore = create<RemoteState>((set, get) => ({
   refresh: async () => {
     const workspaceId = get().workspaceId;
     if (!workspaceId) return;
+    const current = captureContext(workspaceId);
     try {
       const tree = await remoteLoadTree(workspaceId);
+      if (!current()) return;
       set({ hosts: tree.hosts, groups: tree.groups, snippets: tree.snippets });
     } catch (error) {
-      pushErrorToast(`${translate("remote.loadFailed")}: ${String(error)}`);
+      if (current()) pushErrorToast(`${translate("remote.loadFailed")}: ${String(error)}`);
     }
   },
 

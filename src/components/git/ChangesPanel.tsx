@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
+  AlertTriangle,
   ChevronDown,
   ChevronRight,
   Clock,
@@ -48,13 +49,20 @@ import {
 import { useRevisionCompareStore } from "../../state/revisionCompareStore";
 import { AiSparkles } from "../common/AiGlyph";
 import type { LucideIcon } from "lucide-react";
-import { useRepoStore } from "../../state/repoStore";
+import {
+  commitTargetDrift,
+  commitTargetOf,
+  repoDisplayName,
+  useRepoStore,
+  type CommitTarget,
+} from "../../state/repoStore";
 import { useBlameStore } from "../../state/blameStore";
 import { useCommitDraft, useCommitDraftStore } from "../../state/commitDraftStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { DiffView } from "./DiffView";
 import type { DiffSides } from "./BinaryDiff";
 import { EmptyState } from "../common/EmptyState";
+import { Button } from "../common/Button";
 import { FileGlyph } from "../common/FileGlyph";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { CollapsibleSection } from "../common/CollapsibleSection";
@@ -73,7 +81,7 @@ import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { diffToText } from "../../lib/diffText";
 import { parseClaudeError, quotaRetryText } from "../../lib/claudeError";
 import { confirmAction } from "../../state/confirmStore";
-import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
+import { pushErrorToast, pushSuccessToast, useToastStore } from "../../state/toastStore";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { FileHistoryModal } from "./FileHistoryModal";
@@ -144,6 +152,24 @@ function diffSignature(file: FileDiffInfo | undefined): string | null {
     }
   }
   return parts.join("\0");
+}
+
+/** A commit as the user asked for it, read at the click and carried through every await after it. */
+interface CommitRequest {
+  target: CommitTarget;
+  message: string;
+  amend: boolean;
+  after: "none" | "push";
+}
+
+/** What the pre-commit secret scan answered: nothing found, something found, or no answer at all. */
+type SecretScanOutcome =
+  | { kind: "clean" }
+  | { kind: "hits"; hits: SecretHit[] }
+  | { kind: "unverified"; error: string };
+
+function classifySecretScan(hits: SecretHit[]): SecretScanOutcome {
+  return hits.length > 0 ? { kind: "hits", hits } : { kind: "clean" };
 }
 
 function UnpushedCommitsSection() {
@@ -583,7 +609,6 @@ export function ChangesPanel({
   const unstageAll = useRepoStore((s) => s.unstageAll);
   const discardFile = useRepoStore((s) => s.discardFile);
   const discardAll = useRepoStore((s) => s.discardAll);
-  const commitChanges = useRepoStore((s) => s.commitChanges);
   const markConflictResolved = useRepoStore((s) => s.markConflictResolved);
   const busy = useRepoStore((s) => s.busy);
   const operation = useRepoStore((s) => s.operation);
@@ -642,7 +667,11 @@ export function ChangesPanel({
   /** The file whose history is open, if any. */
   const [historyPath, setHistoryPath] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
-  const [secretHits, setSecretHits] = useState<SecretHit[] | null>(null);
+  /** The secret gate: the commit it is holding, and why — hits, or a scan that could not run. */
+  const [secretGate, setSecretGate] = useState<{
+    request: CommitRequest;
+    scan: Exclude<SecretScanOutcome, { kind: "clean" }>;
+  } | null>(null);
   const secretScanEnabled = usePreferencesStore((s) => s.secretScanEnabled);
   const [pending, setPending] = useState<{ path: string; kind: "stage" | "unstage" | "discard" | "all" } | null>(
     null,
@@ -720,6 +749,9 @@ export function ChangesPanel({
    * `[]` when that path has no diff on that side any more (staged, discarded or committed out from
    * under the row, which `DiffView` already draws as "no changes"). */
   const [selectedDiff, setSelectedDiff] = useState<FileDiffInfo[] | null>(null);
+  /** Why the selected file's diff could not be read — kept apart from `[]`, which means the file
+   *  really has no change on that side. Cleared by the next fetch that answers. */
+  const [diffError, setDiffError] = useState<string | null>(null);
   /**
    * Bumped by the refresh button, and only by it.
    *
@@ -745,6 +777,7 @@ export function ChangesPanel({
       return;
     }
     setSelectedDiff(null);
+    setDiffError(null);
   }, [selected]);
 
   /**
@@ -791,13 +824,17 @@ export function ChangesPanel({
     // paid for every changed file on every refresh is now paid for the one being looked at.
     getFileDiff(repoPath, path, staged, ignoreWhitespace)
       .then((file) => {
-        if (!cancelled) setSelectedDiff(file ? [file] : []);
+        if (cancelled) return;
+        setDiffError(null);
+        setSelectedDiff(file ? [file] : []);
       })
-      .catch(() => {
-        // A diff that fails to load is not worth a toast on top of whatever else just went wrong
-        // with the repository — the pane says "no changes", which is also what it said before this
-        // was a fetch at all when the file had dropped out of the list.
-        if (!cancelled) setSelectedDiff([]);
+      .catch((e) => {
+        // Not a toast on top of whatever else just went wrong with the repository — the pane says
+        // it in place, with a retry. Never `[]`: that is "no changes", and a file whose diff could
+        // not be read is not a file without differences.
+        if (cancelled) return;
+        setSelectedDiff(null);
+        setDiffError(String(e));
       });
     return () => {
       cancelled = true;
@@ -1136,23 +1173,67 @@ export function ChangesPanel({
       setDiffNonce((n) => n + 1);
     });
 
+  /**
+   * Whether the repository and branch a commit was aimed at are still the ones checked out. When
+   * they are not, the step is cancelled with a toast naming the repository — `phase` says whether
+   * the commit itself was cancelled or only the push after a commit that already landed.
+   */
+  const stillOnTarget = (target: CommitTarget, phase: "commit" | "push"): boolean => {
+    const drift = commitTargetDrift(target, useRepoStore.getState());
+    if (!drift) return true;
+    const repo = repoDisplayName(target.repoPath);
+    const branch = target.detached ? t("statusbar.detachedHead") : (target.branch ?? "");
+    const message =
+      phase === "commit"
+        ? t(drift === "repo" ? "changes.commitCancelledRepo" : "changes.commitCancelledBranch", { repo, branch })
+        : t(drift === "repo" ? "changes.pushCancelledRepo" : "changes.pushCancelledBranch", { repo, branch });
+    // Left for another repository: the card is also the way back to the one the commit was for,
+    // where the message is still in its box. A branch that moved has nowhere to go back to.
+    const back = drift === "repo" ? projectAt(target.repoPath) : null;
+    useToastStore.getState().pushToast(
+      message,
+      "error",
+      back
+        ? {
+            action: {
+              label: t("changes.backToRepo", { repo }),
+              run: () => {
+                void useWorkspaceStore
+                  .getState()
+                  .focusProject(back.workspaceId, back.projectId)
+                  .then(() => useUiStore.getState().setActiveView("changes"));
+              },
+            },
+            lifetimeMs: 10_000,
+          }
+        : undefined,
+    );
+    return false;
+  };
+
   /** Clears the box only when the commit landed. It used to clear it unconditionally, so a commit
    * that failed — a hook, a missing identity, a conflict still in the index — took the message the
-   * user had just written down with it. */
-  const performCommit = async () => {
-    const text = message.trim();
-    const committed = await commitChanges(text, { amend });
+   * user had just written down with it.
+   *
+   * Everything it acts on comes from `request`, read at the click — never from the store or this
+   * render, which may belong to a repository the user switched to while the scan ran. */
+  const performCommit = async (request: CommitRequest) => {
+    const { target } = request;
+    if (!stillOnTarget(target, "commit")) return;
+    const committed = await useRepoStore
+      .getState()
+      .commitChanges(request.message, { amend: request.amend, repoPath: target.repoPath });
     if (!committed) return;
-    if (repoPath && text) rememberMessage(repoPath, text);
-    setMessage("");
+    if (request.message) rememberMessage(target.repoPath, request.message);
+    useCommitDraftStore.getState().patch(target.repoPath, { message: "" });
     setAmend(false);
     historyAt.current = -1;
-    if (afterCommit.current === "push") {
-      afterCommit.current = "none";
+    if (request.after === "push") {
+      if (!stillOnTarget(target, "push")) return;
       const repo = useRepoStore.getState();
       const head = repo.branches.find((branch) => branch.is_head && !branch.is_remote);
       // A branch with no upstream is published — the first push sets it, as VS Code's does.
-      await repo.push(!head?.upstream);
+      await repo.push(!head?.upstream, { repoPath: target.repoPath });
     }
   };
 
@@ -1220,26 +1301,42 @@ export function ChangesPanel({
     setCommitMenu({ x: rect.left, y: rect.top - 4, items });
   };
 
-  // Commit entry point: run the pre-commit secret scan first (when enabled). If it finds
-  // credential-looking content, hold the commit and surface the SecretScanModal instead. A scan
-  // that itself errors must not block committing — fall through to the commit in that case.
-  const handleCommit = async () => {
-    if (amend && !(await confirmPushedAmend())) return;
-    if (secretScanEnabled && repoPath) {
+  // The pre-commit secret scan (when enabled), then the commit. Hits hold the commit behind the
+  // SecretScanModal; a scan that itself errors must not block committing either, but it is not a
+  // clean scan — the same modal says the changes could not be checked and offers Retry or «commit
+  // anyway», instead of committing as if nothing had been looked at.
+  const scanThenCommit = async (request: CommitRequest) => {
+    if (secretScanEnabled) {
       setScanning(true);
+      let scan: SecretScanOutcome;
       try {
-        const hits = await scanStagedSecrets(repoPath);
-        if (hits.length > 0) {
-          setSecretHits(hits);
-          return;
-        }
-      } catch {
-        // scan failed — don't stand in the way of the commit
+        scan = classifySecretScan(await scanStagedSecrets(request.target.repoPath));
+      } catch (e) {
+        scan = { kind: "unverified", error: String(e) };
       } finally {
         setScanning(false);
       }
+      if (scan.kind !== "clean") {
+        setSecretGate({ request, scan });
+        return;
+      }
     }
-    await performCommit();
+    await performCommit(request);
+  };
+
+  /** Commit entry point. The repository, branch, message, amend flag and what runs afterwards are
+   *  all read here, at the click — see `CommitTarget`. */
+  const handleCommit = async () => {
+    const target = commitTargetOf(useRepoStore.getState());
+    const after = afterCommit.current;
+    afterCommit.current = "none";
+    if (!target) return;
+    const request: CommitRequest = { target, message: message.trim(), amend, after };
+    if (request.amend) {
+      if (!(await confirmPushedAmend())) return;
+      if (!stillOnTarget(target, "commit")) return;
+    }
+    await scanThenCommit(request);
   };
 
   return (
@@ -1684,7 +1781,30 @@ export function ChangesPanel({
                 round trip now rather than a slice of an array the watcher already paid for, and a
                 pane that blanks for it would read as broken. `null` is "on its way", `[]` is
                 "nothing to show", which `DiffView` draws as its own empty state. */}
-            {selectedDiff ? (
+            {diffError ? (
+              <EmptyState
+                icon={AlertTriangle}
+                title={t("changes.diffLoadFailed")}
+                subtitle={diffError}
+                action={
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        setDiffError(null);
+                        setDiffNonce((n) => n + 1);
+                      }}
+                    >
+                      <RefreshCw size={12} />
+                      {t("changes.diffRetry")}
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={clearSelection}>
+                      {t("common.close")}
+                    </Button>
+                  </div>
+                }
+              />
+            ) : selectedDiff ? (
               <DiffView files={selectedDiff} onClose={clearSelection} staging={staging} toolbarExtra={diffToolbar} sides={diffSides} />
             ) : (
               <div className="flex h-full items-center justify-center">
@@ -1695,14 +1815,29 @@ export function ChangesPanel({
         </>
       )}
       </div>
-      {secretHits && (
+      {secretGate && (
         <SecretScanModal
-          hits={secretHits}
-          onCancel={() => setSecretHits(null)}
+          hits={secretGate.scan.kind === "hits" ? secretGate.scan.hits : []}
+          unverified={
+            secretGate.scan.kind === "unverified"
+              ? { repo: repoDisplayName(secretGate.request.target.repoPath), error: secretGate.scan.error }
+              : undefined
+          }
+          onCancel={() => setSecretGate(null)}
           onCommitAnyway={async () => {
-            setSecretHits(null);
-            await performCommit();
+            const { request } = secretGate;
+            setSecretGate(null);
+            await performCommit(request);
           }}
+          onRetry={
+            secretGate.scan.kind === "unverified"
+              ? async () => {
+                  const { request } = secretGate;
+                  setSecretGate(null);
+                  if (stillOnTarget(request.target, "commit")) await scanThenCommit(request);
+                }
+              : undefined
+          }
         />
       )}
 
@@ -1716,4 +1851,14 @@ export function ChangesPanel({
       {historyPath && <FileHistoryModal path={historyPath} onClose={() => setHistoryPath(null)} />}
     </div>
   );
+}
+
+/** The workspace and project a repository path is registered as, if it is one. */
+function projectAt(repoPath: string): { workspaceId: string; projectId: string } | null {
+  const normal = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
+  for (const [workspaceId, projects] of Object.entries(useWorkspaceStore.getState().projectsByWorkspace)) {
+    const project = (projects ?? []).find((p) => normal(p.local_path) === normal(repoPath));
+    if (project) return { workspaceId, projectId: project.id };
+  }
+  return null;
 }

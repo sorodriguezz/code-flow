@@ -61,6 +61,7 @@ import { quickAskOpen } from "./tauri/windows";
 import { acceleratorKeycaps } from "./globalHotkey";
 import { isMac } from "./platform";
 import { pushErrorToast } from "../state/toastStore";
+import { paletteKey } from "./usageActions";
 
 /**
  * Everything the command palette lists, and how a query narrows it.
@@ -77,7 +78,16 @@ export function fold(text: string): string {
   return text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
-export type PaletteGroup = "workspaces" | "projects" | "branches" | "views" | "actions" | "api" | "tools" | "settings";
+export type PaletteGroup =
+  | "frequent"
+  | "workspaces"
+  | "projects"
+  | "branches"
+  | "views"
+  | "actions"
+  | "api"
+  | "tools"
+  | "settings";
 
 export interface PaletteItem {
   key: string;
@@ -89,12 +99,14 @@ export interface PaletteItem {
   keys?: string[];
   /** Extra words the row is found by but never shows — the toolbox's "jwt", "b64", "epoch". */
   keywords?: string;
+  /** On a «Frecuentes» row: the row it repeats, which is what gets counted when it is chosen. */
+  origin?: { group: PaletteGroup; key: string };
 }
 
 /** A scoped opening (from the "switch repository" / "switch workspace" / "switch branch"
  * shortcuts) narrows the palette to one group, so it acts as a dedicated picker. */
 export const SCOPE_GROUPS: Record<PaletteScope, PaletteGroup[]> = {
-  all: ["workspaces", "projects", "branches", "views", "actions", "api", "tools", "settings"],
+  all: ["frequent", "workspaces", "projects", "branches", "views", "actions", "api", "tools", "settings"],
   workspaces: ["workspaces"],
   projects: ["projects"],
 };
@@ -142,7 +154,49 @@ export const VIEW_ITEMS: {
   { id: "toolbox", labelKey: "tabbar.toolbox", icon: Wrench },
 ];
 
+/**
+ * The words people already have for a place, by palette key — the vocabulary of the tools they
+ * come from ("postman", "dbeaver"), the verb of the task ("probar", "consultar") and the plain
+ * nouns, in Spanish and English. `filterPaletteItems` wants *every* typed word in the label or
+ * here, so a verb belongs here as much as a product name does: "probar api" finds nothing if
+ * "probar" is nowhere. Search words only; nothing here is ever drawn.
+ */
+export const PALETTE_ALIASES: Record<string, string> = {
+  // No "commits": the match is by substring, and it would catch "commit" before Changes does.
+  "view:graph:": "historial history log registro grafo graph blame git",
+  "view:changes:": "cambios changes staging stage commit diff status modificaciones git preparar",
+  "view:editor:": "editor archivos files codigo code vscode abrir open",
+  "view:pipelines:": "ci cd pipeline pipelines github actions build deploy despliegue",
+  "view:reviewer:": "revisor calidad quality lint tests pruebas build sonar",
+  "view:codemap:": "mapa map dependencias dependencies estructura structure",
+  "view:env:": "env entorno environment variables dotenv secretos",
+  "view:api:requests": "api postman insomnia bruno endpoint http rest graphql request peticion probar test curl",
+  "view:api:database":
+    "sql dbeaver datagrip tableplus query consulta consultar postgres mysql sqlite mongo redis base datos database tabla table",
+  "view:agents:": "agentes agents agent tareas tasks worktree worktrees ia ai",
+  "view:stories:": "historias stories story tickets jira azure boards usuario",
+  "view:remote:": "ssh sftp scp servidor servidores server vnc rdp remoto remote host conectar connect",
+  "view:notes:": "notas notes notion obsidian markdown apuntes reuniones meetings",
+  "view:diagrams:": "diagramas diagrams drawio excalidraw dbml mermaid dibujo draw",
+  "view:vault:": "llavero vault contrasenas passwords secretos secrets credenciales credentials 1password bitwarden",
+  "view:chat:": "chat chatgpt claude conversacion conversation preguntar ask ia ai",
+  "view:flows:": "flujos flows n8n zapier cron automatizar automate automatizacion automation programar schedule workflow",
+  "view:architecture:": "arquitectura architecture",
+  "view:toolbox:": "herramientas tools utilidades utilities",
+  "view:ai-panel": "asistente assistant ia ai chat preguntar ask",
+  "view:terminal": "terminal consola console shell bash zsh powershell cmd",
+  "view:containers": "docker contenedores containers kubernetes k8s pods compose",
+  "view:services": "servicios services procesos processes npm run dev server levantar start",
+  "action:pr-from-link": "pull request pr review revisar github azure enlace link",
+  "action:fetch": "git fetch",
+  "action:pull": "git pull bajar traer",
+  "action:push": "git push subir publicar",
+  "action:clone": "git clonar clone repositorio repository",
+  "action:new-project": "nuevo new proyecto project crear create plantilla template scaffold",
+};
+
 export const GROUP_LABEL_KEY: Record<PaletteGroup, TranslationKey> = {
+  frequent: "titlebar.frequent",
   workspaces: "sidebar.workspaces",
   projects: "sidebar.projects",
   branches: "sidebar.localBranches",
@@ -487,7 +541,13 @@ export function buildPaletteItems({
     ...apiItems,
     ...toolItems,
     ...settingsItems,
-  ];
+  ].map(withAliases);
+}
+
+function withAliases(item: PaletteItem): PaletteItem {
+  const aliases = PALETTE_ALIASES[item.key];
+  if (!aliases) return item;
+  return { ...item, keywords: item.keywords ? `${item.keywords} ${aliases}` : aliases };
 }
 
 /**
@@ -497,8 +557,13 @@ export function buildPaletteItems({
 export function filterPaletteItems(items: PaletteItem[], groups: PaletteGroup[], query: string): PaletteItem[] {
   const words = fold(query.trim()).split(/\s+/).filter(Boolean);
   // The toolbox's rows wait for a query: with nothing typed they would only push the other groups
-  // down the list.
-  const inScope = items.filter((item) => groups.includes(item.group) && (words.length > 0 || item.group !== "tools"));
+  // down the list. «Frecuentes» is the opposite: a shortcut for an empty field, and once something
+  // is typed its rows would only repeat the ones the query finds in their own groups.
+  const inScope = items.filter(
+    (item) =>
+      groups.includes(item.group) &&
+      (words.length > 0 ? item.group !== "frequent" : item.group !== "tools"),
+  );
   const hits =
     words.length === 0
       ? inScope
@@ -507,4 +572,60 @@ export function filterPaletteItems(items: PaletteItem[], groups: PaletteGroup[],
           return words.every((w) => haystack.includes(w));
         });
   return groups.flatMap((group) => hits.filter((item) => item.group === group));
+}
+
+/**
+ * The counter a row is filed under in Estadísticas, so «Frecuentes» can add up how often it was
+ * used: a place by its `view` key (time in front is counted per view, opened from the rail or not),
+ * anything else by the `command` key the palette files it under.
+ */
+function usageKeysOf(item: PaletteItem): { view?: string; command: string } {
+  const command = paletteKey(item.group, item.key);
+  if (item.group !== "views") return { command };
+  const [, id, workspace] = item.key.split(":");
+  const view = id === "api" && workspace === "database" ? "databases" : id;
+  return { view, command };
+}
+
+/**
+ * «Frecuentes»: the places and actions used most, as rows of their own at the top of an empty
+ * palette — copies under a `frequent:` key, so React and the arrow keys see each row once.
+ * `counts` is `kind:key → times`, from Estadísticas; a row never used is never listed, so a fresh
+ * install shows no such group at all.
+ */
+export function frequentItems(items: PaletteItem[], counts: ReadonlyMap<string, number>, limit = 5): PaletteItem[] {
+  return items
+    .filter((item) => item.group === "views" || item.group === "actions" || item.group === "api")
+    .map((item) => {
+      const keys = usageKeysOf(item);
+      const used = (keys.view ? counts.get(`view:${keys.view}`) ?? 0 : 0) + (counts.get(`command:${keys.command}`) ?? 0);
+      return { item, used };
+    })
+    .filter(({ used }) => used > 0)
+    .sort((a, b) => b.used - a.used)
+    .slice(0, limit)
+    .map(({ item }) => ({
+      ...item,
+      key: `frequent:${item.key}`,
+      group: "frequent" as const,
+      origin: { group: item.group, key: item.key },
+    }));
+}
+
+/**
+ * Why a row matched when its label does not say: the hidden words the query landed on — "postman"
+ * beside «Cliente API». Null when every typed word is in the label, which is most of the time.
+ */
+export function aliasHint(item: PaletteItem, query: string): string | null {
+  if (!item.keywords) return null;
+  const label = fold(item.label);
+  const words = fold(query.trim()).split(/\s+/).filter((w) => w && !label.includes(w));
+  if (words.length === 0) return null;
+  const tokens = item.keywords.split(/\s+/).filter(Boolean);
+  const hits: string[] = [];
+  for (const word of words) {
+    const token = tokens.find((tk) => fold(tk).includes(word));
+    if (token && !hits.includes(token)) hits.push(token);
+  }
+  return hits.length > 0 ? hits.join(" ") : null;
 }

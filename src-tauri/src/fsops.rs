@@ -316,7 +316,55 @@ pub fn read_byte_range(repo_path: &str, rel_path: &str, offset: u64, len: usize)
 
 pub fn write_file_text(repo_path: &str, rel_path: &str, content: &str) -> Result<(), String> {
     let full = resolve_within_repo(repo_path, rel_path)?;
-    std::fs::write(&full, content).map_err(|e| e.to_string())
+    replace_file(&full, content.as_bytes())
+}
+
+/// Writes `content` over `full` whole or not at all: into a sibling temporary file first, flushed to
+/// disk, then renamed over the target. `std::fs::write` truncates first, so a full disk or a crash
+/// half-way left the user's file cut short — and a save is exactly when the only other copy is the
+/// editor's buffer. `full` is already canonical, so a link is followed to the file it names and the
+/// link itself survives.
+///
+/// In place, as before, in the two cases a rename would break something the user relies on: a file
+/// with several hard links (the rename would detach this name from the others), and a rename the OS
+/// refuses — on Windows a file another program holds open, which an in-place write still gets
+/// through. The permissions are copied onto the temporary file so an executable script stays one.
+fn replace_file(full: &Path, content: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let existing = std::fs::metadata(full).ok();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if existing.as_ref().is_some_and(|meta| meta.nlink() > 1) {
+            return std::fs::write(full, content).map_err(|e| e.to_string());
+        }
+    }
+    let (Some(parent), Some(name)) = (full.parent(), full.file_name()) else {
+        return std::fs::write(full, content).map_err(|e| e.to_string());
+    };
+    let temp = parent.join(format!(
+        ".{}.cf-save-{}",
+        name.to_string_lossy(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let written = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        if let Some(meta) = &existing {
+            std::fs::set_permissions(&temp, meta.permissions())?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e.to_string());
+    }
+    if std::fs::rename(&temp, full).is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return std::fs::write(full, content).map_err(|e| e.to_string());
+    }
+    Ok(())
 }
 
 /// What the editor knew about a file's bytes when it last read or wrote them — what a save asks
@@ -614,7 +662,7 @@ pub fn write_bytes_checked(
             ));
         }
     }
-    std::fs::write(&full, content).map_err(|e| e.to_string())?;
+    replace_file(&full, content)?;
     let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
     Ok(version_of(&meta, content))
 }
@@ -2111,6 +2159,39 @@ mod tests {
         assert_eq!(stat_editor_file(&root, "gone.ts", None).unwrap(), None);
         create_dir(&root, "dir").unwrap();
         assert_eq!(stat_editor_file(&root, "dir", None).unwrap(), None);
+
+        std::fs::remove_dir_all(&repo).ok();
+    }
+
+    /// A save replaces the file whole: no temporary file left beside it, an executable stays one, a
+    /// link stays a link (the file it names is what changes), and hard links still share the content.
+    #[cfg(unix)]
+    #[test]
+    fn a_save_replaces_the_file_whole_and_keeps_links_and_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = temp_repo();
+        let root = repo.to_string_lossy().to_string();
+        std::fs::write(repo.join("run.sh"), "old").unwrap();
+        std::fs::set_permissions(repo.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("run.sh", repo.join("link.sh")).unwrap();
+        std::fs::write(repo.join("a.txt"), "one").unwrap();
+        std::fs::hard_link(repo.join("a.txt"), repo.join("b.txt")).unwrap();
+
+        write_file_text(&root, "link.sh", "new").unwrap();
+        assert_eq!(std::fs::read_to_string(repo.join("run.sh")).unwrap(), "new");
+        assert!(std::fs::symlink_metadata(repo.join("link.sh")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::metadata(repo.join("run.sh")).unwrap().permissions().mode() & 0o777, 0o755);
+
+        let version = write_bytes_checked(&root, "a.txt", b"two", None).unwrap();
+        assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "two");
+        assert!(write_bytes_checked(&root, "a.txt", b"three", Some(&version)).is_ok());
+
+        let mut names: Vec<String> = std::fs::read_dir(&repo)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["a.txt", "b.txt", "link.sh", "run.sh"]);
 
         std::fs::remove_dir_all(&repo).ok();
     }

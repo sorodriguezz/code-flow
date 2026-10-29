@@ -1,6 +1,11 @@
 import type { ContextSource, EditorContextPayload } from "../editorContext";
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  ToolInstallResult,
+  ToolStatus,
+  UsageEvent,
+  UsageReport,
+  UsageRawRow,
   ActivityLogEntry,
   AdoProject,
   AdoRepo,
@@ -130,6 +135,23 @@ export const resetAppData = () => invoke<void>("reset_app_data");
 /** What the app cannot do without: `git` on `PATH`, and three writable data directories. Called
  *  once per installation — see `requirementsStore` for the flag that keeps it that way. */
 export const checkRequirements = () => invoke<Requirement[]>("check_requirements");
+
+/** `git` and every AI CLI, installed or not (may run a login shell, so it takes a moment). */
+export const toolSetupStatus = () => invoke<ToolStatus[]>("tool_setup_status");
+/** Installs one with the command from `tool_setup.rs`; output streams as `tool-setup:progress`. */
+export const toolSetupInstall = (id: string) => invoke<ToolInstallResult>("tool_setup_install", { id });
+
+/** Settings › Estadísticas: a batch of counters, the context backend events go to, the report,
+ *  the raw rows for «Exportar», and clearing a scope. `null` workspace/repo = all of them. */
+export const usageRecord = (events: UsageEvent[]) => invoke<void>("usage_record", { events });
+export const usageSetContext = (workspaceId: string | null, repo: string | null) =>
+  invoke<void>("usage_set_context", { workspaceId, repo });
+export const usageReport = (workspaceId: string | null, repo: string | null, days: number | null) =>
+  invoke<UsageReport>("usage_report", { workspaceId, repo, days });
+export const usageRows = (workspaceId: string | null, repo: string | null, days: number | null) =>
+  invoke<UsageRawRow[]>("usage_rows", { workspaceId, repo, days });
+export const usageClear = (workspaceId: string | null, repo: string | null) =>
+  invoke<number>("usage_clear", { workspaceId, repo });
 
 /** Where this install keeps its files, and whether the v1.19 layout change went cleanly. */
 export type LayoutStatus = {

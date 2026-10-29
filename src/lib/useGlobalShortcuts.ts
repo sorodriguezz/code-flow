@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { trackShortcut } from "./usageTracker";
 import { useShortcutsStore, activeChords, bindingFor } from "../state/shortcutsStore";
 import { useTourStore } from "../state/tourStore";
 import { useDataDirsStore } from "../state/dataDirsStore";
@@ -61,6 +62,7 @@ export function useGlobalShortcuts(): void {
       const command = SHORTCUT_BY_ID.get(id);
       if (!command?.run) return;
       e.preventDefault();
+      trackShortcut(id);
       command.run();
     };
 
@@ -148,6 +150,7 @@ function useSatelliteShortcuts(ids: readonly ShortcutId[]): void {
       // must not have it fire into a commit message.
       if (!usesMod(chord) && !isFunctionKey(chord) && isTypingTarget(e.target)) return;
       e.preventDefault();
+      trackShortcut(chordIds.get(chord) ?? "");
       run();
     };
 

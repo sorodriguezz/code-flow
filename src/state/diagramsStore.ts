@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { create } from "zustand";
+import { create, type StoreApi } from "zustand";
 import {
   diagramsCreateDiagram,
   diagramsCreateFolder,
@@ -86,6 +86,28 @@ import { registerIslandApp } from "../lib/islandSync";
  * theme change, a language change) without losing an edit: the store holds the document, not the
  * iframe.
  */
+/**
+ * What `flush` reports about the open draft once it is done: `"saved"` when the row holds what the
+ * editor does (or nothing is open), `"pending"` when the draft is still dirty — the write failed,
+ * the file moved under it, or edits kept arriving past `MAX_FLUSH_PASSES`. Same contract as
+ * `notesStore`'s, and for the same reason: callers used to read a resolved `flush` as "saved" and
+ * drop the only copy of the drawing.
+ */
+export type FlushResult = "saved" | "pending";
+
+/**
+ * An unsaved draft that had to leave the editor before its save landed — see `parked`. `version`
+ * is the file version the edit was made over, so the retry is checked against the same thing the
+ * original save was.
+ */
+export interface ParkedDiagram {
+  workspaceId: string | null;
+  /** Kept with it so the quit guard can name it from a workspace whose list is not loaded. */
+  title: string;
+  draft: DiagramDraft;
+  version: DiagramFileVersion | null;
+}
+
 export interface DiagramDraft {
   id: string;
   doc: string;
@@ -145,6 +167,17 @@ export type DiagramAiRun = {
 /** How long after the last edit the document is written. Long enough that a continuous drag is one
  *  write, short enough that walking away from the keyboard has already saved. */
 const SAVE_DEBOUNCE_MS = 900;
+
+/**
+ * How many times `flush` re-reads the draft and writes again before giving up — the bound
+ * `notesStore` keeps under the same name, for the same reason.
+ *
+ * Each pass catches an edit made during the previous pass's round trip; a stroke is a whole new
+ * document, so a drag held across a slow write can re-dirty the draft every time. The bound keeps
+ * that terminating, and the draft stays dirty afterwards — reported `"pending"`, so a caller about
+ * to replace it parks it instead.
+ */
+const MAX_FLUSH_PASSES = 4;
 
 /**
  * The Diagrams workspace's state: the tree, the open document, and the writes that organise them.
@@ -237,6 +270,18 @@ interface DiagramsState {
    * rather than a toast appearing over a diagram that is still perfectly readable.
    */
   fileError: string;
+  /**
+   * Drafts whose save had not landed when something replaced them — a workspace switch, opening
+   * another diagram, closing, a new diagram — keyed by diagram id.
+   *
+   * A workspace switch cannot be refused (the workspace store has already moved on), so keeping
+   * the drawing has to mean somewhere other than the editor. Every `flush` retries these first,
+   * quietly — the failure was toasted once already — and `openDiagram` hands one back as the open
+   * draft, still dirty, instead of reading the older row. Returning to the workspace reopens it on
+   * its own, and the quit guard lists them. Absent from `clearedWorkspaceState` on purpose, like
+   * `aiByDiagram`: it exists to outlive the view it was drawn in.
+   */
+  parked: Record<string, ParkedDiagram>;
   /**
    * The version of each linked diagram's file as it was last read or written, by diagram id — what
    * the next save is checked against (`diagrams_save_diagram`'s `expected`). `null` when the file
@@ -408,7 +453,7 @@ interface DiagramsState {
    * on disk is left as a failure to report, never a question. `force` writes the file over whatever
    * is there — the answer "overwrite", given by the user.
    */
-  flush: (options?: { interactive?: boolean; force?: boolean }) => Promise<void>;
+  flush: (options?: { interactive?: boolean; force?: boolean }) => Promise<FlushResult>;
   /** The user's answer to "the file changed on disk": take the disk's copy (the unsaved edit goes),
    *  or write the diagram over it. */
   resolveFileConflict: (answer: "reload" | "overwrite") => Promise<void>;
@@ -634,6 +679,101 @@ function stopDiagramAiRuns(runs: Record<string, DiagramAiRun>, diagramIds: Itera
 /** The pending content search — see `setQuery`. */
 let contentTimer: number | undefined;
 
+/** What `flush` tells its caller — read off the draft, which is the only thing that knows. */
+function openDraftResult(get: () => DiagramsState): FlushResult {
+  return get().draft?.dirty ? "pending" : "saved";
+}
+
+/**
+ * Moves the open draft into `parked` if it is still unsaved, for a caller about to replace it.
+ * The draft itself is left for the caller to overwrite; `drainParked` drops a parked copy whose
+ * diagram is open again, since the open one is that copy or newer.
+ */
+function parkOpenDraft(get: () => DiagramsState, set: StoreApi<DiagramsState>["setState"]): void {
+  const { draft, workspaceId, fileVersions, diagrams } = get();
+  if (!draft?.dirty) return;
+  const title = diagrams.find((d) => d.id === draft.id)?.title ?? "";
+  set((state) => ({
+    parked: {
+      ...state.parked,
+      [draft.id]: { workspaceId, title, draft: { ...draft }, version: fileVersions[draft.id] ?? null },
+    },
+  }));
+}
+
+/** The parked copy of `id`, taken out of `parked` — the caller is making it the open draft. */
+function takeParked(
+  get: () => DiagramsState,
+  set: StoreApi<DiagramsState>["setState"],
+  id: string,
+): ParkedDiagram | undefined {
+  const entry = get().parked[id];
+  if (!entry) return undefined;
+  set((state) => ({
+    parked: Object.fromEntries(Object.entries(state.parked).filter(([key]) => key !== id)),
+  }));
+  return entry;
+}
+
+/** Reopens a drawing parked in `workspaceId`, if nothing else is open and it is still listed. */
+function offerParked(get: () => DiagramsState, workspaceId: string): void {
+  if (get().activeId !== null) return;
+  const listed = new Set(get().diagrams.map((d) => d.id));
+  const id = Object.keys(get().parked).find(
+    (key) => get().parked[key].workspaceId === workspaceId && listed.has(key),
+  );
+  if (id) void get().openDiagram(id);
+}
+
+/**
+ * Retries every parked draft once, quietly — each was toasted when its save first failed, and a
+ * backend still failing would otherwise toast on every autosave of whatever is open now. One that
+ * lands leaves `parked` and, in the workspace on screen, is folded into the list and the thumbnail
+ * cache; one that fails stays for the next flush or for reopening. A diagram deleted meanwhile
+ * (`meta: null`) has nowhere to go.
+ */
+async function drainParked(
+  get: () => DiagramsState,
+  set: StoreApi<DiagramsState>["setState"],
+): Promise<void> {
+  const drop = (id: string, entry: ParkedDiagram) =>
+    set((state) =>
+      // Only the copy this pass wrote: one parked again meanwhile is newer and still owed.
+      state.parked[id] !== entry
+        ? {}
+        : { parked: Object.fromEntries(Object.entries(state.parked).filter(([key]) => key !== id)) },
+    );
+  for (const [id, entry] of Object.entries(get().parked)) {
+    if (get().draft?.id === id) {
+      drop(id, entry);
+      continue;
+    }
+    try {
+      const { draft } = entry;
+      const saved = await diagramsSaveDiagram(
+        id,
+        draft.doc,
+        draft.format,
+        draft.thumbnail,
+        entry.version,
+        false,
+      );
+      if (get().parked[id] !== entry) continue;
+      drop(id, entry);
+      const row = saved.meta;
+      if (!row || get().workspaceId !== entry.workspaceId) continue;
+      const version = saved.version;
+      set((state) => ({
+        diagrams: state.diagrams.map((d) => (d.id === row.id ? toDiagram(row) : d)),
+        fileVersions: version ? { ...state.fileVersions, [id]: version } : state.fileVersions,
+        thumbnails: draft.thumbnail ? { ...state.thumbnails, [id]: draft.thumbnail } : state.thumbnails,
+      }));
+    } catch {
+      // Stays parked; the next flush, or reopening the diagram, is the retry.
+    }
+  }
+}
+
 export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   workspaceId: null,
   loading: false,
@@ -646,6 +786,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   saving: false,
   savedAt: null,
   fileError: "",
+  parked: {},
   fileVersions: {},
   fileConflict: null,
   compareRequest: null,
@@ -670,7 +811,9 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
 
     // The outgoing workspace's unsaved edit, written before anything is dropped. A diagram is a
     // document: losing the last shape to a workspace switch is data loss, not a stale cache.
-    await get().flush();
+    // When the write did not land the draft is parked under the workspace it belongs to rather than
+    // cleared with the rest — the switch itself cannot be refused, see `parked`.
+    if ((await get().flush()) === "pending") parkOpenDraft(get, set);
     requestedThumbnails = new Set();
 
     // No workspace to load — what a deleted workspace leaves behind. The view empties rather than
@@ -712,6 +855,9 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
           galleryView: galleryView === "list" ? "list" : "grid",
           exportOptions: parseExportOptions(storedExportOptions),
         });
+        // A drawing left here unsaved on the way out comes back open, still dirty, so the first
+        // thing on screen is the work in progress — and its autosave retries.
+        offerParked(get, workspaceId);
 
         /**
          * The shipped templates, written in as ordinary rows the first time this workspace is ever
@@ -842,9 +988,28 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   openDiagram: async (id) => {
     if (get().activeId === id && get().draft?.id === id) return;
     if (get().openingId === id) return;
-    // The outgoing diagram's edit, before this one replaces it.
+    // The outgoing diagram's edit, before this one replaces it — parked if it did not land.
     await get().flush();
     if (!(await settledBeforeLeaving(get))) return;
+    parkOpenDraft(get, set);
+
+    // A draft parked unsaved is newer than the row and the file, so it is what opens, still dirty,
+    // and checked on save against the version it was drawn over. No pull: reading the file first
+    // would only fold the disk's copy into the row underneath an edit about to be written over it.
+    const parkedCopy = takeParked(get, set, id);
+    if (parkedCopy) {
+      set((state) => ({
+        activeId: id,
+        openingId: null,
+        draft: { ...parkedCopy.draft, dirty: true },
+        savedAt: null,
+        undoGeneration: null,
+        fileError: "",
+        fileVersions: { ...state.fileVersions, [id]: parkedCopy.version },
+      }));
+      scheduleSave(get);
+      return;
+    }
 
     // `undoGeneration` goes with the diagram it was captured on. It holds a whole document — the
     // one *this* diagram had before its last generation — and `undoLastGeneration` writes it into
@@ -915,6 +1080,7 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
   closeDiagram: async () => {
     await get().flush();
     if (!(await settledBeforeLeaving(get))) return;
+    parkOpenDraft(get, set);
     set({ activeId: null, draft: null, openingId: null, savedAt: null, fileError: "" });
   },
 
@@ -1028,72 +1194,104 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
       clearTimeout(saveTimer);
       saveTimer = undefined;
     }
-    if (pendingFlush) return pendingFlush;
-    const draft = get().draft;
-    if (!draft?.dirty) return;
+    // A second caller joins the write under way, and reads the outcome off the draft the same way
+    // the caller that started it does.
+    if (pendingFlush) {
+      await pendingFlush;
+      return openDraftResult(get);
+    }
 
-    let refused = false;
-    pendingFlush = (async () => {
-      set({ saving: true });
-      try {
-        const saved = await diagramsSaveDiagram(
-          draft.id,
-          draft.doc,
-          draft.format,
-          draft.thumbnail,
-          get().fileVersions[draft.id] ?? null,
-          force,
-        );
-        const row = saved.meta;
-        if (saved.version) {
-          const version = saved.version;
+    // Set when this run is the one that found the file moved — asked about once it is over.
+    let refused: string | null = null;
+    const run = (async () => {
+      // Parked drafts first: each is older than anything the editor holds now, so writing them
+      // after the open draft could put an older drawing of the same diagram back over a newer one.
+      // Skipped outright when there are none, so the open draft is still read in the same tick
+      // `flush` was called in, as it always has been.
+      if (Object.keys(get().parked).length > 0) await drainParked(get, set);
+
+      // **A loop, not a single write.** Every caller that awaits `flush()` goes on to replace or
+      // drop the draft — `setWorkspace` clears it, `openDiagram` swaps it. An edit arriving during
+      // the round trip correctly stays dirty (see the `dirty` fold below), but a single write would
+      // then resolve and that caller would drop it anyway. Draining to the latest document is what
+      // makes "flush resolved" mean "the drawing on screen is in the row".
+      for (let pass = 0; pass < MAX_FLUSH_PASSES; pass++) {
+        const draft = get().draft;
+        if (!draft?.dirty) return;
+        set({ saving: true });
+        try {
+          const saved = await diagramsSaveDiagram(
+            draft.id,
+            draft.doc,
+            draft.format,
+            draft.thumbnail,
+            get().fileVersions[draft.id] ?? null,
+            // Only on the first pass: an edit made while the overwrite was in flight is saved over
+            // the file it just wrote, checked like any other.
+            force && pass === 0,
+          );
+          const row = saved.meta;
+          if (saved.version) {
+            const version = saved.version;
+            set((state) => ({
+              fileVersions: { ...state.fileVersions, [draft.id]: version },
+              fileConflict: state.fileConflict === draft.id ? null : state.fileConflict,
+            }));
+          }
+          if (!row) {
+            // Deleted from another window while it was open.
+            set((state) => ({
+              diagrams: state.diagrams.filter((d) => d.id !== draft.id),
+              draft: null,
+              activeId: null,
+            }));
+            return;
+          }
           set((state) => ({
-            fileVersions: { ...state.fileVersions, [draft.id]: version },
-            fileConflict: state.fileConflict === draft.id ? null : state.fileConflict,
+            diagrams: state.diagrams.map((d) => (d.id === row.id ? toDiagram(row) : d)),
+            // Only cleared when what was written is still what the draft holds — the document and
+            // the picture written with it. An edit that landed while the write was in flight must
+            // stay dirty, so the next pass writes it.
+            draft:
+              state.draft &&
+              state.draft.id === draft.id &&
+              state.draft.doc === draft.doc &&
+              state.draft.thumbnail === draft.thumbnail
+                ? { ...state.draft, dirty: false }
+                : state.draft,
+            savedAt: new Date().toISOString(),
           }));
-        }
-        if (!row) {
-          // Deleted from another window while it was open.
-          set((state) => ({
-            diagrams: state.diagrams.filter((d) => d.id !== draft.id),
-            draft: null,
-            activeId: null,
-          }));
+        } catch (error) {
+          // For a **linked** diagram this is very often the file half failing, not the row —
+          // `diagrams_save_diagram` writes the working tree after the row and reports the write. The
+          // draft is deliberately left dirty either way, so the next edit (or the next `flush`)
+          // tries again rather than the app quietly deciding a schema had been saved into a
+          // repository it never reached.
+          if (isChangedOnDisk(error)) {
+            // The file moved under the diagram — a pull, another editor. Asked once; until
+            // answered, the chip carries the same choice and later saves stay quiet about it.
+            if (get().fileConflict !== draft.id) refused = draft.id;
+            set({ fileConflict: draft.id });
+          } else {
+            pushErrorToast(String(error));
+          }
+          // Not retried in this loop: a failing backend would spin here, and the user has been
+          // told. The next debounce, or the caller's parking, is what keeps the edit.
           return;
+        } finally {
+          set({ saving: false });
         }
-        set((state) => ({
-          diagrams: state.diagrams.map((d) => (d.id === row.id ? toDiagram(row) : d)),
-          // Only cleared when what was written is still what the draft holds. An edit that landed
-          // while the write was in flight must stay dirty, or it is never saved at all.
-          draft:
-            state.draft && state.draft.id === draft.id && state.draft.doc === draft.doc
-              ? { ...state.draft, dirty: false }
-              : state.draft,
-          savedAt: new Date().toISOString(),
-        }));
-      } catch (error) {
-        // For a **linked** diagram this is very often the file half failing, not the row —
-        // `diagrams_save_diagram` writes the working tree after the row and reports the write. The
-        // draft is deliberately left dirty either way, so the next edit (or the next `flush`) tries
-        // again rather than the app quietly deciding a schema had been saved into a repository it
-        // never reached.
-        if (isChangedOnDisk(error)) {
-          // The file moved under the diagram — a pull, another editor. Asked once; until answered,
-          // the chip carries the same choice and later saves stay quiet about it.
-          refused = get().fileConflict !== draft.id;
-          set({ fileConflict: draft.id });
-        } else {
-          pushErrorToast(String(error));
-        }
-      } finally {
-        set({ saving: false });
-        pendingFlush = null;
       }
     })();
-    const run = pendingFlush;
-    await run;
+    pendingFlush = run;
+    try {
+      await run;
+    } finally {
+      if (pendingFlush === run) pendingFlush = null;
+    }
     // Outside the write, so the answer's own save ("overwrite") is not waiting on this one.
-    if (refused && interactive) void askFileConflict(get, draft.id);
+    if (refused && interactive) void askFileConflict(get, refused);
+    return openDraftResult(get);
   },
 
   resolveFileConflict: async (answer) => {
@@ -1259,6 +1457,8 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
       const { openDiagramFile } = await import("../lib/diagrams/exportFile");
       const file = await openDiagramFile();
       if (!file) return null;
+      // The open drawing's edit first — the import takes the editor — parked if it did not land.
+      if ((await get().flush()) === "pending") parkOpenDraft(get, set);
       // Stored in the format the extension named, without inspecting the document. A `.drawio` file
       // *is* the dialect the drawing editor reads and a `.dbml` file *is* the one the workbench
       // reads; a validator here would be a second, worse parser in front of the one that is about
@@ -1291,7 +1491,8 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     const workspaceId = get().workspaceId;
     if (!workspaceId) return null;
     try {
-      await get().flush();
+      // Parked when it did not land: the new diagram takes the editor either way.
+      if ((await get().flush()) === "pending") parkOpenDraft(get, set);
       const row = await diagramsCreateDiagram(workspaceId, folderId, title, doc, format, serializeTags([]));
       set((state) => ({
         diagrams: [...state.diagrams, toDiagram(row)],
@@ -1312,6 +1513,8 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     const workspaceId = get().workspaceId;
     if (!workspaceId) return null;
     try {
+      // The new diagram takes the editor: the open one's edit is written, or parked, first.
+      if ((await get().flush()) === "pending") parkOpenDraft(get, set);
       const row = await diagramsCreateDiagram(
         workspaceId,
         folderId,
@@ -1386,6 +1589,8 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
     const workspaceId = get().workspaceId;
     if (!workspaceId) return null;
     try {
+      // The new diagram takes the editor: the open one's edit is written, or parked, first.
+      if ((await get().flush()) === "pending") parkOpenDraft(get, set);
       const row = await diagramsCreateDiagram(
         workspaceId,
         folderId,
@@ -1461,6 +1666,8 @@ export const useDiagramsStore = create<DiagramsState>((set, get) => ({
       }
       await diagramsDeleteDiagram(id);
       set((state) => ({
+        // A parked copy goes with the row, like the draft below.
+        parked: Object.fromEntries(Object.entries(state.parked).filter(([key]) => key !== id)),
         diagrams: state.diagrams.filter((d) => d.id !== id),
         activeId: state.activeId === id ? null : state.activeId,
         draft: state.draft?.id === id ? null : state.draft,
@@ -1807,7 +2014,9 @@ useWorkspaceStore.subscribe((state, previous) => {
  *  read again on the way back — see `lib/islandSync`. */
 registerIslandApp(["diagrams"], {
   isLoaded: () => useDiagramsStore.getState().workspaceId !== null || useDiagramsStore.getState().loading,
-  flush: () => useDiagramsStore.getState().flush({ interactive: false }),
+  flush: async () => {
+    await useDiagramsStore.getState().flush({ interactive: false });
+  },
   release: () => {
     pendingLoad = null;
     requestedThumbnails = new Set();
@@ -1895,19 +2104,29 @@ function unsavedDiagram(state: DiagramsState): { id: string; label: string } | n
   return { id: draft.id, label: title?.trim() || translate("diagrams.untitled") };
 }
 
+/** The open draft and every parked one, as the quit guard names them. */
+function unsavedDiagrams(state: DiagramsState): { label: string }[] {
+  const open = unsavedDiagram(state);
+  const parked = Object.entries(state.parked)
+    .filter(([id]) => id !== state.draft?.id)
+    .map(([, entry]) => ({ label: entry.title.trim() || translate("diagrams.untitled") }));
+  return open ? [{ label: open.label }, ...parked] : parked;
+}
+
 registerUnsavedProvider({
   id: "diagrams",
-  unsaved: () => {
-    const item = unsavedDiagram(useDiagramsStore.getState());
-    return item ? [{ label: item.label, detail: translate("diagrams.title") }] : [];
-  },
+  unsaved: () =>
+    unsavedDiagrams(useDiagramsStore.getState()).map((item) => ({
+      label: item.label,
+      detail: translate("diagrams.title"),
+    })),
   saveAll: async () => {
+    // Each pass also retries the parked drafts (`drainParked`).
     for (let pass = 0; pass < 3; pass++) {
       await useDiagramsStore.getState().flush({ interactive: false });
-      if (!unsavedDiagram(useDiagramsStore.getState())) return [];
+      if (unsavedDiagrams(useDiagramsStore.getState()).length === 0) return [];
     }
-    const left = unsavedDiagram(useDiagramsStore.getState());
-    return left ? [left.label] : [];
+    return unsavedDiagrams(useDiagramsStore.getState()).map((item) => item.label);
   },
   discard: () => {
     if (saveTimer) clearTimeout(saveTimer);
@@ -1916,7 +2135,9 @@ registerUnsavedProvider({
 });
 
 useDiagramsStore.subscribe((state, previous) => {
-  if (unsavedDiagram(state)?.id !== unsavedDiagram(previous)?.id) notifyUnsavedChanged();
+  if (unsavedDiagram(state)?.id !== unsavedDiagram(previous)?.id || state.parked !== previous.parked) {
+    notifyUnsavedChanged();
+  }
 });
 
 /**

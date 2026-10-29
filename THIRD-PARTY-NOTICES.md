@@ -18,7 +18,7 @@ component's own licence wins — which is what section 6 says.
 | What ships | Count |
 |---|---|
 | npm packages (production tree) | 350 resolved versions of 321 packages |
-| Rust crates (resolved for macOS and Windows) | 880 resolved versions of 774 crates |
+| Rust crates (resolved for macOS on Apple Silicon, macOS on Intel and Windows) | 880 resolved versions of 774 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
 | Fonts | 11 |
@@ -684,7 +684,7 @@ because there the order carries meaning.
 ## Rust crates
 
 The resolved graph from `src-tauri/Cargo.lock`, filtered to the platforms a release is built
-for (`aarch64-apple-darwin`, `x86_64-pc-windows-msvc`) and walked from the `codeflow`
+for (`aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-pc-windows-msvc`) and walked from the `codeflow`
 crate through normal and build dependencies. Dev-dependencies are excluded, because nothing a
 `#[test]` reaches ends up in an installer; so are crates only another platform would pull — GTK
 and D-Bus on Linux, the Android and wasm bindings — for the same reason.

@@ -354,6 +354,24 @@ interface ApiState {
  */
 let pendingLoad: { workspaceId: string; promise: Promise<void> } | null = null;
 
+/**
+ * Which hydration of the store an answer belongs to — bumped by every `init` and every island
+ * release/reload, i.e. every time `workspaceId` is (re)assigned.
+ *
+ * A refresh captures it with the workspace before its first await and drops the answer if either has
+ * moved. The workspace alone is not enough: A → B → A puts `workspaceId` back to the value a slow
+ * answer from the *first* visit to A was asked under, so it would pass — and paint a tree, history or
+ * cookie jar read before whatever the second visit has since loaded or written. Same idea as
+ * `searchToken` in `notesStore`.
+ */
+let loadGeneration = 0;
+
+/** A check for "is this still the context the call started in", taken before the first await. */
+function captureContext(workspaceId: string): () => boolean {
+  const generation = loadGeneration;
+  return () => generation === loadGeneration && useApiStore.getState().workspaceId === workspaceId;
+}
+
 /** Resolves once the active workspace's tree, environments, history and cookies are in the store. */
 export function ensureApiStoreLoaded(): Promise<void> {
   const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
@@ -386,6 +404,8 @@ export const useApiStore = create<ApiState>((set, get) => ({
     // Set before the first await: everything that persists (the open tabs, the active
     // environment) keys off it, and those writes can land while the load is still running.
     set({ workspaceId, loading: true });
+    loadGeneration++;
+    const current = captureContext(workspaceId);
     try {
       // Settings and tabs come back through the commands that put their credentials back — a
       // certificate's passphrase and an open draft's token live in the OS credential store now, and
@@ -413,8 +433,9 @@ export const useApiStore = create<ApiState>((set, get) => ({
       ]);
 
       // Two switches in quick succession leave two loads in flight; the one whose workspace is
-      // no longer selected must not be the one that gets to publish its data.
-      if (get().workspaceId !== workspaceId) return;
+      // no longer selected must not be the one that gets to publish its data — nor, after A → B → A,
+      // the first visit's load landing on top of the second's.
+      if (!current()) return;
 
       const restored = parseJson<PersistedTabs | PersistedTabsV1 | null>(rawTabs, null);
       const openTabs =
@@ -457,9 +478,10 @@ export const useApiStore = create<ApiState>((set, get) => ({
       // above already holds the real values either way.
       void apiSealStoredSecrets().catch(() => {});
     } catch (e) {
-      pushErrorToast(String(e));
+      // A failure of a load nobody is waiting for any more is not worth interrupting the new one.
+      if (current()) pushErrorToast(String(e));
     } finally {
-      if (get().workspaceId === workspaceId) set({ loading: false });
+      if (current()) set({ loading: false });
     }
   },
 
@@ -504,10 +526,16 @@ export const useApiStore = create<ApiState>((set, get) => ({
 
   // Every call below is scoped to `workspaceId`; before the first `init` there is none, and no
   // workspace to file a write under, so each one is a no-op rather than a guess.
+  //
+  // Each also drops its answer when the context it was asked in has gone — see `loadGeneration`: a
+  // reload started in workspace A that lands after a switch to B would otherwise leave the store
+  // saying B while holding A's rows, and every write after that would be filed under B.
   reloadTree: async () => {
     const workspaceId = get().workspaceId;
     if (workspaceId === null) return;
+    const current = captureContext(workspaceId);
     const tree = await apiLoadTree(workspaceId);
+    if (!current()) return;
     set({ collections: tree.collections, folders: tree.folders, requests: tree.requests });
     // The rows an open settings tab edits were just replaced wholesale — including, on an import
     // or a deep duplicate, by rows that no longer exist.
@@ -517,19 +545,28 @@ export const useApiStore = create<ApiState>((set, get) => ({
   reloadEnvironments: async () => {
     const workspaceId = get().workspaceId;
     if (workspaceId === null) return;
-    set({ environments: await apiListEnvironments(workspaceId) });
+    const current = captureContext(workspaceId);
+    const environments = await apiListEnvironments(workspaceId);
+    if (!current()) return;
+    set({ environments });
   },
 
   reloadHistory: async () => {
     const workspaceId = get().workspaceId;
     if (workspaceId === null) return;
-    set({ history: await apiListHistoryMeta(workspaceId, get().settings.historyLimit) });
+    const current = captureContext(workspaceId);
+    const history = await apiListHistoryMeta(workspaceId, get().settings.historyLimit);
+    if (!current()) return;
+    set({ history });
   },
 
   reloadCookies: async () => {
     const workspaceId = get().workspaceId;
     if (workspaceId === null) return;
-    set({ cookies: await apiListCookies(workspaceId) });
+    const current = captureContext(workspaceId);
+    const cookies = await apiListCookies(workspaceId);
+    if (!current()) return;
+    set({ cookies });
   },
 
   // ---------- collections ----------
@@ -2009,10 +2046,12 @@ registerIslandApp(["api:requests"], {
     for (const tab of useApiStore.getState().openTabs) releaseTab(tab.id);
     useApiModalStore.getState().closeApiModal();
     pendingLoad = null;
+    loadGeneration++;
     useApiStore.setState({ workspaceId: null, loading: false, openTabs: [], entityTabs: [], tabOrder: [], activeTabId: null });
   },
   reload: () => {
     pendingLoad = null;
+    loadGeneration++;
     useApiStore.setState({ workspaceId: null, loading: false });
     return ensureApiStoreLoaded();
   },

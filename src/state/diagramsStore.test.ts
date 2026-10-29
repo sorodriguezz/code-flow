@@ -77,6 +77,7 @@ beforeEach(() => {
     fileVersions: { d1: v1 },
     fileConflict: null,
     compareRequest: null,
+    parked: {},
   });
 });
 
@@ -178,3 +179,71 @@ describe("the quit guard's view of a diagram", () => {
     expect(useConfirmStore.getState().request).toBeNull();
   });
 });
+
+describe("switching workspace with a drawing unsaved", () => {
+  const docs = () => saveCalls().map((call) => call.args.doc);
+
+  beforeEach(() => {
+    handlers.diagrams_load_tree = (args) => ({
+      diagrams: args.workspaceId === "w1" ? [meta] : [],
+      folders: [],
+      templates: [],
+    });
+    handlers.get_setting = (args) => (String(args.key).startsWith("diagrams_templates_seeded:") ? "1" : null);
+  });
+
+  it("parks a drawing whose save failed, and a later flush saves it", async () => {
+    handlers.diagrams_save_diagram = () => {
+      throw new Error("disco lleno");
+    };
+    expect(await useDiagramsStore.getState().flush()).toBe("pending");
+    await useDiagramsStore.getState().setWorkspace("w2");
+
+    const state = useDiagramsStore.getState();
+    expect(state).toMatchObject({ workspaceId: "w2", draft: null });
+    expect(state.parked.d1).toMatchObject({ workspaceId: "w1", version: v1, draft: { doc: "Table mine {\n  id int\n}\n" } });
+    expect(collectUnsaved()).toContainEqual(expect.objectContaining({ label: "Esquema" }));
+
+    handlers.diagrams_save_diagram = () => ({ meta, version: v2 });
+    await useDiagramsStore.getState().flush();
+    expect(saveCalls()[saveCalls().length - 1].args).toMatchObject({ doc: "Table mine {\n  id int\n}\n", expected: v1 });
+    expect(useDiagramsStore.getState().parked).toEqual({});
+  });
+
+  it("writes an edit made while the save was in flight before leaving", async () => {
+    const first = gate<unknown>();
+    let count = 0;
+    handlers.diagrams_save_diagram = () => (++count === 1 ? first.promise : { meta, version: v2 });
+
+    const switching = useDiagramsStore.getState().setWorkspace("w2");
+    // Drawn during the round trip: the draft is dirty again behind the await.
+    useDiagramsStore.getState().editDoc("Table later {\n  id int\n}\n");
+    first.open({ meta, version: v2 });
+    await switching;
+
+    expect(docs()).toEqual(["Table mine {\n  id int\n}\n", "Table later {\n  id int\n}\n"]);
+    expect(useDiagramsStore.getState()).toMatchObject({ workspaceId: "w2", draft: null, parked: {} });
+  });
+
+  it("reopens a parked drawing, still dirty, on return to its workspace", async () => {
+    handlers.diagrams_save_diagram = () => {
+      throw new Error("disco lleno");
+    };
+    await useDiagramsStore.getState().setWorkspace("w2");
+    await useDiagramsStore.getState().setWorkspace("w1");
+    for (let i = 0; i < 50 && useDiagramsStore.getState().activeId !== "d1"; i++) await Promise.resolve();
+    expect(useDiagramsStore.getState()).toMatchObject({
+      activeId: "d1",
+      draft: { id: "d1", doc: "Table mine {\n  id int\n}\n", dirty: true },
+      fileVersions: { d1: v1 },
+      parked: {},
+    });
+  });
+});
+
+/** Resolves when the test releases it — a backend call left hanging on purpose. */
+function gate<T>() {
+  let open!: (value: T) => void;
+  const promise = new Promise<T>((resolve) => (open = resolve));
+  return { promise, open };
+}

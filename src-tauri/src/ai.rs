@@ -3003,6 +3003,25 @@ const GROUNDING_TASKS: &[&str] = &[
 ];
 
 async fn run(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Result<AiRun, String> {
+    // Settings › Estadísticas: every run counted once, with its outcome and length, filed under the
+    // repository it worked in — the spend it reports from inside is filed there too (`with_run_repo`).
+    let started = std::time::Instant::now();
+    let (task, model, cwd) = (inv.task, inv.model.to_string(), inv.cwd.map(str::to_string));
+    let repo = crate::usage_stats::repo_of(cwd.as_deref());
+    let outcome = crate::usage_stats::with_run_repo(repo, run_engine(engine, binary, inv)).await;
+    let reported = outcome.as_ref().ok().and_then(|run| run.model.clone()).unwrap_or(model);
+    crate::usage_stats::ai_run(
+        engine.id(),
+        &reported,
+        task,
+        cwd.as_deref(),
+        crate::usage_stats::outcome_key(&outcome),
+        started.elapsed().as_secs() as i64,
+    );
+    outcome
+}
+
+async fn run_engine(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) -> Result<AiRun, String> {
     // The task's own instructions, after whatever the flow itself asked for: here, because this is
     // the one place every engine passes through, so no task can be left without them.
     let instructed: String;

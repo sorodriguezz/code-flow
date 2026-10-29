@@ -266,3 +266,62 @@ pub fn system_load(detail: bool) -> crate::sysload::SystemLoad {
 pub fn check_requirements() -> Vec<crate::requirements::Requirement> {
     crate::requirements::check()
 }
+
+/// `git` and every AI CLI, and whether each is installed here. See `tool_setup`.
+#[tauri::command(async)]
+pub fn tool_setup_status() -> Vec<crate::tool_setup::ToolStatus> {
+    crate::tool_setup::status()
+}
+
+/// Installs one of them with the command from `tool_setup`'s table, streaming `tool-setup:progress`.
+#[tauri::command]
+pub async fn tool_setup_install(app: tauri::AppHandle, id: String) -> Result<crate::tool_setup::InstallResult, String> {
+    crate::tool_setup::install(&app, &id).await
+}
+
+/// A batch of usage counters from the frontend. See `usage_stats`.
+#[tauri::command]
+pub fn usage_record(db: State<Db>, events: Vec<crate::usage_stats::UsageEvent>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::usage_stats::record(&conn, &events).map_err(|e| e.to_string())
+}
+
+/// The workspace (and open repository) backend-side usage is filed under when it brings none.
+#[tauri::command]
+pub fn usage_set_context(workspace_id: Option<String>, repo: Option<String>) {
+    crate::usage_stats::set_context(workspace_id.as_deref().unwrap_or_default(), repo.as_deref().unwrap_or_default());
+}
+
+/// Settings › Estadísticas. `None` workspace is every workspace, `None` repo every repository,
+/// `None` days all time.
+#[tauri::command]
+pub fn usage_report(
+    db: State<Db>,
+    workspace_id: Option<String>,
+    repo: Option<String>,
+    days: Option<i64>,
+) -> Result<crate::usage_stats::UsageReport, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let scope = crate::usage_stats::Scope { workspace: workspace_id.as_deref(), repo: repo.as_deref(), days };
+    crate::usage_stats::report(&conn, &scope).map_err(|e| e.to_string())
+}
+
+/// The raw counters of a scope, for «Exportar» (CSV/JSON is written by the frontend).
+#[tauri::command]
+pub fn usage_rows(
+    db: State<Db>,
+    workspace_id: Option<String>,
+    repo: Option<String>,
+    days: Option<i64>,
+) -> Result<Vec<crate::usage_stats::RawRow>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let scope = crate::usage_stats::Scope { workspace: workspace_id.as_deref(), repo: repo.as_deref(), days };
+    crate::usage_stats::rows(&conn, &scope).map_err(|e| e.to_string())
+}
+
+/// Forgets the recorded usage of a scope: one repository, one workspace, or everything.
+#[tauri::command]
+pub fn usage_clear(db: State<Db>, workspace_id: Option<String>, repo: Option<String>) -> Result<usize, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::usage_stats::clear(&conn, workspace_id.as_deref(), repo.as_deref()).map_err(|e| e.to_string())
+}

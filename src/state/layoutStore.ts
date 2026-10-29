@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import { getSettings, setSetting } from "../lib/tauri/commands";
+import { translate } from "./languageStore";
+import { pushErrorToast } from "./toastStore";
 
 export type LayoutKey =
   | "sidebarWidth"
@@ -272,6 +274,45 @@ function parseRailOrder(raw: string | null): string[] {
   }
 }
 
+/**
+ * One write in flight per settings row, and the newest value waiting behind it.
+ *
+ * The three writers below update the store first and persist after, which is right for a drag — but
+ * `setSetting` calls for the same row are not ordered by the IPC layer, so two quick changes (a flag
+ * toggled twice, a rail rearranged twice) could land on disk in the opposite order and come back
+ * after a relaunch as the value the user had already undone. Chaining per row is what makes "last
+ * value wins on disk" true; coalescing the waiting value is what keeps a burst from becoming a queue.
+ */
+const writes = new Map<string, { pending: string | null }>();
+
+/** Persists `value` under `row` after whatever is already being written there. */
+function persist(row: string, value: string): void {
+  const inFlight = writes.get(row);
+  if (inFlight) {
+    // Overwritten rather than appended: only the last value of a burst needs to reach the disk.
+    inFlight.pending = value;
+    return;
+  }
+  const entry = { pending: null as string | null };
+  writes.set(row, entry);
+  void (async () => {
+    let next: string | null = value;
+    while (next !== null) {
+      try {
+        await setSetting(row, next);
+      } catch (error) {
+        // The optimistic change stays on screen — undoing a drag the user just made would be worse
+        // than the miss — but it will not survive a relaunch, and saying so is the difference
+        // between a layout that "forgets" and one that told you it could not be saved.
+        pushErrorToast(translate("layout.saveFailed", { error: String(error) }));
+      }
+      next = entry.pending;
+      entry.pending = null;
+    }
+    writes.delete(row);
+  })();
+}
+
 interface LayoutState {
   sizes: Record<LayoutKey, number>;
   flags: Record<LayoutFlag, boolean>;
@@ -333,18 +374,18 @@ export const useLayoutStore = create<LayoutState>((set) => ({
   setSize: (key, value) => set((s) => ({ sizes: { ...s.sizes, [key]: value } })),
 
   commitSize: (key, value) => {
-    void setSetting(STORAGE_KEYS[key], String(Math.round(value)));
+    persist(STORAGE_KEYS[key], String(Math.round(value)));
   },
 
   toggleFlag: (key) =>
     set((s) => {
       const next = !s.flags[key];
-      void setSetting(FLAG_STORAGE_KEYS[key], next ? "1" : "0");
+      persist(FLAG_STORAGE_KEYS[key], next ? "1" : "0");
       return { flags: { ...s.flags, [key]: next } };
     }),
 
   setRailOrder: (order) => {
-    void setSetting(RAIL_ORDER_KEY, JSON.stringify(order));
+    persist(RAIL_ORDER_KEY, JSON.stringify(order));
     set({ railOrder: order });
   },
 }));

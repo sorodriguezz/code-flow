@@ -295,6 +295,11 @@ pub const NEVER_BACKED_UP: &[&str] = &[
     // What Codi remembers across sessions: its own notes, forgettable with one button, and not a
     // thing a restore should bring back after the user cleared them.
     "codi_recollections",
+    // Estadísticas' counters: how *this* machine was used, keyed by repository paths on its disk. A
+    // restore onto another computer would credit it with days it never saw, and a restore onto the
+    // same one would roll its counts back to the backup's — either way the chart stops being true.
+    "usage_daily",
+    "usage_hourly",
 ];
 
 // ---------------------------------------------------------------------------

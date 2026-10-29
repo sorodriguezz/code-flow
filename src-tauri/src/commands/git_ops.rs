@@ -59,7 +59,9 @@ pub fn list_branches(repo_path: String) -> Result<Vec<branch::BranchInfo>, Strin
 #[tauri::command(async)]
 pub fn create_branch(repo_path: String, name: String, start_point: Option<String>) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    branch::create_branch(&repo_path, &name, start_point)
+    branch::create_branch(&repo_path, &name, start_point)?;
+    crate::usage_stats::git("branch", &repo_path);
+    Ok(())
 }
 
 #[tauri::command(async)]
@@ -119,25 +121,27 @@ pub fn list_stashes(repo_path: String) -> Result<Vec<stash::StashInfo>, String> 
 #[tauri::command(async)]
 pub fn stash_save(repo_path: String, message: Option<String>, include_untracked: bool) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    stash::stash_save(&repo_path, message, include_untracked)
+    stash::stash_save(&repo_path, message, include_untracked)?;
+    crate::usage_stats::git("stash", &repo_path);
+    Ok(())
 }
 
 #[tauri::command(async)]
 pub fn stash_apply(repo_path: String, index: usize) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    stash::stash_apply(&repo_path, index)
+    counted("stash_apply", &repo_path, stash::stash_apply(&repo_path, index))
 }
 
 #[tauri::command(async)]
 pub fn stash_pop(repo_path: String, index: usize) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    stash::stash_pop(&repo_path, index)
+    counted("stash_pop", &repo_path, stash::stash_pop(&repo_path, index))
 }
 
 #[tauri::command(async)]
 pub fn stash_drop(repo_path: String, index: usize) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    stash::stash_drop(&repo_path, index)
+    counted("stash_drop", &repo_path, stash::stash_drop(&repo_path, index))
 }
 
 #[tauri::command(async)]
@@ -238,25 +242,25 @@ pub fn get_file_blame(
 #[tauri::command(async)]
 pub fn stage_file(repo_path: String, file_path: String) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    diff::stage_file(&repo_path, &file_path)
+    counted("stage", &repo_path, diff::stage_file(&repo_path, &file_path))
 }
 
 #[tauri::command(async)]
 pub fn stage_all(repo_path: String) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    diff::stage_all(&repo_path)
+    counted("stage", &repo_path, diff::stage_all(&repo_path))
 }
 
 #[tauri::command(async)]
 pub fn unstage_file(repo_path: String, file_path: String) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    diff::unstage_file(&repo_path, &file_path)
+    counted("unstage", &repo_path, diff::unstage_file(&repo_path, &file_path))
 }
 
 #[tauri::command(async)]
 pub fn unstage_all(repo_path: String) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    diff::unstage_all(&repo_path)
+    counted("unstage", &repo_path, diff::unstage_all(&repo_path))
 }
 
 /// The text the editor's gutter measures the buffer against — see [`diff::quick_diff_base`].
@@ -273,13 +277,13 @@ pub fn quick_diff_base(repo_path: String, file_path: String, staged: bool) -> Re
 #[tauri::command(async)]
 pub fn discard_file_changes(repo_path: String, file_path: String) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    diff::discard_file_changes(&repo_path, &file_path)
+    counted("discard", &repo_path, diff::discard_file_changes(&repo_path, &file_path))
 }
 
 #[tauri::command(async)]
 pub fn discard_all_changes(repo_path: String) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    diff::discard_all_changes(&repo_path)
+    counted("discard", &repo_path, diff::discard_all_changes(&repo_path))
 }
 
 // ---------- one hunk at a time — the editor's inline change peek ----------
@@ -303,14 +307,14 @@ pub fn discard_all_changes(repo_path: String) -> Result<(), String> {
 #[tauri::command(async)]
 pub fn stage_hunk(repo_path: String, hunk: hunk::HunkRef, context_lines: u32) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    hunk::apply_hunk(&repo_path, &hunk, hunk::HunkOp::Stage, context_lines)
+    counted("stage", &repo_path, hunk::apply_hunk(&repo_path, &hunk, hunk::HunkOp::Stage, context_lines))
 }
 
 /// Removes one hunk from the index and leaves the working tree alone — `git reset -p`.
 #[tauri::command(async)]
 pub fn unstage_hunk(repo_path: String, hunk: hunk::HunkRef, context_lines: u32) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    hunk::apply_hunk(&repo_path, &hunk, hunk::HunkOp::Unstage, context_lines)
+    counted("unstage", &repo_path, hunk::apply_hunk(&repo_path, &hunk, hunk::HunkOp::Unstage, context_lines))
 }
 
 /// Throws one hunk of working-tree change away, restoring that region from the **index** — the same
@@ -319,15 +323,15 @@ pub fn unstage_hunk(repo_path: String, hunk: hunk::HunkRef, context_lines: u32) 
 #[tauri::command(async)]
 pub fn discard_hunk(repo_path: String, hunk: hunk::HunkRef, context_lines: u32) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    hunk::apply_hunk(&repo_path, &hunk, hunk::HunkOp::Discard, context_lines)
+    counted("discard", &repo_path, hunk::apply_hunk(&repo_path, &hunk, hunk::HunkOp::Discard, context_lines))
 }
 
 /// `(async)`, unlike the other writes — see the note at the top of this file for what that trades.
 /// A repository with commit hooks or signing commits through `git commit` (see `git::features`), and a
 /// `pre-commit` that runs a type check and a test suite takes a minute; on the UI thread that minute is
-/// a frozen window. The race it opens is a benign one: the CLI holds `index.lock` for the whole commit,
-/// so a stage clicked meanwhile fails with a lock error instead of interleaving, and the libgit2 commit
-/// reads the index once, atomically, as it always has.
+/// a frozen window. So the lock is taken inside `diff::commit`, and only by the in-process path: the
+/// CLI holds `index.lock` for the whole commit, so a stage clicked meanwhile fails with a lock error
+/// instead of interleaving.
 #[tauri::command(async)]
 pub fn commit(
     app: AppHandle,
@@ -337,6 +341,8 @@ pub fn commit(
     author_email: Option<String>,
 ) -> Result<String, String> {
     let oid = diff::commit(&repo_path, &message, author_name, author_email)?;
+    crate::usage_stats::git("commit", &repo_path);
+    crate::usage_stats::commit_stats(&repo_path, &oid);
     // A commit made here is an event a flow can start from ("Evento de CodeFlow").
     crate::flows::triggers::app_event(
         &app,
@@ -346,8 +352,17 @@ pub fn commit(
     Ok(oid)
 }
 
+/// Files a git operation in Settings › Estadísticas when it succeeded, and hands the result back.
+fn counted<T>(operation: &str, repo_path: &str, result: Result<T, String>) -> Result<T, String> {
+    if result.is_ok() {
+        crate::usage_stats::git(operation, repo_path);
+    }
+    result
+}
+
 /// A checkout made from CodeFlow, for the flows that listen for one.
 fn switched(app: &AppHandle, repo_path: &str) {
+    crate::usage_stats::git("checkout", repo_path);
     crate::flows::triggers::app_event(
         app,
         "branchSwitched",
@@ -357,6 +372,7 @@ fn switched(app: &AppHandle, repo_path: &str) {
 
 /// A push made from CodeFlow, for the flows that listen for one.
 fn pushed(app: &AppHandle, repo_path: &str, force: bool) {
+    crate::usage_stats::git("push", repo_path);
     crate::flows::triggers::app_event(
         app,
         "gitPushed",
@@ -367,7 +383,7 @@ fn pushed(app: &AppHandle, repo_path: &str, force: bool) {
 #[tauri::command(async)]
 pub fn reset_to_commit(repo_path: String, oid: String, mode: String) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    repo::reset_to_commit(&repo_path, &oid, &mode)
+    counted("reset", &repo_path, repo::reset_to_commit(&repo_path, &oid, &mode))
 }
 
 // ---------------------------------------------------------------------------
@@ -423,12 +439,12 @@ pub fn rebase_interactive(
     base: String,
     steps: Vec<crate::git::rebase::RebaseStep>,
 ) -> Result<(), String> {
-    crate::git::rebase::rebase_interactive(&repo_path, &base, &steps)
+    counted("rebase", &repo_path, crate::git::rebase::rebase_interactive(&repo_path, &base, &steps))
 }
 
 #[tauri::command(async)]
 pub fn rebase_onto(repo_path: String, upstream: String) -> Result<(), String> {
-    crate::git::rebase::rebase_onto(&repo_path, &upstream)
+    counted("rebase", &repo_path, crate::git::rebase::rebase_onto(&repo_path, &upstream))
 }
 
 #[tauri::command(async)]
@@ -450,7 +466,7 @@ pub fn amend_commit(
     author_name: Option<String>,
     author_email: Option<String>,
 ) -> Result<String, String> {
-    history::amend_commit(&repo_path, &message, author_name, author_email)
+    counted("amend", &repo_path, history::amend_commit(&repo_path, &message, author_name, author_email))
 }
 
 #[tauri::command(async)]
@@ -460,7 +476,7 @@ pub fn revert_commit(
     author_name: Option<String>,
     author_email: Option<String>,
 ) -> Result<String, String> {
-    history::revert_commit(&repo_path, &oid, author_name, author_email)
+    counted("revert", &repo_path, history::revert_commit(&repo_path, &oid, author_name, author_email))
 }
 
 #[tauri::command(async)]
@@ -471,7 +487,7 @@ pub fn cherry_pick_commit(
     author_name: Option<String>,
     author_email: Option<String>,
 ) -> Result<String, String> {
-    history::cherry_pick_commit(&repo_path, &oid, commit_now, author_name, author_email)
+    counted("cherry_pick", &repo_path, history::cherry_pick_commit(&repo_path, &oid, commit_now, author_name, author_email))
 }
 
 #[tauri::command(async)]
@@ -489,13 +505,13 @@ pub fn create_tag(
     author_email: Option<String>,
 ) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    history::create_tag(&repo_path, &name, &oid, &message, author_name, author_email)
+    counted("tag", &repo_path, history::create_tag(&repo_path, &name, &oid, &message, author_name, author_email))
 }
 
 #[tauri::command(async)]
 pub fn delete_tag(repo_path: String, name: String) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    history::delete_tag(&repo_path, &name)
+    counted("tag_delete", &repo_path, history::delete_tag(&repo_path, &name))
 }
 
 #[tauri::command(async)]
@@ -543,19 +559,21 @@ pub fn set_repo_git_identity(repo_path: String, name: String, email: String) -> 
 #[tauri::command(async)]
 pub fn merge_branch(repo_path: String, branch_name: String) -> Result<merge::MergeOutcome, String> {
     let _write = crate::git::write_lock();
-    merge::merge_branch(&repo_path, &branch_name)
+    let outcome = merge::merge_branch(&repo_path, &branch_name)?;
+    crate::usage_stats::git("merge", &repo_path);
+    Ok(outcome)
 }
 
 #[tauri::command(async)]
 pub fn resolve_conflict_side(repo_path: String, rel_path: String, side: String) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    merge::resolve_conflict_side(&repo_path, &rel_path, &side)
+    counted("conflict_resolved", &repo_path, merge::resolve_conflict_side(&repo_path, &rel_path, &side))
 }
 
 #[tauri::command(async)]
 pub fn mark_conflict_resolved(repo_path: String, rel_path: String) -> Result<(), String> {
     let _write = crate::git::write_lock();
-    merge::mark_conflict_resolved(&repo_path, &rel_path)
+    counted("conflict_resolved", &repo_path, merge::mark_conflict_resolved(&repo_path, &rel_path))
 }
 
 /// Which operation is half done, its unresolved paths (read whatever the state), and the message
@@ -596,7 +614,9 @@ pub async fn abort_operation(app: AppHandle, repo_path: String) -> Result<(), St
 
 #[tauri::command]
 pub async fn git_clone(app: AppHandle, url: String, dest: String) -> Result<(), String> {
-    remote::clone(app, url, dest).await
+    remote::clone(app, url, dest.clone()).await?;
+    crate::usage_stats::git("clone", &dest);
+    Ok(())
 }
 
 /// One side of a file's change, as bytes — for showing an image or binary change. `side` is
@@ -639,7 +659,9 @@ pub async fn git_fetch(app: AppHandle, repo_path: String, remote_name: Option<St
 
 #[tauri::command]
 pub async fn git_pull(app: AppHandle, repo_path: String) -> Result<(), String> {
-    remote::pull(app, repo_path).await
+    remote::pull(app, repo_path.clone()).await?;
+    crate::usage_stats::git("pull", &repo_path);
+    Ok(())
 }
 
 /// The answer to a pull refused because the branches diverged: merge, rebase or fast-forward only,
@@ -652,7 +674,9 @@ pub async fn git_pull_with(
     mode: remote::PullMode,
     remember: bool,
 ) -> Result<(), String> {
-    remote::pull_with(app, repo_path, mode, remember).await
+    remote::pull_with(app, repo_path.clone(), mode, remember).await?;
+    crate::usage_stats::git("pull", &repo_path);
+    Ok(())
 }
 
 #[tauri::command]

@@ -71,7 +71,8 @@ const offline = process.argv.includes("--offline");
  * the JNI bindings — is in `Cargo.lock` but in no installer.
  */
 const TARGETS = [
-  { runner: "macos-latest", triple: "aarch64-apple-darwin", label: "macOS" },
+  { runner: "macos-latest", triple: "aarch64-apple-darwin", label: "macOS on Apple Silicon" },
+  { runner: "macos-15-intel", triple: "x86_64-apple-darwin", label: "macOS on Intel" },
   { runner: "windows-latest", triple: "x86_64-pc-windows-msvc", label: "Windows" },
 ];
 
@@ -278,6 +279,10 @@ const LINKS_REVIEWED = [
     why: "declares a link to a system libmongocrypt and compiles nothing; the driver feature that would load it is off",
   },
   { name: "defmt", why: "its build script only writes a linker script for embedded targets; it compiles nothing" },
+  {
+    name: "rayon-core",
+    why: "`links` only keeps a second rayon-core out of the build; its build script compiles and links nothing",
+  },
 ];
 
 /**
@@ -1151,7 +1156,8 @@ function render({ targets, npm, cargo, native, bundled, fonts, icons, archIcons,
   const elected = [...npm, ...cargo].filter((component) => ELECTIONS[component.name]).sort(byName);
   const libgit2 = native.find((row) => row.notice === "libgit2");
   const shipped = (name) => npm.some((component) => component.name === name);
-  const platforms = targets.map((target) => target.label).join(" and ");
+  const labels = targets.map((target) => target.label);
+  const platforms = labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}` : labels.join("");
 
   // Open items belong to rows: one disappears with the component it is about.
   const open = [];

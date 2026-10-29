@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { trackPaletteCommand } from "../../lib/usageTracker";
 import { ensureFlowContextEntries, useFlowContextStore } from "../../state/flowContextStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useMissingProjectsStore } from "../../state/missingProjectsStore";
@@ -10,11 +11,14 @@ import { Search } from "lucide-react";
 import { Kbd } from "../common/Button";
 import { useDialog } from "../../lib/useFocusTrap";
 import { useQuickAskHotkeyStore } from "../../state/quickAskHotkeyStore";
+import { usageRows } from "../../lib/tauri/commands";
 import {
   GROUP_LABEL_KEY,
   SCOPE_GROUPS,
+  aliasHint,
   buildPaletteItems,
   filterPaletteItems,
+  frequentItems,
   type PaletteItem,
 } from "../../lib/paletteItems";
 
@@ -57,11 +61,37 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     [workspaces, projects, missing, notARepo, satellites, branches, t, activeView, quickAskChord, folderFlows],
   );
 
+  // How often each place and action was used in the last 30 days, every workspace — read once per
+  // opening, from the counters Estadísticas keeps. Missing (still loading, or the read failed) is
+  // simply no «Frecuentes» group.
+  const [usage, setUsage] = useState<ReadonlyMap<string, number> | null>(null);
+  useEffect(() => {
+    let live = true;
+    usageRows(null, null, 30)
+      .then((rows) => {
+        const counts = new Map<string, number>();
+        for (const row of rows) {
+          if (row.kind !== "view" && row.kind !== "command") continue;
+          const key = `${row.kind}:${row.key}`;
+          counts.set(key, (counts.get(key) ?? 0) + row.count);
+        }
+        if (live) setUsage(counts);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
+  const withFrequent = useMemo(
+    () => (usage && scope === "all" ? [...frequentItems(items, usage), ...items] : items),
+    [items, usage, scope],
+  );
+
   const groups = SCOPE_GROUPS[scope];
 
   // Every word has to appear, in any order and without regard to case or accents. Laid out in group
   // order, because that is the order the rows are drawn in and the arrow keys walk.
-  const filtered = useMemo(() => filterPaletteItems(items, groups, query), [items, groups, query]);
+  const filtered = useMemo(() => filterPaletteItems(withFrequent, groups, query), [withFrequent, groups, query]);
 
   // The row Enter would pick, moved by ↑/↓ and by the pointer. Back to the top whenever the list
   // changes under it.
@@ -73,6 +103,8 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
   }, [active]);
 
   const choose = (item: PaletteItem) => {
+    // A «Frecuentes» row counts as the row it repeats — or it would only ever count itself.
+    trackPaletteCommand(item.origin?.group ?? item.group, item.origin?.key ?? item.key);
     item.onSelect();
     onClose();
   };
@@ -163,6 +195,14 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
                         className={`shrink-0 ${on ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"}`}
                       />
                       <span className="truncate">{item.label}</span>
+                      {(() => {
+                        // The hidden word that found it, so "postman" landing on «Cliente API»
+                        // reads as an answer rather than a mistake.
+                        const hint = aliasHint(item, query);
+                        return hint ? (
+                          <span className="shrink-0 truncate text-[12px] text-[var(--cf-text-faint)]">· {hint}</span>
+                        ) : null;
+                      })()}
                       {item.keys && (
                         <span className="ml-auto flex shrink-0 items-center gap-1">
                           {item.keys.map((key, i) => (

@@ -109,6 +109,8 @@ mod remotes;
 mod repo_files;
 mod repo_identity;
 mod requirements;
+mod tool_setup;
+mod usage_stats;
 mod reset;
 mod review;
 mod review_memory;
@@ -129,6 +131,7 @@ mod shell_profiles;
 mod shell_rules;
 /// The one cleanup every way out of the app runs — the `Exit` event and a Windows update alike.
 mod shutdown;
+mod slow;
 /// AWS request signing, shared by the API client and the Remote workspace's S3 transport.
 mod sigv4;
 mod skill_builder;
@@ -1043,7 +1046,21 @@ fn command_name(path: &'static str) -> &'static str {
 fn invoke_handler() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
     let routes = invoke_routes();
     move |invoke| match routes.get(invoke.message.command()) {
-        Some(shard) => shard(invoke),
+        Some(shard) => {
+            // A sync command runs inside this call, on the thread that dispatched it (the main
+            // thread, so the window waits); an async one only gets spawned here. So this measures
+            // exactly the hitches — see `slow`.
+            let command = invoke.message.command().to_string();
+            let started = std::time::Instant::now();
+            let handled = shard(invoke);
+            let took = started.elapsed();
+            if took > slow::IPC_THRESHOLD {
+                slow::report(format!("ipc {command}"), || {
+                    format!("ipc: {command} kept its thread for {} ms", slow::ms(took))
+                });
+            }
+            handled
+        }
         None => false,
     }
 }
@@ -1077,6 +1094,13 @@ sharded_invoke_handler! {
         quit_guard::quit_app_confirmed,
         boot_guard::boot_ready,
         commands::app_cmd::check_requirements,
+        commands::app_cmd::tool_setup_status,
+        commands::app_cmd::tool_setup_install,
+        commands::app_cmd::usage_record,
+        commands::app_cmd::usage_set_context,
+        commands::app_cmd::usage_report,
+        commands::app_cmd::usage_rows,
+        commands::app_cmd::usage_clear,
         commands::app_cmd::reset_app_data,
         commands::app_cmd::app_paths,
         commands::app_cmd::delete_legacy_data,

@@ -1,7 +1,7 @@
 {
   "name": "codeflow",
   "private": true,
-  "version": "2.7.1",
+  "version": "2.7.2",
   "type": "module",
   "packageManager": "pnpm@11.5.0",
   "scripts": {
@@ -73,7 +73,7 @@
     "monaco-editor": "^0.57.0",
     "tailwindcss": "^4.3.3",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4",
+    "vite": "^7.3.7",
     "vitest": "^4.1.12"
   }
 }

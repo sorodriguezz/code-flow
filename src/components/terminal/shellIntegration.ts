@@ -1,4 +1,5 @@
 import type { IDecoration, IDisposable, IMarker, Terminal } from "@xterm/xterm";
+import { trackUsage } from "../../lib/usageTracker";
 import { parseOsc133, parseOsc633, parseOsc7 } from "./shellMarks";
 
 /**
@@ -102,6 +103,9 @@ export function installShellIntegration(
         // anyway); there is nothing to colour or report.
         if (record && record.start && record.exit === undefined) {
           record.exit = mark.exit;
+          // Settings › Estadísticas: that a command ran and whether it failed — never the command.
+          trackUsage("action", "terminal.command");
+          if (mark.exit !== null && mark.exit !== 0) trackUsage("error", "terminal.command");
           record.end = term.registerMarker(0);
           decorate(record);
           hooks.onFinished({ command: record.command ?? null, exit: mark.exit, ms: Date.now() - (record.startedAt ?? Date.now()) });

@@ -77,6 +77,7 @@ import { startTerminalAgents } from "./state/terminalAgentStore";
 import { useLanguageOverrideStore } from "./state/languageOverrideStore";
 import { useTourStore } from "./state/tourStore";
 import { useRequirementsStore } from "./state/requirementsStore";
+import { startUsageTracking } from "./lib/usageTracker";
 import { useBlameStore } from "./state/blameStore";
 import { useChainStore } from "./state/chainStore";
 import { useAgentsStore } from "./state/agentsStore";
@@ -717,6 +718,8 @@ export default function App() {
         Promise.resolve(startDepsAlerts()),
         // A new version of an AI CLI, offered top right once, a little after launch.
         Promise.resolve(startCliUpdateCheck()),
+        // Settings › Estadísticas: which app is in front and for how long, batched (`usageTracker`).
+        Promise.resolve(startUsageTracking()),
         useLanguageOverrideStore.getState().init(),
         // Starts before the user can reach the maximize button, so the size the window opened at is
         // already recorded as somewhere to restore to.

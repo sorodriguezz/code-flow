@@ -89,6 +89,7 @@ beforeEach(() => {
     fileVersions: {},
     fileConflict: null,
     fileError: "",
+    parked: {},
   });
 });
 
@@ -366,5 +367,79 @@ describe("the search box's own half", () => {
     expect(ids("configuracion despliegue")).toEqual(["1"]);
     expect(ids("CONFIGURACION")).toEqual(["1", "2"]);
     expect(ids("infra configuración")).toEqual(["2"]);
+  });
+});
+
+describe("a draft whose save did not land", () => {
+  const failing = () => {
+    throw new Error("disco lleno");
+  };
+  const ok: Handler = (args) => saved(meta({ title: String(args.title) }));
+
+  beforeEach(() => {
+    // A workspace load: an empty tree for the one being entered, and templates already seeded so
+    // the load does nothing else.
+    handlers.notes_load_tree = (args) => ({
+      notes: args.workspaceId === "w1" ? [meta()] : [],
+      books: [],
+      templates: [],
+    });
+    handlers.get_setting = (args) => (String(args.key).startsWith("notes_templates_seeded:") ? "1" : null);
+  });
+
+  it("tells the caller it is still pending, and saved once it lands", async () => {
+    handlers.notes_save_note = failing;
+    useNotesStore.getState().editDraft({ content: "uno" });
+    expect(await useNotesStore.getState().flush()).toBe("pending");
+    handlers.notes_save_note = ok;
+    expect(await useNotesStore.getState().flush()).toBe("saved");
+  });
+
+  it("is parked, not dropped, by a workspace switch — and a later flush saves it", async () => {
+    handlers.notes_save_note = failing;
+    useNotesStore.getState().editDraft({ content: "sin guardar" });
+    await useNotesStore.getState().setWorkspace("w2");
+
+    const state = useNotesStore.getState();
+    expect(state).toMatchObject({ workspaceId: "w2", draft: null, activeId: null });
+    expect(state.parked.n1).toMatchObject({ workspaceId: "w1", draft: { content: "sin guardar" } });
+    // The quit guard still sees it, so quitting cannot drop it either.
+    expect(collectUnsaved()).toContainEqual(expect.objectContaining({ label: "Nota" }));
+
+    handlers.notes_save_note = ok;
+    await useNotesStore.getState().flush();
+    expect(saves()[saves().length - 1]).toBe("sin guardar");
+    expect(useNotesStore.getState().parked).toEqual({});
+  });
+
+  it("comes back as the open, still-dirty note on return to its workspace", async () => {
+    handlers.notes_save_note = failing;
+    useNotesStore.getState().editDraft({ content: "sin guardar" });
+    await useNotesStore.getState().setWorkspace("w2");
+    await useNotesStore.getState().setWorkspace("w1");
+    for (let i = 0; i < 50 && useNotesStore.getState().activeId !== "n1"; i++) await Promise.resolve();
+
+    expect(useNotesStore.getState()).toMatchObject({
+      activeId: "n1",
+      draft: { id: "n1", content: "sin guardar", dirty: true },
+      parked: {},
+    });
+    handlers.notes_save_note = ok;
+    expect(await useNotesStore.getState().flush()).toBe("saved");
+    expect(saves()[saves().length - 1]).toBe("sin guardar");
+  });
+
+  it("is parked when another note is opened, and reopens with the unsaved text", async () => {
+    handlers.notes_save_note = failing;
+    handlers.notes_get_note = (args) => ({ ...meta({ id: String(args.id) }), content: "del disco" });
+    useNotesStore.setState({ notes: [asNote(meta()), asNote(meta({ id: "n2", title: "Otra" }))] });
+    useNotesStore.getState().editDraft({ content: "sin guardar" });
+
+    await useNotesStore.getState().openNote("n2");
+    expect(useNotesStore.getState().draft).toMatchObject({ id: "n2", dirty: false });
+    expect(useNotesStore.getState().parked.n1?.draft.content).toBe("sin guardar");
+
+    await useNotesStore.getState().openNote("n1");
+    expect(useNotesStore.getState().draft).toMatchObject({ id: "n1", content: "sin guardar", dirty: true });
   });
 });

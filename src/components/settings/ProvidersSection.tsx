@@ -1,4 +1,5 @@
 import { isMac } from "../../lib/platform";
+import { ToolInstallFor } from "../common/ToolInstallRow";
 import { useEffect, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -138,14 +139,15 @@ function CommandLine({ command }: { command: string }) {
 
 /** How to get this provider working: the install command (when there's a canonical one), whatever
  * has to run afterwards (sign-in, pulling a model), and a link to its official docs. */
-function SetupHelp({ provider }: { provider: AiProviderOption }) {
+function SetupHelp({ provider, missing = false }: { provider: AiProviderOption; missing?: boolean }) {
   const t = useT();
   if (!provider.setup) return null;
   const { url, command, postCommand } = provider.setup;
   return (
     <div className="space-y-1.5 rounded-lg border border-[var(--cf-border)] p-3">
       <p className="text-[13px] font-medium text-[var(--cf-text)]">{t("settings.setupTitle")}</p>
-      {command && <CommandLine command={command} />}
+      {/* Not found: this platform's installer with a one-click «Instalar» (`tool_setup.rs`). */}
+      {missing ? <ToolInstallFor id={provider.id} compact /> : command && <CommandLine command={command} />}
       {postCommand && <CommandLine command={postCommand} />}
       <button
         onClick={() => void openExternalUrl(url)}
@@ -510,7 +512,7 @@ function ProviderRow({ provider }: { provider: AiProviderOption }) {
 
               {/* Up top when it isn't working, so "Not found" is immediately actionable; tucked
                   below the config once it is, where it's reference rather than a to-do. */}
-              {status && !status.available && <SetupHelp provider={provider} />}
+              {status && !status.available && <SetupHelp provider={provider} missing />}
 
               {!provider.builtIn && (
               <Field label={t("settings.binaryLabel")} hint={t("settings.binaryHint")}>

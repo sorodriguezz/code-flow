@@ -75,6 +75,8 @@ pub fn record(provider: &str, model: &str, task: &str, account_id: Option<&str>,
     let Ok(db) = app.try_state::<Db>().ok_or(()) else { return };
     let Ok(conn) = db.0.lock() else { return };
     let _ = queries::record_ai_usage(&conn, provider, model, task, account_id, usage);
+    // The same spend, kept for good and per workspace and repository by Settings › Estadísticas.
+    crate::usage_stats::ai_spend(&conn, provider, model, task, usage);
 }
 
 /// Rows older than this are swept when the statistics screen reads: a screen that only ever looks

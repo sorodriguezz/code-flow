@@ -107,6 +107,8 @@ export type SettingsSectionId =
   | "databases"
   /** Reference repositories: other code bases cloned as memory for the AI surfaces. */
   | "references"
+  /** How the app is used — apps, time, AI by area, git — globally and per workspace. */
+  | "statistics"
   | "api";
 
 /**

@@ -38,6 +38,8 @@ const CHECK_EVERY_SECS: i64 = 12 * 60 * 60;
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long an update may run before it is stopped.
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// How long the output is still read once the process is gone or stopped.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Lines of output kept for "Show details".
 const KEEP_LINES: usize = 60;
 
@@ -203,7 +205,10 @@ struct Progress<'a> {
     line: String,
 }
 
-fn single_flight() -> &'static tokio::sync::Mutex<()> {
+/// One CLI maintenance job at a time, app-wide: an update here and an install from «Preparar
+/// CodeFlow» (`tool_setup`) rewrite the same binaries and shims, so they share this lock rather than
+/// each keeping its own — two separate locks let an install and an update of one CLI run at once.
+pub(crate) fn single_flight() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(Default::default)
 }
@@ -249,6 +254,8 @@ pub async fn update(app: &AppHandle, provider: &str, before: &str) -> Result<Upd
     let (mut command, program) = crate::ai::update_command(&binary);
     command.args(&args).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     command.kill_on_drop(true);
+    // Its own group, so the timeout can stop everything it started: see `ai_runs::kill_tree`.
+    crate::proc::own_process_group(&mut command);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -264,25 +271,47 @@ pub async fn update(app: &AppHandle, provider: &str, before: &str) -> Result<Upd
     );
     let deadline = tokio::time::sleep(UPDATE_TIMEOUT);
     tokio::pin!(deadline);
+    // A stream that has ended is not polled again: `next_line` answers `None` at once from then on,
+    // and a branch that is always ready turned the wait for the process into a busy loop.
+    let (mut out_open, mut err_open) = (true, true);
     let status = loop {
         tokio::select! {
-            line = out.next_line() => if let Ok(Some(line)) = line { keep(app, provider, &mut lines, line) },
-            line = err.next_line() => if let Ok(Some(line)) = line { keep(app, provider, &mut lines, line) },
+            line = out.next_line(), if out_open => match line {
+                Ok(Some(line)) => keep(app, provider, &mut lines, line),
+                _ => out_open = false,
+            },
+            line = err.next_line(), if err_open => match line {
+                Ok(Some(line)) => keep(app, provider, &mut lines, line),
+                _ => err_open = false,
+            },
             status = child.wait() => break status.ok(),
             _ = &mut deadline => {
-                let _ = child.kill().await;
+                // The whole tree: an installer is a shell running a package manager running more,
+                // and killing only the shell left them going — and holding the pipes read below.
+                crate::ai_runs::kill_tree(&mut child).await;
                 lines.push("the update did not finish in 10 minutes and was stopped (timed out)".to_string());
                 break None;
             }
         }
     };
     // Whatever the process wrote after it was waited for.
-    while let Ok(Some(line)) = out.next_line().await {
-        keep(app, provider, &mut lines, line);
-    }
-    while let Ok(Some(line)) = err.next_line().await {
-        keep(app, provider, &mut lines, line);
-    }
+    // Bounded: a descendant that outlived the process (a daemon it started) can keep the pipes
+    // open forever, and the result must not wait on it.
+    let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
+        while out_open {
+            match out.next_line().await {
+                Ok(Some(line)) => keep(app, provider, &mut lines, line),
+                _ => out_open = false,
+            }
+        }
+        while err_open {
+            match err.next_line().await {
+                Ok(Some(line)) => keep(app, provider, &mut lines, line),
+                _ => err_open = false,
+            }
+        }
+    })
+    .await;
 
     crate::ai::forget_engine_version(&binary);
     let after = crate::ai::engine_version(&binary).await.unwrap_or_default();

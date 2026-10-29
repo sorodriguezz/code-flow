@@ -290,6 +290,26 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "guides", labelKey: "backup.tabGuides", hintKey: "backup.tabGuidesHint", icon: BookOpen },
     ],
   },
+  {
+    id: "statistics",
+    labelKey: "stats.title",
+    icon: ChartColumn,
+    group: "app",
+    color: "#7c3aed",
+    // Each pane is one side of the same question — the scope (every workspace or one) and the window
+    // sit above the rail and hold across them.
+    tabs: [
+      { id: "overview", labelKey: "stats.tabOverview", icon: Gauge, searchKey: "stats.searchTerms" },
+      { id: "apps", labelKey: "stats.tabApps", hintKey: "stats.tabAppsHint", icon: LayoutGrid, searchKey: "stats.searchTermsApps" },
+      { id: "workspaces", labelKey: "stats.tabWorkspaces", hintKey: "stats.tabWorkspacesHint", icon: Briefcase },
+      { id: "repos", labelKey: "stats.tabRepos", hintKey: "stats.tabReposHint", icon: FolderGit2 },
+      { id: "chats", labelKey: "stats.tabChats", hintKey: "stats.tabChatsHint", icon: MessageSquareText, searchKey: "stats.searchTermsChats" },
+      { id: "ai", labelKey: "stats.tabAi", hintKey: "stats.tabAiHint", icon: Bot, searchKey: "stats.searchTermsAi" },
+      { id: "git", labelKey: "stats.tabGit", hintKey: "stats.tabGitHint", icon: GitBranch },
+      { id: "commands", labelKey: "stats.tabCommands", hintKey: "stats.tabCommandsHint", icon: Keyboard, searchKey: "stats.searchTermsCommands" },
+      { id: "errors", labelKey: "stats.tabErrors", hintKey: "stats.tabErrorsHint", icon: ShieldAlert },
+    ],
+  },
 
   // ------------------------------------------------------------------ code
   {
@@ -393,6 +413,8 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "secrets", labelKey: "settings.tabSecretScan", hintKey: "settings.secretScanDescription", icon: ShieldAlert, searchKey: "settings.searchTermsSecretScan" },
       { id: "blame", labelKey: "settings.tabBlame", hintKey: "settings.blameDescription", icon: History, searchKey: "settings.searchTermsBlame" },
       { id: "locked", labelKey: "settings.tabLockedBranches", hintKey: "settings.lockedBranchesDescription", icon: Lock, searchKey: "settings.searchTermsLockedBranches" },
+      // Whether `git` is on this machine, with the one-click install the first-launch setup uses.
+      { id: "install", labelKey: "toolSetup.gitPane", hintKey: "toolSetup.gitPaneHint", icon: Download, searchKey: "toolSetup.searchTerms" },
     ],
   },
   {
@@ -700,6 +722,7 @@ export const SETTINGS_GROUPS: { id: SettingsSectionDef["group"]; labelKey: Trans
  * The test beside this file makes that omission impossible to ship.
  */
 export const SELF_SCROLLING_SECTIONS = new Set<SettingsSectionId>([
+  "statistics",
   "general",
   "appearance",
   "keybindings",
