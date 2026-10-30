@@ -565,7 +565,8 @@ describe("editing a question replaces the thread from it", () => {
     await load();
     expect(await useChatStore.getState().submitEdit("p-1", "conv-1", "plain")).toBe(true);
     expect(backend.truncated).toEqual([]);
-    expect(useChatStore.getState().byConversation["conv-1"].messages.at(-1)?.content).toBe("plain");
+    const sent = useChatStore.getState().byConversation["conv-1"].messages;
+    expect(sent[sent.length - 1]?.content).toBe("plain");
 
     // Queued messages stay queued while the replacement runs.
     backend.sends.length = 0;
