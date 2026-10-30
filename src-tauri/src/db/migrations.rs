@@ -2067,10 +2067,33 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_on_demand_to_review_contexts(conn)?;
     add_api_mocks(conn)?;
     add_source_to_db_history(conn)?;
+    add_notes_to_chat_messages(conn)?;
+    add_usage_to_activity_log(conn)?;
     // Tickets → code (boards::ticket_links): the ticket ↔ branch ↔ pull request record.
     crate::boards::ticket_links::migrate(conn)?;
     // Settings › Estadísticas: per-day usage counters (`usage_stats`).
     crate::usage_stats::migrate(conn)?;
+    Ok(())
+}
+
+/// What a workspace chat's turn carried besides its text — «Contexto usado», the engine's usage
+/// report, the folders with no restore point — as one JSON object (`chat_queries::TurnNotes`), so a
+/// reloaded conversation shows what the live turn did. `NULL` for every turn that carried none.
+/// A column of `chat_messages` rather than a table: it dies with the message and backup already
+/// covers it.
+pub(crate) fn add_notes_to_chat_messages(conn: &Connection) -> rusqlite::Result<()> {
+    if !has_column(conn, "chat_messages", "notes")? {
+        conn.execute_batch("ALTER TABLE chat_messages ADD COLUMN notes TEXT;")?;
+    }
+    Ok(())
+}
+
+/// What a repository chat turn spent, as the engine reported it (`ai::AiUsage` as JSON). `NULL` when
+/// the engine said nothing, and for turns recorded before this was kept.
+pub(crate) fn add_usage_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
+    if !has_column(conn, "activity_log", "usage")? {
+        conn.execute_batch("ALTER TABLE activity_log ADD COLUMN usage TEXT;")?;
+    }
     Ok(())
 }
 

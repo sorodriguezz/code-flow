@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   EMPTY_QUEUE,
   chatQueueKey,
@@ -114,5 +114,84 @@ describe("the queue", () => {
     const only = enqueueChatMessage(KEY, { text: "one" });
     takeQueuedChatMessage(KEY, only.id);
     expect(queuedMessages(KEY)).toBe(EMPTY_QUEUE);
+  });
+});
+
+describe("persistence", () => {
+  const PANEL = chatQueueKey("panel", "c-9");
+
+  async function freshModule(stored: string | null) {
+    vi.resetModules();
+    const writes: string[] = [];
+    vi.doMock("../lib/tauri/commands", () => ({
+      getSetting: vi.fn(async () => stored),
+      setSetting: vi.fn(async (_k: string, v: string) => {
+        writes.push(v);
+      }),
+    }));
+    const mod = await import("./chatQueueStore");
+    return { mod, writes };
+  }
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.doUnmock("../lib/tauri/commands");
+  });
+
+  it("round-trips a panel queue and brings it back held", async () => {
+    vi.useFakeTimers();
+    const first = await freshModule(null);
+    first.mod.enqueueChatMessage(PANEL, { text: "one", skill: { name: "s" } as never, attachments: [file("a.png")] });
+    first.mod.enqueueChatMessage(chatQueueKey("chat", "x"), { text: "chat app, not persisted" });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(first.writes).toHaveLength(1);
+    expect(Object.keys(JSON.parse(first.writes[0]))).toEqual([PANEL]);
+
+    const second = await freshModule(first.writes[0]);
+    await second.mod.restoreChatQueue(PANEL, [file("a.png")]);
+    expect(second.mod.queuedMessages(PANEL).map((i) => i.text)).toEqual(["one"]);
+    expect(second.mod.queuedMessages(PANEL)[0].attachments?.map((f) => f.id)).toEqual(["a.png"]);
+    expect(second.mod.queueHold(PANEL)).toBe("restored");
+    // Held: nothing leaves the queue by itself.
+    expect(second.mod.shiftChatQueue(PANEL)).toBeNull();
+    second.mod.releaseChatQueue(PANEL);
+    expect(second.mod.shiftChatQueue(PANEL)?.text).toBe("one");
+  });
+
+  it("drops attachments whose staged copy is gone, and keeps them when the list cannot be read", async () => {
+    const raw = JSON.stringify({
+      [PANEL]: [{ id: "q1", text: "hi", queuedAt: 1, attachments: [file("keep"), file("gone")] }],
+    });
+    const a = await freshModule(raw);
+    await a.mod.restoreChatQueue(PANEL, [file("keep")]);
+    expect(a.mod.queuedMessages(PANEL)[0].attachments?.map((f) => f.id)).toEqual(["keep"]);
+    const b = await freshModule(raw);
+    await b.mod.restoreChatQueue(PANEL, null);
+    expect(b.mod.queuedMessages(PANEL)[0].attachments).toHaveLength(2);
+  });
+
+  it("caps messages per chat and chats overall, and ignores a corrupt blob", async () => {
+    const { mod } = await freshModule(null);
+    const many = Array.from({ length: 30 }, (_, i) => ({ id: `q${i}`, text: `m${i}`, queuedAt: i }));
+    const chats = Object.fromEntries(
+      Array.from({ length: 40 }, (_, i) => [`panel:c${i}`, [{ id: `q${i}`, text: "t", queuedAt: 100 + i }]]),
+    );
+    const out = JSON.parse(mod.serializeChatQueues({ [PANEL]: many as never, ...(chats as Record<string, never>) }));
+    expect(Object.keys(out)).toHaveLength(mod.MAX_QUEUED_CHATS);
+    const only = JSON.parse(mod.serializeChatQueues({ [PANEL]: many as never }));
+    expect(only[PANEL]).toHaveLength(mod.MAX_QUEUED_PER_CHAT);
+
+    const bad = await freshModule("{not json");
+    await bad.mod.restoreChatQueue(PANEL, []);
+    expect(bad.mod.queuedMessages(PANEL)).toEqual([]);
+  });
+
+  it("does not restore over what was queued this session", async () => {
+    const raw = JSON.stringify({ [PANEL]: [{ id: "old", text: "old", queuedAt: 1 }] });
+    const { mod } = await freshModule(raw);
+    mod.enqueueChatMessage(PANEL, { text: "new" });
+    await mod.restoreChatQueue(PANEL, []);
+    expect(mod.queuedMessages(PANEL).map((i) => i.text)).toEqual(["new"]);
+    expect(mod.queueHold(PANEL)).toBeNull();
   });
 });

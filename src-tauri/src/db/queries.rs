@@ -4494,6 +4494,7 @@ pub fn add_activity_log(
         account_id: meta.account_id.map(str::to_string),
         checkpoint: None,
         context: None,
+        usage: None,
     };
     conn.execute(
         "INSERT INTO activity_log (id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id)
@@ -4518,6 +4519,12 @@ pub fn add_activity_log(
     Ok(entry)
 }
 
+/// What a turn spent, as the engine reported it (`ai::AiUsage` as JSON).
+pub fn set_activity_usage(conn: &Connection, id: &str, usage: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE activity_log SET usage = ?1 WHERE id = ?2", params![usage, id])?;
+    Ok(())
+}
+
 /// What CodeFlow put in front of the engine for a turn (`crate::context::ContextSource` as JSON).
 pub fn set_activity_context(conn: &Connection, id: &str, context: &str) -> rusqlite::Result<()> {
     conn.execute("UPDATE activity_log SET context = ?1 WHERE id = ?2", params![context, id])?;
@@ -4538,7 +4545,7 @@ pub fn set_activity_checkpoint(conn: &Connection, id: &str, checkpoint: &str) ->
 /// go through [`conversation_turns`] instead, because `trace` is the heaviest column in the
 /// database and reading it to build a list of titles is pure waste.
 const ACTIVITY_COLUMNS: &str =
-    "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint, context";
+    "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint, context, usage";
 
 /// [`ACTIVITY_COLUMNS`] with `trace` replaced by [`TRACE_PRESENCE`], so [`read_activity_row`] can
 /// read it unchanged and the turn comes back with `trace: Some("")` when it has one, `None` when not.
@@ -4549,7 +4556,7 @@ const ACTIVITY_COLUMNS: &str =
 const ACTIVITY_COLUMNS_NO_TRACE: &str =
     "id, project_id, session_id, engine_session_id, question, answer, \
      CASE WHEN trace IS NULL OR trace = '' OR trace = '[]' THEN NULL ELSE '' END, \
-     created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint, context";
+     created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint, context, usage";
 
 fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> {
     Ok(ActivityLogEntry {
@@ -4569,6 +4576,7 @@ fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> 
         account_id: row.get(13)?,
         checkpoint: row.get(14)?,
         context: row.get(15)?,
+        usage: row.get(16)?,
     })
 }
 
@@ -4912,6 +4920,52 @@ pub fn branch_chat_conversation(
         rename_chat_conversation(conn, project_id, to, title.trim())?;
     }
     Ok(kept.len())
+}
+
+/// «Editar y reenviar» in a repository conversation: deletes the turn `row_id` and every turn filed
+/// after it, and makes the next question start a fresh engine session that is re-told the surviving
+/// transcript (`claude_cmd::panel_transcript`, taken whenever no session is handed on).
+///
+/// Dropping the session has to survive a restart, so it is written on the rows: the frontend resumes
+/// the engine token of the conversation's *last* row, which would otherwise be a session that still
+/// holds the removed turns. Every survivor loses its `engine_session_id` — the same thing a branch's
+/// copies do. (Side effect: the «another account» lines of the older turns are no longer drawn.)
+///
+/// `/clear`s typed after the cut turn started belonged to the removed turns and go; one before it
+/// stays and still precedes the question asked in its place. The turn's checkpoint is a column of its
+/// row and goes with it; the files it wrote are not touched. `None`: no such turn here.
+pub fn truncate_chat_from(conn: &Connection, project_id: &str, session_id: &str, row_id: &str) -> rusqlite::Result<Option<usize>> {
+    let cut: Option<(String, Option<i64>)> = conn
+        .query_row(
+            "SELECT created_at, response_time_ms FROM activity_log WHERE id = ?1 AND project_id = ?2 AND session_id = ?3",
+            params![row_id, project_id, session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((created_at, took)) = cut else { return Ok(None) };
+    let started = turn_started(&created_at, took);
+    let tx = conn.unchecked_transaction()?;
+    let removed = tx.execute(
+        "DELETE FROM activity_log WHERE project_id = ?1 AND session_id = ?2 AND created_at >= ?3",
+        params![project_id, session_id, created_at],
+    )?;
+    let resets: Vec<(String, String)> = {
+        let mut stmt = tx.prepare("SELECT id, created_at FROM conversation_resets WHERE session_id = ?1")?;
+        let rows = stmt.query_map(params![session_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (id, at) in resets {
+        let later = chrono::DateTime::parse_from_rfc3339(&at).is_ok_and(|at| at.with_timezone(&Utc) > started);
+        if later {
+            tx.execute("DELETE FROM conversation_resets WHERE id = ?1", params![id])?;
+        }
+    }
+    tx.execute(
+        "UPDATE activity_log SET engine_session_id = NULL WHERE project_id = ?1 AND session_id = ?2",
+        params![project_id, session_id],
+    )?;
+    tx.commit()?;
+    Ok(Some(removed))
 }
 
 // ---------- the assistant panel's `/clear` ----------
@@ -6252,6 +6306,7 @@ mod tests {
             account_id: account.map(str::to_string),
             checkpoint: None,
             context: None,
+        usage: None,
         }
     }
 

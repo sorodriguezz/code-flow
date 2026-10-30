@@ -413,8 +413,9 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
   const [symbolPaletteOpen, setSymbolPaletteOpen] = useState(false);
   const comparePair = useCompareStore((s) => s.pair);
   /** Files whose last tab was closed, newest last — what ⌘⇧T opens again. Session-only, per window,
-   *  and capped: nobody reopens the thirtieth tab back. */
-  const closedRef = useRef<string[]>([]);
+   *  and capped: nobody reopens the thirtieth tab back. Per repository — the editor stays mounted
+   *  across a repo switch, and a path closed in one is not a tab of the next. */
+  const closedRef = useRef<Record<string, string[]>>({});
   const [sidePanel, setSidePanel] = useState<SidePanel>("files");
   /**
    * Whether the panel column is put away — the activity bar's own gesture in VS Code (user ask,
@@ -750,7 +751,9 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     // Out of every group means out of the registry — which is also what disposes its model.
     if (!next.some((g) => g.paths.includes(path))) {
       setTabs((prev) => prev.filter((item) => item.path !== path));
-      if (!isScratchPath(path)) closedRef.current = [...closedRef.current.filter((p) => p !== path), path].slice(-30);
+      if (!isScratchPath(path) && repoPath) {
+        closedRef.current[repoPath] = [...(closedRef.current[repoPath] ?? []).filter((p) => p !== path), path].slice(-30);
+      }
     }
   }, []);
 
@@ -2423,9 +2426,11 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       case "reopenClosed": {
         // The newest closed file that is not open again already.
         const open = new Set(groupsRef.current.flatMap((g) => g.paths));
-        const stack = closedRef.current.filter((p) => !open.has(p));
+        const repoPath = projectRef.current?.local_path;
+        if (!repoPath) break;
+        const stack = (closedRef.current[repoPath] ?? []).filter((p) => !open.has(p));
         const path = stack.pop();
-        closedRef.current = stack;
+        closedRef.current[repoPath] = stack;
         if (path) void openFile(path, { pin: true });
         break;
       }

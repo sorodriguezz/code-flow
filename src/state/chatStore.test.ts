@@ -21,6 +21,16 @@ const backend = vi.hoisted(() => ({
   asked: [] as string[],
   /** Conversations a `/clear` was written down for. */
   cleared: [] as string[],
+  /** `app_settings`, as `get_setting`/`set_setting` see it. */
+  settings: {} as Record<string, string>,
+  /** What `chat_failed_turn_changes` answers. */
+  failed: null as unknown,
+  /** The row ids `truncate_chat_from` was asked to cut from; `truncateFails` makes it refuse. */
+  truncated: [] as string[],
+  truncateFails: null as string | null,
+  /** What the confirmation dialog answers, and the messages it was shown. */
+  confirm: true,
+  confirmed: [] as string[],
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -29,6 +39,17 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (name === "chat_context_resets") return resets;
     if (name === "reset_chat_context") {
       backend.cleared.push(String(args.sessionId));
+      return null;
+    }
+    if (name === "chat_failed_turn_changes") return backend.failed;
+    if (name === "truncate_chat_from") {
+      if (backend.truncateFails) throw backend.truncateFails;
+      backend.truncated.push(String(args.rowId));
+      return 1;
+    }
+    if (name === "get_setting") return backend.settings[String(args.key)] ?? null;
+    if (name === "set_setting") {
+      backend.settings[String(args.key)] = String(args.value);
       return null;
     }
     if (name === "send_chat_message") {
@@ -45,8 +66,14 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {}, emit: as
 // initialization"), as an unhandled rejection after the test that caused it has passed. The app
 // has all of it loaded long before; the queue tests below have no use for notifications at all.
 vi.mock("./notificationStore", () => ({ notify: () => {} }));
+vi.mock("./confirmStore", () => ({
+  confirmAction: async (message: string) => {
+    backend.confirmed.push(message);
+    return backend.confirm;
+  },
+}));
 
-const { turnsToMessages, useChatStore } = await import("./chatStore");
+const { editPlan, turnsToMessages, useChatStore } = await import("./chatStore");
 const { chatQueueKey, queueHold, queuedMessages, useChatQueueStore } = await import("./chatQueueStore");
 
 function turn(n: number, partial: Partial<ActivityLogEntry> = {}): ActivityLogEntry {
@@ -78,6 +105,15 @@ beforeEach(() => {
   stored = [];
   resets = { turns: [], pending: false };
   useChatStore.setState({ byConversation: {} });
+});
+
+describe("turnsToMessages usage", () => {
+  it("restores a turn's usage from the row and ignores bad JSON", () => {
+    const usage = { input_tokens: 5, output_tokens: 6, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: 0.01 };
+    const out = turnsToMessages([turn(1, { usage: JSON.stringify(usage) }), turn(2, { usage: "{bad" }), turn(3)]);
+    const answers = out.filter((m) => m.role === "assistant");
+    expect(answers.map((m) => m.usage)).toEqual([usage, undefined, undefined]);
+  });
 });
 
 describe("turnsToMessages", () => {
@@ -284,5 +320,276 @@ describe("a /clear is kept on disk", () => {
     const session = useChatStore.getState().byConversation["conv-1"];
     expect(session.resetPending).toBe(false);
     expect(session.messages.filter((m) => m.contextReset).map((m) => m.content)).toEqual(["question 2"]);
+  });
+});
+
+describe("reopening a conversation this window already holds", () => {
+  it("keeps what only memory has — stopped turns, the plan flag, the meter — and still takes new rows", async () => {
+    stored = [turn(1)];
+    await useChatStore.getState().ensureLoaded("p-1", "conv-1");
+    useChatStore.setState((s) => {
+      const session = s.byConversation["conv-1"];
+      return {
+        byConversation: {
+          ...s.byConversation,
+          "conv-1": {
+            ...session,
+            contextTokens: 4200,
+            messages: [
+              ...session.messages,
+              { role: "user", content: "stopped question", plan: true },
+              { role: "assistant", content: "", isCancelled: true, plan: true },
+            ],
+          },
+        },
+      };
+    });
+
+    await useChatStore.getState().ensureLoaded("p-1", "conv-1");
+    let session = useChatStore.getState().byConversation["conv-1"];
+    expect(session.messages.map((m) => m.content)).toEqual(["question 1", "answer 1", "stopped question", ""]);
+    expect(session.messages[3].isCancelled).toBe(true);
+    expect(session.messages[2].plan).toBe(true);
+    expect(session.contextTokens).toBe(4200);
+
+    // A turn sent from another device still shows up on reopening.
+    stored = [turn(1), turn(2)];
+    await useChatStore.getState().ensureLoaded("p-1", "conv-1");
+    session = useChatStore.getState().byConversation["conv-1"];
+    expect(session.messages.map((m) => m.content)).toEqual(["question 1", "answer 1", "stopped question", "", "question 2", "answer 2"]);
+  });
+});
+
+describe("per-conversation picks survive a restart", () => {
+  it("restores engine, account, effort and plan from settings, and forgets them with the conversation", async () => {
+    vi.useFakeTimers();
+    try {
+      backend.settings = {};
+      vi.resetModules();
+      const first = await import("./chatStore");
+      first.useChatStore.getState().setEngine("conv-1", { provider: "claude", model: "opus", account: "acct-work" });
+      first.useChatStore.getState().setEffort("conv-1", "high");
+      first.useChatStore.getState().setPlan("conv-1", true);
+      await vi.advanceTimersByTimeAsync(1000);
+      const saved = JSON.parse(backend.settings["ai_panel_conversation_prefs"]);
+      expect(saved["conv-1"]).toEqual({ engine: { provider: "claude", model: "opus", account: "acct-work" }, effort: "high", plan: true });
+
+      // A new process: nothing in memory, the blob on disk.
+      vi.resetModules();
+      const second = await import("./chatStore");
+      await second.loadConversationPrefs();
+      const state = second.useChatStore.getState();
+      expect(state.engineByConversation["conv-1"]).toEqual({ provider: "claude", model: "opus", account: "acct-work" });
+      expect(state.effortByConversation["conv-1"]).toBe("high");
+      expect(state.planByConversation["conv-1"]).toBe(true);
+
+      second.useChatStore.getState().discard("conv-1");
+      expect(second.useChatStore.getState().planByConversation["conv-1"]).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(JSON.parse(backend.settings["ai_panel_conversation_prefs"])).toEqual({});
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("a stopped turn that changed files", () => {
+  const cancelledRow = (n: number) =>
+    turn(n, { is_error: true, answer: "RUN_CANCELLED::", checkpoint: JSON.stringify({ id: "cp-1", paths: ["a.ts"] }) });
+
+  it("reads back from disk as a stopped bubble with its review, not as an error", async () => {
+    stored = [turn(1), cancelledRow(2)];
+    await useChatStore.getState().ensureLoaded("p-1", "conv-1");
+    const last = useChatStore.getState().byConversation["conv-1"].messages[3];
+    expect(last.isCancelled).toBe(true);
+    expect(last.isError).toBeUndefined();
+    expect(last.content).toBe("");
+    expect(last.changes).toEqual({ checkpointId: "cp-1", paths: ["a.ts"] });
+  });
+
+  it("is not drawn twice when its row turns up next to the live bubble", async () => {
+    stored = [turn(1)];
+    await useChatStore.getState().ensureLoaded("p-1", "conv-1");
+    // The live bubble, filed when the stop landed, stamped with the local clock.
+    useChatStore.setState((s) => {
+      const session = s.byConversation["conv-1"];
+      return {
+        byConversation: {
+          ...s.byConversation,
+          "conv-1": {
+            ...session,
+            messages: [
+              ...session.messages,
+              { role: "user", content: "question 2" },
+              { role: "assistant", content: "", isCancelled: true, createdAt: "2026-09-24T10:02:07Z" },
+            ],
+          },
+        },
+      };
+    });
+    stored = [turn(1), cancelledRow(2)];
+    await useChatStore.getState().reconcile("p-1", "conv-1");
+    const messages = useChatStore.getState().byConversation["conv-1"].messages;
+    expect(messages).toHaveLength(4);
+    expect(messages[3].rowId).toBe("t2");
+    expect(messages[3].changes?.checkpointId).toBe("cp-1");
+    await useChatStore.getState().reconcile("p-1", "conv-1");
+    expect(useChatStore.getState().byConversation["conv-1"].messages).toHaveLength(4);
+  });
+});
+
+/**
+ * «Editar y reenviar»: sending an edited question replaces the thread from it on. The rows are cut
+ * first, then the session — memory, engine token and all — so the next turn is handed no session
+ * (`send_chat_message` then replays the surviving rows) and the later turns are gone from the screen.
+ */
+describe("editing a question replaces the thread from it", () => {
+  const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const load = async () => {
+    stored = [turn(1), turn(2), turn(3)];
+    await useChatStore.getState().ensureLoaded("p-1", "conv-1");
+  };
+
+  beforeEach(() => {
+    backend.sends.length = 0;
+    backend.asked.length = 0;
+    backend.truncated.length = 0;
+    backend.truncateFails = null;
+    backend.confirm = true;
+    backend.confirmed.length = 0;
+    useChatStore.setState({ byConversation: {}, editing: {} });
+    useChatQueueStore.setState({ items: {}, held: {} });
+  });
+
+  it("plans the cut from the transcript: the first stored row at or after the question", () => {
+    const messages = turnsToMessages([turn(1), turn(2), turn(3)]);
+    expect(editPlan(messages, 2)).toMatchObject({ laterTurns: 1, cutRowId: "t2" });
+    expect(editPlan(messages, 4)).toMatchObject({ laterTurns: 0, cutRowId: "t3" });
+    // A stopped turn is never stored: the cut falls on the next stored turn.
+    const stopped = [...messages.slice(0, 2), { role: "user" as const, content: "q" }, { role: "assistant" as const, content: "", isCancelled: true }, ...messages.slice(2)];
+    expect(editPlan(stopped, 2).cutRowId).toBe("t2");
+    expect(editPlan(stopped, 2).laterTurns).toBe(2);
+    expect(editPlan(stopped.slice(0, 4), 2).cutRowId).toBeNull();
+  });
+
+  it("marks the question, and cancelling clears the marker", async () => {
+    await load();
+    const store = useChatStore.getState();
+    store.beginEdit("conv-1", 2);
+    expect(useChatStore.getState().editing["conv-1"]).toEqual({ index: 2, fromTurn: 2 });
+    // Only a question can be edited.
+    store.beginEdit("conv-1", 1);
+    expect(useChatStore.getState().editing["conv-1"]).toEqual({ index: 2, fromTurn: 2 });
+    store.cancelEdit("conv-1");
+    expect(useChatStore.getState().editing["conv-1"]).toBeUndefined();
+  });
+
+  it("confirms once, cuts the rows, drops the later turns and the session, then asks", async () => {
+    await load();
+    expect(useChatStore.getState().byConversation["conv-1"].sessionId).toBe("ses-3");
+    useChatStore.getState().beginEdit("conv-1", 2);
+    expect(await useChatStore.getState().submitEdit("p-1", "conv-1", "question 2, better")).toBe(true);
+
+    expect(backend.confirmed).toHaveLength(1);
+    expect(backend.truncated).toEqual(["t2"]);
+    expect(useChatStore.getState().editing["conv-1"]).toBeUndefined();
+    const session = useChatStore.getState().byConversation["conv-1"];
+    expect(session.messages.map((m) => m.content)).toEqual(["question 1", "answer 1", "question 2, better"]);
+    expect(session.sending).toBe(true);
+    // No session handed on: the backend replays the surviving turns instead of resuming one that
+    // still holds the removed ones.
+    expect(backend.sends[0].args.sessionId).toBeNull();
+    expect(backend.asked).toEqual(["question 2, better"]);
+  });
+
+  it("asks nothing when the last question is edited, and sends nothing when the user declines", async () => {
+    await load();
+    useChatStore.getState().beginEdit("conv-1", 4);
+    expect(await useChatStore.getState().submitEdit("p-1", "conv-1", "again")).toBe(true);
+    expect(backend.confirmed).toHaveLength(0);
+    expect(backend.truncated).toEqual(["t3"]);
+
+    backend.sends.length = 0;
+    backend.asked.length = 0;
+    backend.truncated.length = 0;
+    useChatStore.setState({ byConversation: {}, editing: {} });
+    useChatQueueStore.setState({ items: {}, held: {} });
+    await load();
+    backend.confirm = false;
+    useChatStore.getState().beginEdit("conv-1", 2);
+    expect(await useChatStore.getState().submitEdit("p-1", "conv-1", "no")).toBe(false);
+    expect(backend.truncated).toEqual([]);
+    expect(useChatStore.getState().byConversation["conv-1"].messages).toHaveLength(6);
+    expect(useChatStore.getState().editing["conv-1"]).toBeDefined();
+  });
+
+  it("keeps the transcript and the marker when the cut is refused", async () => {
+    await load();
+    backend.truncateFails = "busy::conv-1";
+    useChatStore.getState().beginEdit("conv-1", 2);
+    expect(await useChatStore.getState().submitEdit("p-1", "conv-1", "x")).toBe(false);
+    expect(useChatStore.getState().byConversation["conv-1"].messages).toHaveLength(6);
+    expect(useChatStore.getState().editing["conv-1"]).toBeDefined();
+    expect(backend.asked).toEqual([]);
+  });
+
+  it("cuts a stopped turn out of memory without touching disk, bubbles cancelled or failed included", async () => {
+    stored = [turn(1)];
+    await useChatStore.getState().ensureLoaded("p-1", "conv-1");
+    useChatStore.setState((s) => ({
+      byConversation: {
+        ...s.byConversation,
+        "conv-1": {
+          ...s.byConversation["conv-1"],
+          messages: [
+            ...s.byConversation["conv-1"].messages,
+            { role: "user", content: "stopped one" },
+            { role: "assistant", content: "", isCancelled: true },
+            { role: "user", content: "failed one" },
+            { role: "assistant", content: "boom", isError: true },
+          ],
+        },
+      },
+    }));
+    useChatStore.getState().beginEdit("conv-1", 2);
+    await useChatStore.getState().submitEdit("p-1", "conv-1", "stopped one, reworded");
+    expect(backend.truncated).toEqual([]);
+    expect(useChatStore.getState().byConversation["conv-1"].messages.map((m) => m.content)).toEqual([
+      "question 1",
+      "answer 1",
+      "stopped one, reworded",
+    ]);
+  });
+
+  it("is an ordinary send without a marker, and leaves what is queued behind it queued", async () => {
+    await load();
+    expect(await useChatStore.getState().submitEdit("p-1", "conv-1", "plain")).toBe(true);
+    expect(backend.truncated).toEqual([]);
+    expect(useChatStore.getState().byConversation["conv-1"].messages.at(-1)?.content).toBe("plain");
+
+    // Queued messages stay queued while the replacement runs.
+    backend.sends.length = 0;
+    backend.asked.length = 0;
+    useChatStore.setState({ byConversation: {}, editing: {} });
+    await load();
+    useChatQueueStore.setState({ items: { [chatQueueKey("panel", "conv-1")]: [{ id: "q1", text: "later" }] } as never, held: {} });
+    useChatStore.getState().beginEdit("conv-1", 2);
+    await useChatStore.getState().submitEdit("p-1", "conv-1", "edited");
+    await flush();
+    expect(backend.asked).toEqual(["edited"]);
+    expect(queuedMessages(chatQueueKey("panel", "conv-1")).map((q) => q.text)).toEqual(["later"]);
+  });
+
+  it("is not undone by a sync that read the disk before the cut", async () => {
+    await load();
+    useChatStore.getState().beginEdit("conv-1", 2);
+    const sync = useChatStore.getState().reconcile("p-1", "conv-1");
+    await useChatStore.getState().submitEdit("p-1", "conv-1", "edited");
+    await sync;
+    expect(useChatStore.getState().byConversation["conv-1"].messages.map((m) => m.content)).toEqual([
+      "question 1",
+      "answer 1",
+      "edited",
+    ]);
   });
 });

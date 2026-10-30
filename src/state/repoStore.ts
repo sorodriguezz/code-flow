@@ -18,8 +18,15 @@ import {
   isReadRace,
   looksLikeGitUrl,
   operationLabel,
+  remoteFailure,
   stoppedOperation,
 } from "../lib/gitErrors";
+import {
+  clearRemoteProgress,
+  reduceRemoteProgress,
+  type RemoteProgressMap,
+} from "../lib/remoteProgress";
+import type { GitRemoteProgressEvent } from "../types/domain";
 import * as gitApi from "../lib/tauri/gitCommands";
 import { commitFilterActive, logFilterOf, NO_COMMIT_FILTER, type CommitFilter } from "../lib/commitFilter";
 import type { LineSelection } from "../lib/tauri/gitCommands";
@@ -134,6 +141,15 @@ interface RepoState {
    * have to go on every row or on none of them.
    */
   remoteOpBranch: string | null;
+  /** `remoteOp` is the background fetch (timer, or opening a menu): no progress UI, and the stop
+   *  button never cancels it. */
+  remoteOpSilent: boolean;
+  /** Latest git meter per repository path, while a user-started fetch/pull/push runs there. */
+  remoteProgress: RemoteProgressMap;
+  /** Feeds `git:remote-progress` in; dropped for a silent op. */
+  applyRemoteProgress: (event: GitRemoteProgressEvent) => void;
+  /** Stops the user's running fetch/pull/push in the open repository. Never touches a silent one. */
+  cancelRemoteOp: () => Promise<void>;
   /**
    * The operation git has half done — a merge, revert, cherry-pick or rebase stopped for the user —
    * or `null`. With `conflicts`, what decides whether the conflicts banner is on screen: it used to
@@ -655,6 +671,20 @@ async function landOnConflicts(get: () => RepoState, kind: OperationKind): Promi
     .pushToast(translate("conflicts.stoppedToast", { operation: operationLabel(kind, translate) }), "info");
 }
 
+/** The user stopped a running fetch/pull/push (`gitCancelRemoteOp`): a stop, never a failure. */
+const wasCancelled = (e: unknown) => remoteFailure(e) === "cancelled";
+
+/** «Cancelado», quietly — an info toast, no error banner, no notification-centre failure. */
+const toastCancelled = () => useToastStore.getState().pushToast(translate("git.opCancelled"), "info");
+
+/** The op settled: the lock and this repository's progress go together. */
+const settledRemote = (s: RepoState, repoPath: string | null, extra?: Partial<RepoState>): Partial<RepoState> => ({
+  remoteOp: null,
+  remoteOpSilent: false,
+  remoteProgress: repoPath ? clearRemoteProgress(s.remoteProgress, repoPath) : s.remoteProgress,
+  ...extra,
+});
+
 type PullOutcome = "pulled" | "failed" | "cancelled" | "conflicts";
 
 /**
@@ -697,6 +727,13 @@ async function runPull(
     if (stopped) {
       await landOnConflicts(get, stopped);
       return "conflicts";
+    }
+    if (wasCancelled(e)) {
+      // Killed mid-way, a pull can leave MERGE_HEAD or a rebase behind: re-read, and the conflicts
+      // banner (which keys off that state) takes it from there.
+      toastCancelled();
+      await refresh().catch(() => {});
+      return "cancelled";
     }
     const message = describeError(e);
     set({ error: message });
@@ -803,6 +840,10 @@ async function runPush(
     return "pushed";
   } catch (e) {
     if (e === PUBLISH_CANCELLED) return "cancelled";
+    if (wasCancelled(e)) {
+      toastCancelled();
+      return "cancelled";
+    }
     const message = describeError(e);
     set({ error: message });
     pushErrorToast(message);
@@ -917,6 +958,8 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   checkingOutBranch: null,
   remoteOp: null,
   remoteOpBranch: null,
+  remoteOpSilent: false,
+  remoteProgress: {},
   operation: null,
   operationSequenced: false,
   operationMessage: null,
@@ -1674,7 +1717,8 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   fetch: async (options) => {
     const { repoPath, remoteOp } = get();
     if (!repoPath || remoteOp) return;
-    set({ remoteOp: "fetch" });
+    // `auto` is the timer's fetch: silent, so no progress UI and nothing for the stop button.
+    set({ remoteOp: "fetch", remoteOpSilent: !!options?.auto });
     // Captured before the work: a fetch is the one remote op that also runs on a timer, so by the
     // time it lands the user may well be looking at a different repository than the one it was for
     // — and, just as often, at a different workspace.
@@ -1688,6 +1732,10 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       await get().refreshBranches();
       notify({ source: "git", titleKey: "notifications.gitFetched", status: "success", detail: where, workspaceId });
     } catch (e) {
+      if (wasCancelled(e)) {
+        if (!options?.auto) toastCancelled();
+        return;
+      }
       // The timer's fetch says it once — see `autoFetchFailing`.
       const alreadyReported = autoFetchFailing.has(repoPath);
       autoFetchFailing.add(repoPath);
@@ -1697,7 +1745,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       pushErrorToast(message);
       notify({ source: "git", titleKey: "notifications.gitFetchFailed", status: "error", detail: where, workspaceId });
     } finally {
-      set({ remoteOp: null });
+      set((s) => settledRemote(s, repoPath));
     }
   },
 
@@ -1714,7 +1762,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     // processes on one working copy contend for the same ref lockfiles, and the one that would
     // lose that race here is a pull the user is watching — so a background fetch waits its turn
     // exactly like the timed one already does, and what makes it *silent* is everything below.
-    set({ remoteOp: "fetch" });
+    set({ remoteOp: "fetch", remoteOpSilent: true });
 
     // …but it does not get to hold that turn forever. `git fetch` against a host that is neither
     // reachable nor refusing — a VPN that dropped, a server behind a black hole — sits in a TCP
@@ -1734,7 +1782,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       // clearing that would re-enable the buttons underneath their own running operation.
       if (released) return;
       released = true;
-      if (get().remoteOp === "fetch") set({ remoteOp: null });
+      if (get().remoteOp === "fetch") set({ remoteOp: null, remoteOpSilent: false });
     };
     const watchdog = setTimeout(release, SILENT_FETCH_LOCK_MS);
 
@@ -1769,7 +1817,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   pull: async () => {
     const { repoPath, remoteOp } = get();
     if (!repoPath || remoteOp) return;
-    set({ remoteOp: "pull" });
+    set({ remoteOp: "pull", remoteOpSilent: false });
     const where = notificationDetail(get());
     const workspaceId = repoWorkspaceId(get());
     try {
@@ -1787,14 +1835,14 @@ export const useRepoStore = create<RepoState>((set, get) => ({
         });
       }
     } finally {
-      set({ remoteOp: null });
+      set((s) => settledRemote(s, repoPath));
     }
   },
 
   fetchBranch: async (name) => {
     const { repoPath, remoteOp } = get();
     if (!repoPath || remoteOp) return;
-    set({ remoteOp: "fetch", remoteOpBranch: name });
+    set({ remoteOp: "fetch", remoteOpBranch: name, remoteOpSilent: false });
     const detail = branchNotificationDetail(get(), name);
     const workspaceId = repoWorkspaceId(get());
     try {
@@ -1802,12 +1850,16 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       await get().refreshBranches();
       notify({ source: "git", titleKey: "notifications.gitFetched", status: "success", detail, workspaceId });
     } catch (e) {
+      if (wasCancelled(e)) {
+        toastCancelled();
+        return;
+      }
       const message = describeError(e);
       set({ error: message });
       pushErrorToast(message);
       notify({ source: "git", titleKey: "notifications.gitFetchFailed", status: "error", detail, workspaceId });
     } finally {
-      set({ remoteOp: null, remoteOpBranch: null });
+      set((s) => settledRemote(s, repoPath, { remoteOpBranch: null }));
     }
   },
 
@@ -1817,7 +1869,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     // Read before the work, because the answer decides how much has to be reloaded afterwards and
     // the pull itself can change it.
     const isHead = get().branches.some((b) => b.name === name && b.is_head);
-    set({ remoteOp: "pull", remoteOpBranch: name });
+    set({ remoteOp: "pull", remoteOpBranch: name, remoteOpSilent: false });
     const detail = branchNotificationDetail(get(), name);
     const workspaceId = repoWorkspaceId(get());
     try {
@@ -1841,7 +1893,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
         });
       }
     } finally {
-      set({ remoteOp: null, remoteOpBranch: null });
+      set((s) => settledRemote(s, repoPath, { remoteOpBranch: null }));
     }
   },
 
@@ -1852,7 +1904,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       return;
     }
     if (!repoPath || remoteOp) return;
-    set({ remoteOp: "push" });
+    set({ remoteOp: "push", remoteOpSilent: false });
     const where = notificationDetail(get());
     const workspaceId = repoWorkspaceId(get());
     try {
@@ -1876,7 +1928,19 @@ export const useRepoStore = create<RepoState>((set, get) => ({
         workspaceId,
       });
     } finally {
-      set({ remoteOp: null });
+      set((s) => settledRemote(s, repoPath));
     }
+  },
+
+  applyRemoteProgress: (event) => {
+    if (get().remoteOpSilent) return;
+    set((s) => ({ remoteProgress: reduceRemoteProgress(s.remoteProgress, event) }));
+  },
+
+  cancelRemoteOp: async () => {
+    const { repoPath, remoteOp, remoteOpSilent } = get();
+    if (!repoPath || !remoteOp || remoteOpSilent) return;
+    // Rejects the running call with `GIT_REMOTE: cancelled`, which its own catch settles quietly.
+    await api.gitCancelRemoteOp(repoPath).catch(() => []);
   },
 }));

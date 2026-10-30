@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Check, ChevronDown, ChevronRight, Laptop, Moon, Sun } from "lucide-react";
 import { useThemeStore } from "../../state/themeStore";
 import { useGlassStore } from "../../state/glassStore";
+import { usePreferencesStore, type Density } from "../../state/preferencesStore";
 import { useMotionStore, type MotionLevel } from "../../state/motionStore";
 import { findTheme, themesFor, type CodeThemeUi } from "../../lib/codeThemes";
 import { usePlatform } from "../../lib/platform";
@@ -209,6 +210,25 @@ function MotionControl() {
   );
 }
 
+/** How tight the interface is drawn — see `preferencesStore`. Applies on the spot. */
+function DensityControl() {
+  const t = useT();
+  const density = usePreferencesStore((s) => s.density);
+  const setDensity = usePreferencesStore((s) => s.setDensity);
+  return (
+    <Segmented
+      ariaLabel={t("settings.density")}
+      layoutId="cf-density"
+      value={density}
+      onChange={(value) => void setDensity(value as Density)}
+      options={[
+        { value: "comfortable", label: t("settings.densityComfortable") },
+        { value: "compact", label: t("settings.densityCompact") },
+      ]}
+    />
+  );
+}
+
 function TransparencyControl() {
   const t = useT();
   const enabled = useGlassStore((s) => s.enabled);
@@ -386,6 +406,10 @@ export function ThemeSettings() {
 
               <PaneBlock title={t("settings.motion")} hint={t("settings.motionHint")}>
                 <MotionControl />
+              </PaneBlock>
+
+              <PaneBlock title={t("settings.density")} hint={t("settings.densityHint")}>
+                <DensityControl />
               </PaneBlock>
             </>
           )}

@@ -1,8 +1,11 @@
-import { CloudUpload, Download, Loader2, RefreshCw, Upload } from "lucide-react";
+import { useEffect } from "react";
+import { CloudUpload, Download, Loader2, RefreshCw, Upload, X } from "lucide-react";
+import { onGitRemoteProgress } from "../../lib/tauri/events";
+import { progressLabel, remoteProgressOf } from "../../lib/remoteProgress";
 import { useRepoStore } from "../../state/repoStore";
 import { useFetchTimerStore } from "../../state/fetchTimerStore";
 import { useT } from "../../state/languageStore";
-import { canPublishRepo, canPull, canPush, fetchNow, pullNow, pushNow } from "../../lib/gitActions";
+import { canPublishRepo, canPull, canPush, fetchNow, pullNow, pushNow, stopRemoteNow } from "../../lib/gitActions";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { GitDialogs } from "./GitDialogs";
 
@@ -51,6 +54,7 @@ function GitAction({
   count,
   countdown,
   disabled,
+  stopping,
   onClick,
 }: {
   icon: React.ReactNode;
@@ -60,6 +64,8 @@ function GitAction({
   /** Seconds until the automatic fetch, for the one button that has a clock instead of a count. */
   countdown?: number | null;
   disabled: boolean;
+  /** This button's own operation is running and the user started it: pressing it stops it. */
+  stopping?: boolean;
   onClick: () => void;
 }) {
   return (
@@ -67,11 +73,20 @@ function GitAction({
       type="button"
       onClick={onClick}
       disabled={disabled}
+      data-stopping={stopping || undefined}
       title={title}
       aria-label={title}
-      className="flex h-6 min-w-6 shrink-0 items-center justify-center gap-0.5 rounded-md px-1 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--cf-text-muted)] dark:disabled:hover:bg-transparent"
+      className="group/git flex h-6 min-w-6 shrink-0 items-center justify-center gap-0.5 rounded-md px-1 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--cf-text-muted)] dark:disabled:hover:bg-transparent"
     >
-      {icon}
+      {stopping ? (
+        // The spinner says it is working; under the pointer (or focus) it becomes the ✕ that stops it.
+        <span className="relative flex h-[13px] w-[13px] items-center justify-center">
+          <span className="group-hover/git:hidden group-focus-visible/git:hidden">{icon}</span>
+          <X size={13} className="hidden group-hover/git:block group-focus-visible/git:block" />
+        </span>
+      ) : (
+        icon
+      )}
       {/* The count as a digit beside the glyph, in the button's own colour — not a badge. A filled
           accent pip is what an app uses to say "come here now", and a branch being two commits
           behind is not that: it is a fact you read in passing, alongside the two buttons that have
@@ -101,6 +116,23 @@ function GitAction({
 export function RemoteActions() {
   const branches = useRepoStore((s) => s.branches);
   const remoteOp = useRepoStore((s) => s.remoteOp);
+  const silent = useRepoStore((s) => s.remoteOpSilent);
+  const repoPath = useRepoStore((s) => s.repoPath);
+  const remoteProgress = useRepoStore((s) => s.remoteProgress);
+  const applyRemoteProgress = useRepoStore((s) => s.applyRemoteProgress);
+  // The meter of git's own output, per repository (this window's store is its own). Subscribed here
+  // because this control is on screen in every window that has a repository open.
+  useEffect(() => {
+    let off: (() => void) | undefined;
+    let gone = false;
+    void onGitRemoteProgress(applyRemoteProgress)
+      .then((unlisten) => (gone ? unlisten() : (off = unlisten)))
+      .catch(() => {});
+    return () => {
+      gone = true;
+      off?.();
+    };
+  }, [applyRemoteProgress]);
   const remainingSeconds = useFetchTimerStore((s) => s.remainingSeconds);
   const t = useT();
   const hint = useShortcutHint();
@@ -116,6 +148,14 @@ export function RemoteActions() {
   useRepoStore((s) => s.remotes.length);
   useRepoStore((s) => s.status?.current_branch);
   const publishable = canPublishRepo();
+  const progress = progressLabel(remoteProgressOf(remoteProgress, repoPath), (key) => t(key));
+  /** The op `which` is running and was started by the user — the button then stops it. */
+  const stoppable = (which: "fetch" | "pull" | "push") => remoteOp === which && !silent;
+  /** «Stop fetch · Receiving objects 45 %». */
+  const stopTitle = (which: "fetch" | "pull" | "push") => {
+    const base = t(which === "fetch" ? "statusbar.stopFetch" : which === "pull" ? "statusbar.stopPull" : "statusbar.stopPush");
+    return progress ? `${base} · ${progress}` : base;
+  };
   /** "3 commits to pull" — the count spelled out for the tooltip, singular where it matters. */
   const commits = (n: number, one: "statusbar.commitToPull" | "statusbar.commitToPush") =>
     n === 1
@@ -133,13 +173,16 @@ export function RemoteActions() {
           remoteOp === "fetch" ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />
         }
         title={
-          remainingSeconds !== null
-            ? `${hint("git.fetch", t("statusbar.fetch"))} · ${t("statusbar.nextFetch", { n: remainingSeconds })}`
-            : hint("git.fetch", t("statusbar.fetch"))
+          stoppable("fetch")
+            ? stopTitle("fetch")
+            : remainingSeconds !== null
+              ? `${hint("git.fetch", t("statusbar.fetch"))} · ${t("statusbar.nextFetch", { n: remainingSeconds })}`
+              : hint("git.fetch", t("statusbar.fetch"))
         }
         countdown={remainingSeconds}
-        disabled={remoteOp !== null}
-        onClick={fetchNow}
+        disabled={remoteOp !== null && !stoppable("fetch")}
+        stopping={stoppable("fetch")}
+        onClick={stoppable("fetch") ? stopRemoteNow : fetchNow}
       />
 
       {publishable ? (
@@ -151,9 +194,10 @@ export function RemoteActions() {
               <CloudUpload size={13} />
             )
           }
-          title={hint("git.push", t("statusbar.publishTo"))}
-          disabled={remoteOp !== null}
-          onClick={pushNow}
+          title={stoppable("push") ? stopTitle("push") : hint("git.push", t("statusbar.publishTo"))}
+          disabled={remoteOp !== null && !stoppable("push")}
+          stopping={stoppable("push")}
+          onClick={stoppable("push") ? stopRemoteNow : pushNow}
         />
       ) : (
         <>
@@ -166,13 +210,16 @@ export function RemoteActions() {
               )
             }
             title={
-              pullEnabled
+              stoppable("pull")
+                ? stopTitle("pull")
+                : pullEnabled
                 ? `${hint("git.pull", t("statusbar.pullFrom"))} · ${commits(behind, "statusbar.commitToPull")}`
                 : t("statusbar.nothingToPull")
             }
             count={behind}
-            disabled={remoteOp !== null || !pullEnabled}
-            onClick={pullNow}
+            disabled={stoppable("pull") ? false : remoteOp !== null || !pullEnabled}
+            stopping={stoppable("pull")}
+            onClick={stoppable("pull") ? stopRemoteNow : pullNow}
           />
           <GitAction
             icon={
@@ -185,15 +232,18 @@ export function RemoteActions() {
             // A locked branch is a different reason for the same greyed-out button, and
             // "nothing to push" would be the wrong explanation for it.
             title={
-              pushEnabled
+              stoppable("push")
+                ? stopTitle("push")
+                : pushEnabled
                 ? `${hint("git.push", t("statusbar.pushTo"))} · ${commits(ahead, "statusbar.commitToPush")}`
                 : current?.is_locked
                   ? t("branch.lockedCannotPush", { name: current.name })
                   : t("statusbar.nothingToPush")
             }
             count={ahead}
-            disabled={remoteOp !== null || !pushEnabled}
-            onClick={pushNow}
+            disabled={stoppable("push") ? false : remoteOp !== null || !pushEnabled}
+            stopping={stoppable("push")}
+            onClick={stoppable("push") ? stopRemoteNow : pushNow}
           />
         </>
       )}

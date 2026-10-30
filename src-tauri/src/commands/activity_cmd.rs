@@ -114,6 +114,27 @@ pub fn reset_chat_context(db: State<'_, Db>, project_id: String, session_id: Str
     queries::add_conversation_reset(&conn, &project_id, &session_id).map_err(|e| e.to_string())
 }
 
+/// «Editar y reenviar» in the panel chat: deletes the turn `row_id` (an answer's `rowId`) and every
+/// turn after it, and drops the engine session so the next question replays the survivors — see
+/// [`queries::truncate_chat_from`]. File edits those turns made are not reverted. Returns how many
+/// turns were removed.
+///
+/// Under the conversation's turn lease, so it is refused (busy marker) while a turn of it runs; agent
+/// tasks keep their transcript, which their own bookkeeping points into.
+#[tauri::command]
+pub fn truncate_chat_from(db: State<'_, Db>, project_id: String, session_id: String, row_id: String) -> Result<u32, String> {
+    if session_id.starts_with(queries::AGENT_CONVERSATION_PREFIX) {
+        return Err("Una tarea de agente no se edita.".to_string());
+    }
+    let _lease = crate::ai_locks::acquire_key(&format!("panel::{session_id}"))
+        .ok_or_else(|| format!("{}{session_id}", crate::ai_locks::BUSY_MARKER))?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::truncate_chat_from(&conn, &project_id, &session_id, &row_id)
+        .map_err(|e| e.to_string())?
+        .map(|removed| removed as u32)
+        .ok_or_else(|| "turn not found".to_string())
+}
+
 /// Where a conversation's `/clear`s fall among its turns — the lines a reopened transcript draws,
 /// and whether one is still waiting for its question.
 #[tauri::command]

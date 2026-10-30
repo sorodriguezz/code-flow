@@ -3,6 +3,7 @@ import * as api from "../lib/tauri/commands";
 import { isOwnOrigin, onStateInvalidate } from "../lib/tauri/events";
 import { WINDOW } from "../lib/windowIdentity";
 import { pushErrorToast } from "./toastStore";
+import { recordProjectOpened } from "../lib/projectLastOpened";
 import { DEFAULT_WORKSPACE_COLOR } from "../lib/workspaceColors";
 import type { NewProject, Project, Workspace } from "../types/domain";
 
@@ -389,6 +390,12 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
   setActiveProject: (id) => {
     set({ activeProjectId: id });
     void api.setSetting(windowKey(LAST_PROJECT_KEY), id);
+    // Feeds the palette's «most recent first» order (focusProject goes through here too).
+    try {
+      recordProjectOpened(id);
+    } catch {
+      /* history is best effort */
+    }
   },
 
   followWorkspace: async (id) => {

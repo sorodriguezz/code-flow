@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { AtSign, Brain, CircleSlash, FileCode2, FileDiff, FilePen, ListTree, TextSelect, TriangleAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useT } from "../../state/languageStore";
@@ -47,7 +48,7 @@ function chipLabel(source: ContextSource, t: ReturnType<typeof useT>): string {
  * «Contexto usado»: what CodeFlow put in front of the engine for an answer besides the question —
  * one quiet line under the bubble, each source a chip that opens its file where it has one.
  */
-export function ContextSources({ sources }: { sources: ContextSource[] }) {
+export const ContextSources = memo(function ContextSources({ sources }: { sources: ContextSource[] }) {
   const t = useT();
   if (sources.length === 0) return null;
   return (
@@ -82,4 +83,4 @@ export function ContextSources({ sources }: { sources: ContextSource[] }) {
       })}
     </div>
   );
-}
+});

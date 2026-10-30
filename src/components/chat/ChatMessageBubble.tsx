@@ -11,6 +11,8 @@ import { parseClaudeError } from "../../lib/claudeError";
 import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
 import { useT } from "../../state/languageStore";
 import type { AiRunLine } from "../../state/aiRunStore";
+import type { TurnUsage } from "../../types/domain";
+import { compactTokens, formatCost } from "../../lib/usageFormat";
 import { AiErrorBanner } from "../ai/AiErrorBanner";
 import { AiRunLog, RunFileChips } from "../ai/AiRunLog";
 import { AiSparkles } from "../common/AiGlyph";
@@ -61,6 +63,9 @@ export interface ChatBubbleMessage {
   provider?: string;
   model?: string;
   engineVersion?: string;
+  /** What this turn spent, when the engine reported it — drawn quietly in the stamp. Absent means
+   *  nothing was reported, not that it was free. */
+  usage?: TurnUsage;
   /** What the engine printed while producing this answer. */
   trace?: AiRunLine[];
   /** The model's reasoning behind this answer, when the engine streamed it. Folded with the trace
@@ -123,6 +128,9 @@ export type ChatBubbleVariant = "panel" | "reading";
 export interface CodeBlockTarget {
   insert: (code: string) => void;
   apply: (code: string, path: string | null) => void;
+  /** The repository this conversation belongs to. The Chat app's active conversation is not the
+   *  panel's, so an inline `path:line` link in a panel answer must resolve against this one. */
+  projectId?: string;
 }
 
 /** How much the stamp under a turn says. `full` is the AI panel's (duration, engine, model, CLI
@@ -296,7 +304,10 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   }, codeTarget);
 
   // A `path:line` in inline code opens in the editor, when the conversation belongs to a repository.
-  const repoId = useConversationStore((s) => (s.activeId ? (s.byConversation[s.activeId]?.projectId ?? null) : null));
+  // The caller's own repository wins: the store lookup names the Chat app's active conversation,
+  // which is the wrong repository for an answer in the assistant panel.
+  const storeRepoId = useConversationStore((s) => (s.activeId ? (s.byConversation[s.activeId]?.projectId ?? null) : null));
+  const repoId = codeTarget?.projectId ?? storeRepoId;
   useEffect(() => {
     const el = bodyRef.current;
     if (!el || !repoId) return;
@@ -1079,6 +1090,16 @@ function ChatStamp({ message, detail }: { message: ChatBubbleMessage; detail: Ch
     // recorded before the provider was tracked.
     if (message.model) parts.push(modelDisplayLabel(message.provider ?? "", message.model, t));
     if (detail === "full" && message.engineVersion) parts.push(`v${message.engineVersion}`);
+    // ↑ what was sent (cache reads and writes included, they are input too), ↓ what came back; the
+    // cost only when the CLI put a number on it.
+    if (detail === "full" && message.usage) {
+      const u = message.usage;
+      const sent = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens;
+      if (sent + u.output_tokens > 0 || u.cost_usd !== null) {
+        const tokens = `↑${compactTokens(sent)} ↓${compactTokens(u.output_tokens)}`;
+        parts.push(u.cost_usd !== null ? `${tokens} · ${formatCost(u.cost_usd)}` : tokens);
+      }
+    }
   }
   if (when) parts.push(when.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }));
   if (parts.length === 0) return null;

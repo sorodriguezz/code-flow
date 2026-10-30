@@ -10,6 +10,7 @@ import {
   CornerUpLeft,
   Database,
   GitBranch,
+  Globe,
   KeyRound,
   Layers,
   Lock,
@@ -32,6 +33,7 @@ import { isMac as platformIsMac, usePlatform } from "../../lib/platform";
 import { getWindowStatus, subscribeWindowStatus, toggleMaximize } from "../../lib/windowControls";
 import { returnThisIsland } from "../../lib/islandReturn";
 import { WINDOW } from "../../lib/windowIdentity";
+import { GLOBAL_APP_REFS } from "../../lib/satelliteGlobalApps";
 import { parseFileIslandRef, useFileIslandStore } from "../../lib/editorIslands";
 import { pushErrorToast } from "../../state/toastStore";
 import { FileGlyph } from "../common/FileGlyph";
@@ -152,6 +154,28 @@ function WindowsControls() {
   );
 }
 
+/** The same «Global» crumb as the main window's `ChromeScope`: no picker, because the app does not follow a workspace. */
+function GlobalCrumb() {
+  const t = useT();
+  return (
+    <Tooltip side="bottom" label={t("tabbar.scopeGlobalHint")}>
+      <span
+        aria-label={t("tabbar.scopeGlobal")}
+        className="flex h-7 min-w-0 shrink-0 cursor-default select-none items-center gap-2 pl-1 pr-1.5 text-[13px] font-semibold text-[var(--cf-text)]"
+      >
+        <span
+          aria-hidden
+          className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-[6px]"
+          style={monogramStyle("var(--cf-text-muted)")}
+        >
+          <Globe size={12} />
+        </span>
+        <span className="max-w-[200px] truncate">{t("tabbar.scopeGlobal")}</span>
+      </span>
+    </Tooltip>
+  );
+}
+
 export function SatelliteTitleBar() {
   // Through the hook so the component re-renders if the answer ever arrives late, and compared
   // here rather than calling `isMac()` directly — same value, one source.
@@ -227,11 +251,18 @@ export function SatelliteTitleBar() {
         // picker, since an app window holds its own workspace. Then the slot an app puts its own
         // mode controls in (Especificación's three modes), exactly as in the main window.
         <>
-          {workspace && (
+          {spec && GLOBAL_APP_REFS.includes(spec.refId) ? (
             <>
-              <WorkspacePicker current={workspace} />
+              <GlobalCrumb />
               <ChevronRight size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
             </>
+          ) : (
+            workspace && (
+              <>
+                <WorkspacePicker current={workspace} />
+                <ChevronRight size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
+              </>
+            )
           )}
           <span className="flex h-7 min-w-0 items-center gap-2 px-1 font-semibold text-[var(--cf-text)]">
             <app.icon size={15} className="shrink-0 text-[var(--cf-accent)]" />

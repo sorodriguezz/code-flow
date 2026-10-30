@@ -1907,7 +1907,7 @@ function ProjectRow({
                 : undefined
         }
         style={riseDelay(at)}
-        className={`cf-rise group relative flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors ${rowTone}`}
+        className={`cf-d-pad-row cf-rise group relative flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-sm transition-colors ${rowTone}`}
       >
         {/* The fill *slides* from the project you left to the one you picked, instead of blinking
             off one row and on at another — the same shared pill the Settings nav uses, and the same
@@ -2246,7 +2246,7 @@ function ProjectRow({
                         // `disabled:cursor-wait` is about the checkout in flight, so an unborn row —
                         // disabled for a reason that will never resolve by waiting — takes the
                         // default cursor back.
-                        className={`flex flex-1 min-w-0 items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-left text-[13px] ${
+                        className={`cf-d-pad-tight flex flex-1 min-w-0 items-center gap-1.5 truncate rounded-md px-1.5 py-0.5 text-left text-[13px] ${
                           unborn ? "disabled:cursor-default" : "disabled:cursor-wait"
                         } ${
                           b.is_head

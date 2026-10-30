@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Braces, Folder, FolderGit2, GitBranch, GitCompareArrows, StickyNote } from "lucide-react";
 import { FileGlyph } from "../common/FileGlyph";
 import { listRepoFiles } from "../../lib/tauri/commands";
@@ -308,7 +308,26 @@ export function useMentions({
     return false;
   };
 
-  return { open: active && items.length > 0, items, index, pick, onKeyDown };
+  // The ARIA wiring between the textarea and the list: spread `inputProps` on the textarea and pass
+  // `listboxId` to the menu. Absent while the menu is closed, so the box stays a plain textbox.
+  const listboxId = useId();
+  const open = active && items.length > 0;
+  const inputProps = open
+    ? ({
+        role: "combobox",
+        "aria-expanded": true,
+        "aria-haspopup": "listbox",
+        "aria-autocomplete": "list",
+        "aria-controls": listboxId,
+        "aria-activedescendant": mentionOptionId(listboxId, Math.min(index, items.length - 1)),
+      } as const)
+    : ({} as const);
+  return { open, items, index, pick, onKeyDown, listboxId, inputProps };
+}
+
+/** The DOM id of option `i` in the list `listboxId` names — what `aria-activedescendant` points at. */
+function mentionOptionId(listboxId: string, i: number): string {
+  return `${listboxId}-opt-${i}`;
 }
 
 function ItemIcon({ item }: { item: MentionItem }) {
@@ -329,7 +348,18 @@ function ItemIcon({ item }: { item: MentionItem }) {
   }
 }
 
-export function MentionMenu({ items, index, onPick }: { items: MentionItem[]; index: number; onPick: (item: MentionItem) => void }) {
+export function MentionMenu({
+  items,
+  index,
+  onPick,
+  listboxId,
+}: {
+  items: MentionItem[];
+  index: number;
+  onPick: (item: MentionItem) => void;
+  /** From `useMentions` — links the list to the textarea for assistive technology. */
+  listboxId?: string;
+}) {
   const t = useT();
   const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -338,6 +368,7 @@ export function MentionMenu({ items, index, onPick }: { items: MentionItem[]; in
   return (
     <div
       ref={listRef}
+      id={listboxId}
       role="listbox"
       aria-label={t("chat.mentionTitle")}
       className="cf-fade-in mb-1.5 max-h-[260px] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] py-1 shadow-[var(--cf-shadow)]"
@@ -349,6 +380,7 @@ export function MentionMenu({ items, index, onPick }: { items: MentionItem[]; in
         <button
           key={`${item.kind}:${item.insert}`}
           type="button"
+          id={listboxId ? mentionOptionId(listboxId, i) : undefined}
           role="option"
           aria-selected={i === index}
           data-active={i === index}

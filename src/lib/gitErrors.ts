@@ -128,6 +128,8 @@ const REMOTE_FAILURES = [
   "timeout",
   "stale_lease",
   "git_too_old",
+  // The user stopped it (`gitCancelRemoteOp`): a stop, never reported as a failure.
+  "cancelled",
 ] as const;
 
 export type RemoteFailure = (typeof REMOTE_FAILURES)[number];
@@ -200,7 +202,7 @@ export function describeGitError(error: unknown, t: Translate): string {
   if (hasTag(raw, GIT_ERROR.noRemote)) return t("gitError.noRemote");
 
   const failure = remoteFailure(raw);
-  if (failure) return t(`gitError.remote.${failure}` as TranslationKey);
+  if (failure && failure !== "cancelled") return t(`gitError.remote.${failure}` as TranslationKey);
 
   return untagged(raw);
 }

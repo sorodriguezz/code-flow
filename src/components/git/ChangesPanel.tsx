@@ -56,6 +56,7 @@ import {
   useRepoStore,
   type CommitTarget,
 } from "../../state/repoStore";
+import { commitTargetLabel } from "../../lib/commitTargetLabel";
 import { useBlameStore } from "../../state/blameStore";
 import { useCommitDraft, useCommitDraftStore } from "../../state/commitDraftStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -1762,6 +1763,20 @@ export function ChangesPanel({
               </div>
             );
           })()}
+          {/* Where Commit will land — the same repo and branch `handleCommit` captures at the click. */}
+          {repoPath && (
+            <div
+              className="mt-1 truncate px-0.5 text-[11px] text-[var(--cf-text-muted)]"
+              title={repoPath}
+            >
+              {"→ "}
+              {commitTargetLabel(
+                { repoPath, branch: status.current_branch ?? null, detached: status.is_detached ?? false },
+                repoDisplayName(repoPath),
+                t("statusbar.detachedHead"),
+              )}
+            </div>
+          )}
         </div>
       </div>
 

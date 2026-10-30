@@ -59,9 +59,13 @@ import type { SatelliteInfo } from "./tauri/windows";
 import type { BranchInfo, Project, Workspace } from "../types/domain";
 import { quickAskOpen } from "./tauri/windows";
 import { acceleratorKeycaps } from "./globalHotkey";
+import { chordKeycaps } from "./keys";
+import { bindingFor, useShortcutsStore, type BindingOverrides } from "../state/shortcutsStore";
+import type { ShortcutId } from "./shortcuts";
 import { isMac } from "./platform";
 import { pushErrorToast } from "../state/toastStore";
 import { paletteKey } from "./usageActions";
+import { ensureLastOpenedLoaded, lastOpenedNow, sortByLastOpened } from "./projectLastOpened";
 
 /**
  * Everything the command palette lists, and how a query narrows it.
@@ -155,6 +159,41 @@ export const VIEW_ITEMS: {
 ];
 
 /**
+ * The shortcut command behind a view row, by the same `id` + `workspace` the rows are built from.
+ * `null` where the app has none (the toolbox). The chord itself is read through `bindingFor`, so a
+ * user's rebinding — or clearing — is what the row shows.
+ */
+export function viewShortcutId(id: MainView, workspace?: ApiWorkspace): ShortcutId | null {
+  if (id === "api") return workspace === "database" ? "view.database" : "view.api";
+  const known: Partial<Record<MainView, ShortcutId>> = {
+    graph: "view.graph",
+    changes: "view.changes",
+    editor: "view.editor",
+    pipelines: "view.pipelines",
+    reviewer: "view.reviewer",
+    codemap: "view.codemap",
+    env: "view.env",
+    agents: "view.agents",
+    stories: "view.stories",
+    remote: "view.remote",
+    notes: "view.notes",
+    diagrams: "view.diagrams",
+    vault: "view.vault",
+    chat: "view.chat",
+    flows: "view.flows",
+    architecture: "view.architecture",
+  };
+  return known[id] ?? null;
+}
+
+/** Key caps for a view row under the user's bindings; `undefined` when it has no chord. */
+export function viewRowKeys(id: MainView, workspace: ApiWorkspace | undefined, overrides: BindingOverrides): string[] | undefined {
+  const shortcut = viewShortcutId(id, workspace);
+  const chord = shortcut ? bindingFor(shortcut, overrides) : null;
+  return chord ? chordKeycaps(chord) : undefined;
+}
+
+/**
  * The words people already have for a place, by palette key — the vocabulary of the tools they
  * come from ("postman", "dbeaver"), the verb of the task ("probar", "consultar") and the plain
  * nouns, in Spanish and English. `filterPaletteItems` wants *every* typed word in the label or
@@ -219,6 +258,8 @@ export interface PaletteSources {
   branches: BranchInfo[];
   activeView: MainView;
   quickAskChord: string | null;
+  /** The user's rebindings, for the chords on the view rows; the store's when left out. */
+  shortcutOverrides?: BindingOverrides;
 }
 
 /** The sources as the stores hold them right now — for a caller that is not a component. */
@@ -249,7 +290,9 @@ export function buildPaletteItems({
   branches,
   activeView,
   quickAskChord,
+  shortcutOverrides,
 }: PaletteSources): PaletteItem[] {
+  const overrides = shortcutOverrides ?? useShortcutsStore.getState().overrides;
   // The stores' own actions — the same functions the palette used to select through its hooks.
   const { setActiveWorkspace, setActiveProject } = useWorkspaceStore.getState();
   const { checkoutBranch, checkoutRemoteBranch } = useRepoStore.getState();
@@ -279,14 +322,19 @@ export function buildPaletteItems({
   // happens when you press Return on it, and the sidebar has already taken "open" off these —
   // see `missingProjectsStore`. They are still in the sidebar and in Settings, which is where the
   // row that says why, and the buttons that repair or remove it, live.
-  const projectItems: PaletteItem[] = projects
-    .filter(
-      (p) =>
-        !missing.has(p.local_path) &&
-        !notARepo.has(p.local_path) &&
-        !satellites.some((s) => s.kind === "repo" && s.ref_id === p.id),
-    )
-    .map((p) => ({
+  void ensureLastOpenedLoaded();
+  const openable = projects.filter(
+    (p) =>
+      !missing.has(p.local_path) &&
+      !notARepo.has(p.local_path) &&
+      !satellites.some((s) => s.kind === "repo" && s.ref_id === p.id),
+  );
+  // Most recently opened first (the one open now last), not sidebar order.
+  const projectItems: PaletteItem[] = sortByLastOpened(
+    openable,
+    lastOpenedNow(),
+    useWorkspaceStore.getState().activeProjectId,
+  ).map((p) => ({
       key: `project:${p.id}`,
       icon: FolderGit2,
       label: p.name,
@@ -309,6 +357,7 @@ export function buildPaletteItems({
       label: t(labelKey),
       group: "views" as const,
       onSelect: () => (workspace ? openApiWorkspace(workspace) : setActiveView(id)),
+      keys: viewRowKeys(id, workspace, overrides),
     })),
     {
       key: "view:ai-panel",

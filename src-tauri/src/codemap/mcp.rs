@@ -63,11 +63,14 @@ struct Access {
     /// «Codi»'s turn: the interface's three tools ([`CODI_TOOLS`]) and nothing else — its run is
     /// lean (`AiInvocation::lean`), so every definition is tokens it pays on every order.
     codi: bool,
+    /// A workspace chat limited to some of its repositories: the project ids it left out, which
+    /// `search_knowledge` does not search. Empty for every other run.
+    excluded_projects: Vec<String>,
 }
 
 impl Access {
     fn new(root: &str, acts: bool, token: &str) -> Self {
-        Access { root: root.to_string(), acts, session: format!("mcp:{}", &token[..token.len().min(16)]), workspace: false, grounding: false, codi: false }
+        Access { root: root.to_string(), acts, session: format!("mcp:{}", &token[..token.len().min(16)]), workspace: false, grounding: false, codi: false, excluded_projects: Vec::new() }
     }
 }
 
@@ -131,13 +134,14 @@ fn for_grounding_run(root: &str) -> Option<(LiveServer, Grant)> {
 /// The server for a workspace chat's turn: the knowledge of every repository of the workspace, its
 /// folders and notes, and its memories — queries only, so a read-only turn may have it too. `None`
 /// when the user switched the map off or the webhook server cannot listen. `acts`: the turn may
-/// write, so a database write (approved one by one) is offered too.
-pub fn for_workspace_chat(workspace_id: &str, acts: bool) -> Option<(LiveServer, Grant)> {
+/// write, so a database write (approved one by one) is offered too. `excluded`: the project ids of
+/// a chat limited to some of the workspace's repositories, which `search_knowledge` does not search.
+pub fn for_workspace_chat_without(workspace_id: &str, acts: bool, excluded: &[String]) -> Option<(LiveServer, Grant)> {
     if !enabled() {
         return None;
     }
     let root = crate::workspace_chat::working_dir(workspace_id).to_string_lossy().to_string();
-    serve(|token| Access { workspace: true, ..Access::new(&root, acts, token) })
+    serve(|token| Access { workspace: true, excluded_projects: excluded.to_vec(), ..Access::new(&root, acts, token) })
 }
 
 fn serve(access: impl FnOnce(&str) -> Access) -> Option<(LiveServer, Grant)> {
@@ -1404,6 +1408,17 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
             }
             // Everything served here goes to a CLI engine — a cloud model: knowledge is searched with
             // the workspace's cloud rules (local-only folders out, the switch obeyed).
+            if name == "search_knowledge" && !access.excluded_projects.is_empty() {
+                let query = args.get("query").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+                if query.is_empty() {
+                    return Some(text_result(id, "query is empty".to_string(), true));
+                }
+                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(8) as usize;
+                return Some(match crate::knowledge::tool_answer_without(&access.root, &query, limit, true, &access.excluded_projects).await {
+                    Ok(text) => text_result(id, text, false),
+                    Err(error) => text_result(id, error, true),
+                });
+            }
             match call_tool_as(&access.root, name, &args, true).await {
                 Ok(text) => text_result(id, text, false),
                 Err(error) => text_result(id, error, true),

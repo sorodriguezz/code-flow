@@ -902,6 +902,11 @@ pub struct ActivityLogEntry {
     /// knowledge — for the «Contexto usado» chips. `None` for turns before this was kept.
     #[serde(default)]
     pub context: Option<String>,
+    /// What the turn spent as the engine reported it, as JSON `ai::AiUsage`
+    /// (`{input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd}`). `None`
+    /// when the engine said nothing — which is not "free" — and for turns before this was kept.
+    #[serde(default)]
+    pub usage: Option<String>,
 }
 
 /// A finished PR review or pre-commit analysis run — `meta` is a small JSON blob (e.g.

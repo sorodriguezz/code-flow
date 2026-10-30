@@ -240,3 +240,23 @@ describe("workspace chat tabs", () => {
     expect(saved.tabs.map((t) => t.key)).not.toContain(blank);
   });
 });
+
+describe("the tab cap", () => {
+  it("never closes a tab that is running or holds queued messages", async () => {
+    const { panel } = await boot();
+    const busy = new Set<string>();
+    panel.registerTabBusyProbe((tab) => busy.has(tab.key));
+    const store = panel.useAiPanelStore;
+    const keys: string[] = [];
+    for (let i = 1; i <= panel.MAX_TABS; i++) {
+      keys.push(store.getState().open({ kind: "pr", projectId: "p-1", pr: pr(i) }, { focus: false }));
+    }
+    busy.add(keys[0]);
+    // The oldest tab is busy, so the cap takes the next-oldest idle one instead.
+    store.getState().open({ kind: "pr", projectId: "p-1", pr: pr(100) });
+    const open = store.getState().tabsByWorkspace["ws-1"].map((tab) => tab.key);
+    expect(open).toContain(keys[0]);
+    expect(open).not.toContain(keys[1]);
+    expect(open).toHaveLength(panel.MAX_TABS);
+  });
+});

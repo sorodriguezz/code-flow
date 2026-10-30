@@ -89,7 +89,6 @@ use crate::commands::claude_cmd::{load_ai_config_as, load_ai_config_in, AiConfig
 use crate::commands::skills_cmd::sync_skills_into_project;
 use crate::db::models::{ActivityLogEntry, ChatConversation, ChatGroup, ChatMessageRow, ChatSearchHit, ContextReset, Continuation};
 use crate::db::{chat_queries, queries, Db};
-use crate::git;
 
 /// What a finished turn answers with.
 ///
@@ -148,6 +147,19 @@ pub struct ChatReply {
     /// repository chat's reply says them (`claude_cmd::ChatResponse`).
     learned_memory: Option<String>,
     learned_outcome: Option<crate::ai_memory::Remembered>,
+    /// What CodeFlow put in front of the engine besides the question — «Contexto usado», as the
+    /// repository chat's reply says it (`claude_cmd::ChatReply::context`): the `@` mentions, the
+    /// notes cited as `[[Título]]`, the memories, and the knowledge passages that rode the message
+    /// on an engine that cannot call `search_knowledge`. Empty when nothing besides the question
+    /// went (and for every non-workspace turn).
+    context: Vec<crate::context::ContextSource>,
+    /// What the turn spent, as the engine itself reported it — `None` when it reported nothing
+    /// (which is not "free"). One turn's figure, not the conversation's.
+    usage: Option<ai::AiUsage>,
+    /// Workspace chat: folders the engine was handed that are not git repositories, so this turn
+    /// had no restore point there and edits in them cannot be undone from CodeFlow. Absolute
+    /// paths, as the live block names them; empty when every folder is protected.
+    unprotected_dirs: Vec<String>,
 }
 
 /// A slash command the composer's `/` menu can offer for a provider. See
@@ -452,10 +464,37 @@ pub fn chat_get_conversation(
     db: State<'_, Db>,
     conversation_id: String,
     with_trace: Option<bool>,
-) -> Result<Vec<ChatMessageRow>, String> {
+) -> Result<Vec<LoadedMessage>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    chat_queries::list_messages(&conn, &conversation_id, with_trace.unwrap_or(false))
-        .map_err(|e| e.to_string())
+    loaded_messages(&conn, &conversation_id, with_trace.unwrap_or(false)).map_err(|e| e.to_string())
+}
+
+/// A stored message plus what its turn carried (`chat_queries::TurnNotes`). The row's fields stay
+/// flattened and unchanged; the notes are three optional extras, so every other reader of
+/// `ChatMessageRow` is untouched. camelCase like the row, while `usage` keeps the snake_case
+/// field names `ChatReply::usage` has always had.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadedMessage {
+    #[serde(flatten)]
+    row: ChatMessageRow,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    context: Vec<crate::context::ContextSource>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<ai::AiUsage>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    unprotected_dirs: Vec<String>,
+}
+
+fn loaded_messages(conn: &rusqlite::Connection, conversation_id: &str, with_trace: bool) -> rusqlite::Result<Vec<LoadedMessage>> {
+    let mut notes = chat_queries::message_notes(conn, conversation_id)?;
+    Ok(chat_queries::list_messages(conn, conversation_id, with_trace)?
+        .into_iter()
+        .map(|row| {
+            let n = notes.remove(&row.id).unwrap_or_default();
+            LoadedMessage { row, context: n.context, usage: n.usage, unprotected_dirs: n.unprotected_dirs }
+        })
+        .collect())
 }
 
 #[tauri::command]
@@ -611,19 +650,52 @@ pub fn workspace_chat_snapshot(db: State<'_, Db>, workspace_id: String) -> Resul
     // Every repository is opened to read its branch: not under the lock.
     drop(conn);
     let repos = crate::workspace_chat::repo_lines(projects);
-    Ok(WorkspaceChatSnapshot {
-        repos: repos.len(),
+    Ok(snapshot_of(&repos))
+}
+
+fn snapshot_of(repos: &[crate::workspace_chat::RepoLine]) -> WorkspaceChatSnapshot {
+    WorkspaceChatSnapshot {
+        repo_count: repos.len(),
         repos_on_disk: repos.iter().filter(|r| r.on_disk).count(),
-        text: crate::workspace_chat::live_block(&repos).trim().to_string(),
-    })
+        text: crate::workspace_chat::live_block(repos).trim().to_string(),
+        repos: repos
+            .iter()
+            .map(|r| WorkspaceChatRepo {
+                id: r.id.clone(),
+                path: r.path.clone(),
+                name: r.name.clone(),
+                branch: Some(r.branch.clone()).filter(|b| !b.is_empty()),
+                on_disk: r.on_disk,
+                is_repo: r.is_git,
+            })
+            .collect(),
+    }
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceChatSnapshot {
-    pub repos: usize,
+    /// How many repositories the workspace has (`repos.len()`).
+    pub repo_count: usize,
     pub repos_on_disk: usize,
     pub text: String,
+    /// Each repository's state, in the sidebar's order.
+    pub repos: Vec<WorkspaceChatRepo>,
+}
+
+/// One repository of the workspace as the next turn would see it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceChatRepo {
+    /// The project id — what `chat_send`'s `repos` takes.
+    pub id: String,
+    pub path: String,
+    pub name: String,
+    /// The checked-out branch; `None` when detached, unreadable or not on disk.
+    pub branch: Option<String>,
+    pub on_disk: bool,
+    /// A git repository (its root opens as one). `false` for a plain folder or a missing path.
+    pub is_repo: bool,
 }
 
 // ---------- turns in flight ----------
@@ -667,6 +739,10 @@ pub struct InflightTurn {
     /// The workspace, for a workspace chat of the assistant panel — which the chat workspace's
     /// windows must not adopt as one of theirs. `None` for every chat-workspace thread.
     pub workspace_chat: Option<String>,
+    /// The folder the engine runs in. Several workspace chats share one (`workspace_chat::working_dir`),
+    /// so this is what tells a Grok turn another one is still using its `.grok/config.toml`.
+    #[serde(skip)]
+    pub cwd: String,
 }
 
 fn inflight() -> &'static std::sync::Mutex<std::collections::HashMap<String, InflightTurn>> {
@@ -1043,12 +1119,16 @@ pub fn chat_branch_conversation(
     at_turn: i64,
 ) -> Result<ChatConversation, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let parent = chat_queries::get_conversation(&conn, &conversation_id)
+    branch_conversation(&conn, &conversation_id, at_turn)
+}
+
+fn branch_conversation(conn: &Connection, conversation_id: &str, at_turn: i64) -> Result<ChatConversation, String> {
+    let parent = chat_queries::get_conversation(conn, conversation_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "conversation not found".to_string())?;
 
     let fork = chat_queries::create_conversation(
-        &conn,
+        conn,
         &parent.workspace_id,
         parent.project_id.as_deref(),
         &parent.provider,
@@ -1084,10 +1164,22 @@ pub fn chat_branch_conversation(
     // And how the parent was set up, which is part of what its engine was told: the project it is
     // filed under (whose instructions and documents every turn carries), the reasoning level, the
     // answer style and the MCP switches. A fork that left its project answered without either.
+    // A fork of a workspace chat is a workspace chat: without `workspace_scope` it would surface in
+    // the Chat app's list and run with no repositories in reach. The repository binding came with
+    // `create_conversation` above; the chain it was opened to carry on comes along with the scope.
     conn.execute(
-        "UPDATE chat_conversations SET group_id = ?2, effort = ?3, caveman_level = ?4, mcp_overrides = ?5
+        "UPDATE chat_conversations SET group_id = ?2, effort = ?3, caveman_level = ?4, mcp_overrides = ?5,
+             workspace_scope = ?6, focus_chain_id = ?7
          WHERE id = ?1",
-        rusqlite::params![fork.id, parent.group_id, parent.effort, parent.caveman_level, parent.mcp_overrides],
+        rusqlite::params![
+            fork.id,
+            parent.group_id,
+            parent.effort,
+            parent.caveman_level,
+            parent.mcp_overrides,
+            parent.workspace_scope as i64,
+            parent.focus_chain_id
+        ],
     )
     .map_err(|e| e.to_string())?;
     conn.execute(
@@ -1110,7 +1202,7 @@ pub fn chat_branch_conversation(
     // Traces are not copied. They are by far the heaviest column, they describe a run that happened
     // under the *parent's* run id, and nothing in the fork can act on them — the fork's own turns
     // will write their own.
-    let prefix = chat_queries::list_messages(&conn, &parent.id, false).map_err(|e| e.to_string())?;
+    let prefix = chat_queries::list_messages(conn, &parent.id, false).map_err(|e| e.to_string())?;
     for message in prefix.into_iter().filter(|m| m.turn <= at_turn) {
         let copy = ChatMessageRow {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1122,10 +1214,10 @@ pub fn chat_branch_conversation(
             // two threads agree on what turn N is.
             ..message
         };
-        chat_queries::append_message(&conn, &copy).map_err(|e| e.to_string())?;
+        chat_queries::append_message(conn, &copy).map_err(|e| e.to_string())?;
     }
 
-    chat_queries::get_conversation(&conn, &fork.id)
+    chat_queries::get_conversation(conn, &fork.id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "conversation not found".to_string())
 }
@@ -1141,6 +1233,142 @@ pub fn chat_turn_checkpoints(
 ) -> Result<std::collections::HashMap<String, String>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     Ok(chat_queries::turn_checkpoints(&conn, &conversation_id).map_err(|e| e.to_string())?.into_iter().collect())
+}
+
+/// The workspace's projects narrowed to the ids a workspace chat turn was scoped to, and the ids it
+/// left out. `None` or an empty list keeps them all; an id that names no project of the workspace
+/// is refused rather than ignored — a stale selection would otherwise quietly widen to everything.
+fn select_repos(
+    projects: Vec<crate::db::models::Project>,
+    wanted: Option<&[String]>,
+) -> Result<(Vec<crate::db::models::Project>, Vec<String>), String> {
+    let Some(wanted) = wanted.filter(|ids| !ids.is_empty()) else { return Ok((projects, Vec::new())) };
+    if let Some(unknown) = wanted.iter().find(|id| !projects.iter().any(|p| &p.id == *id)) {
+        return Err(format!("unknown repository for this workspace: {unknown}"));
+    }
+    let (kept, left_out): (Vec<_>, Vec<_>) = projects.into_iter().partition(|p| wanted.contains(&p.id));
+    Ok((kept, left_out.into_iter().map(|p| p.id).collect()))
+}
+
+/// What a cancelled or failed turn left changed on disk, found right after the send rejected — the
+/// reply a finished turn would have carried it in never came.
+#[derive(Serialize)]
+pub struct FailedTurnChanges {
+    /// The row the changes are filed under: the assistant message of a workspace conversation, the
+    /// `activity_log` entry of a repository one. For the workspace chat it is the id
+    /// [`chat_turn_checkpoints`] keys by, which is not the id the frontend gave its local failure
+    /// bubble — this is the one to attach the review to (and the one a reload shows).
+    message_id: String,
+    /// A repository conversation's turn: JSON `{"id", "paths"}`, as `ChatReply::checkpoint` says it.
+    checkpoint: Option<String>,
+    /// A workspace conversation's turn: JSON `[{"repo", "path", "id", "paths"}]`, as
+    /// `ChatReply::checkpoints` says it. Exactly one of the two is set.
+    checkpoints: Option<String>,
+}
+
+/// The changes of the conversation's latest turn **when it ended cancelled or failed**, or `None` —
+/// the turn changed nothing, it finished normally, or there is nothing yet. Works for both chats:
+/// a workspace conversation reads `chat_turn_checkpoints`, a repository one the `activity_log` row
+/// the failed turn was filed as (`claude_cmd::send_chat_message`).
+#[tauri::command]
+pub fn chat_failed_turn_changes(db: State<'_, Db>, conversation_id: String) -> Result<Option<FailedTurnChanges>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    failed_turn_changes(&conn, &conversation_id)
+}
+
+fn failed_turn_changes(conn: &Connection, conversation_id: &str) -> Result<Option<FailedTurnChanges>, String> {
+    let rows = chat_queries::list_messages(conn, conversation_id, false).map_err(|e| e.to_string())?;
+    if let Some(last) = rows.iter().rev().find(|row| row.role == "assistant") {
+        if !(last.is_error || last.is_cancelled) {
+            return Ok(None);
+        }
+        let filed = chat_queries::turn_checkpoints(conn, conversation_id).map_err(|e| e.to_string())?;
+        return Ok(filed
+            .into_iter()
+            .find(|(message_id, _)| message_id == &last.id)
+            .map(|(message_id, checkpoints)| FailedTurnChanges { message_id, checkpoint: None, checkpoints: Some(checkpoints) }));
+    }
+    let latest: Option<(String, Option<String>, bool)> = conn
+        .query_row(
+            "SELECT id, checkpoint, is_error FROM activity_log WHERE session_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            rusqlite::params![conversation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .ok();
+    Ok(latest.and_then(|(message_id, checkpoint, is_error)| {
+        let checkpoint = checkpoint.filter(|json| is_error && !json.trim().is_empty())?;
+        Some(FailedTurnChanges { message_id, checkpoint: Some(checkpoint), checkpoints: None })
+    }))
+}
+
+/// `/clear` for a workspace chat: the next turn starts without any of the earlier history, and the
+/// transcript draws a «contexto reiniciado» line above it.
+///
+/// What it changes is what the next turn sends. `chat_send` resumes the engine session when the row
+/// has one and otherwise replays the stored transcript (`replayed_prefix`), so this does both halves:
+/// it appends `{turn: <the next question's turn>, reason: "clear"}` to `context_resets` (the replay
+/// skips every message before the latest reset, and the legend is drawn from it) and it drops the
+/// engine session, the compaction summary and the measured context. Messages stay in the transcript.
+/// The panel's `reset_chat_context` is for the repository chat (`conversation_resets`, keyed by
+/// project and session); it does not touch a `chat_conversations` row, so it would change nothing here.
+///
+/// Refused with the busy marker while a turn of the conversation runs, like any other change to a
+/// live thread. Clearing twice with no question in between records one reset.
+#[tauri::command]
+pub fn chat_clear_context(db: State<'_, Db>, conversation_id: String) -> Result<ChatConversation, String> {
+    let _lease = ai_locks::acquire_key(&conversation_id)
+        .ok_or_else(|| format!("{}{conversation_id}", ai_locks::BUSY_MARKER))?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    clear_context(&conn, &conversation_id)
+}
+
+fn clear_context(conn: &Connection, conversation_id: &str) -> Result<ChatConversation, String> {
+    let conversation = chat_queries::get_conversation(conn, conversation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "conversation not found".to_string())?;
+    let turn = chat_queries::next_turn(conn, conversation_id).map_err(|e| e.to_string())?;
+    let mut resets = conversation.context_resets;
+    if !resets.iter().any(|reset| reset.turn == turn && reset.reason == "clear") {
+        resets.push(crate::db::models::ContextReset { turn, reason: "clear".to_string(), provider: None, account_id: None });
+    }
+    conn.execute(
+        "UPDATE chat_conversations SET context_resets = ?2, engine_session_id = NULL, context_tokens = NULL,
+             compacted_summary = '', compacted_through_turn = NULL WHERE id = ?1",
+        rusqlite::params![conversation_id, serde_json::to_string(&resets).unwrap_or_default()],
+    )
+    .map_err(|e| e.to_string())?;
+    chat_queries::get_conversation(conn, conversation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "conversation not found".to_string())
+}
+
+/// «Editar y reenviar»: removes the question `message_id` belongs to (either of its two messages),
+/// its answer and every turn after it, so the question asked in its place continues the thread from
+/// what precedes it — like ChatGPT's edit, not an append.
+///
+/// The model's memory is the part that has to be right: the engine session holds the removed turns
+/// and no CLI can rewind it, so [`chat_queries::truncate_from_turn`] drops it (and a compaction that
+/// summarised them). With no session, `chat_send` replays the surviving rows (`replayed_prefix`) —
+/// the same path that serves a thread after `/clear` or a branch. File edits the removed turns made
+/// are NOT reverted, and their per-turn review (`chat_turn_checkpoints`) goes with them.
+///
+/// Refused with the busy marker while a turn of the conversation runs, like `chat_clear_context`.
+#[tauri::command]
+pub fn chat_truncate_from(db: State<'_, Db>, conversation_id: String, message_id: String) -> Result<ChatConversation, String> {
+    let _lease = ai_locks::acquire_key(&conversation_id)
+        .ok_or_else(|| format!("{}{conversation_id}", ai_locks::BUSY_MARKER))?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    truncate_from(&conn, &conversation_id, &message_id)
+}
+
+fn truncate_from(conn: &Connection, conversation_id: &str, message_id: &str) -> Result<ChatConversation, String> {
+    let turn = chat_queries::message_turn(conn, conversation_id, message_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "message not found".to_string())?;
+    chat_queries::truncate_from_turn(conn, conversation_id, turn).map_err(|e| e.to_string())?;
+    chat_queries::get_conversation(conn, conversation_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "conversation not found".to_string())
 }
 
 /// Runs one turn of a conversation and resolves when it is over.
@@ -1183,6 +1411,10 @@ pub async fn chat_send(
     // The workspace chat's plan mode: this turn is read-only and answers with a plan — see
     // `ai::PLAN_MODE_NOTE`.
     plan: Option<bool>,
+    // The workspace chat's scope: the project ids of the repositories this turn may reach. `None` or
+    // empty is all of them, as before; an id that is not a repository of the conversation's own
+    // workspace refuses the turn. Ignored by every other conversation.
+    repos: Option<Vec<String>>,
 ) -> Result<ChatReply, String> {
     let plan = plan.unwrap_or(false);
     let conversation = {
@@ -1275,9 +1507,14 @@ pub async fn chat_send(
     } else {
         (Vec::new(), String::new())
     };
+    // Only the repositories this turn was scoped to — before anything is derived from the list, so
+    // the live block, `--add-dir`, the presence locks, the restore points, the knowledge and the
+    // `@` mentions all see the same set.
+    let (ws_projects, ws_excluded) = select_repos(ws_projects, repos.as_deref().filter(|_| workspace_scope))?;
     // Outside the lock: every repository is opened to read its branch.
     let ws_repos = crate::workspace_chat::repo_lines(ws_projects);
     let ws_extra_dirs = crate::workspace_chat::extra_dirs(&ws_repos);
+    let ws_unprotected = crate::workspace_chat::unprotected_dirs(&ws_repos);
 
     // See the module note. One unit of exclusion: a conversation from a second turn of its own. A
     // repository, when there is one, is shared — this turn is only listed in it, and told below who
@@ -1539,7 +1776,7 @@ pub async fn chat_send(
     // statement, on a turn that may write. Held until the turn ends: dropping the grant
     // revokes its token. Agy and Grok get the best passages with the question instead, below.
     let ws_knowledge = if workspace_scope && matches!(config.provider.as_str(), "claude" | "codex" | "opencode" | "cline") {
-        crate::codemap::mcp::for_workspace_chat(&conversation.workspace_id, may_write)
+        crate::codemap::mcp::for_workspace_chat_without(&conversation.workspace_id, may_write, &ws_excluded)
     } else {
         None
     };
@@ -1595,7 +1832,10 @@ pub async fn chat_send(
     // chat's own folder. Written for a Grok turn, removed when there is nothing to hand it — and
     // only ever servers with no secrets in them, since the model can read the file.
     if project.is_none() && config.provider == "grok" {
-        write_grok_mcp(std::path::Path::new(&cwd), &turn_mcp.app);
+        // The registry is read before this turn registers itself (`mark_inflight` below), so it
+        // lists only the others.
+        let live: Vec<InflightTurn> = inflight().lock().map(|held| held.values().cloned().collect()).unwrap_or_default();
+        write_grok_mcp(std::path::Path::new(&cwd), &turn_mcp.app, other_grok_turn_live(&live, &cwd, &conversation_id));
     }
 
     // The system prompt for this turn: the base one, plus the project's standing instructions when
@@ -1665,6 +1905,8 @@ pub async fn chat_send(
     // The question's judgement (`context::need`), for a workspace chat: what goes with it, and — for
     // the in-process agent, which reads it inside the run — whether passages do.
     let mut judgement: Option<crate::context::need::Turn> = None;
+    // «Contexto usado»: what rode the message besides the question, for the reply.
+    let mut context_sources: Vec<crate::context::ContextSource> = Vec::new();
     let mut engine_message = match caveman.as_deref() {
         Some(rules) => format!("{message}\n\n{rules}"),
         None => message.clone(),
@@ -1687,8 +1929,9 @@ pub async fn chat_send(
     let mut noted = false;
     if let Ok(conn) = db.0.lock() {
         let cloud = config.provider != crate::local_agent::PROVIDER_ID;
-        if let Some((note, _)) = ai::note_mention_note(&conn, Some(&conversation.workspace_id), &asked, cloud) {
+        if let Some((note, sources)) = ai::note_mention_note(&conn, Some(&conversation.workspace_id), &asked, cloud) {
             engine_message.push_str(&note);
+            context_sources.extend(sources);
             noted = true;
         }
     }
@@ -1712,24 +1955,40 @@ pub async fn chat_send(
         let named: Vec<(String, String)> =
             ws_repos.iter().filter(|repo| repo.on_disk).map(|repo| (repo.name.clone(), repo.path.clone())).collect();
         let mentioned = ai::workspace_mentioned_paths(&asked, &named);
+        context_sources.extend(crate::context::mention_sources(&mentioned));
         if let Some(note) = ai::workspace_mention_note(&mentioned) {
             engine_message.push_str(&note);
         }
+        // What the knowledge search may look at, read once under a short lock: the search itself
+        // (the index, the map) runs with none held, so a slow one never stalls the commands that
+        // need the connection. Only the vetting of private notes goes back under it, for a few rows.
+        let ws_scope = db
+            .0
+            .lock()
+            .ok()
+            .and_then(|conn| crate::knowledge::scope_for_workspace(&conn, &conversation.workspace_id, true))
+            .map(|scope| scope.without_projects(&ws_excluded));
+        // The passages the judgement's vocabulary check found, kept for the message when it needs them.
+        let mut passages: Option<crate::knowledge::Candidates> = None;
         // Whether this question needs the workspace attached at all (`context::need`): a follow-up
         // or a general question goes with the standing rules alone.
         if !is_cli_command {
             let pointed = !mentioned.is_empty() || noted || !attachments.is_empty();
-            judgement = db.0.lock().ok().map(|conn| {
+            let mode = db.0.lock().ok().map(|conn| crate::context::need::Mode::read(&conn));
+            judgement = mode.map(|mode| {
                 let maps: Vec<_> = named.iter().filter_map(|(_, path)| crate::codemap::snapshot_if_built(path)).collect();
                 crate::context::need::judge(
-                    crate::context::need::Mode::read(&conn),
+                    mode,
                     &asked,
                     crate::context::need::Signals {
                         pointed,
                         declared: |name: &str| maps.iter().any(|map| map.declares(name)),
                         vocabulary: || {
-                            crate::knowledge::scope_for_workspace(&conn, &conversation.workspace_id, true)
-                                .is_some_and(|scope| crate::knowledge::shares_vocabulary(&conn, &scope, &asked))
+                            let Some(scope) = ws_scope.clone() else { return false };
+                            let found = crate::knowledge::candidates(scope, &asked);
+                            let shares = db.0.lock().is_ok_and(|conn| found.shares_vocabulary(&conn, &asked));
+                            passages = Some(found);
+                            shares
                         },
                     },
                 )
@@ -1760,16 +2019,34 @@ pub async fn chat_send(
                 }
             }
             if let Ok(found) = crate::ai_memory::relevant_with(&conn, Some(&conversation.workspace_id), None, &asked, true, 3_000, push.memories()) {
-                if let Some((note, _)) = crate::ai_memory::note(&found) {
+                if let Some((note, sources)) = crate::ai_memory::note(&found) {
                     engine_message.push_str(said.say("memories", &note));
+                    context_sources.extend(sources);
                 }
             }
-            // Agy and Grok take no server here: the passages that clear the bar ride the question —
-            // unless it is a follow-up, which the conversation answers.
-            if matches!(config.provider.as_str(), "gemini" | "grok") && push.attaches() {
-                let strict = push == crate::context::need::Push::Relevant;
-                if let Some((note, _)) = crate::knowledge::workspace_prompt_note(&conn, &conversation.workspace_id, &asked, strict) {
-                    engine_message.push_str(&note);
+        }
+        // The engines that take no server for the knowledge — agy, Grok, and any of the others when
+        // the map is switched off (`ws_knowledge` is `None`) — get the passages that clear the bar
+        // with the question instead, unless it is a follow-up, which the conversation answers. The
+        // in-process agent reads them itself (`judgement`).
+        let reads_by_server = matches!(config.provider.as_str(), "claude" | "codex" | "opencode" | "cline");
+        let passages_ride = matches!(config.provider.as_str(), "gemini" | "grok") || (reads_by_server && ws_knowledge.is_none());
+        if passages_ride && push.attaches() {
+            let strict = push == crate::context::need::Push::Relevant;
+            let found = match (passages.take(), ws_scope.clone()) {
+                (Some(found), _) => Some(found),
+                (None, Some(scope)) => {
+                    let question = asked.clone();
+                    tokio::task::spawn_blocking(move || crate::knowledge::candidates(scope, &question)).await.ok()
+                }
+                (None, None) => None,
+            };
+            if let Some(found) = found {
+                if let Ok(conn) = db.0.lock() {
+                    if let Some((note, sources)) = found.prompt_note(&conn, &asked, strict) {
+                        engine_message.push_str(&note);
+                        context_sources.extend(sources);
+                    }
                 }
             }
         }
@@ -1800,14 +2077,25 @@ pub async fn chat_send(
         started_at_ms: chrono::Utc::now().timestamp_millis(),
         turn,
         workspace_chat: workspace_scope.then(|| conversation.workspace_id.clone()),
+        cwd: cwd.clone(),
     });
 
     // Only where there is a working copy to snapshot. A repo-less turn writes nothing by design,
-    // and a checkpoint of an empty scratch directory would be an undo button for nothing.
-    let checkpoint = project.as_ref().and_then(|p| checkpoint_before(&p.local_path, "chat"));
-    // A workspace chat may write in any of its repositories: one restore point in each.
-    let ws_checkpoints: Vec<(String, Option<String>)> =
-        ws_extra_dirs.iter().map(|path| (path.clone(), checkpoint_before(path, "chat"))).collect();
+    // and a checkpoint of an empty scratch directory would be an undo button for nothing. A plan
+    // turn on an engine that enforces read-only writes nothing either — no snapshot at all.
+    let snapshot = !(plan && config.engine.enforces_read_only());
+    // A workspace chat may write in any of its repositories: one restore point in each. All of them
+    // — the bound repository's too — are taken in parallel and off the async thread, and none is
+    // pruned yet: only a turn that changed files keeps its checkpoint, and only then does the cap
+    // apply (`checkpoint::settle_turn`), so a read-only question never evicts a real one.
+    let mut snapshot_paths: Vec<String> = project.iter().map(|p| p.local_path.clone()).collect();
+    snapshot_paths.extend(ws_extra_dirs.iter().cloned());
+    let taken: Vec<(String, Option<String>)> = if snapshot {
+        let ids = crate::git::checkpoint::snapshot_turn(&snapshot_paths, "chat").await;
+        snapshot_paths.into_iter().zip(ids).collect()
+    } else {
+        Vec::new()
+    };
     // Kept for the title run below; `app` moves into the run's scope.
     let title_app = app.clone();
     let (result, trace) = ai_runs::scoped_with_trace(app, run_id, crate::context::need::within(judgement, async {
@@ -1842,21 +2130,18 @@ pub async fn chat_send(
     }))
     .await;
     let response_time_ms = started.elapsed().as_millis() as i64;
-    if let Some(project) = project.as_ref() {
-        checkpoint_after(&project.local_path, checkpoint);
-    }
-    // Each repository's restore point is kept, with the files it differs in, when the turn changed
-    // something there — the per-turn review under the answer reads them. The rest are dropped.
+    // Each restore point is kept, with the files it differs in, when the turn changed something
+    // there — the per-turn review under the answer reads them. The rest are dropped. A cancelled or
+    // failed turn is settled the same way: whatever it managed to write stays reviewable.
     let mut ws_changes: Vec<serde_json::Value> = Vec::new();
-    for (path, checkpoint) in ws_checkpoints {
-        let Some(id) = checkpoint else { continue };
-        let paths = crate::git::checkpoint::changed_paths(&path, &id).unwrap_or_default();
-        if paths.is_empty() {
-            let _ = crate::git::checkpoint::remove(&path, &id);
+    for change in crate::git::checkpoint::settle_turn(taken).await {
+        // The bound repository's checkpoint is kept in its list; only a workspace chat files it
+        // against the row.
+        if project.as_ref().is_some_and(|p| p.local_path == change.path) {
             continue;
         }
-        let repo = ws_repos.iter().find(|repo| repo.path == path).map(|repo| repo.name.clone()).unwrap_or_default();
-        ws_changes.push(serde_json::json!({ "repo": repo, "path": path, "id": id, "paths": paths }));
+        let repo = ws_repos.iter().find(|repo| repo.path == change.path).map(|repo| repo.name.clone()).unwrap_or_default();
+        ws_changes.push(serde_json::json!({ "repo": repo, "path": change.path, "id": change.id, "paths": change.paths }));
     }
     let turn_checkpoints = (!ws_changes.is_empty()).then(|| serde_json::Value::Array(ws_changes).to_string());
     // After the run, not before: it is cached per binary, so only the first turn of an app session
@@ -1883,7 +2168,7 @@ pub async fn chat_send(
 
     let run = match result {
         Ok(run) => {
-            said.settle(run.session_id.as_deref());
+            said.settle_with(run.session_id.as_deref(), run.context_tokens);
             run
         }
         Err(e) => {
@@ -1927,6 +2212,11 @@ pub async fn chat_send(
                 if let Some(checkpoints) = turn_checkpoints.as_deref() {
                     let _ = chat_queries::set_turn_checkpoints(&conn, &assistant_message_id, &conversation_id, checkpoints);
                 }
+                let _ = chat_queries::set_message_notes(
+                    &conn,
+                    &assistant_message_id,
+                    &chat_queries::TurnNotes { context: context_sources.clone(), usage: None, unprotected_dirs: ws_unprotected.clone() },
+                );
             }
             return Err(e);
         }
@@ -1955,6 +2245,15 @@ pub async fn chat_send(
                 if let Some(checkpoints) = turn_checkpoints.as_deref() {
                     let _ = chat_queries::set_turn_checkpoints(&conn, &assistant_message_id, &conversation_id, checkpoints);
                 }
+                let _ = chat_queries::set_message_notes(
+                    &conn,
+                    &assistant_message_id,
+                    &chat_queries::TurnNotes {
+                        context: context_sources.clone(),
+                        usage: run.usage.clone().filter(|usage| !usage.is_empty()),
+                        unprotected_dirs: ws_unprotected.clone(),
+                    },
+                );
                 // An answer has landed. Marked unread here rather than left to the frontend,
                 // because the window that asked the question is not necessarily the one looking at
                 // it — a turn started in the quick-ask box, or in a detached window, lands in a
@@ -2019,6 +2318,9 @@ pub async fn chat_send(
         context_tokens: run.context_tokens,
         learned_memory,
         learned_outcome,
+        context: context_sources,
+        usage: run.usage.filter(|usage| !usage.is_empty()),
+        unprotected_dirs: ws_unprotected,
     })
 }
 
@@ -2161,6 +2463,9 @@ async fn flow_turn(
         context_tokens: None,
         learned_memory: None,
         learned_outcome: None,
+        context: Vec::new(),
+        usage: None,
+        unprotected_dirs: Vec::new(),
     })
 }
 
@@ -2883,7 +3188,9 @@ fn replayed_prefix(conn: &Connection, conversation_id: &str) -> Option<String> {
         .as_ref()
         .and_then(|conversation| conversation.continued_from.as_ref())
         .map(|continuation| continuation.summary.trim().to_string())
-        .filter(|summary| !summary.is_empty());
+        .filter(|summary| !summary.is_empty())
+        // …unless the user has cleared since: nothing before the clear is the conversation any more.
+        .filter(|_| starts_at.is_none());
 
     let messages = chat_queries::list_messages(conn, conversation_id, false).ok()?;
     if messages.is_empty() && inherited.is_none() {
@@ -2959,27 +3266,6 @@ fn keep_tail(text: String, budget: usize) -> String {
     let skip = text.chars().count() - budget;
     let at = text.char_indices().nth(skip).map(|(i, _)| i).unwrap_or(text.len());
     format!("[…earlier turns omitted…]\n\n{}", &text[at..])
-}
-
-/// Snapshots the working tree before a turn that can write to it, so the run is undoable.
-/// Best-effort: a repo that cannot be snapshotted must not block the turn the user asked for — they
-/// just do not get the undo button. Mirrors `claude_cmd`'s, which is private to that module.
-fn checkpoint_before(repo_path: &str, kind: &str) -> Option<String> {
-    match git::checkpoint::create(repo_path, kind) {
-        Ok(id) => Some(id),
-        Err(e) => {
-            eprintln!("checkpoint before '{kind}' failed: {e}");
-            None
-        }
-    }
-}
-
-/// Discards a checkpoint whose turn changed nothing on disk — an "undo" restoring zero files is
-/// clutter in the list.
-fn checkpoint_after(repo_path: &str, checkpoint: Option<String>) {
-    if let Some(id) = checkpoint {
-        let _ = git::checkpoint::remove_if_unchanged(repo_path, &id);
-    }
 }
 
 // ===================== the provider command surface =====================
@@ -3111,9 +3397,18 @@ pub(crate) async fn mcp_plan(
     crate::chat_mcp::plan(provider, &servers, &overrides, &allowed, app)
 }
 
+/// Whether a Grok turn of another conversation is running in `cwd` right now. Workspace chats share
+/// one folder per workspace, and Grok's only per-run channel is the config file in it — so a turn
+/// with nothing to hand over must not delete the file out from under one that is using it.
+fn other_grok_turn_live(live: &[InflightTurn], cwd: &str, conversation_id: &str) -> bool {
+    live.iter().any(|turn| turn.provider == "grok" && turn.cwd == cwd && turn.conversation_id != conversation_id)
+}
+
 /// Writes — or removes — the managed `.grok/config.toml` in a chat's folder. A file there that the
-/// app did not write is left alone.
-fn write_grok_mcp(dir: &std::path::Path, app: &[crate::mcp_registry::LiveServer]) {
+/// app did not write is left alone. `keep_for_others` leaves a managed file in place when this turn
+/// has nothing to write (see [`other_grok_turn_live`]); the next turn to find the folder free
+/// removes it.
+fn write_grok_mcp(dir: &std::path::Path, app: &[crate::mcp_registry::LiveServer], keep_for_others: bool) {
     let file = dir.join(".grok").join("config.toml");
     let ours = std::fs::read_to_string(&file).map(|text| text.starts_with("# Managed by CodeFlow")).unwrap_or(true);
     if !ours {
@@ -3124,6 +3419,7 @@ fn write_grok_mcp(dir: &std::path::Path, app: &[crate::mcp_registry::LiveServer]
             let _ = std::fs::create_dir_all(dir.join(".grok"));
             let _ = std::fs::write(&file, text);
         }
+        None if keep_for_others => {}
         None => {
             let _ = std::fs::remove_file(&file);
         }
@@ -3483,6 +3779,266 @@ mod tests {
         id
     }
 
+    fn project(id: &str, ws: &str) -> crate::db::models::Project {
+        crate::db::models::Project {
+            id: id.into(),
+            workspace_id: ws.into(),
+            name: id.into(),
+            local_path: format!("/nowhere/{id}"),
+            remote_url: None,
+            color: String::new(),
+            icon: String::new(),
+            ado_org: None,
+            ado_project: None,
+            ado_repo_id: None,
+            github_owner: None,
+            github_repo: None,
+            github_host: None,
+            gitlab_project: None,
+            gitlab_host: None,
+            sort_order: 0,
+            created_at: String::new(),
+            bitbucket_workspace: None,
+            bitbucket_repo: None,
+        }
+    }
+
+    #[test]
+    fn clearing_starts_the_next_turn_without_the_history() {
+        let conn = install();
+        let ws = workspace(&conn);
+        let conv = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "m", "").unwrap();
+        say(&conn, &conv.id, 0, "user", "old question");
+        say(&conn, &conv.id, 0, "assistant", "old answer");
+        chat_queries::update_session(&conn, &conv.id, Some("sess"), "claude", None, "m", Some(5_000)).unwrap();
+        assert!(replayed_prefix(&conn, &conv.id).unwrap().contains("old question"));
+
+        let cleared = clear_context(&conn, &conv.id).unwrap();
+        assert_eq!(cleared.context_resets.len(), 1);
+        assert_eq!((cleared.context_resets[0].turn, cleared.context_resets[0].reason.as_str()), (1, "clear"));
+        assert!(cleared.engine_session_id.is_none() && cleared.context_tokens.is_none(), "no session to resume");
+        assert!(replayed_prefix(&conn, &conv.id).is_none(), "nothing before the clear is replayed");
+        assert_eq!(chat_queries::list_messages(&conn, &conv.id, false).unwrap().len(), 2, "the transcript stays");
+        assert_eq!(clear_context(&conn, &conv.id).unwrap().context_resets.len(), 1, "twice is once");
+
+        say(&conn, &conv.id, 1, "user", "new question");
+        say(&conn, &conv.id, 1, "assistant", "new answer");
+        let prefix = replayed_prefix(&conn, &conv.id).unwrap();
+        assert!(prefix.contains("new question") && !prefix.contains("old question"), "{prefix}");
+    }
+
+    fn first_id(conn: &Connection, conversation_id: &str, turn: i64, role: &str) -> String {
+        chat_queries::list_messages(conn, conversation_id, false)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.turn == turn && m.role == role)
+            .unwrap()
+            .id
+    }
+
+    /// Edit & resend: the edited question, its answer and every later turn are gone from the rows,
+    /// the session is dropped, and the next send replays only what survived.
+    #[test]
+    fn truncating_replaces_the_thread_and_replays_only_the_survivors() {
+        let conn = install();
+        let ws = workspace(&conn);
+        let conv = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "m", "").unwrap();
+        for (turn, q, a) in [(0, "first q", "first a"), (1, "second q", "second a"), (2, "third q", "third a")] {
+            say(&conn, &conv.id, turn, "user", q);
+            say(&conn, &conv.id, turn, "assistant", a);
+        }
+        let answer = first_id(&conn, &conv.id, 2, "assistant");
+        chat_queries::set_turn_checkpoints(&conn, &answer, &conv.id, "[]").unwrap();
+        chat_queries::update_session(&conn, &conv.id, Some("sess"), "claude", None, "m", Some(5_000)).unwrap();
+
+        // Cut from the assistant message of turn 1: either message of the exchange names it.
+        let cut = truncate_from(&conn, &conv.id, &first_id(&conn, &conv.id, 1, "assistant")).unwrap();
+        assert!(cut.engine_session_id.is_none() && cut.context_tokens.is_none(), "no session that remembers the removed turns");
+        let left = chat_queries::list_messages(&conn, &conv.id, false).unwrap();
+        assert_eq!(left.iter().map(|m| m.content.as_str()).collect::<Vec<_>>(), ["first q", "first a"]);
+        assert!(chat_queries::turn_checkpoints(&conn, &conv.id).unwrap().is_empty(), "their reviews go with them");
+
+        let prefix = replayed_prefix(&conn, &conv.id).unwrap();
+        assert!(prefix.contains("first q") && !prefix.contains("second") && !prefix.contains("third"), "{prefix}");
+
+        // The resent question takes the freed turn and the replay then holds it too.
+        assert_eq!(chat_queries::next_turn(&conn, &conv.id).unwrap(), 1);
+        say(&conn, &conv.id, 1, "user", "second q, edited");
+        say(&conn, &conv.id, 1, "assistant", "new answer");
+        let prefix = replayed_prefix(&conn, &conv.id).unwrap();
+        assert!(prefix.contains("second q, edited") && !prefix.contains("second a"), "{prefix}");
+    }
+
+    #[test]
+    fn truncating_keeps_a_waiting_clear_and_drops_a_compaction_over_the_removed_turns() {
+        let conn = install();
+        let ws = workspace(&conn);
+        let conv = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "m", "").unwrap();
+        for turn in 0..3 {
+            say(&conn, &conv.id, turn, "user", &format!("q{turn}"));
+            say(&conn, &conv.id, turn, "assistant", &format!("a{turn}"));
+        }
+        // A `/clear` typed before q1, a later one (pending after q2), and a compaction through turn 1.
+        let resets = vec![
+            crate::db::models::ContextReset { turn: 1, reason: "clear".into(), provider: None, account_id: None },
+            crate::db::models::ContextReset { turn: 3, reason: "clear".into(), provider: None, account_id: None },
+        ];
+        conn.execute(
+            "UPDATE chat_conversations SET context_resets = ?2, compacted_summary = 'resumen', compacted_through_turn = 1 WHERE id = ?1",
+            rusqlite::params![conv.id, serde_json::to_string(&resets).unwrap()],
+        )
+        .unwrap();
+
+        let cut = truncate_from(&conn, &conv.id, &first_id(&conn, &conv.id, 1, "user")).unwrap();
+        assert_eq!(cut.context_resets.len(), 1, "the clear before the edited question stays, the later one goes");
+        assert_eq!(cut.context_resets[0].turn, 1, "and still precedes the question asked in its place");
+        assert!(cut.compacted_summary.is_empty() && cut.compacted_through_turn.is_none(), "the summary covered removed turns");
+        let prefix = replayed_prefix(&conn, &conv.id);
+        assert!(prefix.is_none(), "after the clear nothing earlier is replayed: {prefix:?}");
+
+        // A compaction that ends before the cut survives it.
+        let other = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "m", "").unwrap();
+        for turn in 0..3 {
+            say(&conn, &other.id, turn, "user", &format!("q{turn}"));
+            say(&conn, &other.id, turn, "assistant", &format!("a{turn}"));
+        }
+        chat_queries::set_compaction(&conn, &other.id, "resumen", 0).unwrap();
+        let cut = truncate_from(&conn, &other.id, &first_id(&conn, &other.id, 2, "user")).unwrap();
+        assert_eq!(cut.compacted_through_turn, Some(0));
+        let prefix = replayed_prefix(&conn, &other.id).unwrap();
+        assert!(prefix.contains("resumen") && prefix.contains("q1") && !prefix.contains("q2"), "{prefix}");
+    }
+
+    #[test]
+    fn truncating_an_unknown_message_changes_nothing() {
+        let conn = install();
+        let ws = workspace(&conn);
+        let conv = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "m", "").unwrap();
+        say(&conn, &conv.id, 0, "user", "q");
+        let other = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "m", "").unwrap();
+        say(&conn, &other.id, 0, "user", "elsewhere");
+        let foreign = first_id(&conn, &other.id, 0, "user");
+        assert!(truncate_from(&conn, &conv.id, &foreign).is_err(), "another conversation's message is not ours to cut");
+        assert!(truncate_from(&conn, &conv.id, "nope").is_err());
+        assert_eq!(chat_queries::list_messages(&conn, &conv.id, false).unwrap().len(), 1);
+        assert_eq!(chat_queries::list_messages(&conn, &other.id, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_fork_of_a_workspace_chat_stays_a_workspace_chat() {
+        let conn = install();
+        let ws = workspace(&conn);
+        let source = chat_queries::create_workspace_conversation(&conn, &uuid::Uuid::new_v4().to_string(), &ws, "claude", None, "m", "chain-1").unwrap();
+        say(&conn, &source.id, 0, "user", "q");
+        let fork = branch_conversation(&conn, &source.id, 0).unwrap();
+        assert!(fork.workspace_scope);
+        assert_eq!(fork.focus_chain_id, "chain-1");
+        assert!(chat_queries::list_workspace_conversations(&conn, &ws).unwrap().iter().any(|c| c.id == fork.id));
+        assert!(chat_queries::list_conversations(&conn, true).unwrap().iter().all(|c| c.id != fork.id), "not in the Chat app");
+        let plain = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "m", "").unwrap();
+        assert!(!branch_conversation(&conn, &plain.id, 0).unwrap().workspace_scope);
+    }
+
+    #[test]
+    fn the_snapshot_lists_each_repository_s_state() {
+        let root = std::env::temp_dir().join(format!("cf-snap-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let line = |id: &str, path: &str, on_disk: bool, is_git: bool, branch: &str| crate::workspace_chat::RepoLine {
+            id: id.into(),
+            name: id.into(),
+            path: path.into(),
+            branch: branch.into(),
+            on_disk,
+            is_git,
+            spec_dirs: vec![],
+        };
+        let snapshot = snapshot_of(&[
+            line("a", "/x/a", true, true, "main"),
+            line("b", root.to_str().unwrap(), true, false, ""),
+            line("c", "/nowhere/c", false, false, ""),
+        ]);
+        assert_eq!((snapshot.repo_count, snapshot.repos_on_disk), (3, 2));
+        assert_eq!(snapshot.repos[0].branch.as_deref(), Some("main"));
+        assert!(snapshot.repos[0].is_repo && snapshot.repos[1].on_disk && !snapshot.repos[1].is_repo);
+        assert!(snapshot.repos[1].branch.is_none() && !snapshot.repos[2].on_disk);
+        assert!(snapshot.text.contains("Repositorios:"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_scoped_turn_keeps_the_chosen_repositories_and_refuses_strangers() {
+        let all = vec![project("a", "w"), project("b", "w"), project("c", "w")];
+        let (kept, left_out) = select_repos(all.clone(), None).unwrap();
+        assert_eq!((kept.len(), left_out.len()), (3, 0), "default is all");
+        let (kept, left_out) = select_repos(all.clone(), Some(&[])).unwrap();
+        assert_eq!((kept.len(), left_out.len()), (3, 0), "an empty list is the default too");
+        let (kept, left_out) = select_repos(all.clone(), Some(&["c".to_string(), "a".to_string()])).unwrap();
+        assert_eq!(kept.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(), vec!["a", "c"], "workspace order, not the request's");
+        assert_eq!(left_out, vec!["b".to_string()]);
+        let err = select_repos(all, Some(&["a".to_string(), "other-workspace".to_string()])).unwrap_err();
+        assert!(err.contains("other-workspace"), "{err}");
+    }
+
+    #[test]
+    fn a_cancelled_workspace_turn_hands_back_the_changes_filed_under_its_row() {
+        let conn = install();
+        let ws = workspace(&conn);
+        let conv = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "m", "").unwrap();
+        assert!(failed_turn_changes(&conn, &conv.id).unwrap().is_none(), "nothing yet");
+        say(&conn, &conv.id, 1, "user", "q");
+        let row = |id: &str, turn: i64, cancelled: bool| ChatMessageRow {
+            id: id.into(),
+            conversation_id: conv.id.clone(),
+            turn,
+            role: "assistant".into(),
+            content: String::new(),
+            provider: None,
+            model: None,
+            engine_version: None,
+            response_time_ms: None,
+            is_error: false,
+            is_cancelled: cancelled,
+            trace: None,
+            outputs: None,
+            created_at: String::new(),
+        };
+        chat_queries::append_message(&conn, &row("a1", 1, true)).unwrap();
+        assert!(failed_turn_changes(&conn, &conv.id).unwrap().is_none(), "a cancelled turn that changed nothing");
+        chat_queries::set_turn_checkpoints(&conn, "a1", &conv.id, "[{\"repo\":\"r\"}]").unwrap();
+        let found = failed_turn_changes(&conn, &conv.id).unwrap().unwrap();
+        assert_eq!(found.message_id, "a1");
+        assert_eq!(found.checkpoints.as_deref(), Some("[{\"repo\":\"r\"}]"));
+        assert!(found.checkpoint.is_none());
+        // The next turn finishes normally: the earlier failure is not the latest turn any more.
+        say(&conn, &conv.id, 2, "user", "q2");
+        chat_queries::append_message(&conn, &row("a2", 2, false)).unwrap();
+        assert!(failed_turn_changes(&conn, &conv.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_failed_repository_turn_hands_back_its_activity_row_checkpoint() {
+        let conn = install();
+        let ws = workspace(&conn);
+        conn.execute(
+            "INSERT INTO projects (id, workspace_id, name, local_path, color, icon, sort_order, created_at)
+             VALUES ('p', ?1, 'p', '/nowhere/p', '#222', 'folder', 0, '2026-01-01T00:00:00Z')",
+            rusqlite::params![ws],
+        )
+        .unwrap();
+        let meta = || crate::db::queries::TurnMeta { provider: None, account_id: None, model: None, engine_version: None, response_time_ms: None };
+        let finished = crate::db::queries::add_activity_log(&conn, "p", "conv", None, "q1", "a1", None, meta(), false).unwrap();
+        crate::db::queries::set_activity_checkpoint(&conn, &finished.id, r#"{"id":"x","paths":["f"]}"#).unwrap();
+        assert!(failed_turn_changes(&conn, "conv").unwrap().is_none(), "a finished turn is not a failure");
+        let failed =
+            crate::db::queries::add_activity_log(&conn, "p", "conv", None, "q2", ai_runs::CANCELLED_MARKER, None, meta(), true).unwrap();
+        assert!(failed_turn_changes(&conn, "conv").unwrap().is_none(), "no checkpoint, no changes");
+        crate::db::queries::set_activity_checkpoint(&conn, &failed.id, r#"{"id":"y","paths":["g"]}"#).unwrap();
+        let found = failed_turn_changes(&conn, "conv").unwrap().unwrap();
+        assert_eq!(found.message_id, failed.id);
+        assert_eq!(found.checkpoint.as_deref(), Some(r#"{"id":"y","paths":["g"]}"#));
+        assert!(found.checkpoints.is_none());
+    }
+
     fn say(conn: &Connection, conversation_id: &str, turn: i64, role: &str, content: &str) {
         chat_queries::append_message(
             conn,
@@ -3504,6 +4060,44 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    /// A reloaded transcript carries what each turn carried live (context chips, usage, folders
+    /// with no restore point) — and a turn that carried nothing serialises without those keys.
+    #[test]
+    fn turn_notes_round_trip_through_the_loaded_transcript() {
+        let conn = install();
+        let ws = workspace(&conn);
+        let c = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "", "").unwrap();
+        say(&conn, &c.id, 0, "user", "q");
+        say(&conn, &c.id, 0, "assistant", "a");
+        say(&conn, &c.id, 1, "assistant", "plain");
+        let rows = chat_queries::list_messages(&conn, &c.id, false).unwrap();
+        let (answer, plain) = (rows[1].id.clone(), rows[2].id.clone());
+        let notes = chat_queries::TurnNotes {
+            context: vec![crate::context::ContextSource {
+                kind: crate::context::SourceKind::Mention,
+                label: "a.rs".into(),
+                path: Some("/r/a.rs".into()),
+                start_line: None,
+                end_line: None,
+            }],
+            usage: Some(ai::AiUsage { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: Some(0.5) }),
+            unprotected_dirs: vec!["/plain".into()],
+        };
+        chat_queries::set_message_notes(&conn, &answer, &notes).unwrap();
+        // Empty notes file nothing.
+        chat_queries::set_message_notes(&conn, &plain, &chat_queries::TurnNotes::default()).unwrap();
+
+        let loaded = loaded_messages(&conn, &c.id, false).unwrap();
+        let json: Vec<serde_json::Value> = loaded.iter().map(|m| serde_json::to_value(m).unwrap()).collect();
+        assert_eq!(json[1]["context"][0]["label"], "a.rs");
+        assert_eq!(json[1]["usage"]["input_tokens"], 10);
+        assert_eq!(json[1]["unprotectedDirs"][0], "/plain");
+        assert_eq!(json[1]["conversationId"], c.id.as_str(), "the row's own fields stay flat");
+        for key in ["context", "usage", "unprotectedDirs"] {
+            assert!(json[0].get(key).is_none() && json[2].get(key).is_none(), "{key} only on a turn that has it");
+        }
     }
 
     /// The ordinary first turn: there is nothing behind it, so nothing is replayed and the user
@@ -3878,6 +4472,38 @@ plain prose with no leading slash
         assert!(parse_markdown_commands("- / ").is_empty(), "a bare slash is not a command");
     }
 
+    #[test]
+    fn grok_config_is_kept_while_another_grok_turn_uses_the_folder() {
+        let turn = |conv: &str, provider: &str, cwd: &str| InflightTurn {
+            conversation_id: conv.into(),
+            run_id: String::new(),
+            message_id: String::new(),
+            provider: provider.into(),
+            started_at_ms: 0,
+            turn: 0,
+            workspace_chat: None,
+            cwd: cwd.into(),
+        };
+        let live = vec![turn("a", "grok", "/ws"), turn("b", "claude", "/ws"), turn("c", "grok", "/other")];
+        assert!(other_grok_turn_live(&live, "/ws", "z"));
+        assert!(!other_grok_turn_live(&live, "/ws", "a"), "a turn is not its own competitor");
+        assert!(!other_grok_turn_live(&live, "/empty", "z"), "another folder is free");
+        assert!(!other_grok_turn_live(&[turn("b", "claude", "/ws")], "/ws", "z"), "only Grok reads the file");
+
+        let dir = std::env::temp_dir().join(format!("cf-grok-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join(".grok")).unwrap();
+        let file = dir.join(".grok").join("config.toml");
+        std::fs::write(&file, "# Managed by CodeFlow\n[mcp]\n").unwrap();
+        write_grok_mcp(&dir, &[], true);
+        assert!(file.exists(), "kept while another turn is live");
+        write_grok_mcp(&dir, &[], false);
+        assert!(!file.exists(), "removed once the folder is free");
+        std::fs::write(&file, "mine").unwrap();
+        write_grok_mcp(&dir, &[], false);
+        assert!(file.exists(), "a file the app did not write is never touched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A turn the quit cut off is filed exactly as a Stop files one: the minted message id (so it
     /// cannot land twice), no content, `is_cancelled` — never an error, which would mark the thread
     /// unread and read as the engine failing.
@@ -3891,6 +4517,7 @@ plain prose with no leading slash
             started_at_ms: chrono::Utc::now().timestamp_millis() - 1_000,
             turn: 4,
             workspace_chat: None,
+            cwd: String::new(),
         });
         assert_eq!((row.id.as_str(), row.conversation_id.as_str(), row.turn), ("m1", "c1", 4));
         assert_eq!(row.role, "assistant");

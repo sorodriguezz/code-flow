@@ -1347,8 +1347,13 @@ fn run_scope(root: &str, cloud: bool) -> Result<Scope, String> {
 /// The MCP / agent tool's answer: `question` searched in the scope of the run at `root` — the
 /// checkout's, or the whole workspace's from the workspace chat's folder ([`scope_for_root`]).
 pub async fn tool_answer(root: &str, question: &str, limit: usize, cloud: bool) -> Result<String, String> {
+    tool_answer_without(root, question, limit, cloud, &[]).await
+}
+
+/// [`tool_answer`] without the projects in `excluded` — see [`Scope::without_projects`].
+pub async fn tool_answer_without(root: &str, question: &str, limit: usize, cloud: bool, excluded: &[String]) -> Result<String, String> {
     let scope = match run_scope(root, cloud) {
-        Ok(scope) => scope,
+        Ok(scope) => scope.without_projects(excluded),
         Err(off) => return Ok(off),
     };
     let answer = search_answer(&scope, question, limit.clamp(1, 20)).await?;
@@ -1401,13 +1406,6 @@ pub fn prompt_note(main: &Connection, root: &str, question: &str, strict: bool) 
     note_for(main, scope_for_repo(main, root, true)?, question, strict)
 }
 
-/// [`prompt_note`] for the workspace chat on an engine the map's server does not reach there (agy,
-/// Grok): the passages that best match the question across the whole workspace, each naming its
-/// repository.
-pub fn workspace_prompt_note(main: &Connection, workspace_id: &str, question: &str, strict: bool) -> Option<(String, Vec<crate::context::ContextSource>)> {
-    note_for(main, scope_for_workspace(main, workspace_id, true)?, question, strict)
-}
-
 /// The caller holds the app's database (`main`): nothing here may ask for it again — the refresh
 /// runs on a thread of its own, which waits for the lock — and the code map is used only if it is
 /// already in memory, never built under the lock.
@@ -1416,7 +1414,11 @@ fn note_for(main: &Connection, scope: Scope, question: &str, strict: bool) -> Op
     std::thread::spawn(move || {
         let _ = refresh_blocking(&background, false);
     });
-    let mut found = drop_unshareable(main, &lexical(&scope, question, 6, MapUse::Ready), scope.cloud);
+    let found = drop_unshareable(main, &lexical(&scope, question, 6, MapUse::Ready), scope.cloud);
+    note_from_found(scope, found, question, strict)
+}
+
+fn note_from_found(scope: Scope, mut found: Vec<Found>, question: &str, strict: bool) -> Option<(String, Vec<crate::context::ContextSource>)> {
     if strict {
         let terms = index::query_terms(question);
         found.retain(|f| strong(&terms, f));
@@ -1437,6 +1439,58 @@ fn note_for(main: &Connection, scope: Scope, question: &str, strict: bool) -> Op
         format!("\n\n---\nPasajes del conocimiento del workspace que pueden servir para responder (cítalos por ruta y líneas si los usas):\n{}", render(&answer)),
         sources,
     ))
+}
+
+/// The search half of a prompt's passages, done **without the app's database** so a caller can run
+/// it outside the lock: the index search is the slow part, and holding `Db` across it stalls every
+/// command that needs the connection. The one thing that needs the database — dropping what a
+/// private book keeps from a cloud engine — is [`Candidates::vetted`], a few row reads under a lock
+/// the caller takes for just that.
+pub struct Candidates {
+    scope: Scope,
+    found: Vec<Found>,
+}
+
+/// The lexical passages for `question` in `scope` — the index as it is, the map only if in memory.
+/// Neither refreshes anything: [`Candidates::prompt_note`] starts the refresh.
+pub fn candidates(scope: Scope, question: &str) -> Candidates {
+    let found = lexical(&scope, question, 6, MapUse::Ready);
+    Candidates { scope, found }
+}
+
+impl Candidates {
+    /// What may be shared with this scope's engine, vetted against the app's database (`main`).
+    fn vetted(&self, main: &Connection) -> Vec<Found> {
+        drop_unshareable(main, &self.found, self.scope.cloud)
+    }
+
+    /// [`shares_vocabulary`] over the passages already found.
+    pub fn shares_vocabulary(&self, main: &Connection, question: &str) -> bool {
+        let terms = index::query_terms(question);
+        !terms.is_empty() && self.vetted(main).iter().any(|found| strong(&terms, found))
+    }
+
+    /// The workspace chat's passages for an engine the map's server does not reach (agy, Grok, any
+    /// engine with the map off), each naming its repository: starts the background refresh, then
+    /// vets and renders.
+    pub fn prompt_note(&self, main: &Connection, question: &str, strict: bool) -> Option<(String, Vec<crate::context::ContextSource>)> {
+        let background = self.scope.clone();
+        std::thread::spawn(move || {
+            let _ = refresh_blocking(&background, false);
+        });
+        note_from_found(self.scope.clone(), self.vetted(main), question, strict)
+    }
+}
+
+impl Scope {
+    /// Leaves out the repositories whose project id is in `excluded` — a workspace chat limited to
+    /// some of its repositories. Reference repositories and folders are not projects and stay.
+    pub fn without_projects(mut self, excluded: &[String]) -> Scope {
+        if !excluded.is_empty() {
+            self.repos.retain(|(id, _, _)| !excluded.contains(id));
+        }
+        self
+    }
 }
 
 /// The most characters [`read_note`] hands over. A meeting's note can run to a book; a model that

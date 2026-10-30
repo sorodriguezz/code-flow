@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::Notify;
 
 use crate::git::merge::{OperationKind, OPERATION_CONFLICTS_PREFIX};
 use crate::proc;
@@ -73,6 +76,8 @@ pub enum RemoteFailure {
     StaleLease,
     /// This git is older than `--force-if-includes` (2.30), which a safe force push needs.
     GitTooOld,
+    /// The user pressed Cancel (`git_cancel_remote_op`). Not a failure: the UI says nothing.
+    Cancelled,
 }
 
 impl RemoteFailure {
@@ -87,6 +92,7 @@ impl RemoteFailure {
             RemoteFailure::Timeout => "timeout",
             RemoteFailure::StaleLease => "stale_lease",
             RemoteFailure::GitTooOld => "git_too_old",
+            RemoteFailure::Cancelled => "cancelled",
         }
     }
 }
@@ -301,8 +307,49 @@ async fn run_git(
     args: &[&str],
     extra_env: &[(&str, &str)],
 ) -> Result<(), String> {
+    let app = app.clone();
+    let emit: Emit = Arc::new(move |event| match event {
+        Emitted::Progress(e) => {
+            let _ = app.emit("git:progress", e);
+        }
+        Emitted::Remote(e) => {
+            let _ = app.emit("git:remote-progress", e);
+        }
+        Emitted::Done(e) => {
+            let _ = app.emit("git:done", e);
+        }
+    });
+    run_git_with(emit, op, cwd, args, extra_env).await
+}
+
+/// Where a run's events go. A closure over the `AppHandle` in production; a collector in tests.
+type Emit = Arc<dyn Fn(Emitted) + Send + Sync>;
+
+enum Emitted {
+    Progress(GitProgressEvent),
+    Remote(RemoteProgressEvent),
+    Done(GitDoneEvent),
+}
+
+/// The subcommands that print their progress meters only when stderr is a terminal — which a pipe
+/// never is — unless told `--progress`.
+fn wants_progress_flag(args: &[&str]) -> bool {
+    matches!(args.first().copied(), Some("fetch" | "pull" | "push" | "clone")) && !args.contains(&"--progress")
+}
+
+async fn run_git_with(
+    emit: Emit,
+    op: &str,
+    cwd: Option<&str>,
+    args: &[&str],
+    extra_env: &[(&str, &str)],
+) -> Result<(), String> {
     let mut cmd = proc::command("git");
-    cmd.args(args);
+    if wants_progress_flag(args) {
+        cmd.arg(args[0]).arg("--progress").args(&args[1..]);
+    } else {
+        cmd.args(args);
+    }
     if let Some(dir) = cwd {
         cmd.current_dir(dir);
     }
@@ -321,54 +368,98 @@ async fn run_git(
     proc::own_process_group(&mut cmd);
     cmd.kill_on_drop(true);
 
+    // Registered before the process exists, so a Cancel pressed during startup is not lost.
+    let registered = cwd.map(|dir| register_op(dir, op));
+    let started_at = std::time::SystemTime::now();
     let mut child = cmd.spawn().map_err(|e| e.to_string())?;
     let stdout = child.stdout.take().ok_or("failed to capture stdout")?;
     let stderr = child.stderr.take().ok_or("failed to capture stderr")?;
 
-    let app_out = app.clone();
+    let emit_out = emit.clone();
     let op_out = op.to_string();
     let stdout_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
         let mut collected = Vec::new();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let _ = app_out.emit("git:progress", GitProgressEvent { op: op_out.clone(), line: line.clone() });
+        for_each_segment(stdout, |line| {
+            emit_out(Emitted::Progress(GitProgressEvent { op: op_out.clone(), line: crate::applog::scrub(&line) }));
             collected.push(line);
-        }
+        })
+        .await;
         collected
     });
 
-    let app_err = app.clone();
+    let emit_err = emit.clone();
     let op_err = op.to_string();
+    let repo_key = cwd.map(norm_repo).unwrap_or_default();
     let stderr_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(stderr).lines();
         let mut collected = Vec::new();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let _ = app_err.emit("git:progress", GitProgressEvent { op: op_err.clone(), line: line.clone() });
-            collected.push(line);
-        }
+        let mut throttle = Throttle::new(PROGRESS_INTERVAL);
+        // git redraws a meter with `\r`, so a "line" here is one redraw, not one line of text.
+        for_each_segment(stderr, |line| {
+            let shown = crate::applog::scrub(&line);
+            let progress = parse_progress(&shown);
+            if throttle.allow(std::time::Instant::now(), progress.as_ref().and_then(|p| p.percent) == Some(100)) {
+                emit_err(Emitted::Remote(RemoteProgressEvent {
+                    repo_path: repo_key.clone(),
+                    operation: op_err.clone(),
+                    line: shown.clone(),
+                    phase: progress.as_ref().map(|p| p.phase.clone()),
+                    percent: progress.as_ref().and_then(|p| p.percent),
+                }));
+            }
+            // Meters are not part of the story of a failure: kept out of the error text (and out of
+            // the older `git:progress` stream, which has never carried them).
+            if progress.is_none() {
+                emit_err(Emitted::Progress(GitProgressEvent { op: op_err.clone(), line: shown }));
+                collected.push(line);
+            }
+        })
+        .await;
         collected
     });
 
     let limit = timeout_for(op);
-    let status = match tokio::time::timeout(limit, child.wait()).await {
-        Ok(status) => Some(status.map_err(|e| e.to_string())?),
-        Err(_) => {
-            crate::ai_runs::kill_tree(&mut child).await;
-            None
-        }
+    let cancel = registered.as_ref().map(|r| r.cancel.clone());
+    let ended = tokio::select! {
+        waited = tokio::time::timeout(limit, child.wait()) => match waited {
+            Ok(status) => Ended::Exited(status.map_err(|e| e.to_string())?),
+            Err(_) => Ended::TimedOut,
+        },
+        _ = async {
+            match &cancel {
+                Some(cancel) => cancel.notified().await,
+                None => std::future::pending::<()>().await,
+            }
+        } => Ended::Cancelled,
     };
+    // SIGTERM first (see `ai_runs::kill_tree`): git removes its own lock files on it.
+    if !matches!(ended, Ended::Exited(_)) {
+        crate::ai_runs::kill_tree(&mut child).await;
+    }
     // The pipes close once the group is gone. Bounded anyway: a straggler that escaped the group
     // and kept a pipe open must not be able to hold this call — and the buttons — hostage.
     let drain = Duration::from_secs(5);
     let stdout_lines = tokio::time::timeout(drain, stdout_task).await.ok().and_then(Result::ok).unwrap_or_default();
     let stderr_lines = tokio::time::timeout(drain, stderr_task).await.ok().and_then(Result::ok).unwrap_or_default();
+    drop(registered);
 
+    let cancelled = matches!(ended, Ended::Cancelled);
+    if cancelled && op == "pull" {
+        if let Some(dir) = cwd {
+            clear_stale_index_lock(dir, started_at);
+        }
+    }
+    let status = match &ended {
+        Ended::Exited(status) => Some(*status),
+        _ => None,
+    };
     let success = status.as_ref().is_some_and(|s| s.success());
 
     // git writes most error detail to stderr, but some commands (rare misconfigurations)
     // only explain themselves on stdout — fall back so the UI never shows a bare
     // "git fetch failed" with no reason.
-    let detail = if status.is_none() {
+    let detail = if cancelled {
+        format!("git {op} cancelled")
+    } else if status.is_none() {
         format!("stopped after {} minutes with no answer", limit.as_secs() / 60)
     } else if !stderr_lines.is_empty() {
         stderr_lines.join("\n")
@@ -378,17 +469,17 @@ async fn run_git(
         format!("git {op} exited with {}", status.as_ref().map(|s| s.to_string()).unwrap_or_default())
     };
 
-    let _ = app.emit(
-        "git:done",
-        GitDoneEvent {
-            op: op.to_string(),
-            success,
-            message: if success { "ok".to_string() } else { detail.clone() },
-        },
-    );
+    emit(Emitted::Done(GitDoneEvent {
+        op: op.to_string(),
+        success,
+        message: if success { "ok".to_string() } else { detail.clone() },
+    }));
 
     if success {
         return Ok(());
+    }
+    if cancelled {
+        return Err(cancelled_message(op));
     }
     if status.is_none() {
         return Err(format!(
@@ -398,6 +489,201 @@ async fn run_git(
     }
     let output = format!("{}\n{}", stderr_lines.join("\n"), stdout_lines.join("\n"));
     Err(failure_message(op, &output, &detail))
+}
+
+enum Ended {
+    Exited(std::process::ExitStatus),
+    TimedOut,
+    Cancelled,
+}
+
+/// What a run the user stopped resolves with — the same tagged shape as every other classified
+/// failure (`remoteFailure(error) === "cancelled"` on the frontend), so a stop is told apart from a
+/// failure without parsing git's text.
+pub fn cancelled_message(op: &str) -> String {
+    format!("{REMOTE_FAILURE_PREFIX}{}\ngit {op} cancelled", RemoteFailure::Cancelled.code())
+}
+
+// ---------- in-flight operations: cancel and progress ----------
+
+/// A fetch, pull or push that is running, so a Cancel can find it.
+struct LiveOp {
+    repo: String,
+    op: String,
+    cancel: Arc<Notify>,
+}
+
+fn live_ops() -> &'static Mutex<HashMap<u64, LiveOp>> {
+    static OPS: OnceLock<Mutex<HashMap<u64, LiveOp>>> = OnceLock::new();
+    OPS.get_or_init(Default::default)
+}
+
+/// Leaves the registry when the run ends, by any route.
+struct OpGuard {
+    id: u64,
+    cancel: Arc<Notify>,
+}
+
+impl Drop for OpGuard {
+    fn drop(&mut self) {
+        if let Ok(mut ops) = live_ops().lock() {
+            ops.remove(&self.id);
+        }
+    }
+}
+
+/// A repository path as the registry keys it: trailing separators do not make a different repo.
+fn norm_repo(path: &str) -> String {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() { path.to_string() } else { trimmed.to_string() }
+}
+
+fn register_op(repo: &str, op: &str) -> OpGuard {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    let cancel = Arc::new(Notify::new());
+    if let Ok(mut ops) = live_ops().lock() {
+        ops.insert(id, LiveOp { repo: norm_repo(repo), op: op.to_string(), cancel: cancel.clone() });
+    }
+    OpGuard { id, cancel }
+}
+
+/// Stops every remote operation running in `repo`, returning their names (`["pull"]`) — empty when
+/// none was. Each resolves its own call with [`cancelled_message`]; this only signals.
+pub fn cancel_ops(repo: &str) -> Vec<String> {
+    let key = norm_repo(repo);
+    let Ok(ops) = live_ops().lock() else { return Vec::new() };
+    ops.values()
+        .filter(|live| live.repo == key)
+        .map(|live| {
+            // `notify_one` keeps a permit if the run has not reached its wait yet.
+            live.cancel.notify_one();
+            live.op.clone()
+        })
+        .collect()
+}
+
+/// The `index.lock` a killed pull may leave behind. git removes its lock files when it is
+/// terminated by SIGTERM, so one still there after the group was stopped is either from the
+/// SIGKILL that follows a slow exit or somebody else's — and only a file written since this run
+/// began is taken to be ours. Pull is the only operation here that writes the index (the merge,
+/// rebase or fast-forward after its fetch); fetch and push never take it.
+fn clear_stale_index_lock(repo: &str, since: std::time::SystemTime) -> bool {
+    let Ok(repository) = git2::Repository::open(repo) else { return false };
+    let lock = repository.path().join("index.lock");
+    let ours = std::fs::metadata(&lock)
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|modified| modified + Duration::from_secs(1) >= since);
+    ours && std::fs::remove_file(&lock).is_ok()
+}
+
+/// One redraw of git's progress, or one line of its text, from a running fetch, pull or push.
+/// camelCase, as the TS side reads it.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteProgressEvent {
+    pub repo_path: String,
+    /// `"fetch"`, `"pull"`, `"push"` — the same names `git:done` carries.
+    pub operation: String,
+    /// Credentials in a URL are already masked (`applog::scrub`).
+    pub line: String,
+    /// `"Receiving objects"`, `"Resolving deltas"`… for a progress meter; `None` for other text.
+    pub phase: Option<String>,
+    /// 0–100 when the meter has one (`Enumerating objects: 5, done.` does not).
+    pub percent: Option<u8>,
+}
+
+/// At most five events a second reach the webview; see [`Throttle`].
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Rate limit for the progress stream. A fetch of a large repository redraws its meter hundreds of
+/// times a second, and every event is a trip across the IPC boundary.
+struct Throttle {
+    interval: Duration,
+    last: Option<std::time::Instant>,
+}
+
+impl Throttle {
+    fn new(interval: Duration) -> Self {
+        Self { interval, last: None }
+    }
+
+    /// Whether an event at `now` may go out. `force` (a meter reaching 100%) always may, so the
+    /// bar is never left at 97% by the redraw that fell inside the window.
+    fn allow(&mut self, now: std::time::Instant, force: bool) -> bool {
+        let due = self.last.is_none_or(|last| now.duration_since(last) >= self.interval);
+        if due || force {
+            self.last = Some(now);
+            return true;
+        }
+        false
+    }
+}
+
+struct Meter {
+    phase: String,
+    percent: Option<u8>,
+}
+
+/// git's progress meters: `Receiving objects:  45% (45/100), 1.2 MiB | 2.3 MiB/s`,
+/// `remote: Counting objects: 100% (5/5), done.`, `Enumerating objects: 5, done.`. Matched by the
+/// phase names git prints rather than by shape, so an ordinary `remote:` message is not mistaken
+/// for one.
+fn parse_progress(line: &str) -> Option<Meter> {
+    const PHASES: [&str; 11] = [
+        "enumerating objects",
+        "counting objects",
+        "compressing objects",
+        "receiving objects",
+        "writing objects",
+        "resolving deltas",
+        "unpacking objects",
+        "updating files",
+        "checking out files",
+        "finding sources",
+        "analyzing objects",
+    ];
+    let text = line.trim();
+    let text = text.strip_prefix("remote:").map(str::trim_start).unwrap_or(text);
+    let (phase, rest) = text.split_once(':')?;
+    if !PHASES.contains(&phase.trim().to_lowercase().as_str()) {
+        return None;
+    }
+    let percent = rest.find('%').and_then(|at| {
+        let digits: String = rest[..at].chars().rev().take_while(char::is_ascii_digit).collect::<Vec<_>>().into_iter().rev().collect();
+        digits.parse::<u8>().ok().filter(|p| *p <= 100)
+    });
+    Some(Meter { phase: phase.trim().to_string(), percent })
+}
+
+/// Calls `f` for each line of `reader`, where a line ends at `\n` **or** `\r` — git redraws a meter
+/// in place with a bare carriage return, which `lines()` would glue into one enormous line that
+/// only arrives when the transfer is over. Empty segments (`\r\n`) are skipped.
+async fn for_each_segment<R: tokio::io::AsyncRead + Unpin>(mut reader: R, mut f: impl FnMut(String)) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 8192];
+    let mut pending: Vec<u8> = Vec::new();
+    let flush = |pending: &mut Vec<u8>, f: &mut dyn FnMut(String)| {
+        if !pending.is_empty() {
+            f(String::from_utf8_lossy(pending).into_owned());
+            pending.clear();
+        }
+    };
+    loop {
+        match reader.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                for &byte in &buf[..n] {
+                    if byte == b'\n' || byte == b'\r' {
+                        flush(&mut pending, &mut f);
+                    } else {
+                        pending.push(byte);
+                    }
+                }
+            }
+        }
+    }
+    flush(&mut pending, &mut f);
 }
 
 pub async fn clone(app: AppHandle, url: String, dest: String) -> Result<(), String> {
@@ -859,5 +1145,166 @@ mod tests {
         assert!(detail.contains("terminal prompts disabled"));
         // Nothing recognised: the plain sentence, as before.
         assert_eq!(failure_message("fetch", "boom", "boom"), "git fetch failed: boom");
+    }
+
+    #[test]
+    fn git_progress_meters_are_parsed_by_phase_and_percent() {
+        let m = parse_progress("Receiving objects:  45% (45/100), 1.2 MiB | 2.3 MiB/s").unwrap();
+        assert_eq!((m.phase.as_str(), m.percent), ("Receiving objects", Some(45)));
+        let m = parse_progress("remote: Counting objects: 100% (5/5), done.").unwrap();
+        assert_eq!((m.phase.as_str(), m.percent), ("Counting objects", Some(100)));
+        let m = parse_progress("Enumerating objects: 5, done.").unwrap();
+        assert_eq!((m.phase.as_str(), m.percent), ("Enumerating objects", None));
+        assert!(parse_progress("remote: Resolving the thing is not a meter").is_none());
+        assert!(parse_progress("fatal: could not read Username: terminal prompts disabled").is_none());
+        assert!(parse_progress("From https://example.com/o/r").is_none());
+    }
+
+    #[test]
+    fn progress_is_limited_to_about_five_events_a_second() {
+        let mut throttle = Throttle::new(PROGRESS_INTERVAL);
+        let t0 = std::time::Instant::now();
+        assert!(throttle.allow(t0, false), "the first always goes");
+        assert!(!throttle.allow(t0 + Duration::from_millis(50), false));
+        assert!(!throttle.allow(t0 + Duration::from_millis(199), false));
+        assert!(throttle.allow(t0 + Duration::from_millis(250), false));
+        assert!(throttle.allow(t0 + Duration::from_millis(260), true), "100% is never swallowed");
+    }
+
+    #[test]
+    fn progress_flag_is_added_only_where_git_prints_meters() {
+        assert!(wants_progress_flag(&["fetch", "origin"]));
+        assert!(wants_progress_flag(&["pull", "--rebase"]));
+        assert!(wants_progress_flag(&["push"]));
+        assert!(!wants_progress_flag(&["push", "--progress"]));
+        assert!(!wants_progress_flag(&["lfs", "pull"]));
+        assert!(!wants_progress_flag(&["rebase", "--continue"]));
+        assert!(!wants_progress_flag(&["submodule", "update"]));
+    }
+
+    #[tokio::test]
+    async fn carriage_return_redraws_become_separate_segments() {
+        let input: &[u8] = b"Receiving objects:  10% (1/10)\rReceiving objects: 100% (10/10), done.\r\nfatal: boom\n";
+        let mut seen = Vec::new();
+        for_each_segment(input, |line| seen.push(line)).await;
+        assert_eq!(seen, ["Receiving objects:  10% (1/10)", "Receiving objects: 100% (10/10), done.", "fatal: boom"]);
+    }
+
+    #[test]
+    fn a_cancelled_run_is_tagged_as_such() {
+        let message = cancelled_message("push");
+        assert!(message.starts_with("GIT_REMOTE: cancelled\n"), "{message}");
+        assert_eq!(RemoteFailure::Cancelled.code(), "cancelled");
+    }
+
+    #[test]
+    fn cancel_finds_only_runs_of_that_repository() {
+        let a = register_op("/tmp/cf-cancel-a/", "fetch");
+        let _b = register_op("/tmp/cf-cancel-b", "push");
+        assert_eq!(cancel_ops("/tmp/cf-cancel-a"), ["fetch"], "a trailing slash is the same repository");
+        assert!(cancel_ops("/tmp/cf-cancel-none").is_empty());
+        drop(a);
+        assert!(cancel_ops("/tmp/cf-cancel-a").is_empty(), "a finished run leaves the registry");
+    }
+
+    #[test]
+    fn a_stale_index_lock_is_cleared_only_when_it_is_newer_than_the_run() {
+        let dir = std::env::temp_dir().join(format!("cf-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        git2::Repository::init(&dir).unwrap();
+        let repo = dir.to_str().unwrap();
+        let lock = dir.join(".git").join("index.lock");
+        let before = std::time::SystemTime::now() - Duration::from_secs(3600);
+        std::fs::write(&lock, "").unwrap();
+        assert!(!clear_stale_index_lock(repo, std::time::SystemTime::now() + Duration::from_secs(3600)), "older than the run: not ours");
+        assert!(lock.exists());
+        assert!(clear_stale_index_lock(repo, before));
+        assert!(!lock.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A local bare remote whose `pre-receive` hook sleeps stands in for a slow server.
+    #[cfg(unix)]
+    fn slow_remote() -> (std::path::PathBuf, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("cf-slow-{}", uuid::Uuid::new_v4()));
+        let bare = root.join("remote.git");
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&root, &["init", "--bare", "remote.git"]);
+        let hook = bare.join("hooks").join("pre-receive");
+        std::fs::write(&hook, "#!/bin/sh\nsleep 30\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        git(&work, &["init"]);
+        std::fs::write(work.join("a.txt"), "a").unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "-m", "one"]);
+        git(&work, &["remote", "add", "origin", bare.to_str().unwrap()]);
+        (root, work)
+    }
+
+    fn collector() -> (Emit, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<Option<String>>>>) {
+        let done = Arc::new(Mutex::new(Vec::new()));
+        let phases = Arc::new(Mutex::new(Vec::new()));
+        let (d, p) = (done.clone(), phases.clone());
+        let emit: Emit = Arc::new(move |event| match event {
+            Emitted::Done(e) => d.lock().unwrap().push(e.message),
+            Emitted::Remote(e) => p.lock().unwrap().push(e.phase),
+            Emitted::Progress(_) => {}
+        });
+        (emit, done, phases)
+    }
+
+    /// Cancel kills the whole tree — git, receive-pack and the sleeping hook — and the call
+    /// resolves at once with the cancelled tag rather than at the five-minute deadline.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_a_slow_push_resolves_it_as_cancelled() {
+        let (root, work) = slow_remote();
+        let repo = work.to_str().unwrap().to_string();
+        let (emit, done, _) = collector();
+        let canceller = {
+            let repo = repo.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(800)).await;
+                cancel_ops(&repo)
+            })
+        };
+        let started = std::time::Instant::now();
+        let result = run_git_with(emit, "push", Some(&repo), &["push", "origin", "HEAD:refs/heads/main"], &[]).await;
+        assert_eq!(canceller.await.unwrap(), ["push"]);
+        let err = result.unwrap_err();
+        assert!(err.starts_with("GIT_REMOTE: cancelled\n"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(15), "did not wait for the hook: {:?}", started.elapsed());
+        assert_eq!(done.lock().unwrap().len(), 1, "git:done still fires once");
+        assert!(cancel_ops(&repo).is_empty(), "the run left the registry");
+        assert!(!work.join(".git").join("index.lock").exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// An ordinary push streams its meters as phases, and `--progress` is what makes git print them
+    /// into a pipe at all.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_push_reports_progress_phases() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, work) = slow_remote();
+        let hook = root.join("remote.git").join("hooks").join("pre-receive");
+        std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (emit, _, phases) = collector();
+        let repo = work.to_str().unwrap();
+        run_git_with(emit, "push", Some(repo), &["push", "origin", "HEAD:refs/heads/main"], &[]).await.unwrap();
+        assert!(phases.lock().unwrap().iter().any(Option::is_some), "no progress meter seen: {:?}", phases.lock().unwrap());
+        std::fs::remove_dir_all(&root).ok();
     }
 }

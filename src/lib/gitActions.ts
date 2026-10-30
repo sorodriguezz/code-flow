@@ -60,6 +60,11 @@ export function fetchNow(): void {
   restartAutoFetchCountdown();
 }
 
+/** Stops the fetch/pull/push the user started here. A no-op for the background fetch. */
+export function stopRemoteNow(): void {
+  void useRepoStore.getState().cancelRemoteOp();
+}
+
 export function pullNow(): void {
   if (!canPull(headBranch())) return;
   void useRepoStore.getState().pull();

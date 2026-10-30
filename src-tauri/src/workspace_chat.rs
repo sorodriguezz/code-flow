@@ -27,11 +27,17 @@ use rusqlite::{params, Connection, OptionalExtension};
 /// One repository of the workspace, as the model is told about it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepoLine {
+    /// The project's id.
+    pub id: String,
     pub name: String,
     pub path: String,
     /// The checked-out branch; `""` when detached, unreadable or missing.
     pub branch: String,
     pub on_disk: bool,
+    /// Whether it is a git repository (its root, as the checkpoints open it). A folder that exists
+    /// but is not one is handed to the engine all the same, yet a turn cannot snapshot it: edits
+    /// there have no restore point.
+    pub is_git: bool,
     /// The [`SPEC_DIRS`] it has, in that order, with a trailing `/`.
     pub spec_dirs: Vec<String>,
 }
@@ -58,7 +64,8 @@ pub fn repo_lines(projects: Vec<crate::db::models::Project>) -> Vec<RepoLine> {
             let on_disk = root.is_dir();
             let branch = if on_disk { current_branch(&project.local_path) } else { String::new() };
             let spec_dirs = if on_disk { spec_dirs(root) } else { Vec::new() };
-            RepoLine { name: project.name, path: project.local_path, branch, on_disk, spec_dirs }
+            let is_git = on_disk && git2::Repository::open(&project.local_path).is_ok();
+            RepoLine { id: project.id, name: project.name, path: project.local_path, branch, on_disk, is_git, spec_dirs }
         })
         .collect()
 }
@@ -73,6 +80,12 @@ fn current_branch(path: &str) -> String {
 /// The folders the engine is given besides its own: every repository that exists on disk.
 pub fn extra_dirs(repos: &[RepoLine]) -> Vec<String> {
     repos.iter().filter(|repo| repo.on_disk).map(|repo| repo.path.clone()).collect()
+}
+
+/// The folders the engine can write in that no turn can snapshot: on disk but not a git repository.
+/// The chat reply names them so the UI can warn that edits there cannot be undone.
+pub fn unprotected_dirs(repos: &[RepoLine]) -> Vec<String> {
+    repos.iter().filter(|repo| repo.on_disk && !repo.is_git).map(|repo| repo.path.clone()).collect()
 }
 
 /// Where a workspace's chats run: a folder of the app's own, one per workspace, created on first
@@ -190,6 +203,11 @@ pub fn live_block(repos: &[RepoLine]) -> String {
         }
         if !repo.spec_dirs.is_empty() {
             out.push_str(&format!("; carpetas de especificación: {}", repo.spec_dirs.join(", ")));
+        }
+        if !repo.is_git {
+            out.push_str(
+                " (no es un repositorio git: sin punto de restauración; los cambios que se hagan ahí no se pueden deshacer desde CodeFlow)",
+            );
         }
     }
     out
@@ -349,15 +367,56 @@ mod tests {
         assert_eq!(spec_dirs(&root), vec!["specs/".to_string(), ".kiro/steering/".to_string()]);
 
         let line = RepoLine {
+            id: "p".into(),
             name: "api".into(),
             path: root.to_string_lossy().into_owned(),
             branch: "main".into(),
             on_disk: true,
+            is_git: true,
             spec_dirs: spec_dirs(&root),
         };
         let block = live_block(std::slice::from_ref(&line));
         assert!(block.ends_with("(rama main); carpetas de especificación: specs/, .kiro/steering/"), "{block}");
         assert!(system_prompt("Flow", "/tmp/x", true).contains("carpetas de especificación o de harness"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_that_is_not_a_git_repository_is_marked_as_unprotected() {
+        let root = std::env::temp_dir().join(format!("cf-ws-nogit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.to_string_lossy().into_owned();
+        let plain = RepoLine { id: "n".into(), name: "notes".into(), path: path.clone(), branch: String::new(), on_disk: true, is_git: false, spec_dirs: vec![] };
+        let missing = RepoLine { id: "g".into(), name: "gone".into(), path: "/nowhere/gone".into(), branch: String::new(), on_disk: false, is_git: false, spec_dirs: vec![] };
+        let block = live_block(&[plain.clone(), missing.clone()]);
+        assert!(block.contains("(no es un repositorio git: sin punto de restauración"), "{block}");
+        assert!(block.contains("- gone — /nowhere/gone (no está en disco)"), "{block}");
+        assert_eq!(unprotected_dirs(&[plain.clone(), missing]), vec![path.clone()], "a missing folder is not writable at all");
+        // The engine still gets the folder: only the warning is new.
+        assert_eq!(extra_dirs(&[plain]), vec![path]);
+        git2::Repository::init(&root).unwrap();
+        let lines = repo_lines(vec![crate::db::models::Project {
+            id: "p".into(),
+            workspace_id: "w".into(),
+            name: "repo".into(),
+            local_path: root.to_string_lossy().into_owned(),
+            remote_url: None,
+            color: String::new(),
+            icon: String::new(),
+            ado_org: None,
+            ado_project: None,
+            ado_repo_id: None,
+            github_owner: None,
+            github_repo: None,
+            github_host: None,
+            gitlab_project: None,
+            gitlab_host: None,
+            sort_order: 0,
+            created_at: String::new(),
+            bitbucket_workspace: None,
+            bitbucket_repo: None,
+        }]);
+        assert!(lines[0].is_git && unprotected_dirs(&lines).is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -111,6 +111,7 @@ import type {
   RemoteNotice,
   RemoteTerminal,
   RemoteStatus,
+  TurnUsage,
 } from "../../types/domain";
 import type { FindingLocation } from "../parseAnalysis";
 
@@ -763,6 +764,11 @@ export const gitClone = (url: string, dest: string) => invoke<void>("git_clone",
 
 export const gitFetch = (repoPath: string, remoteName?: string) =>
   invoke<void>("git_fetch", { repoPath, remoteName: remoteName ?? null });
+
+/** Stops the fetch/pull/push running in `repoPath` (git's whole process tree). The call that started
+ *  it rejects with `GIT_REMOTE: cancelled` — `remoteFailure(error) === "cancelled"` — which is a
+ *  stop, not a failure. Resolves with the operation names signalled (empty: nothing was running). */
+export const gitCancelRemoteOp = (repoPath: string) => invoke<string[]>("git_cancel_remote_op", { repoPath });
 
 export const gitPull = (repoPath: string) => invoke<void>("git_pull", { repoPath });
 
@@ -1715,6 +1721,9 @@ export interface ChatReply {
   learned_memory?: string | null;
   /** What that "recuerda que…" did — see `ai_memory::Remembered`. */
   learned_outcome?: "new" | "approved" | "updated" | "already_known" | null;
+  /** What this turn spent, as the engine reported it. Absent/`null` when it reported nothing (not
+   *  "free"). One turn's figure, not the conversation's. */
+  usage?: TurnUsage | null;
 }
 
 /** `sessionId` is the engine's resume token; `conversationId` is *our* identity for the chat and
@@ -2521,6 +2530,12 @@ export const renameChatConversation = (projectId: string, sessionId: string, tit
  *  `sessionId` filed up to `through` (an answer's `created_at`). Returns how many were copied. */
 export const branchChatConversation = (projectId: string, sessionId: string, newSessionId: string, through: string, title: string) =>
   invoke<number>("branch_chat_conversation", { projectId, sessionId, newSessionId, through, title });
+
+/** «Editar y reenviar»: deletes the turn whose row is `rowId` (an answer's `ChatMessage.rowId`) and
+ *  every turn after it, and drops the engine session the rest resume. Files those turns changed are
+ *  not reverted. Resolves with how many turns were removed; refused (busy marker) while a turn runs. */
+export const truncateChatFrom = (projectId: string, sessionId: string, rowId: string) =>
+  invoke<number>("truncate_chat_from", { projectId, sessionId, rowId });
 
 /** The panel's `/clear`, written down: the next question in this conversation starts a fresh engine
  *  session — whichever window or phone asks it, after a restart too, and in the chat workspace if

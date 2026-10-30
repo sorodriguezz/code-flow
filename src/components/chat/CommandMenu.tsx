@@ -54,7 +54,8 @@ export type ChatAppCommand = "new" | "export" | "branch" | "continue" | "compact
  * `/branch`, `/continue` and `/caveman`; a repository conversation in the panel has neither, so there `/compact`
  * is Claude's own and `/clear` is the app's — the next turn simply starts a fresh engine session,
  * which works on every engine rather than only the one whose CLI expands the command headlessly.
- * The workspace chat of the assistant has only `/new` and `/export`.
+ * The workspace chat of the assistant has `/new`, `/export`, `/clear` and `/caveman` (it sends through
+ * the free chat's `chat_send`, which applies the row's level).
  */
 export type CommandSurface = "chat" | "panel" | "workspace";
 
@@ -93,9 +94,9 @@ const APP_COMMANDS: AppCommand[] = [
 const SURFACE_COMMANDS: Record<CommandSurface, ChatAppCommand[]> = {
   chat: ["new", "export", "branch", "continue", "compact", "caveman"],
   panel: ["new", "clear", "export", "move"],
-  // The workspace chat of the assistant: a new one, and out as a file. The rest of the free chat's
-  // act on its sidebar, which this one is not in.
-  workspace: ["new", "export"],
+  // The workspace chat of the assistant: a new one, out as a file, and `/clear`. The rest of the
+  // free chat's act on its sidebar, which this one is not in.
+  workspace: ["new", "export", "clear", "caveman"],
 };
 
 function appCommandsOf(surface: CommandSurface): AppCommand[] {

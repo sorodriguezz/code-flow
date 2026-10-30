@@ -368,3 +368,68 @@ describe("commit through git", () => {
     expect(errorToasts()).toHaveLength(0);
   });
 });
+
+describe("cancelling a remote operation", () => {
+  const CANCELLED = "GIT_REMOTE: cancelled\ngit fetch was cancelled";
+  const infoToasts = () => useToastStore.getState().toasts.filter((t) => t.type === "info");
+
+  beforeEach(() => {
+    useRepoStore.setState({ remoteOpSilent: false, remoteProgress: {}, error: null });
+  });
+
+  it("settles a cancelled fetch quietly: an info toast, no error, lock and progress released", async () => {
+    handlers.git_fetch = () => {
+      useRepoStore.getState().applyRemoteProgress({
+        repoPath: "/repo",
+        operation: "fetch",
+        line: "Receiving objects:  45%",
+        phase: "Receiving objects",
+        percent: 45,
+      });
+      expect(useRepoStore.getState().remoteProgress["/repo"]?.percent).toBe(45);
+      throw CANCELLED;
+    };
+    await useRepoStore.getState().fetch();
+    const s = useRepoStore.getState();
+    expect(errorToasts()).toHaveLength(0);
+    expect(infoToasts()).toHaveLength(1);
+    expect(s.error).toBeNull();
+    expect(s.remoteOp).toBeNull();
+    expect(s.remoteProgress).toEqual({});
+  });
+
+  it("settles a cancelled push quietly", async () => {
+    handlers.git_push = () => {
+      throw "GIT_REMOTE: cancelled\ngit push was cancelled";
+    };
+    await useRepoStore.getState().push(false);
+    expect(errorToasts()).toHaveLength(0);
+    expect(useRepoStore.getState().error).toBeNull();
+    expect(useRepoStore.getState().remoteOp).toBeNull();
+  });
+
+  it("settles a cancelled pull as 'cancelled', not failed", async () => {
+    handlers.git_pull = () => {
+      throw "GIT_REMOTE: cancelled\ngit pull was cancelled";
+    };
+    await useRepoStore.getState().pull();
+    expect(errorToasts()).toHaveLength(0);
+    expect(useRepoStore.getState().error).toBeNull();
+    expect(useRepoStore.getState().remoteOp).toBeNull();
+  });
+
+  it("never cancels, or shows progress for, the background fetch", async () => {
+    useRepoStore.setState({ remoteOp: "fetch", remoteOpSilent: true });
+    await useRepoStore.getState().cancelRemoteOp();
+    expect(called("git_cancel_remote_op")).toHaveLength(0);
+    useRepoStore.getState().applyRemoteProgress({ repoPath: "/repo", operation: "fetch", line: "x", phase: "p", percent: 1 });
+    expect(useRepoStore.getState().remoteProgress).toEqual({});
+  });
+
+  it("cancels the user's own operation in the open repository", async () => {
+    useRepoStore.setState({ remoteOp: "pull", remoteOpSilent: false });
+    await useRepoStore.getState().cancelRemoteOp();
+    expect(called("git_cancel_remote_op")).toHaveLength(1);
+    expect(called("git_cancel_remote_op")[0].args.repoPath).toBe("/repo");
+  });
+});

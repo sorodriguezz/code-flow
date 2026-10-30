@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { ArrowUpRight, Layers } from "lucide-react";
 import { HOLD_REVEAL_MS, HOLD_SLOP, HoldProgress, HoldScrim, slotShift, useHoldReorder } from "../../lib/holdReorder";
 import { openCodi } from "../codi/openCodi";
@@ -13,6 +13,7 @@ import { ThinkingOrb } from "../common/ThinkingOrb";
 import { ActiveMarker } from "../common/ActivePill";
 import { StageChip } from "../common/StageChip";
 import { TourLauncher } from "../tour/TourLauncher";
+import { railTabStop, stepRailIndex } from "../../lib/railKeyNav";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { useAiRunStore } from "../../state/aiRunStore";
 
@@ -26,6 +27,11 @@ import { APPS, appKey, openRailApp, sendRailAppOut, type WorkspaceApp } from "..
 /** The rail's apps and what opening and detaching one does live in `lib/railApps` — «Codi» does both
  *  too. Re-exported for the readers that found them here. */
 export { APPS, appKey, type WorkspaceApp };
+
+/** An app key as an id fragment: keys can carry `:` and the like, which an id reference should not. */
+function descId(key: string): string {
+  return key.replace(/[^A-Za-z0-9_-]/g, "-");
+}
 
 /** `items` with the entry at `from` lifted out and put back in at `to`. */
 function move<T>(items: T[], from: number, to: number): T[] {
@@ -130,6 +136,32 @@ export function AppRail() {
   const reorder = useHoldReorder((from, to) => setRailOrder(move(apps, from, to).map(appKey)));
   const drag = reorder.drag;
 
+  // Keyboard: a vertical toolbar with a roving tab stop. One app button is tabbable (the one last
+  // focused, else the open app, else the first), ArrowUp/Down/Home/End move focus between them,
+  // Tab leaves the list, Enter/Space press natively. The «open in a window» corner buttons are out
+  // of the tab order (tabIndex -1, still clickable): Shift+Enter on the focused app sends it out.
+  const [rovingKey, setRovingKey] = useState<string | null>(null);
+  const current = apps.find((a) => a.id === activeView && (a.workspace ?? apiWorkspace) === apiWorkspace);
+  const tabStopKey = railTabStop(apps.map(appKey), rovingKey, current ? appKey(current) : null);
+  const onListKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const button = e.target instanceof HTMLElement ? e.target.closest<HTMLElement>("button[data-rail-app]") : null;
+    if (!button || drag) return;
+    const key = button.dataset.railApp ?? "";
+    if (e.key === "Enter" && e.shiftKey) {
+      const app = apps.find((a) => appKey(a) === key);
+      if (app && !windowFor(app)) {
+        e.preventDefault();
+        void sendOut(app);
+      }
+      return;
+    }
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const next = stepRailIndex(apps.findIndex((a) => appKey(a) === key), apps.length, e.key);
+    if (next === null) return;
+    e.preventDefault();
+    e.currentTarget.querySelector<HTMLElement>(`button[data-rail-app="${CSS.escape(appKey(apps[next]))}"]`)?.focus();
+  };
+
   const workspace = workspaces.find((w) => w.id === activeWorkspaceId) ?? null;
   // No workspace yet (first launch, or one was just deleted): fall back to the accent so the
   // chrome still looks deliberate instead of losing its colour entirely.
@@ -198,7 +230,15 @@ export function AppRail() {
           drag ? "overflow-hidden" : "overflow-y-auto overflow-x-hidden"
         }`}
       >
-      <div ref={reorder.listRef} data-tour="workspace-tools" className="relative flex flex-col items-center gap-1">
+      <div
+        ref={reorder.listRef}
+        data-tour="workspace-tools"
+        role="toolbar"
+        aria-orientation="vertical"
+        aria-label={t("tabbar.workspaceTools")}
+        onKeyDown={onListKeyDown}
+        className="cf-d-rail-gap relative flex flex-col items-center gap-1"
+      >
         <Tooltip side="left" label={scopeHint} description={t("tabbar.scopeWorkspaceReset")}>
           <button
             type="button"
@@ -235,7 +275,7 @@ export function AppRail() {
         {drag && (
           <span
             aria-hidden
-            className="pointer-events-none absolute left-1/2 w-8 -translate-x-1/2 rounded-md border border-dashed border-[var(--cf-accent)] bg-[var(--cf-accent)]/12"
+            className="cf-d-rail-ghost pointer-events-none absolute left-1/2 w-8 -translate-x-1/2 rounded-md border border-dashed border-[var(--cf-accent)] bg-[var(--cf-accent)]/12"
             style={{ top: drag.ghost.top, height: drag.ghost.height }}
           />
         )}
@@ -298,7 +338,7 @@ export function AppRail() {
                   ? { transform: `translateY(${offset}px)${lifted ? " scale(1.12)" : ""}` }
                   : undefined
               }
-              className={`relative h-9 w-9 shrink-0 ${
+              className={`cf-d-rail-slot relative h-9 w-9 shrink-0 ${
                 // The lifted icon is pinned to the pointer, so it must not ease anywhere; its
                 // neighbours are the ones sliding out of the way, so they must. Dropping the
                 // transform transition on the way out is what keeps the icons still in the frame
@@ -308,6 +348,9 @@ export function AppRail() {
             >
             <button
               type="button"
+              data-rail-app={key}
+              tabIndex={key === tabStopKey ? 0 : -1}
+              onFocus={() => setRovingKey(key)}
               onPointerDown={(e) => reorder.beginHold(e, index, key)}
               onClick={() => {
                 if (reorder.swallowsClick()) return;
@@ -315,7 +358,10 @@ export function AppRail() {
               }}
               aria-current={isActive ? "page" : undefined}
               aria-label={detachedTo ? `${name} — ${t("windows.inOtherWindow")}` : name}
-              className={`relative flex h-9 w-9 shrink-0 select-none items-center justify-center rounded-lg ${
+              // The tooltip's description is drawn in a portal on hover and focus; a screen reader
+              // gets the same sentence from the hidden node below.
+              aria-describedby={`rail-desc-${descId(key)}`}
+              className={`cf-d-rail-slot relative flex h-9 w-9 shrink-0 select-none items-center justify-center rounded-lg ${
                 // Idle, the only thing that moves is colour.
                 lifted
                   ? "cursor-grabbing shadow-lg ring-1 ring-[var(--cf-accent)]"
@@ -340,7 +386,7 @@ export function AppRail() {
                   "you are here" bar on its edge, the projects panel's. The rail's edge is 6px out
                   from the 36px button in its 48px column. */}
               {isActive && !drag && (
-                <ActiveMarker layoutId="app-rail-active" color="var(--cf-accent-fill)" className="-left-1.5 inset-y-2" />
+                <ActiveMarker layoutId="app-rail-active" color="var(--cf-accent-fill)" className="cf-d-rail-mark -left-1.5 inset-y-2" />
               )}
               {/* Keyed by the return, so an app that comes back twice in a row drops in twice. */}
               <span key={returning?.id ?? "rest"} className={`flex ${returning ? "cf-return-land" : ""}`}>
@@ -406,11 +452,15 @@ export function AppRail() {
                 </span>
               )}
             </button>
+            <span id={`rail-desc-${descId(key)}`} className="sr-only">
+              {detachedTo ? t("windows.focusWindow") : t(app.descriptionKey)}
+            </span>
             {!detachedTo && (
               <button
                 type="button"
                 aria-label={`${name} — ${t("windows.openInWindow")}`}
                 title={t("windows.openInWindow")}
+                tabIndex={-1}
                 // The rail's own gesture is a *hold*, and this sits on the surface that starts one —
                 // stopped so aiming at the corner never picks the icon up instead.
                 onPointerDown={(e) => e.stopPropagation()}
@@ -551,7 +601,7 @@ function AssistantButton() {
         data-tour="toggle-ai-panel"
         aria-label={t("statusbar.aiPanel")}
         aria-expanded={open}
-        className={`relative flex h-9 w-9 shrink-0 select-none items-center justify-center rounded-lg transition-colors ${
+        className={`cf-d-rail-slot relative flex h-9 w-9 shrink-0 select-none items-center justify-center rounded-lg transition-colors ${
           open ? "bg-[var(--cf-accent)]/15 hover:bg-[var(--cf-accent)]/20" : "hover:bg-[var(--cf-hover)]"
         } ${arming && charges ? "cf-charging" : ""}`}
         style={arming && charges ? ({ "--cf-charge-ms": `${CODI_HOLD_MS - CHARGE_FROM_MS}ms` } as CSSProperties) : undefined}

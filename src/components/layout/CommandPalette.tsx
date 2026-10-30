@@ -21,6 +21,8 @@ import {
   frequentItems,
   type PaletteItem,
 } from "../../lib/paletteItems";
+import { ensureLastOpenedLoaded } from "../../lib/projectLastOpened";
+import { useShortcutsStore } from "../../state/shortcutsStore";
 
 export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScope; onClose: () => void }) {
   const t = useT();
@@ -50,15 +52,37 @@ export function CommandPalette({ scope = "all", onClose }: { scope?: PaletteScop
     ensureFlowContextEntries();
   }, []);
 
+  const shortcutOverrides = useShortcutsStore((s) => s.overrides);
+  // The «last opened» history reads asynchronously; rebuild the projects' order once it lands.
+  const [historyReady, setHistoryReady] = useState(0);
+  useEffect(() => {
+    let live = true;
+    void ensureLastOpenedLoaded().then(() => live && setHistoryReady(1));
+    return () => {
+      live = false;
+    };
+  }, []);
+
   // The rows themselves are `lib/paletteItems`' — «Codi» lists and runs the same ones. Rebuilt when
   // anything they are built from changes; the actions they call are the stores' own, which never do.
   const items = useMemo<PaletteItem[]>(
     () =>
-      buildPaletteItems({ t, workspaces, projects, missing, notARepo, satellites, branches, activeView, quickAskChord }),
+      buildPaletteItems({
+        t,
+        workspaces,
+        projects,
+        missing,
+        notARepo,
+        satellites,
+        branches,
+        activeView,
+        quickAskChord,
+        shortcutOverrides,
+      }),
     // `folderFlows` is read by the rows through the store, not passed — listed so the armed flows
     // arriving rebuilds them.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [workspaces, projects, missing, notARepo, satellites, branches, t, activeView, quickAskChord, folderFlows],
+    [workspaces, projects, missing, notARepo, satellites, branches, t, activeView, quickAskChord, folderFlows, shortcutOverrides, historyReady],
   );
 
   // How often each place and action was used in the last 30 days, every workspace — read once per

@@ -657,6 +657,14 @@ pub async fn git_fetch(app: AppHandle, repo_path: String, remote_name: Option<St
     remote::fetch(app, repo_path, remote_name).await
 }
 
+/// Stops the fetch, pull or push running in `repo_path`: its git process tree is killed and the
+/// call that started it rejects with `GIT_REMOTE: cancelled`. Returns the names of the operations
+/// signalled (empty: nothing was running).
+#[tauri::command]
+pub fn git_cancel_remote_op(repo_path: String) -> Vec<String> {
+    remote::cancel_ops(&repo_path)
+}
+
 #[tauri::command]
 pub async fn git_pull(app: AppHandle, repo_path: String) -> Result<(), String> {
     remote::pull(app, repo_path.clone()).await?;

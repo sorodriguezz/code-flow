@@ -96,11 +96,100 @@ fn snapshot_tree(repo: &Repository) -> Result<git2::Oid, String> {
 }
 
 /// Takes a checkpoint of `path`'s working tree. Returns the new checkpoint's id.
+///
+/// Prunes to [`MAX_CHECKPOINTS`] on the way, so every caller whose checkpoint is kept by
+/// construction (an agent run, a fix) behaves as it always has. A chat turn does not know yet
+/// whether its checkpoint will be kept — most turns change nothing — and must use
+/// [`create_unpruned`] followed by [`prune_path`] only once the turn proved it changed files.
 pub fn create(path: &str, kind: &str) -> Result<String, String> {
     let repo = open(path)?;
-    let tree_oid = snapshot_tree(&repo)?;
+    let id = commit_snapshot(&repo, kind)?;
+    prune(&repo);
+    Ok(id)
+}
+
+/// [`create`] without the prune. A turn that then changes nothing removes its checkpoint again
+/// (`remove_if_unchanged`), and that must never have cost an older, real checkpoint its place.
+pub fn create_unpruned(path: &str, kind: &str) -> Result<String, String> {
+    let repo = open(path)?;
+    commit_snapshot(&repo, kind)
+}
+
+/// Applies the [`MAX_CHECKPOINTS`] cap to a repo. Called when a checkpoint taken with
+/// [`create_unpruned`] turns out to be worth keeping. Best-effort.
+pub fn prune_path(path: &str) {
+    if let Ok(repo) = open(path) {
+        prune(&repo);
+    }
+}
+
+/// One chat turn's restore points, taken in parallel and off the async thread: a workspace chat
+/// snapshots every repository, and N serial working-tree walks in front of the first token is N
+/// times the wait. Order follows `paths`; `None` where a path could not be snapshotted (not a git
+/// repository, unreadable index) — the turn runs unprotected there rather than not at all.
+///
+/// Unpruned (see [`create_unpruned`]): [`settle_turn`] prunes the ones that are kept.
+pub async fn snapshot_turn(paths: &[String], kind: &str) -> Vec<Option<String>> {
+    let handles: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            let (path, kind) = (path.clone(), kind.to_string());
+            tokio::task::spawn_blocking(move || match create_unpruned(&path, &kind) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    eprintln!("checkpoint before '{kind}' failed: {e}");
+                    None
+                }
+            })
+        })
+        .collect();
+    let mut out = Vec::with_capacity(handles.len());
+    for handle in handles {
+        out.push(handle.await.ok().flatten());
+    }
+    out
+}
+
+/// What a turn did to one repository, once it ended: the checkpoint and the files it differs in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnChange {
+    pub path: String,
+    pub id: String,
+    pub paths: Vec<String>,
+}
+
+/// Ends the turn's checkpoints, in parallel and off the async thread: one that differs nowhere is
+/// removed and never counts against the cap; one that differs is kept — and only then is the repo
+/// pruned. Returns the kept ones, in the order given.
+pub async fn settle_turn(taken: Vec<(String, Option<String>)>) -> Vec<TurnChange> {
+    let handles: Vec<_> = taken
+        .into_iter()
+        .map(|(path, id)| {
+            tokio::task::spawn_blocking(move || {
+                let id = id?;
+                let paths = changed_paths(&path, &id).unwrap_or_default();
+                if paths.is_empty() {
+                    let _ = remove(&path, &id);
+                    return None;
+                }
+                prune_path(&path);
+                Some(TurnChange { path, id, paths })
+            })
+        })
+        .collect();
+    let mut out = Vec::new();
+    for handle in handles {
+        if let Ok(Some(change)) = handle.await {
+            out.push(change);
+        }
+    }
+    out
+}
+
+fn commit_snapshot(repo: &Repository, kind: &str) -> Result<String, String> {
+    let tree_oid = snapshot_tree(repo)?;
     let tree = repo.find_tree(tree_oid).map_err(|e| e.message().to_string())?;
-    let sig = signature(&repo)?;
+    let sig = signature(repo)?;
 
     // Parented on HEAD when there is one so the checkpoint reads as a commit on top of the
     // current state; a repo with no commits yet gets a parentless one rather than no protection.
@@ -115,7 +204,6 @@ pub fn create(path: &str, kind: &str) -> Result<String, String> {
     let id = format!("{}-{}", chrono::Utc::now().timestamp(), &uuid::Uuid::new_v4().to_string()[..8]);
     repo.commit(Some(&checkpoint_ref(&id)), &sig, &sig, kind, &tree, &parent_refs)
         .map_err(|e| e.message().to_string())?;
-    prune(&repo);
     Ok(id)
 }
 
@@ -596,6 +684,67 @@ mod tests {
             expected_revision: file_revision(crate::fsops::read_bytes_in_repo(path, rel).unwrap().as_deref()),
             content: content.map(str::to_string),
         }
+    }
+
+    fn count(path: &str) -> usize {
+        list(path).unwrap().len()
+    }
+
+    #[test]
+    fn read_only_turns_never_evict_kept_checkpoints() {
+        let (dir, _repo) = fixture();
+        let path = dir.to_str().unwrap();
+        for _ in 0..MAX_CHECKPOINTS {
+            create(path, "chat").unwrap();
+        }
+        assert_eq!(count(path), MAX_CHECKPOINTS);
+        // Fifty read-only turns: each snapshots, finds nothing changed, and removes it again.
+        for _ in 0..50 {
+            let id = create_unpruned(path, "chat").unwrap();
+            assert!(remove_if_unchanged(path, &id).unwrap());
+        }
+        assert_eq!(count(path), MAX_CHECKPOINTS, "nothing was evicted");
+    }
+
+    #[test]
+    fn the_checkpoint_past_the_cap_prunes_the_oldest_once_kept() {
+        let (dir, repo) = fixture();
+        let path = dir.to_str().unwrap();
+        // Distinct ages: the cap orders by commit time, in seconds.
+        let tree = repo.head().unwrap().peel_to_commit().unwrap().tree().unwrap();
+        let sig = |secs: i64| git2::Signature::new("T", "t@example.com", &git2::Time::new(secs, 0)).unwrap();
+        for n in 0..MAX_CHECKPOINTS as i64 {
+            repo.commit(Some(&checkpoint_ref(&format!("old-{n}"))), &sig(1_000 + n), &sig(1_000 + n), "chat", &tree, &[]).unwrap();
+        }
+        let id = create_unpruned(path, "chat").unwrap();
+        assert_eq!(count(path), MAX_CHECKPOINTS + 1, "unpruned until the turn proves itself");
+        fs::write(dir.join("tracked.txt"), "AI change\n").unwrap();
+        assert!(!remove_if_unchanged(path, &id).unwrap());
+        prune_path(path);
+        let ids: Vec<String> = list(path).unwrap().into_iter().map(|c| c.id).collect();
+        assert_eq!(ids.len(), MAX_CHECKPOINTS);
+        assert!(ids.contains(&id), "the new one stays");
+        assert!(!ids.contains(&"old-0".to_string()), "the oldest went");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_turn_keeps_only_the_checkpoints_that_changed_something() {
+        let (quiet, _r1) = fixture();
+        let (busy, _r2) = fixture();
+        let paths = vec![quiet.to_str().unwrap().to_string(), busy.to_str().unwrap().to_string(), "/definitely/not/a/repo".to_string()];
+        let ids = snapshot_turn(&paths, "chat").await;
+        assert_eq!(ids.len(), 3);
+        assert!(ids[0].is_some() && ids[1].is_some() && ids[2].is_none(), "a non-repository is skipped, not fatal");
+        fs::write(busy.join("tracked.txt"), "AI change\n").unwrap();
+        let kept = settle_turn(paths.iter().cloned().zip(ids).collect()).await;
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].path, paths[1]);
+        assert_eq!(kept[0].paths, vec!["tracked.txt".to_string()]);
+        assert_eq!(count(&paths[0]), 0, "the quiet repo's checkpoint was removed");
+        assert_eq!(count(&paths[1]), 1);
+        fs::remove_dir_all(quiet).unwrap();
+        fs::remove_dir_all(busy).unwrap();
     }
 
     #[test]

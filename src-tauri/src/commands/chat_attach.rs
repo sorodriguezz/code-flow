@@ -461,6 +461,29 @@ pub fn repo_chat_attach_bytes(
     store_bytes(&safe_repo_conversation_dir(&conversation_id)?, &name, data)
 }
 
+/// A repository conversation's attachments still waiting in the composer — the files in its folder
+/// that no sent question names (the same rule as [`chat_list_staged_attachments`]). A repository
+/// turn files its question with the attachment note appended (`send_chat_message`), so
+/// `activity_log.question` is the transcript the rule reads; derived, no column.
+#[tauri::command]
+pub fn repo_chat_list_staged_attachments(db: State<'_, Db>, conversation_id: String) -> Result<Vec<ChatAttachment>, String> {
+    let files = list_dir(&safe_repo_conversation_dir(&conversation_id)?);
+    if files.is_empty() {
+        return Ok(files);
+    }
+    let asked: Vec<String> = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        sent_repo_questions(&conn, &conversation_id).map_err(|e| e.to_string())?
+    };
+    Ok(unsent(files, &asked))
+}
+
+fn sent_repo_questions(conn: &rusqlite::Connection, conversation_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare("SELECT question FROM activity_log WHERE session_id = ?1")?;
+    let rows = statement.query_map(rusqlite::params![conversation_id], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
 #[tauri::command]
 pub fn repo_chat_remove_attachment(conversation_id: String, attachment_id: String) -> Result<(), String> {
     remove_from(&safe_repo_conversation_dir(&conversation_id)?, &attachment_id)
@@ -1021,6 +1044,26 @@ fn uuid_prefix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repository_attachment_is_staged_until_a_question_names_it() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO workspaces (id, name, sort_order, created_at) VALUES ('w', 'W', 0, '2026-01-01T00:00:00Z');
+             INSERT INTO projects (id, workspace_id, name, local_path, color, icon, sort_order, created_at)
+                 VALUES ('p', 'w', 'p', '/nowhere/p', '#222', 'folder', 0, '2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+        let file = |id: &str| ChatAttachment { id: id.into(), name: id.into(), path: format!("/x/{id}"), bytes: 1, is_image: true };
+        let meta = || crate::db::queries::TurnMeta { provider: None, account_id: None, model: None, engine_version: None, response_time_ms: None };
+        assert!(sent_repo_questions(&conn, "conv").unwrap().is_empty());
+        crate::db::queries::add_activity_log(&conn, "p", "conv", None, "look at /x/aaa-sent.png", "ok", None, meta(), false).unwrap();
+        crate::db::queries::add_activity_log(&conn, "p", "other", None, "mentions bbb-staged.png", "ok", None, meta(), false).unwrap();
+        let asked = sent_repo_questions(&conn, "conv").unwrap();
+        let staged = unsent(vec![file("aaa-sent.png"), file("bbb-staged.png")], &asked);
+        assert_eq!(staged.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), vec!["bbb-staged.png"]);
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("cf-attach-{tag}-{}", uuid::Uuid::new_v4()));

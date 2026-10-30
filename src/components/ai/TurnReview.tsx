@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import { AlertCircle, Check, ChevronDown, ChevronRight, ExternalLink, FileDiff, Loader2, RotateCcw, Undo2 } from "lucide-react";
 import { FileGlyph } from "../common/FileGlyph";
 import { aiCheckpointFile, restoreAiCheckpointPaths, type ReviewedEdit, type TurnFile } from "../../lib/tauri/commands";
 import { lineHunks, type LineHunk } from "../../lib/liveGutter";
 import type { TurnChanges } from "../../state/chatStore";
 import { useUiStore } from "../../state/uiStore";
+import { confirmAction } from "../../state/confirmStore";
+import { focusEditorOn } from "../../lib/editorIslands";
 import { recordExperience } from "../../lib/tauri/experiencesCommands";
 import { useT } from "../../state/languageStore";
 
@@ -25,6 +27,12 @@ const MAX_HUNK_LINES = 40;
 
 function splitLines(text: string): string[] {
   return text.split(/\r\n|\r|\n/);
+}
+
+/** Whether `latest` — the file read again just before a hunk is written — is the very file the hunk
+ *  was drawn from. Anything else and its line numbers may point at other code. */
+export function sameFileAsRead(read: TurnFile, latest: TurnFile | null): boolean {
+  return !!latest && !latest.binary && latest.revision === read.revision && latest.after === read.after;
 }
 
 function eolOf(text: string): string {
@@ -53,11 +61,14 @@ function writeKept(checkpointId: string, kept: Set<string>) {
   }
 }
 
-export function TurnReview({
+/** Memoised: it sits under every answer of a transcript that re-renders with each streamed token,
+ *  and its props (`changes` is the message's own object) are stable between them. */
+export const TurnReview = memo(function TurnReview({
   repoPath,
   changes,
   repoLabel,
   canOpen = true,
+  openProjectId,
 }: {
   repoPath: string;
   changes: TurnChanges;
@@ -65,6 +76,9 @@ export function TurnReview({
   repoLabel?: string;
   /** Whether a file can be opened in the editor — which shows the active repository only. */
   canOpen?: boolean;
+  /** The project the file belongs to, when it may not be the one on screen (the workspace chat's
+   *  turns touch several): opening switches to it first. */
+  openProjectId?: string;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -113,8 +127,12 @@ export function TurnReview({
     }
   };
   const allReady = changes.paths.every((path) => reviewed[path]?.version === version);
-  const discardAll = () => {
+  const discardAll = async () => {
     if (!allReady || busy) return;
+    // The checkpoint is the file before the turn, so this also reverts whatever was written after it
+    // — a later turn's edits, the user's own — which is why it asks, with the count.
+    const ok = await confirmAction(t("turnReview.discardAllConfirm", { count: changes.paths.length }), true, t("turnReview.discardAll"));
+    if (!ok) return;
     void discard(changes.paths.map((path) => ({ path, expectedRevision: reviewed[path].file.revision, content: null })));
   };
 
@@ -180,13 +198,14 @@ export function TurnReview({
               })}
               onGone={() => setGone(true)}
               canOpen={canOpen}
+              openProjectId={openProjectId}
             />
           ))}
         </div>
       )}
     </div>
   );
-}
+});
 
 function TurnFileRow({
   repoPath,
@@ -201,8 +220,10 @@ function TurnFileRow({
   onLoaded,
   onGone,
   canOpen,
+  openProjectId,
 }: {
   canOpen: boolean;
+  openProjectId?: string;
   repoPath: string;
   checkpointId: string;
   path: string;
@@ -219,10 +240,12 @@ function TurnFileRow({
   const [open, setOpen] = useState(false);
   const [file, setFile] = useState<TurnFile | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [hunkError, setHunkError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     setFile(null);
+    setHunkError(null);
     setError(null);
     onLoaded(null);
     aiCheckpointFile(repoPath, checkpointId, path)
@@ -265,6 +288,15 @@ function TurnFileRow({
   const discardHunk = async (hunk: LineHunk) => {
     if (!file || busy) return;
     if (file.after === null) return discardFile();
+    // The hunk was drawn from the file as it was read when this row loaded. Read it again right
+    // before writing: if anything touched it since (the user typing, a later turn), the line numbers
+    // may point at other code, so refuse rather than splice into the wrong place.
+    setHunkError(null);
+    const latest = await aiCheckpointFile(repoPath, checkpointId, path).catch(() => null);
+    if (!sameFileAsRead(file, latest)) {
+      setHunkError(t("turnReview.hunkChanged"));
+      return;
+    }
     const now = splitLines(file.after);
     const before = splitLines(file.before ?? "");
     const next = [...now.slice(0, hunk.bufferStart), ...before.slice(hunk.baseStart, hunk.baseEnd), ...now.slice(hunk.bufferEnd)];
@@ -306,7 +338,11 @@ function TurnFileRow({
         {canOpen && file && !file.binary && file.after !== null && (
           <button
             type="button"
-            onClick={() => useUiStore.getState().openInEditor(path, (hunks[0]?.bufferStart ?? 0) + 1)}
+            onClick={() => {
+              const line = (hunks[0]?.bufferStart ?? 0) + 1;
+              if (openProjectId) void focusEditorOn(openProjectId).then(() => useUiStore.getState().openInEditor(path, line));
+              else useUiStore.getState().openInEditor(path, line);
+            }}
             title={t("turnReview.open")}
             aria-label={t("turnReview.open")}
             className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-text)] group-hover:opacity-100"
@@ -332,6 +368,14 @@ function TurnFileRow({
           <span className="min-w-0 flex-1 break-words">{t("turnReview.readFailed", { error })}</span>
           <button type="button" onClick={onRetry} disabled={busy} className="flex shrink-0 items-center gap-1 text-[var(--cf-accent)]">
             <RotateCcw size={11} />{t("turnReview.retry")}
+          </button>
+        </div>
+      )}
+      {hunkError && (
+        <div role="alert" className="mb-1 ml-4 flex items-start gap-2 px-1 text-[11px] text-[var(--cf-danger)]">
+          <span className="min-w-0 flex-1 break-words">{hunkError}</span>
+          <button type="button" onClick={onRetry} disabled={busy} className="flex shrink-0 items-center gap-1 text-[var(--cf-accent)]">
+            <RotateCcw size={11} />{t("turnReview.refresh")}
           </button>
         </div>
       )}

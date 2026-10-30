@@ -1,4 +1,5 @@
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { densityMark } from "./recipes";
 
 /**
  * The one button recipe.
@@ -48,7 +49,7 @@ export function buttonClass({
   size = "md",
   className = "",
 }: { variant?: ButtonVariant; size?: ButtonSize; className?: string } = {}): string {
-  return `${BASE} ${SIZES[size]} ${VARIANTS[variant]} ${className}`;
+  return `${BASE} ${SIZES[size]} ${densityMark(`cf-d-btn-${size}`, className)} ${VARIANTS[variant]} ${className}`;
 }
 
 export type IconButtonSize = "xs" | "sm" | "md";
@@ -71,7 +72,7 @@ export function iconButtonClass({
 }: { size?: IconButtonSize; active?: boolean; className?: string } = {}): string {
   return `cf-press inline-flex shrink-0 items-center justify-center rounded-md transition-colors duration-100 disabled:pointer-events-none disabled:opacity-40 ${
     ICON_SIZES[size]
-  } ${
+  } ${size === "xs" ? "" : densityMark(`cf-d-ibtn-${size}`, className, "hw")} ${
     active
       ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
       : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"

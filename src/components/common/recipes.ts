@@ -20,6 +20,19 @@
  */
 
 /** A small status or label chip. 20px tall, 11px text — never below the 10.5px floor. */
+/**
+ * Density marker: `mark` when the caller has not set its own height, otherwise nothing.
+ *
+ * The compact rules in `index.css` (`[data-density="compact"] .cf-d-*`) override the recipe's height
+ * with a smaller one. A marker on a call site that already overrides the height (`h-auto` on a
+ * textarea, `h-[22px]` on a tight button) would beat that choice, so those get none. The recipe's own
+ * utility classes are never touched, which is what keeps the comfortable mode byte-identical.
+ */
+export function densityMark(mark: string, className: string, axis: "h" | "hw" = "h"): string {
+  const own = axis === "hw" ? /(^|\s)[hw]-/ : /(^|\s)h-/;
+  return own.test(className) ? "" : mark;
+}
+
 export type ChipTone = "neutral" | "accent" | "ok" | "warn" | "bad" | "info";
 
 const CHIP_TONES: Record<ChipTone, string> = {
@@ -43,7 +56,7 @@ export function chipClass(tone: ChipTone = "neutral", className = ""): string {
 export function fieldClass({ size = "md", className = "" }: { size?: "sm" | "md"; className?: string } = {}): string {
   return `${
     size === "sm" ? "h-[26px] text-[12px]" : "h-[30px] text-[13px]"
-  } min-w-0 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)] focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)] disabled:opacity-50 ${className}`;
+  } ${densityMark(size === "sm" ? "cf-d-fld-sm" : "cf-d-fld-md", className)} min-w-0 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 text-[var(--cf-text)] outline-none transition-[border-color,box-shadow] duration-100 placeholder:text-[var(--cf-text-faint)] focus:border-[var(--cf-accent)] focus:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)] disabled:opacity-50 ${className}`;
 }
 
 /**
@@ -61,7 +74,7 @@ export function fieldClass({ size = "md", className = "" }: { size?: "sm" | "md"
  * covers (`-mb-px` on the tab makes that work without a second border).
  */
 export const docStripClass =
-  "flex h-9 shrink-0 items-stretch overflow-x-auto border-b border-[var(--cf-border)] bg-[var(--cf-sunken)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden";
+  "cf-d-strip flex h-9 shrink-0 items-stretch overflow-x-auto border-b border-[var(--cf-border)] bg-[var(--cf-sunken)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden";
 
 export function docTabClass(active: boolean, className = ""): string {
   return `group/doctab relative -mb-px flex min-w-0 max-w-[220px] shrink-0 items-center gap-1.5 border-r border-[var(--cf-border)] pl-3 pr-1.5 text-[13px] transition-colors duration-100 ${
@@ -76,7 +89,7 @@ export function docTabClass(active: boolean, className = ""): string {
  * with a 2px accent rule (`ActiveUnderline`, so it slides between tabs) sitting on the hairline.
  */
 export const underlineStripClass =
-  "flex h-9 shrink-0 items-stretch gap-4 overflow-x-auto border-b border-[var(--cf-border)] px-3.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden";
+  "cf-d-strip flex h-9 shrink-0 items-stretch gap-4 overflow-x-auto border-b border-[var(--cf-border)] px-3.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden";
 
 export function underlineTabClass(active: boolean, className = ""): string {
   return `relative inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[13px] font-medium transition-colors duration-100 ${
@@ -107,7 +120,16 @@ export function segItemClass(
 ): string {
   return `relative inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-md font-medium transition-colors duration-100 ${
     size === "sm" ? "h-[22px] px-2 text-[11px]" : "h-6 px-2.5 text-[12px]"
-  } ${full ? "min-w-0 flex-auto" : ""} ${active ? "text-[var(--cf-text)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"} ${className}`;
+  } ${densityMark(size === "sm" ? "cf-d-seg-sm" : "cf-d-seg-md", className)} ${full ? "min-w-0 flex-auto" : ""} ${active ? "text-[var(--cf-text)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"} ${className}`;
+}
+
+/** The compact marker for a row by the height its call site gave it; rows sized by their content
+ *  (`min-h-*`, padding only) have none and keep their height in both densities. */
+function rowMark(className: string): string {
+  if (/(^|\s)h-7(\s|$)/.test(className)) return "cf-d-row-28";
+  if (/(^|\s)h-\[30px\](\s|$)/.test(className)) return "cf-d-row-30";
+  if (/(^|\s)h-8(\s|$)/.test(className)) return "cf-d-row-32";
+  return "";
 }
 
 /**
@@ -115,7 +137,7 @@ export function segItemClass(
  * rows take the accent tint; hover is the neutral tint.
  */
 export function rowClass(selected: boolean, className = ""): string {
-  return `relative flex w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-100 ${
+  return `${rowMark(className)} relative flex w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-[13px] transition-colors duration-100 ${
     selected ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]" : "text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
   } ${className}`;
 }
@@ -134,11 +156,11 @@ export const explorerClass =
 export const inspectorClass =
   "flex min-h-0 shrink-0 flex-col border-l border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_55%,var(--cf-surface))]";
 /** An explorer's head row: its title (14px semibold) and a few icon buttons. */
-export const explorerHeadClass = "flex h-11 shrink-0 items-center gap-1 pl-3.5 pr-2";
+export const explorerHeadClass = "cf-d-bar flex h-11 shrink-0 items-center gap-1 pl-3.5 pr-2";
 export const explorerTitleClass = "flex min-w-0 items-center gap-2 text-[14px] font-semibold text-[var(--cf-text)]";
 /** A surface's toolbar: 44px, a hairline under it. */
 export const toolbarClass =
-  "flex h-11 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] pl-4 pr-3 min-w-0";
+  "cf-d-bar flex h-11 shrink-0 items-center gap-2 border-b border-[var(--cf-border)] pl-4 pr-3 min-w-0";
 
 /** A popover or menu panel that is not the shared `ContextMenu`. */
 export const popoverClass =
@@ -146,7 +168,7 @@ export const popoverClass =
 
 /** A row inside such a popover. */
 export function menuItemClass(active = false, className = ""): string {
-  return `flex h-[30px] w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] text-[var(--cf-text)] transition-colors duration-100 disabled:pointer-events-none disabled:opacity-45 ${
+  return `${densityMark("cf-d-menu", className)} flex h-[30px] w-full items-center gap-2.5 rounded-md px-2.5 text-left text-[13px] text-[var(--cf-text)] transition-colors duration-100 disabled:pointer-events-none disabled:opacity-45 ${
     active ? "bg-[var(--cf-hover)]" : "hover:bg-[var(--cf-hover)]"
   } ${className}`;
 }

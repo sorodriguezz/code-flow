@@ -1,5 +1,6 @@
-import { useMemo } from "react";
-import { X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Check, Copy, X } from "lucide-react";
+import { copyErrorDetail } from "../../lib/errorDetail";
 import { useToastStore, type Toast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -107,6 +108,38 @@ export function groupToasts(toasts: readonly Pick<Toast, "id" | "message" | "typ
 
 const durationOf = (group: ToastGroup) => group.lifetimeMs ?? (group.type === "error" ? DURATION_ERROR_MS : DURATION_MS);
 
+/**
+ * «Copiar detalle» on an error card: classifies and copies on click only. A separate button from the
+ * card's own action (stopPropagation), so it can never trigger an undo-style `toast.action`.
+ */
+function CopyDetailButton({ message }: { message: string }) {
+  const t = useT();
+  const [done, setDone] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const label = done ? t("common.copied") : t("toast.copyDetail");
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        void copyErrorDetail(message)
+          .then(() => {
+            setDone(true);
+            clearTimeout(timer.current);
+            timer.current = setTimeout(() => setDone(false), 1500);
+          })
+          .catch(() => {});
+      }}
+      aria-label={label}
+      title={label}
+      className="cf-morph-close"
+    >
+      {done ? <Check size={12} strokeWidth={2.5} /> : <Copy size={12} strokeWidth={2.5} />}
+    </button>
+  );
+}
+
 function ToastCard({
   group,
   leaving,
@@ -159,15 +192,18 @@ function ToastCard({
       }
       activateLabel={group.action?.label}
       trailing={
-        <button
-          type="button"
-          onClick={onDismiss}
-          aria-label={t("common.close")}
-          title={t("common.close")}
-          className="cf-morph-close"
-        >
-          <X size={12} strokeWidth={2.5} />
-        </button>
+        <>
+          {group.type === "error" && <CopyDetailButton message={group.message} />}
+          <button
+            type="button"
+            onClick={onDismiss}
+            aria-label={t("common.close")}
+            title={t("common.close")}
+            className="cf-morph-close"
+          >
+            <X size={12} strokeWidth={2.5} />
+          </button>
+        </>
       }
     />
   );

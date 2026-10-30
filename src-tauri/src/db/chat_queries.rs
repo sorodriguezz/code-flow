@@ -34,6 +34,7 @@
 //! that CLI can resume from it, and what happens when it cannot are all `commands::chat_cmd`'s.
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::models::{ActivityLogEntry, ChatConversation, ChatGroup, ChatMessageRow, ChatSearchHit, ContextReset, Continuation};
@@ -718,6 +719,51 @@ pub fn set_turn_checkpoints(conn: &Connection, message_id: &str, conversation_id
     Ok(())
 }
 
+/// What a workspace chat's turn carried besides its text, filed on the assistant message's row
+/// (`chat_messages.notes`, see `migrations::add_notes_to_chat_messages`). Empty parts are omitted
+/// from the JSON; a turn with nothing to note files nothing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TurnNotes {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<crate::context::ContextSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::ai::AiUsage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unprotected_dirs: Vec<String>,
+}
+
+impl TurnNotes {
+    pub fn is_empty(&self) -> bool {
+        self.context.is_empty() && self.usage.is_none() && self.unprotected_dirs.is_empty()
+    }
+}
+
+/// Files a turn's notes on its message. A no-op for empty notes, and for a message that was never
+/// written (the UPDATE matches nothing).
+pub fn set_message_notes(conn: &Connection, message_id: &str, notes: &TurnNotes) -> rusqlite::Result<()> {
+    if notes.is_empty() {
+        return Ok(());
+    }
+    let json = serde_json::to_string(notes).unwrap_or_default();
+    conn.execute("UPDATE chat_messages SET notes = ?2 WHERE id = ?1", params![message_id, json])?;
+    Ok(())
+}
+
+/// Every message of a conversation that has notes, by message id. A row whose JSON no longer parses
+/// is skipped rather than failing the whole transcript.
+pub fn message_notes(conn: &Connection, conversation_id: &str) -> rusqlite::Result<std::collections::HashMap<String, TurnNotes>> {
+    let mut stmt = conn.prepare("SELECT id, notes FROM chat_messages WHERE conversation_id = ?1 AND notes IS NOT NULL")?;
+    let rows = stmt.query_map(params![conversation_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    let mut out = std::collections::HashMap::new();
+    for row in rows {
+        let (id, json) = row?;
+        if let Ok(notes) = serde_json::from_str::<TurnNotes>(&json) {
+            out.insert(id, notes);
+        }
+    }
+    Ok(out)
+}
+
 /// Every turn of a conversation that changed something, as `(message id, checkpoints JSON)`.
 pub fn turn_checkpoints(conn: &Connection, conversation_id: &str) -> rusqlite::Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare("SELECT message_id, checkpoints FROM chat_turn_checkpoints WHERE conversation_id = ?1")?;
@@ -842,6 +888,81 @@ pub fn append_message(conn: &Connection, msg: &ChatMessageRow) -> rusqlite::Resu
         params![msg.conversation_id, at],
     )?;
     Ok(())
+}
+
+/// The turn a stored message belongs to, `None` when there is no such message in that conversation.
+pub fn message_turn(conn: &Connection, conversation_id: &str, message_id: &str) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT turn FROM chat_messages WHERE id = ?1 AND conversation_id = ?2",
+        params![message_id, conversation_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+/// «Editar y reenviar»: drops every message from `turn` on — the edited question, its answer and all
+/// that followed — together with what hung off them, and leaves the conversation in the state where
+/// the next question replays the survivors instead of resuming an engine session that still holds
+/// the removed turns. Returns how many messages were removed.
+///
+/// One transaction: a half-truncated thread (rows gone, session still pointing at them) would answer
+/// from memory of turns the transcript no longer shows.
+///
+/// - `chat_turn_checkpoints` goes with its messages (also by cascade, but not relying on
+///   `foreign_keys` being on). The files those turns wrote are NOT reverted; only the per-turn
+///   review that offered to undo them is lost.
+/// - The engine session and the measured context are dropped, like `/clear`: the session's history
+///   contains the removed turns and no CLI can rewind it.
+/// - A compaction summary that covers a removed turn is dropped (it summarised them); one that ends
+///   before `turn` stays, and the replay keeps using it.
+/// - `context_resets`: a `/clear` waiting at `turn` still precedes the question that will be asked
+///   in its place, so it is kept and re-pointed at the turn that question will take; every other
+///   reset at or after `turn` described the removed turns and goes.
+pub fn truncate_from_turn(conn: &Connection, conversation_id: &str, turn: i64) -> rusqlite::Result<usize> {
+    let tx = conn.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM chat_turn_checkpoints WHERE message_id IN
+             (SELECT id FROM chat_messages WHERE conversation_id = ?1 AND turn >= ?2)",
+        params![conversation_id, turn],
+    )?;
+    let removed = tx.execute(
+        "DELETE FROM chat_messages WHERE conversation_id = ?1 AND turn >= ?2",
+        params![conversation_id, turn],
+    )?;
+    let next = next_turn(&tx, conversation_id)?;
+    let (resets_json, through): (String, Option<i64>) = tx.query_row(
+        "SELECT context_resets, compacted_through_turn FROM chat_conversations WHERE id = ?1",
+        params![conversation_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let mut resets: Vec<crate::db::models::ContextReset> = serde_json::from_str(&resets_json).unwrap_or_default();
+    let mut waiting_clear = false;
+    resets.retain(|reset| {
+        if reset.turn < turn {
+            return true;
+        }
+        waiting_clear |= reset.turn == turn && reset.reason == "clear";
+        false
+    });
+    if waiting_clear {
+        resets.push(crate::db::models::ContextReset { turn: next, reason: "clear".to_string(), provider: None, account_id: None });
+    }
+    let compaction_stale = through.is_some_and(|through| through >= turn);
+    tx.execute(
+        "UPDATE chat_conversations SET engine_session_id = NULL, context_tokens = NULL, context_resets = ?2,
+             compacted_summary = CASE WHEN ?3 THEN '' ELSE compacted_summary END,
+             compacted_through_turn = CASE WHEN ?3 THEN NULL ELSE compacted_through_turn END,
+             updated_at = ?4
+         WHERE id = ?1",
+        params![
+            conversation_id,
+            if resets.is_empty() { String::new() } else { serde_json::to_string(&resets).unwrap_or_default() },
+            compaction_stale,
+            now()
+        ],
+    )?;
+    tx.commit()?;
+    Ok(removed)
 }
 
 /// The number the next exchange writes its two messages under.

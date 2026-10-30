@@ -8,6 +8,7 @@ import { useChatStore } from "../state/chatStore";
 import { translate } from "../state/languageStore";
 import { useRepoStore } from "../state/repoStore";
 import { useToastStore } from "../state/toastStore";
+import { useWorkspaceChatStore } from "../state/workspaceChatStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
 import { CANCELLED_MARKER } from "../state/aiRunStore";
 import {
@@ -160,6 +161,17 @@ export function openWorkspaceChat(
   });
 }
 
+/** The workspace a workspace chat belongs to: its session if open, else the list that has its row. */
+export function workspaceOfWsChat(conversationId: string): string | null {
+  const { byConversation, listByWorkspace } = useWorkspaceChatStore.getState();
+  const open = byConversation[conversationId]?.workspaceId;
+  if (open) return open;
+  for (const [workspaceId, rows] of Object.entries(listByWorkspace)) {
+    if (rows.some((row) => row.id === conversationId)) return workspaceId;
+  }
+  return null;
+}
+
 /** One row of the Inbox's history. */
 export async function openActivityEntry(entry: ActivityEntry): Promise<boolean> {
   if (entry.type === "chat") {
@@ -167,7 +179,9 @@ export async function openActivityEntry(entry: ActivityEntry): Promise<boolean> 
     // in the panel's workspace tab, which is a different store and a different tab kind from a
     // repository's chat.
     if (entry.conv.project_id === "") {
-      const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
+      // The workspace the chat belongs to, not the one on screen: in a satellite window the two
+      // differ. The row carries no workspace, so the store that listed it is asked.
+      const workspaceId = workspaceOfWsChat(entry.conv.session_id) ?? useWorkspaceStore.getState().activeWorkspaceId;
       if (!workspaceId) return false;
       useAiPanelStore.getState().open({ kind: "wsChat", workspaceId, conversationId: entry.conv.session_id });
       return true;

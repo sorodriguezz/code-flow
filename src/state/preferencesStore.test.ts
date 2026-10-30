@@ -36,3 +36,49 @@ describe("reviewer visibility", () => {
     expect(usePreferencesStore.getState().reviewerEnabled).toBe(true);
   });
 });
+
+describe("interface density", () => {
+  it("is comfortable before settings load and when nothing is saved", async () => {
+    expect(usePreferencesStore.getInitialState().density).toBe("comfortable");
+    usePreferencesStore.setState({ density: "compact" });
+    await usePreferencesStore.getState().init();
+    expect(usePreferencesStore.getState().density).toBe("comfortable");
+  });
+
+  it("round-trips a choice through the settings row", async () => {
+    await usePreferencesStore.getState().setDensity("compact");
+    expect(settings.ui_density).toBe("compact");
+    usePreferencesStore.setState({ density: "comfortable" });
+    await usePreferencesStore.getState().init();
+    expect(usePreferencesStore.getState().density).toBe("compact");
+  });
+
+  it("reads an unknown stored value as comfortable", async () => {
+    settings.ui_density = "ultra";
+    await usePreferencesStore.getState().init();
+    expect(usePreferencesStore.getState().density).toBe("comfortable");
+  });
+});
+
+describe("density on the root element", () => {
+  const fakeRoot = () => {
+    const attrs = new Map<string, string>();
+    return {
+      attrs,
+      setAttribute: (k: string, v: string) => void attrs.set(k, v),
+      removeAttribute: (k: string) => void attrs.delete(k),
+    };
+  };
+
+  it("stamps data-density only for compact", async () => {
+    const { applyDensity, densityAttribute, normalizeDensity } = await import("./preferencesStore");
+    const root = fakeRoot();
+    applyDensity("compact", root);
+    expect(root.attrs.get("data-density")).toBe("compact");
+    applyDensity("comfortable", root);
+    expect(root.attrs.has("data-density")).toBe(false);
+    expect(densityAttribute("comfortable")).toBeNull();
+    expect(normalizeDensity(undefined)).toBe("comfortable");
+    expect(normalizeDensity("compact")).toBe("compact");
+  });
+});

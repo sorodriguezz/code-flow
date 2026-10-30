@@ -1,21 +1,37 @@
-import { collectEditorContext, parseContextSources, type ContextSource } from "../lib/editorContext";
+import { parseTurnUsage } from "../lib/wsChatTurnNotes";
+import {
+  collectEditorContext,
+  parseContextSources,
+  type ContextSource,
+} from "../lib/editorContext";
 import { create } from "zustand";
 import { speakAnswer } from "../lib/speech/speakAnswer";
 import {
   chatContextResets,
   getChatConversation,
+  getSetting,
+  setSetting,
   isRepoBusy,
   notifyStateChange,
   resetChatContext,
   sendChatMessage,
+  truncateChatFrom,
   REPO_BUSY_MARKER,
 } from "../lib/tauri/commands";
 import { useChatHistoryStore } from "./activityStore";
-import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunLine } from "./aiRunStore";
+import { registerTabBusyProbe } from "./aiPanelStore";
+import {
+  isCancellation,
+  newRunId,
+  snapshotTrace,
+  useAiRunStore,
+  type AiRunLine,
+} from "./aiRunStore";
 import { translate } from "./languageStore";
 import { learnedKey } from "../lib/memoryToast";
 import { leavesContextAsIs } from "../lib/contextWindow";
 import { pushErrorToast, pushSuccessToast } from "./toastStore";
+import { confirmAction } from "./confirmStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { parseTrace, traceIdOf } from "../lib/turnTrace";
@@ -25,17 +41,21 @@ import {
   repoChatAttachBytes,
   repoChatAttachFile,
   repoChatRemoveAttachment,
+  repoChatListStagedAttachments,
+  chatFailedTurnChanges,
   type ChatAttachment,
   type SkillPick,
 } from "../lib/tauri/chatCommands";
-import type { ActivityLogEntry } from "../types/domain";
+import type { ActivityLogEntry, TurnUsage } from "../types/domain";
 import {
   chatQueueKey,
   dropChatQueue,
   enqueueChatMessage,
   holdChatQueue,
   queuedMessages,
+  queuedAttachmentIds,
   releaseChatQueue,
+  restoreChatQueue,
   shiftChatQueue,
   takeQueuedChatMessage,
   type QueuedChatMessage,
@@ -64,6 +84,23 @@ function restageFiles(conversationId: string, files: ChatAttachment[]) {
     const known = new Set(current.map((file) => file.id));
     return { attachments: { ...s.attachments, [conversationId]: [...files.filter((file) => !known.has(file.id)), ...current] } };
   });
+}
+
+/**
+ * Puts back the files a conversation had staged in the composer when the app last ran: the copies
+ * are on disk (`repo_chat_attach_*`), only the chips lived in memory. Merged by id and never over
+ * anything already staged this session.
+ *
+ */
+async function restoreStagedAttachments(conversationId: string): Promise<void> {
+  const listed = await repoChatListStagedAttachments(conversationId).catch(
+    () => null,
+  );
+  // The restored queue claims its own files first, so they are not also offered on the composer.
+  await restoreChatQueue(queueOf(conversationId), listed);
+  const carried = queuedAttachmentIds(queueOf(conversationId));
+  const files = (listed ?? []).filter((file) => !carried.has(file.id));
+  if (files.length > 0) restageFiles(conversationId, files);
 }
 
 /** The repository name the backend puts after its busy marker. */
@@ -116,6 +153,12 @@ export interface ChatMessage {
   /** On an answer: the files the turn changed and the checkpoint taken before it — the per-turn
    *  review under the bubble. Read back from the row, so a reopened conversation keeps it. */
   changes?: TurnChanges;
+  /** The `activity_log` row this message is stored as, once known — what ties a live bubble to the
+   *  row a reload (or `reconcile`) reads back, so the two are never both drawn. Assistant messages. */
+  rowId?: string;
+  /** On an answer: what the turn spent, as the engine reported it. Absent when it reported nothing —
+   *  which is not the same as free. Live only. */
+  usage?: TurnUsage;
   /** On an answer: what CodeFlow put in front of the engine — «Contexto usado». Read back from the
    *  row too. */
   context?: ContextSource[];
@@ -249,6 +292,12 @@ function liveTitle(message: string): string {
   return oneLine.length > LIVE_TITLE_MAX ? `${oneLine.slice(0, LIVE_TITLE_MAX)}…` : oneLine;
 }
 
+/** The prefix the backend files a stopped turn's row under — a stopped turn that changed files is
+ *  kept (as an error row) so its changes stay reviewable; the text itself is not an answer. */
+const CANCELLED_ROW = "RUN_CANCELLED::";
+const isCancelledRow = (e: ActivityLogEntry): boolean =>
+  e.is_error && e.answer.startsWith(CANCELLED_ROW);
+
 /** Rehydrates a stored trace — see `lib/turnTrace.ts`, where it lives now that every transcript
  * fetches traces one turn at a time. Re-exported for the callers that always imported it from here. */
 export { parseTrace };
@@ -290,24 +339,33 @@ export function turnsToMessages(entries: ActivityLogEntry[], cleared: readonly n
       !e.is_error && session !== null && last !== null && e.provider !== null && last.provider === e.provider && last.account !== account;
     if (e.provider) last = { provider: e.provider, account };
     session = e.engine_session_id ?? session;
-    const question: ChatMessage = { role: "user", content: e.question, createdAt: e.created_at };
-    if (broke && e.provider) question.accountBreak = { provider: e.provider, accountId: account };
+    const stopped = isCancelledRow(e);
+    const question: ChatMessage = {
+      role: "user",
+      content: e.question,
+      createdAt: e.created_at,
+    };
+    if (broke && e.provider)
+      question.accountBreak = { provider: e.provider, accountId: account };
     // Where a `/clear` started the engine over — kept on disk, so a reopened transcript draws it too.
     if (cleared.includes(index)) question.contextReset = true;
     return [
       question,
       {
         role: "assistant" as const,
-        content: e.answer,
+        content: stopped ? "" : e.answer,
+        rowId: e.id,
         responseTimeMs: e.response_time_ms ?? undefined,
         createdAt: e.created_at,
         provider: e.provider ?? undefined,
         model: e.model ?? undefined,
         engineVersion: e.engine_version ?? undefined,
-        isError: e.is_error,
+        isError: stopped ? undefined : e.is_error,
+        isCancelled: stopped ? true : undefined,
         trace: parseTrace(e.trace),
         traceId: traceIdOf(e.trace, e.id),
         changes: parseTurnChanges(e.checkpoint),
+        usage: parseTurnUsage(e.usage),
         context: (() => {
           const sources = parseContextSources(e.context);
           return sources.length > 0 ? sources : undefined;
@@ -315,6 +373,35 @@ export function turnsToMessages(entries: ActivityLogEntry[], cleared: readonly n
       },
     ];
   });
+}
+
+/** «Editar y reenviar»: the question being rewritten. `index` is its position in `messages` (a
+ *  question is always followed by its answer, stopped or failed ones included), `fromTurn` its
+ *  1-based turn number for the line above the box. */
+export interface EditingTurn {
+  index: number;
+  fromTurn: number;
+}
+
+/**
+ * What replacing the thread from the question at `index` removes, worked out from the transcript.
+ *
+ * - `kept`: everything before it.
+ * - `laterTurns`: the questions asked after it, whose answers go too — what the confirmation counts.
+ * - `cutRowId`: the stored row to cut from. The first `rowId` at or after the question: a stopped
+ *   turn is never written to disk, so its own bubble has none and the cut falls on the next stored
+ *   turn, which is the first row that must go. `null` when nothing from here on is stored.
+ */
+export function editPlan(
+  messages: readonly ChatMessage[],
+  index: number,
+): { kept: ChatMessage[]; laterTurns: number; cutRowId: string | null } {
+  const rest = messages.slice(index);
+  return {
+    kept: messages.slice(0, index),
+    laterTurns: rest.slice(1).filter((m) => m.role === "user").length,
+    cutRowId: rest.find((m) => m.rowId)?.rowId ?? null,
+  };
 }
 
 /** Stand-in for "this project has no conversation open" — a fresh, empty session the chat panel
@@ -344,6 +431,25 @@ let recentConversations: string[] = [];
 /** Conversations an assistant tab is showing — never collapsed, the panel would go blank under
  *  the user. Kept current by the panel (see `setPinned`). */
 let pinnedConversations = new Set<string>();
+
+/** Conversations with an edit being confirmed or cut right now: a second Enter must not open a second dialog. */
+const editsInFlight = new Set<string>();
+async function guardedEdit(
+  conversationId: string,
+  run: () => Promise<boolean>,
+): Promise<boolean> {
+  if (editsInFlight.has(conversationId)) return false;
+  editsInFlight.add(conversationId);
+  try {
+    return await run();
+  } finally {
+    editsInFlight.delete(conversationId);
+  }
+}
+
+/** Bumped when a conversation is cut short by an edit: a `reconcile` that began before the cut holds
+ *  rows that no longer exist and must not apply them. */
+const truncationEpoch = new Map<string, number>();
 
 /** Which conversation each in-flight turn belongs to, so a streamed fragment finds its bubble. */
 const runToConversation = new Map<string, string>();
@@ -443,6 +549,116 @@ function pruneConversations(): void {
   });
 }
 
+/**
+ * What a conversation's composer picked — engine (with its account), thinking level, plan mode —
+ * kept in `app_settings` so it survives a restart. Held only in memory these used to fall back to
+ * the routing's defaults on reopening: the account changed under the conversation, and since an
+ * engine session belongs to one account (`session_for_engine`), the next turn silently started a
+ * fresh one with none of the context. Same persistence shape as the panel's drafts: one blob,
+ * written after its read, capped, debounced.
+ */
+const PREFS_KEY = "ai_panel_conversation_prefs";
+const MAX_PREFS = 200;
+const PREFS_DEBOUNCE_MS = 400;
+interface ConversationPrefs {
+  engine?: ChatEngine;
+  effort?: string;
+  plan?: boolean;
+}
+let prefsLoad: Promise<void> | null = null;
+let prefsTimer: ReturnType<typeof setTimeout> | null = null;
+
+function parsePrefs(raw: string | null): Record<string, ConversationPrefs> {
+  const out: Record<string, ConversationPrefs> = {};
+  try {
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== "object") return out;
+    for (const [id, value] of Object.entries(
+      parsed as Record<string, unknown>,
+    )) {
+      if (!value || typeof value !== "object") continue;
+      const v = value as Record<string, unknown>;
+      const prefs: ConversationPrefs = {};
+      const engine = v.engine as Record<string, unknown> | undefined;
+      if (
+        engine &&
+        typeof engine.provider === "string" &&
+        typeof engine.model === "string"
+      ) {
+        prefs.engine = {
+          provider: engine.provider,
+          model: engine.model,
+          account: typeof engine.account === "string" ? engine.account : null,
+        };
+      }
+      if (typeof v.effort === "string" && v.effort) prefs.effort = v.effort;
+      if (v.plan === true) prefs.plan = true;
+      out[id] = prefs;
+    }
+  } catch {
+    // A corrupt blob is a lost preference, never a broken chat.
+  }
+  return out;
+}
+
+/** Merges the stored picks into the store, once. What was picked this session is newer and wins. */
+export function loadConversationPrefs(): Promise<void> {
+  if (!prefsLoad) {
+    prefsLoad = (async () => {
+      const stored = parsePrefs(await getSetting(PREFS_KEY).catch(() => null));
+      useChatStore.setState((s) => {
+        const engineByConversation = { ...s.engineByConversation };
+        const effortByConversation = { ...s.effortByConversation };
+        const planByConversation = { ...s.planByConversation };
+        for (const [id, prefs] of Object.entries(stored)) {
+          if (prefs.engine && !(id in engineByConversation))
+            engineByConversation[id] = prefs.engine;
+          if (prefs.effort && !(id in effortByConversation))
+            effortByConversation[id] = prefs.effort;
+          if (prefs.plan && !(id in planByConversation))
+            planByConversation[id] = true;
+        }
+        return {
+          engineByConversation,
+          effortByConversation,
+          planByConversation,
+        };
+      });
+    })();
+  }
+  return prefsLoad;
+}
+
+function persistPrefs(): void {
+  if (prefsTimer) clearTimeout(prefsTimer);
+  prefsTimer = setTimeout(() => {
+    prefsTimer = null;
+    void (async () => {
+      await loadConversationPrefs();
+      const s = useChatStore.getState();
+      const ids = new Set([
+        ...Object.keys(s.engineByConversation),
+        ...Object.keys(s.effortByConversation),
+        ...Object.keys(s.planByConversation),
+      ]);
+      const entries: [string, ConversationPrefs][] = [];
+      for (const id of ids) {
+        const prefs: ConversationPrefs = {};
+        if (s.engineByConversation[id])
+          prefs.engine = s.engineByConversation[id];
+        if (s.effortByConversation[id])
+          prefs.effort = s.effortByConversation[id];
+        if (s.planByConversation[id]) prefs.plan = true;
+        if (Object.keys(prefs).length > 0) entries.push([id, prefs]);
+      }
+      await setSetting(
+        PREFS_KEY,
+        JSON.stringify(Object.fromEntries(entries.slice(-MAX_PREFS))),
+      ).catch(() => {});
+    })();
+  }, PREFS_DEBOUNCE_MS);
+}
+
 interface ChatState {
   byConversation: Record<string, ChatSession>;
   /**
@@ -513,6 +729,24 @@ interface ChatState {
     message: string,
     opts?: { skill?: ChatSkillPick | null; command?: QueuedCommand },
   ) => void;
+  /** The question each conversation's box is rewriting, if any — see {@link EditingTurn}. */
+  editing: Record<string, EditingTurn | undefined>;
+  /** «Editar»: marks the question at `index` as the one the next send replaces. Refused while a turn runs. */
+  beginEdit: (conversationId: string, index: number) => void;
+  /** Esc / Cancelar: the box goes back to asking a new question. */
+  cancelEdit: (conversationId: string) => void;
+  /**
+   * The send of an edited question: confirms once when turns follow it, deletes the thread from that
+   * question on (disk, then memory), and asks `message` in its place. Resolves `false` when nothing
+   * was sent — the user declined, or the cut failed (said in a toast) — and the box keeps its text
+   * and the marker. Without a marker it is an ordinary `submit`. Queued messages stay queued behind.
+   */
+  submitEdit: (
+    projectId: string,
+    conversationId: string,
+    message: string,
+    opts?: { skill?: ChatSkillPick | null },
+  ) => Promise<boolean>;
   /** Sends the next queued message if the conversation is free and its queue is not held. */
   drainQueue: (conversationId: string) => void;
   /** Lets a held queue go again, starting with its oldest message. */
@@ -577,6 +811,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   effortByConversation: {},
   planByConversation: {},
   attachments: {},
+  editing: {},
 
   attachFilePath: async (conversationId, sourcePath) => {
     try {
@@ -756,7 +991,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               trace: trace.length > 0 ? trace : undefined,
               plan: plan || undefined,
               changes: parseTurnChanges(reply.checkpoint),
-              context: reply.context && reply.context.length > 0 ? reply.context : undefined,
+              usage: reply.usage ?? undefined,
+              context:
+                reply.context && reply.context.length > 0
+                  ? reply.context
+                  : undefined,
             },
           ],
           sessionId: reply.session_id,
@@ -880,6 +1119,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // must not be reconciled against the history list.
           persisted: session.persisted || !cancelled,
         }));
+        // What the stopped or failed turn left changed on disk: attached to the bubble just filed, so
+        // the review under it appears like a finished turn's, and keyed to the stored row so a
+        // reload does not draw it twice. Best effort — no changes (or no answer) is no review.
+        void chatFailedTurnChanges(conversationId)
+          .then((failed) => {
+            if (!failed) return;
+            const changes = parseTurnChanges(failed.checkpoint);
+            settle((session) => {
+              const at = session.messages.length - 1;
+              const last = session.messages[at];
+              if (
+                !last ||
+                last.role !== "assistant" ||
+                !(last.isCancelled || last.isError) ||
+                last.rowId
+              )
+                return session;
+              const messages = session.messages.slice();
+              messages[at] = { ...last, rowId: failed.message_id, changes };
+              return { ...session, messages, persisted: true };
+            });
+          })
+          .catch(() => {});
         // The failed turn was logged server-side — pick it up so it shows in the activity list.
         if (!cancelled) {
           void useChatHistoryStore.getState().load(projectId);
@@ -940,6 +1202,96 @@ export const useChatStore = create<ChatState>((set, get) => ({
     get().drainQueue(conversationId);
   },
 
+  beginEdit: (conversationId, index) => {
+    const session = get().byConversation[conversationId];
+    if (!session || session.sending || session.messages[index]?.role !== "user")
+      return;
+    const fromTurn =
+      session.messages.slice(0, index).filter((m) => m.role === "user").length +
+      1;
+    set((s) => ({
+      editing: { ...s.editing, [conversationId]: { index, fromTurn } },
+    }));
+  },
+
+  cancelEdit: (conversationId) => {
+    if (!get().editing[conversationId]) return;
+    set((s) => ({ editing: { ...s.editing, [conversationId]: undefined } }));
+  },
+
+  submitEdit: (projectId, conversationId, message, opts) =>
+    guardedEdit(conversationId, async () => {
+      const edit = get().editing[conversationId];
+      const session = get().byConversation[conversationId];
+      // No marker, or the question it named is gone (another window's change): an ordinary send.
+      if (!edit || !session || session.messages[edit.index]?.role !== "user") {
+        get().cancelEdit(conversationId);
+        get().submit(projectId, conversationId, message, opts);
+        return true;
+      }
+      // A turn started meanwhile (a queued message went out): nothing can be cut under it.
+      if (session.sending) {
+        pushErrorToast(translate("chat.editBusy"));
+        return false;
+      }
+      const plan = editPlan(session.messages, edit.index);
+      if (plan.laterTurns > 0) {
+        const ok = await confirmAction(
+          translate("chat.editReplaceConfirm", { count: plan.laterTurns }),
+          true,
+          translate("chat.editReplaceAction"),
+        );
+        if (!ok) return false;
+      }
+      const current = get().byConversation[conversationId];
+      if (
+        !current ||
+        current.sending ||
+        current.messages[edit.index]?.role !== "user"
+      )
+        return false;
+      // Disk first: if the cut is refused (a turn is running in another window) the transcript must
+      // keep what the store still holds.
+      const cutRowId = editPlan(current.messages, edit.index).cutRowId;
+      if (current.persisted && cutRowId) {
+        try {
+          await truncateChatFrom(projectId, conversationId, cutRowId);
+        } catch (e) {
+          pushErrorToast(String(e));
+          return false;
+        }
+      }
+      // Bumped before the state changes, so a `reconcile` that read the disk before the cut cannot
+      // add the removed rows back when it lands.
+      truncationEpoch.set(
+        conversationId,
+        (truncationEpoch.get(conversationId) ?? 0) + 1,
+      );
+      const resetsBefore = current.messages[edit.index].contextReset === true;
+      set((s) => {
+        const live = s.byConversation[conversationId];
+        if (!live) return s;
+        return {
+          editing: { ...s.editing, [conversationId]: undefined },
+          byConversation: {
+            ...s.byConversation,
+            [conversationId]: {
+              ...live,
+              messages: live.messages.slice(0, edit.index),
+              // The session holds the removed turns; with none, the backend replays the survivors.
+              sessionId: null,
+              contextTokens: null,
+              // A `/clear` that preceded the edited question still precedes its replacement.
+              resetPending: resetsBefore,
+              updatedAt: Date.now(),
+            },
+          },
+        };
+      });
+      get().send(projectId, conversationId, message, opts?.skill ?? null);
+      return true;
+    }),
+
   drainQueue: (conversationId) => {
     const session = get().byConversation[conversationId];
     if (!session || session.sending) return;
@@ -965,6 +1317,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   ensureLoaded: async (projectId, conversationId) => {
     touchConversation(conversationId);
+    void loadConversationPrefs();
+    void restoreStagedAttachments(conversationId);
     const cached = get().byConversation[conversationId];
     // The two cases where memory is the *only* copy, and pointing at it is the whole of the work.
     //
@@ -977,11 +1331,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    // Everything else is re-read, including conversations this store already holds — which used to
-    // be the early return above, unconditionally. That was wrong the moment a second device could
-    // add a turn: reopening the row showed the copy this window happened to have when it last
-    // looked, so even "close it and open it again" did not surface a turn sent from a phone. The
-    // read is one indexed query against a conversation the user just asked to see.
+    // A conversation this window already holds and has on disk is *merged*, never replaced. Reading it
+    // back wholesale (the code below) rebuilds every message from the stored rows, and a stored row
+    // knows nothing of what only memory has: stopped turns (the backend never writes them), the
+    // plan flag behind «Ejecutar el plan», the chips of a live question and the context meter. That
+    // is what reopening a tab used to wipe. `reconcile` is append-only — it still surfaces a turn
+    // sent from a phone, which is why this re-reads at all — and leaves the rest as it was.
+    if (cached) {
+      await get().reconcile(projectId, conversationId);
+      pruneConversations();
+      return;
+    }
+
+    // A conversation this store has never held is read whole.
     const [entries, resets] = await Promise.all([
       getChatConversation(projectId, conversationId).catch(() => null),
       chatContextResets(projectId, conversationId).catch(() => null),
@@ -1032,12 +1394,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
   reconcile: async (projectId, conversationId) => {
     const before = get().byConversation[conversationId];
     if (!before || before.sending) return;
+    const epoch = truncationEpoch.get(conversationId) ?? 0;
 
     const [entries, resets] = await Promise.all([
       getChatConversation(projectId, conversationId).catch(() => null),
       chatContextResets(projectId, conversationId).catch(() => null),
     ]);
-    if (!entries) return;
+    if (!entries || (truncationEpoch.get(conversationId) ?? 0) !== epoch)
+      return;
 
     set((s) => {
       const session = s.byConversation[conversationId];
@@ -1052,21 +1416,66 @@ export const useChatStore = create<ChatState>((set, get) => ({
           .filter((m) => m.role === "assistant" && m.createdAt !== undefined)
           .map((m) => m.createdAt),
       );
-      const added = entries.filter((e) => !known.has(e.created_at));
+      const knownRows = new Set(
+        session.messages.flatMap((m) => (m.rowId ? [m.rowId] : [])),
+      );
+      // A stopped or failed turn is filed locally the moment it ends, stamped with the clock here, and
+      // stored under the backend's: neither the stamp nor (until `chatFailedTurnChanges` answered) the
+      // id matches. Such a row adopts the oldest local bubble of its kind that has no row yet, instead
+      // of being drawn a second time.
+      const messages0 = session.messages.slice();
+      const adopted = new Set<string>();
+      for (const e of entries) {
+        if (known.has(e.created_at) || knownRows.has(e.id)) continue;
+        const stopped = isCancelledRow(e);
+        if (!stopped && !e.is_error) continue;
+        const at = messages0.findIndex(
+          (m) =>
+            m.role === "assistant" &&
+            !m.rowId &&
+            (stopped ? m.isCancelled : m.isError),
+        );
+        if (at < 0) continue;
+        messages0[at] = {
+          ...messages0[at],
+          rowId: e.id,
+          createdAt: e.created_at,
+          changes: messages0[at].changes ?? parseTurnChanges(e.checkpoint),
+        };
+        adopted.add(e.id);
+      }
+      const added = entries.filter(
+        (e) =>
+          !known.has(e.created_at) &&
+          !knownRows.has(e.id) &&
+          !adopted.has(e.id),
+      );
       if (added.length === 0) {
-        if (resetPending === session.resetPending) return s;
-        return { byConversation: { ...s.byConversation, [conversationId]: { ...session, resetPending } } };
+        if (resetPending === session.resetPending && adopted.size === 0)
+          return s;
+        return {
+          byConversation: {
+            ...s.byConversation,
+            [conversationId]: {
+              ...session,
+              resetPending,
+              messages: adopted.size > 0 ? messages0 : session.messages,
+            },
+          },
+        };
       }
       // Mapped over the whole conversation and then cut, not over the new rows alone: whether a
       // turn changed account depends on the one before it, which this window may already hold.
       const all = turnsToMessages(entries, resets?.turns);
-      const messages = entries.flatMap((e, i) => (known.has(e.created_at) ? [] : all.slice(i * 2, i * 2 + 2)));
+      const messages = entries.flatMap((e, i) =>
+        added.includes(e) ? all.slice(i * 2, i * 2 + 2) : [],
+      );
       return {
         byConversation: {
           ...s.byConversation,
           [conversationId]: {
             ...session,
-            messages: [...session.messages, ...messages],
+            messages: [...messages0, ...messages],
             // The engine session moved with the turn that was just added, and this window is the one
             // that would `--resume` next. Left at the old token, the desk's next message would ask
             // the CLI to continue from before the phone's turn — the two clients would fork the
@@ -1093,9 +1502,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const { [conversationId]: _session, ...byConversation } = s.byConversation;
       const { [conversationId]: _engine, ...engineByConversation } = s.engineByConversation;
       const { [conversationId]: _staged, ...attachments } = s.attachments;
-      const { [conversationId]: _effort, ...effortByConversation } = s.effortByConversation;
-      return { byConversation, engineByConversation, attachments, effortByConversation };
+      const { [conversationId]: _effort, ...effortByConversation } =
+        s.effortByConversation;
+      const { [conversationId]: _plan, ...planByConversation } =
+        s.planByConversation;
+      const { [conversationId]: _editing, ...editing } = s.editing;
+      return {
+        byConversation,
+        engineByConversation,
+        attachments,
+        effortByConversation,
+        planByConversation,
+        editing,
+      };
     });
+    persistPrefs();
   },
 
   clearContext: (conversationId) => {
@@ -1113,15 +1534,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setEffort: (conversationId, effort) => {
-    set((s) => ({ effortByConversation: { ...s.effortByConversation, [conversationId]: effort } }));
+    set((s) => ({
+      effortByConversation: {
+        ...s.effortByConversation,
+        [conversationId]: effort,
+      },
+    }));
+    persistPrefs();
   },
 
   setPlan: (conversationId, on) => {
-    set((s) => ({ planByConversation: { ...s.planByConversation, [conversationId]: on } }));
+    set((s) => ({
+      planByConversation: { ...s.planByConversation, [conversationId]: on },
+    }));
+    persistPrefs();
   },
 
   setEngine: (conversationId, engine) => {
-    set((s) => ({ engineByConversation: { ...s.engineByConversation, [conversationId]: engine } }));
+    set((s) => ({
+      engineByConversation: {
+        ...s.engineByConversation,
+        [conversationId]: engine,
+      },
+    }));
+    persistPrefs();
   },
 
   takeRestored: (conversationId) => {
@@ -1151,5 +1587,15 @@ export function liveSessionsOf(
   const sessions = Object.values(byConversation).filter((s) => s.projectId === projectId);
   return sessions.length === 0 ? EMPTY_LIVE : sessions.sort((a, b) => b.updatedAt - a.updatedAt);
 }
+
+// A tab running a turn or holding queued messages is never the one the tab cap closes: its state
+// exists only in memory, and the strip would drop it without a word.
+registerTabBusyProbe((tab) => {
+  if (tab.kind !== "chat") return false;
+  return (
+    useChatStore.getState().byConversation[tab.conversationId]?.sending ===
+      true || queuedMessages(queueOf(tab.conversationId)).length > 0
+  );
+});
 
 export { EMPTY_CHAT, EMPTY_LIVE };

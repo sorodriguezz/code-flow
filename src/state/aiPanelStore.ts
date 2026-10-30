@@ -298,12 +298,25 @@ function loadDrafts(): Promise<void> {
   return draftsLoad;
 }
 
+/**
+ * Whether a tab has work in memory that closing it would lose or strand: a turn in flight, or
+ * messages waiting to be sent. Registered by the stores that own that state (`chatStore`) — this
+ * store cannot import them without a cycle, and knows nothing of what a turn is.
+ */
+type TabBusyProbe = (tab: PanelTab) => boolean;
+const busyProbes: TabBusyProbe[] = [];
+export function registerTabBusyProbe(probe: TabBusyProbe): void {
+  busyProbes.push(probe);
+}
+
 /** Drops the least recently used idle tab while there are too many. The tab being opened, the one
- *  on screen and anything with unsent text are never candidates. */
+ *  on screen, anything with unsent text and anything running or holding a queue are never candidates. */
 function trim(tabs: PanelTab[], keep: string, active: string, s: AiPanelState): PanelTab[] {
   let next = tabs;
   while (next.length > MAX_TABS) {
-    const candidates = next.filter((tab) => tab.key !== keep && tab.key !== active && !s.drafts[tab.key]);
+    const candidates = next.filter(
+      (tab) => tab.key !== keep && tab.key !== active && !s.drafts[tab.key] && !busyProbes.some((busy) => busy(tab)),
+    );
     if (candidates.length === 0) break;
     const victim = candidates.reduce((oldest, tab) =>
       (s.lastUsed[tab.key] ?? 0) < (s.lastUsed[oldest.key] ?? 0) ? tab : oldest,

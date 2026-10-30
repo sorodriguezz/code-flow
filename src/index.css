@@ -5267,3 +5267,63 @@ svg.\-rotate-180 {
 .cf-markdown-preview code.cf-code-ref:hover {
   color: var(--cf-accent);
 }
+
+/* Density — Apariencia › Modo y color › Densidad.
+
+   `data-density="compact"` is stamped on the root by `preferencesStore` (and only then: the default
+   carries no attribute, so none of this matches and the comfortable look is untouched). The shared
+   recipes in `components/common/recipes.ts` / `Button.tsx` add a `cf-d-*` marker next to their own
+   utilities — never instead of them — and only when the call site did not set a height itself.
+   Unlayered on purpose: it must beat the Tailwind utilities that carry the comfortable height.
+
+   One token per size, so a tighter or looser compact is a one-line change here. */
+:root[data-density="compact"] {
+  --cf-d-btn-sm: 1.25rem; /* 24 → 20 */
+  --cf-d-btn-md: 1.5rem; /* 28 → 24 */
+  --cf-d-btn-lg: 1.75rem; /* 32 → 28 */
+  --cf-d-ibtn-sm: 1.375rem; /* 26 → 22 */
+  --cf-d-ibtn-md: 1.5rem; /* 28 → 24 */
+  --cf-d-fld-sm: 1.375rem; /* 26 → 22 */
+  --cf-d-fld-md: 1.625rem; /* 30 → 26 */
+  --cf-d-seg-sm: 1.125rem; /* 22 → 18 */
+  --cf-d-seg-md: 1.25rem; /* 24 → 20 */
+  --cf-d-menu: 1.625rem; /* 30 → 26 */
+  --cf-d-row-28: 1.5rem; /* 28 → 24 */
+  --cf-d-row-30: 1.625rem; /* 30 → 26 */
+  --cf-d-row-32: 1.75rem; /* 32 → 28 */
+  --cf-d-bar: 2.5rem; /* 44 → 40 */
+  --cf-d-strip: 2rem; /* 36 → 32 */
+}
+:root[data-density="compact"] .cf-d-btn-sm { height: var(--cf-d-btn-sm); }
+:root[data-density="compact"] .cf-d-btn-md { height: var(--cf-d-btn-md); }
+:root[data-density="compact"] .cf-d-btn-lg { height: var(--cf-d-btn-lg); }
+:root[data-density="compact"] .cf-d-ibtn-sm { height: var(--cf-d-ibtn-sm); width: var(--cf-d-ibtn-sm); }
+:root[data-density="compact"] .cf-d-ibtn-md { height: var(--cf-d-ibtn-md); width: var(--cf-d-ibtn-md); }
+:root[data-density="compact"] .cf-d-fld-sm { height: var(--cf-d-fld-sm); }
+:root[data-density="compact"] .cf-d-fld-md { height: var(--cf-d-fld-md); }
+:root[data-density="compact"] .cf-d-seg-sm { height: var(--cf-d-seg-sm); }
+:root[data-density="compact"] .cf-d-seg-md { height: var(--cf-d-seg-md); }
+:root[data-density="compact"] .cf-d-menu { height: var(--cf-d-menu); }
+:root[data-density="compact"] .cf-d-row-28 { height: var(--cf-d-row-28); }
+:root[data-density="compact"] .cf-d-row-30 { height: var(--cf-d-row-30); }
+:root[data-density="compact"] .cf-d-row-32 { height: var(--cf-d-row-32); }
+:root[data-density="compact"] .cf-d-bar { height: var(--cf-d-bar); }
+:root[data-density="compact"] .cf-d-strip { height: var(--cf-d-strip); }
+
+/* The rail and the sidebars. The rail keeps its 48px column (the window frame, the status bar's
+   `cf-bar-rail` and the tour anchors are laid out on it): only the squares inside it shrink, and the
+   hold-to-reorder gesture reads every size from the DOM, so it follows. */
+:root[data-density="compact"] {
+  --cf-d-rail-slot: 1.875rem; /* 36 → 30 */
+  --cf-d-rail-gap: 0.125rem; /* 4 → 2 */
+  --cf-d-rail-ghost: 1.625rem; /* 32 → 26 */
+  --cf-d-rail-mark: -0.5625rem; /* the active bar sits on the column's edge: 6 → 9px out of the button */
+  --cf-d-pad-row: 0.25rem; /* a project row's py-1.5 (6px) → 4px */
+  --cf-d-pad-tight: 0.0625rem; /* a branch row's py-0.5 (2px) → 1px */
+}
+:root[data-density="compact"] .cf-d-rail-slot { height: var(--cf-d-rail-slot); width: var(--cf-d-rail-slot); }
+:root[data-density="compact"] .cf-d-rail-gap { gap: var(--cf-d-rail-gap); }
+:root[data-density="compact"] .cf-d-rail-ghost { width: var(--cf-d-rail-ghost); }
+:root[data-density="compact"] .cf-d-rail-mark { left: var(--cf-d-rail-mark); }
+:root[data-density="compact"] .cf-d-pad-row { padding-block: var(--cf-d-pad-row); }
+:root[data-density="compact"] .cf-d-pad-tight { padding-block: var(--cf-d-pad-tight); }

@@ -42,7 +42,42 @@ const CHAT_AUTO_COMPACT_KEY = "chat_auto_compact";
 const WINDOW_LIMIT_KEY = "satellite_window_limit";
 /** Whether the Revisor tab is shown. On unless explicitly hidden in Settings. */
 const REVIEWER_KEY = "reviewer_enabled";
+/** How tight the interface is drawn — Apariencia › Modo y color › Densidad. */
+const DENSITY_KEY = "ui_density";
 export const MIN_AUTO_FETCH_SECONDS = 10;
+
+/**
+ * `comfortable` is today's look and carries no attribute at all; `compact` is stamped on the root as
+ * `data-density="compact"`, which the `cf-d-*` rules in `index.css` read (shared buttons, fields, list
+ * rows, tab strips and toolbars drop a few pixels). Leaving the attribute off for the default is what
+ * makes that mode pixel-identical: nothing in the stylesheet matches it.
+ */
+export type Density = "comfortable" | "compact";
+export const DENSITIES: readonly Density[] = ["comfortable", "compact"];
+
+/** A stored value as a density; anything unset or unknown is the comfortable default. */
+export function normalizeDensity(raw: string | undefined | null): Density {
+  return raw === "compact" ? "compact" : "comfortable";
+}
+
+/** The `data-density` value for a density, `null` meaning "no attribute". Pure, for the tests. */
+export function densityAttribute(density: Density): string | null {
+  return density === "compact" ? "compact" : null;
+}
+
+/** Stamps (or clears) `data-density` on the root element. */
+export function applyDensity(
+  density: Density,
+  root: { setAttribute(name: string, value: string): void; removeAttribute(name: string): void } | null = typeof document !==
+  "undefined"
+    ? document.documentElement
+    : null,
+): void {
+  if (!root) return;
+  const attr = densityAttribute(density);
+  if (attr === null) root.removeAttribute("data-density");
+  else root.setAttribute("data-density", attr);
+}
 
 /**
  * How many satellite windows are allowed, from a stored string.
@@ -158,6 +193,8 @@ interface PreferencesState {
    * On by default; Settings › Revisor can hide it and manages the optional SonarQube download.
    */
   reviewerEnabled: boolean;
+  /** Interface density — `comfortable` (today's look) or `compact`. Applied as `data-density` on the root. */
+  density: Density;
   /**
    * Branch-name patterns whose branches come locked in every repository, without anyone having
    * clicked a padlock on them — `main`, `master`, `develop` and `release/*` out of the box.
@@ -194,6 +231,7 @@ interface PreferencesState {
   setChatAutoCompactEnabled: (enabled: boolean) => Promise<void>;
   setSatelliteLimit: (limit: number) => Promise<void>;
   setReviewerEnabled: (enabled: boolean) => Promise<void>;
+  setDensity: (density: Density) => Promise<void>;
   /** Saves the list and adopts the normalised version the backend stored. */
   setLockedBranchRules: (rules: string[]) => Promise<void>;
   /** Puts the shipped defaults back, asking the backend what they are so they're named once. */
@@ -232,6 +270,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   blameAnnotationEnabled: false,
   satelliteLimit: DEFAULT_SATELLITE_LIMIT,
   reviewerEnabled: true,
+  density: "comfortable",
   lockedBranchRules: null,
 
   init: async () => {
@@ -258,6 +297,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         CHAT_FILE_GENERATION_KEY,
         CHAT_AUTO_COMPACT_KEY,
         REVIEWER_KEY,
+        DENSITY_KEY,
       ]).catch(
         () => ({}) as Record<string, string>,
       ),
@@ -308,8 +348,10 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         : stored[CHAT_AUTO_COMPACT_KEY] === "true",
       // Show the tab by default, preserving an explicit choice to hide it.
       reviewerEnabled: stored[REVIEWER_KEY] !== "false",
+      density: normalizeDensity(stored[DENSITY_KEY]),
       lockedBranchRules: rules,
     });
+    applyDensity(get().density);
     // The store that enforces it keeps its own copy, so the rail can refuse without reaching across
     // stores on every press. One writer, mirrored — not two sources.
     useWindowStore.getState().setLimit(get().satelliteLimit);
@@ -405,6 +447,12 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     await setSetting(REVIEWER_KEY, String(enabled));
   },
 
+  setDensity: async (density) => {
+    set({ density });
+    applyDensity(density);
+    await setSetting(DENSITY_KEY, density);
+  },
+
   setSatelliteLimit: async (limit) => {
     const value = clampWindows(String(limit));
     set({ satelliteLimit: value });
@@ -455,6 +503,7 @@ watchSettings(
     CHAT_FILE_GENERATION_KEY,
     CHAT_AUTO_COMPACT_KEY,
     REVIEWER_KEY,
+    DENSITY_KEY,
   ],
   () => usePreferencesStore.getState().init(),
 );

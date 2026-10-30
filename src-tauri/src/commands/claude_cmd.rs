@@ -56,6 +56,9 @@ pub struct ChatReply {
     /// What that "recuerda que…" did: a new memory, an existing proposal approved, an existing one
     /// updated, or one already known — so the toast says which instead of always "learned".
     learned_outcome: Option<crate::ai_memory::Remembered>,
+    /// What this turn spent, as the engine itself reported it — `None` when it reported nothing
+    /// (which is not "free"). One turn's figure; also kept for agent tasks (`add_agent_task_usage`).
+    usage: Option<ai::AiUsage>,
 }
 
 /// How much of a turn's message the approved memories may take.
@@ -1601,7 +1604,16 @@ pub async fn send_chat_message(
     // files — it gets the same undo protection as an explicit "fix with AI". A story's analysis
     // pass keeps it too: on an engine that cannot enforce read-only, the checkpoint is what is left
     // if the model writes anyway.
-    let checkpoint = checkpoint_before(&project.local_path, "chat");
+    //
+    // Taken off the async thread and without pruning: most turns change nothing, and a checkpoint
+    // that is removed again must not have evicted an older one — the cap is applied by
+    // `settle_turn` to a checkpoint that is kept. A plan turn on an engine that enforces read-only
+    // writes nothing, so it takes none.
+    let checkpoint = if plan && config.engine.enforces_read_only() {
+        None
+    } else {
+        crate::git::checkpoint::snapshot_turn(std::slice::from_ref(&project.local_path), "chat").await.pop().flatten()
+    };
     // The reply as it is written, for the panel that asked (Claude alone produces it; every other
     // engine ignores the sink). Keyed by run: the panel matches fragments on the run id it minted.
     let stream_deltas = stream.unwrap_or(false).then(|| ai::DeltaSink {
@@ -1642,15 +1654,13 @@ pub async fn send_chat_message(
     let response_time_ms = started.elapsed().as_millis() as i64;
     // Kept, with the files it differs in, when the turn changed something — the per-turn review
     // reads it from the row. Otherwise dropped, as every run's is.
-    let turn_checkpoint = checkpoint.and_then(|id| {
-        let paths = crate::git::checkpoint::changed_paths(&project.local_path, &id).unwrap_or_default();
-        if paths.is_empty() {
-            let _ = crate::git::checkpoint::remove(&project.local_path, &id);
-            None
-        } else {
-            Some(serde_json::json!({ "id": id, "paths": paths }).to_string())
-        }
-    });
+    //
+    // A cancelled or failed turn is settled the same way: what it managed to write stays reviewable
+    // (see the error branch below).
+    let turn_checkpoint = crate::git::checkpoint::settle_turn(vec![(project.local_path.clone(), checkpoint)])
+        .await
+        .pop()
+        .map(|change| serde_json::json!({ "id": change.id, "paths": change.paths }).to_string());
     // Read after the run, not before: it's cached per binary, so only the very first turn of an
     // app session pays for the probe, and it never sits between the user pressing send and the
     // engine starting.
@@ -1668,24 +1678,29 @@ pub async fn send_chat_message(
 
     let run = match result {
         Ok(run) => {
-            said.settle(run.session_id.as_deref());
+            said.settle_with(run.session_id.as_deref(), run.context_tokens);
             run
         }
         Err(e) => {
             // A run the user stopped isn't history: it has no answer, and filing it would leave
-            // a permanent failed turn in the transcript for something they did on purpose.
-            if !e.starts_with(ai_runs::CANCELLED_MARKER) {
+            // a permanent failed turn in the transcript for something they did on purpose — unless
+            // it had already changed files. Then the question and the review of what it wrote must
+            // survive a restart, so it is filed as a failed turn whose answer is the cancellation
+            // marker alone (`is_error` with an answer starting `ai_runs::CANCELLED_MARKER` is a
+            // cancelled bubble, not an error one).
+            let cancelled = e.starts_with(ai_runs::CANCELLED_MARKER);
+            if !cancelled || turn_checkpoint.is_some() {
                 // Record other failures. Otherwise the panel's error vanishes the moment the next
                 // message is sent, and days later there's nothing left explaining why a run died
                 // (out of credit, CLI gone).
                 if let Ok(conn) = db.0.lock() {
-                    let _ = queries::add_activity_log(
+                    let filed = queries::add_activity_log(
                         &conn,
                         &project_id,
                         &conversation_id,
                         session_id.as_deref(),
                         &message,
-                        &e,
+                        if cancelled { ai_runs::CANCELLED_MARKER } else { &e },
                         trace_json.as_deref(),
                         // A failed turn has no model to report (the CLI never got that far), but
                         // *which* engine and version failed is exactly what makes it diagnosable.
@@ -1698,6 +1713,10 @@ pub async fn send_chat_message(
                         },
                         true,
                     );
+                    // A turn that failed or was stopped halfway may have changed files all the same.
+                    if let (Ok(entry), Some(checkpoint)) = (filed, turn_checkpoint.as_deref()) {
+                        let _ = queries::set_activity_checkpoint(&conn, &entry.id, checkpoint);
+                    }
                 }
             }
             // A failed or stopped turn is evidence about the engine and the question — see
@@ -1769,6 +1788,9 @@ pub async fn send_chat_message(
             if !context_sources.is_empty() {
                 let _ = queries::set_activity_context(&conn, &entry.id, &serde_json::to_string(&context_sources).unwrap_or_default());
             }
+            if let Some(usage) = run.usage.as_ref().filter(|usage| !usage.is_empty()) {
+                let _ = queries::set_activity_usage(&conn, &entry.id, &serde_json::to_string(usage).unwrap_or_default());
+            }
             entry.created_at
         })
         // The reply is already in hand; a failed *write* shouldn't cost the user their answer, so
@@ -1807,6 +1829,7 @@ pub async fn send_chat_message(
         context: context_sources,
         learned_memory,
         learned_outcome,
+        usage: run.usage.filter(|usage| !usage.is_empty()),
     })
 }
 
@@ -1918,6 +1941,7 @@ async fn run_hybrid_execute(
                 context: Vec::new(),
                 learned_memory: None,
                 learned_outcome: None,
+                usage: None,
             })
         }
     }
@@ -2092,6 +2116,49 @@ mod tests {
         let conn = install();
         queries::set_setting(&conn, "ai_provider", "").unwrap();
         assert!(routed_providers(&conn).unwrap().contains("claude"));
+    }
+
+    /// Edit & resend in the panel chat: the turn and everything after it are deleted, no survivor
+    /// keeps an engine token (so a restart cannot resume the session that holds the removed turns),
+    /// and the next question — handed no session — is re-told only what is left.
+    #[test]
+    fn truncating_a_panel_chat_replays_only_the_surviving_turns() {
+        let conn = install();
+        conn.execute("INSERT INTO workspaces (id, name, sort_order, created_at) VALUES ('w', 'W', 0, '2026-01-01T00:00:00Z')", []).unwrap();
+        conn.execute("INSERT INTO projects (id, workspace_id, name, local_path, sort_order, created_at) VALUES ('p', 'w', 'P', '/tmp', 0, '2026-01-01T00:00:00Z')", []).unwrap();
+        let meta = || queries::TurnMeta { provider: Some("claude"), account_id: None, model: None, engine_version: None, response_time_ms: None };
+        let mut ids = Vec::new();
+        for n in 0..3 {
+            let row = queries::add_activity_log(&conn, "p", "conv", Some("s1"), &format!("pregunta {n}"), &format!("respuesta {n}"), None, meta(), false).unwrap();
+            ids.push(row.id);
+            std::thread::sleep(std::time::Duration::from_millis(3));
+            if n == 1 {
+                // A `/clear` typed after the edited turn started belonged to the removed turns.
+                std::thread::sleep(std::time::Duration::from_millis(3));
+                queries::add_conversation_reset(&conn, "p", "conv").unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(3));
+            }
+        }
+        assert_eq!(queries::conversation_resets(&conn, "conv").unwrap().len(), 1);
+
+        assert_eq!(queries::truncate_chat_from(&conn, "p", "conv", &ids[1]).unwrap(), Some(2));
+        let left = queries::get_conversation_messages_lite(&conn, "p", "conv").unwrap();
+        assert_eq!(left.iter().map(|t| t.question.as_str()).collect::<Vec<_>>(), ["pregunta 0"]);
+        assert!(left.iter().all(|t| t.engine_session_id.is_none()), "no token left to resume");
+        assert!(queries::conversation_resets(&conn, "conv").unwrap().is_empty(), "the later clear went with its turns");
+        assert!(!queries::conversation_reset_pending(&conn, "p", "conv").unwrap());
+
+        let told = panel_transcript(&conn, "p", "conv", Replay::Once).unwrap();
+        assert!(told.contains("pregunta 0") && !told.contains("pregunta 1") && !told.contains("pregunta 2"), "{told}");
+
+        // Unknown or foreign turns cut nothing.
+        assert_eq!(queries::truncate_chat_from(&conn, "p", "conv", &ids[2]).unwrap(), None);
+        assert_eq!(queries::truncate_chat_from(&conn, "p", "other", &ids[0]).unwrap(), None);
+        assert_eq!(queries::get_conversation_messages_lite(&conn, "p", "conv").unwrap().len(), 1);
+
+        // Cutting the first turn leaves nothing to tell.
+        assert_eq!(queries::truncate_chat_from(&conn, "p", "conv", &ids[0]).unwrap(), Some(1));
+        assert!(panel_transcript(&conn, "p", "conv", Replay::Once).is_none());
     }
 
     /// A branch («Bifurcar desde aquí») starts a fresh session that is told the conversation once:

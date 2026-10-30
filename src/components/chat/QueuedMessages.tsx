@@ -16,6 +16,8 @@ export interface ComposerQueue {
   /** Takes one back out of the queue; the composer puts its text and skill in the box. */
   onEdit: (id: string) => QueuedChatMessage | null;
   onResume: () => void;
+  /** Drops the whole queue — offered with resume when it came back from a restart. */
+  onDiscardAll?: () => void;
 }
 
 /**
@@ -52,7 +54,9 @@ export function QueuedMessages({ queue }: { queue: ComposerQueue }) {
       ? t("chat.queueHeldError")
       : held === "stopped"
         ? t("chat.queueHeldStopped")
-        : t("chat.queueHint");
+        : held === "restored"
+          ? t("chat.queueHeldRestored")
+          : t("chat.queueHint");
 
   return (
     <div className="cf-fade-in mb-1.5" role="region" aria-label={heading}>
@@ -68,11 +72,20 @@ export function QueuedMessages({ queue }: { queue: ComposerQueue }) {
             <span className="tabular-nums opacity-70">{items.length}</span>
           </span>
         </Tooltip>
+        {held === "restored" && queue.onDiscardAll && (
+          <button
+            type="button"
+            onClick={queue.onDiscardAll}
+            className="ml-auto flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"
+          >
+            {t("chat.queueDiscard")}
+          </button>
+        )}
         {waiting && (
           <button
             type="button"
             onClick={queue.onResume}
-            className="ml-auto flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[var(--cf-accent)] transition-colors hover:bg-[var(--cf-hover)]"
+            className={`${held === "restored" ? "" : "ml-auto "}flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[var(--cf-accent)] transition-colors hover:bg-[var(--cf-hover)]`}
           >
             <Play size={9} className="shrink-0 fill-current" />
             {t("chat.queueResume")}

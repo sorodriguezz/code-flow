@@ -1,5 +1,7 @@
 import { invoke } from "./invoke";
 import type { ChatReply as EngineReply } from "./commands";
+import type { FailedTurnChanges, TurnUsage } from "../../types/domain";
+import type { ContextSource } from "../editorContext";
 // Type-only, so nothing here depends on the store at runtime and no import cycle can form. The
 // alternative — a third copy of `{ stream, text }` under `src/types/` — would be a shape that has
 // to be kept in step with the one the log component actually renders, which is this one.
@@ -157,6 +159,12 @@ export interface ChatMessageRow {
    * directory, so a file deleted from disk stops being offered rather than leaving a row that lies.
    */
   outputs?: string[] | string | null;
+  /** Workspace-chat assistant messages only, and only when the turn had them: what the live reply
+   *  carried as `context` / `usage` / `unprotected_dirs`, restored on reload. Already parsed (not
+   *  JSON strings); absent otherwise. `usage` keeps the snake_case fields of `TurnUsage`. */
+  context?: ContextSource[];
+  usage?: TurnUsage;
+  unprotectedDirs?: string[];
   createdAt: string;
 }
 
@@ -281,6 +289,11 @@ export interface ChatReply extends EngineReply {
   /** The memory a workspace chat's "recuerda que…" saved, and what saving it did. */
   learned_memory?: string | null;
   learned_outcome?: "new" | "approved" | "updated" | "already_known" | null;
+  /** Workspace chat: absolute paths of folders the engine could write in that are not git
+   *  repositories, so this turn had no restore point there and edits in them cannot be undone from
+   *  CodeFlow. Empty/absent when every folder was protected. (`context` and `usage` come from the
+   *  repository chat's reply shape this extends.) */
+  unprotected_dirs?: string[];
 }
 
 // ---------- conversations ----------
@@ -432,6 +445,13 @@ export const chatSearchConversations = (query: string, limit?: number) =>
 export const chatBranchConversation = (conversationId: string, atTurn: number) =>
   invoke<ChatConversation>("chat_branch_conversation", { conversationId, atTurn });
 
+/** «Editar y reenviar»: deletes the turn `messageId` belongs to (its question or its answer), and
+ *  every turn after it, plus their per-turn reviews; drops the engine session, so the next question
+ *  replays only the surviving rows. Files those turns changed are not reverted. Resolves with the
+ *  updated row; refused (busy marker) while a turn of the conversation runs. */
+export const chatTruncateFrom = (conversationId: string, messageId: string) =>
+  invoke<ChatConversation>("chat_truncate_from", { conversationId, messageId });
+
 /** What a compaction did — see {@link chatCompact}. */
 export interface ChatCompaction {
   summary: string;
@@ -519,6 +539,9 @@ export const chatSend = (
   skill?: SkillPick | null,
   /** The workspace chat's plan mode: this turn runs read-only and answers with a plan. */
   plan?: boolean,
+  /** The workspace chat's scope: project ids of the repositories this turn may reach. `null`/empty =
+   *  all of them. An id outside the conversation's workspace rejects the send. */
+  repos?: string[] | null,
 ) =>
   invoke<ChatReply>("chat_send", {
     conversationId,
@@ -530,12 +553,25 @@ export const chatSend = (
     stream: stream ?? null,
     skill: skill ?? null,
     plan: plan ?? null,
+    repos: repos && repos.length > 0 ? repos : null,
   });
 
 /** What each turn of a workspace chat changed, per repository: message id → the checkpoints JSON
  *  (`[{repo, path, id, paths}]`). Turns that changed nothing are absent. */
 export const chatTurnCheckpoints = (conversationId: string) =>
   invoke<Record<string, string>>("chat_turn_checkpoints", { conversationId });
+
+/** `/clear` for a workspace chat: the next turn starts without the earlier history. Appends
+ *  `{turn, reason: "clear"}` to the returned conversation's `contextResets` (the transcript keeps
+ *  every message) and drops the engine session. Rejects with the busy marker while a turn runs. */
+export const chatClearContext = (conversationId: string) =>
+  invoke<ChatConversation>("chat_clear_context", { conversationId });
+
+/** Right after a send rejected as cancelled or failed: what that turn changed on disk, or `null`
+ *  (it changed nothing, or the latest turn did not end that way). Works for repository and
+ *  workspace conversations alike — see `FailedTurnChanges`. */
+export const chatFailedTurnChanges = (conversationId: string) =>
+  invoke<FailedTurnChanges | null>("chat_failed_turn_changes", { conversationId });
 
 // ---------- provider surface ----------
 
@@ -695,6 +731,10 @@ export const repoChatAttachFile = (conversationId: string, sourcePath: string) =
 export const repoChatAttachBytes = (conversationId: string, name: string, data: number[]) =>
   invoke<ChatAttachment>("repo_chat_attach_bytes", { conversationId, name, data });
 
+/** A repository conversation's attachments still waiting in the composer (none a sent question names). */
+export const repoChatListStagedAttachments = (conversationId: string) =>
+  invoke<ChatAttachment[]>("repo_chat_list_staged_attachments", { conversationId });
+
 export const repoChatRemoveAttachment = (conversationId: string, attachmentId: string) =>
   invoke<void>("repo_chat_remove_attachment", { conversationId, attachmentId });
 
@@ -829,11 +869,27 @@ export const chatCreateWorkspaceConversation = (args: {
 export const chatListWorkspaceConversations = (workspaceId: string) =>
   invoke<ChatConversation[]>("chat_list_workspace_conversations", { workspaceId });
 
+/** One repository of the workspace as the next turn would see it. */
+export interface WorkspaceChatRepo {
+  /** The project id — what `chatSend`'s `repos` takes. */
+  id: string;
+  path: string;
+  name: string;
+  /** `null` when detached, unreadable or not on disk. */
+  branch: string | null;
+  onDisk: boolean;
+  /** A git repository; `false` for a plain folder (no restore point) or a missing path. */
+  isRepo: boolean;
+}
+
 export interface WorkspaceChatSnapshot {
-  repos: number;
+  /** How many repositories the workspace has. (Was `repos: number`; `repos` is now the list.) */
+  repoCount: number;
   reposOnDisk: number;
   /** The block itself, as the engine reads it. */
   text: string;
+  /** Each repository's state, in the sidebar's order. */
+  repos: WorkspaceChatRepo[];
 }
 
 /** What a workspace chat's next turn is told about the workspace. */

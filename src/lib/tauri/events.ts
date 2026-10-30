@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import type { GitProgressEvent, TerminalAgent } from "../../types/domain";
+import type { GitProgressEvent, GitRemoteProgressEvent, TerminalAgent } from "../../types/domain";
 import type {
   StreamMessage as ApiStreamMessage,
   StreamStatusEvent as ApiStreamStatusEvent,
@@ -12,6 +12,10 @@ import type { LearningEvent } from "./learningCommands";
 
 export const onGitProgress = (handler: (event: GitProgressEvent) => void) =>
   listen<GitProgressEvent>("git:progress", (e) => handler(e.payload));
+
+/** Progress of a running fetch/pull/push, parsed — see `GitRemoteProgressEvent`. */
+export const onGitRemoteProgress = (handler: (event: GitRemoteProgressEvent) => void) =>
+  listen<GitRemoteProgressEvent>("git:remote-progress", (e) => handler(e.payload));
 
 export interface TerminalOutputEvent {
   id: string;

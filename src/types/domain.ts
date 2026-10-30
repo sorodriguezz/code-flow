@@ -979,6 +979,9 @@ export interface ActivityLogEntry {
   checkpoint?: string | null;
   /** What CodeFlow put in front of the engine for the turn, as JSON — see `lib/editorContext`. */
   context?: string | null;
+  /** What the turn spent, as JSON `TurnUsage` (snake_case fields) — `null`/absent when the engine
+   *  reported nothing, and for turns recorded before this was kept. */
+  usage?: string | null;
 }
 
 export interface JobHistoryEntry {
@@ -1039,6 +1042,18 @@ export interface PrCommentThread {
 export interface GitProgressEvent {
   op: string;
   line: string;
+}
+
+/** One redraw of git's meter (or a line of its text) from a running fetch, pull or push —
+ *  `git:remote-progress`, at most ~5 a second, URL credentials already masked. */
+export interface GitRemoteProgressEvent {
+  repoPath: string;
+  operation: "fetch" | "pull" | "push" | string;
+  line: string;
+  /** `"Receiving objects"`, `"Resolving deltas"`… for a meter; `null` for other text. */
+  phase: string | null;
+  /** 0–100; `null` when the meter has no percentage (`Enumerating objects: 5, done.`). */
+  percent: number | null;
 }
 
 export type ThemePreference = "light" | "dark" | "system";
@@ -2530,4 +2545,29 @@ export interface PipelineAvailability {
   provider: VcsProvider | null;
   connected: boolean;
   host: string | null;
+}
+
+/** One turn's spend, as the engine itself reported it (`ai::AiUsage`). Whole-turn figures; the
+ *  cache counts are kept apart from `input_tokens` because they are the cheap ones. */
+export interface TurnUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  /** US dollars, when the CLI said; `null` is unreported, not zero. */
+  cost_usd: number | null;
+}
+
+/** What a cancelled or failed turn left changed on disk (`chat_failed_turn_changes`). Exactly one
+ *  of `checkpoint` / `checkpoints` is set: the first for a repository conversation, the second for
+ *  a workspace one — the same JSON strings a finished turn's reply carries, so the same parser
+ *  (`parseTurnChanges` / the workspace one) reads them. */
+export interface FailedTurnChanges {
+  /** The persisted row the changes are filed under: the assistant message id (workspace chat) or the
+   *  `activity_log` entry id (repository chat). Not the id of the frontend's local failure bubble. */
+  message_id: string;
+  /** Repository chat: JSON `{"id", "paths"}`. */
+  checkpoint: string | null;
+  /** Workspace chat: JSON `[{"repo", "path", "id", "paths"}]`. */
+  checkpoints: string | null;
 }

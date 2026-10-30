@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// paletteItems pulls in the stores, and dbStore listens for events at import time.
+vi.mock("@tauri-apps/api/event", () => ({ listen: () => Promise.resolve(() => {}), emit: () => Promise.resolve() }));
+
 import {
   SCOPE_GROUPS,
   aliasHint,

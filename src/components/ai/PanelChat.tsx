@@ -1,4 +1,4 @@
-import { Fragment, Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ListChecks, ListPlus, MessageSquareShare, Paperclip, Pencil, Play, Search, Square, Users, UsersRound } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
@@ -14,7 +14,7 @@ import { useAutosizeTextarea } from "../../lib/useAutosizeTextarea";
 import type { ChatAttachment } from "../../lib/tauri/chatCommands";
 import { McpMenu } from "../chat/McpMenu";
 import { QueuedMessages, type ComposerQueue } from "../chat/QueuedMessages";
-import { chatQueueKey, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
+import { chatQueueKey, discardChatQueue, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
 import { FOCUS_CHAT_EVENT, SEND_CHAT_EVENT, openChat, openNewChat, takePendingSend } from "../../lib/aiPanelNav";
 import { moveChatToApp } from "../../lib/moveChatToApp";
 import { openTerminal } from "../../lib/tauri/commands";
@@ -38,7 +38,7 @@ import { ChatModelPicker } from "./ChatModelPicker";
 import { AnswerLengthPicker } from "../chat/AnswerLengthPicker";
 import { EffortPicker } from "../chat/EffortPicker";
 import { useEffortSupported } from "../../lib/useEffortSupport";
-import { EMPTY_CHAT, engineFor, useChatStore, type ChatEngine, type ChatSkillPick } from "../../state/chatStore";
+import { EMPTY_CHAT, engineFor, loadConversationPrefs, useChatStore, type ChatEngine, type ChatSkillPick } from "../../state/chatStore";
 import { EMPTY_CONVERSATIONS, useChatHistoryStore } from "../../state/activityStore";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useAiPanelStore } from "../../state/aiPanelStore";
@@ -129,6 +129,11 @@ export function PanelChat({
   useEffect(() => {
     if (!fresh) void useChatStore.getState().ensureLoaded(projectId, conversationId);
   }, [fresh, projectId, conversationId]);
+  // The engine, account, thinking level and plan flag picked here come back after a restart — also
+  // for a tab restored as a blank chat, which `ensureLoaded` is not called for.
+  useEffect(() => {
+    void loadConversationPrefs();
+  }, []);
 
   // A conversation deleted from history while its tab is open has nothing left behind it: forget it
   // and close the tab, rather than keep showing — or re-create on the next message — something gone.
@@ -332,8 +337,24 @@ export function PanelChat({
     // characters. Anything else starting with a slash is the CLI's, and goes through as written.
     const command = appCommandFor(text, "panel");
     if (command) {
+      useChatStore.getState().cancelEdit(conversationId);
       setDraft("");
       runAppCommand(command.id);
+      return;
+    }
+    if (useChatStore.getState().editing[conversationId]) {
+      // Replaces the thread from the edited question: the box keeps its text until that went through
+      // (the user may decline, or the cut may be refused).
+      void useChatStore
+        .getState()
+        .submitEdit(projectId, conversationId, text, { skill })
+        .then((sent) => {
+          if (!sent) return;
+          setDraft("");
+          setSkill(null);
+          useAiPanelStore.getState().markChatStarted(tabKey);
+          toBottom();
+        });
       return;
     }
     useChatStore.getState().submit(projectId, conversationId, text, { skill });
@@ -359,7 +380,8 @@ export function PanelChat({
   // «Dictar»: stop-and-send runs the submit of the render that holds the transcript.
   const submitRef = useRef(submit);
   submitRef.current = submit;
-  useEffect(() => registerDictationSend(boxRef.current, () => submitRef.current()));
+  // Once per mount: the box is always rendered, and the handler reads the latest submit through the ref.
+  useEffect(() => registerDictationSend(boxRef.current, () => submitRef.current()), []);
   const dictating = useDictatingHere(boxRef);
 
   // ── Attachments ───────────────────────────────────────────────────────────────────────────
@@ -397,16 +419,16 @@ export function PanelChat({
     },
     () => true,
   );
-  /** A screenshot pasted into the box becomes an attachment — or, for a model that cannot see one,
-   *  is said not to be rather than vanishing. Text pastes are left alone. */
+  /** A screenshot pasted into the box becomes an attachment, exactly as a dropped image does — for a
+   *  model that cannot see one, with the same notice. Text pastes are left alone. */
   const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const item = Array.from(event.clipboardData.items).find((entry) => entry.type.startsWith("image/"));
     const file = item?.getAsFile();
     if (!file) return;
     event.preventDefault();
+    // As a drop does it: kept, with a notice that the engine will read it as a file rather than see it.
     if (!readsImages) {
-      pushErrorToast(t("assistant.imagesUnsupported"));
-      return;
+      useToastStore.getState().pushToast(t("chat.attachImageBlind", { provider: providerDisplayLabel(provider, t) }), "info");
     }
     const extension = (file.type.split("/")[1] ?? "png").replace(/[^a-z0-9]/gi, "") || "png";
     void file.arrayBuffer().then((buffer) =>
@@ -438,8 +460,9 @@ export function PanelChat({
         return item;
       },
       onResume: () => useChatStore.getState().resumeQueue(conversationId),
+      onDiscardAll: () => discardChatQueue(queueKey),
     }),
-    [queuedMessages, queueHeld, session.sending, conversationId, tabKey],
+    [queuedMessages, queueHeld, session.sending, conversationId, tabKey, queueKey],
   );
   /** The `/` menu is open while the draft is one token that begins with a slash. */
   const slash = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).toLowerCase() : null;
@@ -452,13 +475,13 @@ export function PanelChat({
   const lastUser = session.messages.map((m) => m.role).lastIndexOf("user");
 
   // ── Turn actions ──────────────────────────────────────────────────────────────────────────
-  /** The question whose text is in the box for a second attempt — only so the line above the box
-   *  can say which. The send is an ordinary one: no engine can unsay a turn, so the original and its
-   *  answer stay, and this asks again with them in context (the Chat app's «Editar y reenviar»). */
-  const [editing, setEditing] = useState<number | null>(null);
+  /** «Editar y reenviar»: the question whose text is in the box. Sending it replaces the thread from
+   *  that question on (`chatStore.submitEdit`) — the engine session is dropped and the survivors are
+   *  replayed — so the line above the box says what is about to be replaced. */
+  const editing = useChatStore((s) => s.editing[conversationId]) ?? null;
   useEffect(() => {
-    if (!draft.trim()) setEditing(null);
-  }, [draft]);
+    if (!draft.trim()) useChatStore.getState().cancelEdit(conversationId);
+  }, [draft, conversationId]);
   /** «Bifurcar desde aquí»: a new conversation with the turns up to this answer, in its own tab.
    *  It starts a fresh engine session, which is told the transcript (`claude_cmd::panel_transcript`). */
   const branchAt = async (createdAt: string) => {
@@ -481,13 +504,28 @@ export function PanelChat({
     () =>
       session.messages.map((message, index): ChatBubbleActions | undefined => {
         const canAct = !session.sending;
-        if (message.isError) return { onPickModel: (next) => handlers.current.pickEngine(handlers.current.provider, next) };
+        if (message.isError) {
+          const asked = session.messages[index - 1];
+          return {
+            onPickModel: (next) => handlers.current.pickEngine(handlers.current.provider, next),
+            // Asks the same question again, as «Regenerar» does on an answer: the failed turn stays
+            // in the transcript and the retry is an ordinary new turn.
+            onRegenerate:
+              canAct && asked?.role === "user"
+                ? () => {
+                    useChatStore.getState().submit(projectId, conversationId, asked.content, {});
+                    useAiPanelStore.getState().markChatStarted(tabKey);
+                    toBottom();
+                  }
+                : undefined,
+          };
+        }
         if (message.role === "user") {
           return canAct
             ? {
                 onEdit: () => {
                   handlers.current.setDraft(message.content);
-                  setEditing(Math.floor(index / 2) + 1);
+                  useChatStore.getState().beginEdit(conversationId, index);
                   requestAnimationFrame(() => boxRef.current?.focus());
                 },
               }
@@ -519,6 +557,7 @@ export function PanelChat({
     () => ({
       insert: (code) => insertCodeAtCaret(projectId, code),
       apply: (code, path) => useApplyCodeStore.getState().open({ tabKey, projectId, code, path }),
+      projectId,
     }),
     [projectId, tabKey],
   );
@@ -530,6 +569,15 @@ export function PanelChat({
   useEffect(() => {
     if (meterModel) useConversationStore.getState().ensureContextWindow(meterModel);
   }, [meterModel]);
+  // Announced politely to a screen reader: that a reply is coming and that it is in — never the
+  // streamed text itself, which would be read out token by token.
+  const [liveStatus, setLiveStatus] = useState("");
+  const announced = useRef(session.sending);
+  useEffect(() => {
+    if (announced.current === session.sending) return;
+    announced.current = session.sending;
+    setLiveStatus(session.sending ? t("assistant.liveResponding") : t("assistant.liveReady"));
+  }, [session.sending, t]);
   const wasSending = useRef(session.sending);
   useEffect(() => {
     if (wasSending.current && !session.sending && meterModel) useConversationStore.getState().ensureContextWindow(meterModel, true);
@@ -575,6 +623,9 @@ export function PanelChat({
   return (
     <div ref={rootRef} className="flex h-full min-h-0 flex-col">
       <ChatFindBar find={find} />
+      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {liveStatus}
+      </div>
       {/* Above the scroller, not in it: find, export and "move to the chat workspace" are needed
           most in a long conversation, which is exactly the one that had scrolled them off the
           top. Same strip, same place, as the workspace chat's. */}
@@ -663,8 +714,16 @@ export function PanelChat({
         <div ref={contentRef} className="space-y-2.5 wrap-anywhere">
           {session.messages.map((message, i) => {
             const day = dayDivider(message, session.messages[i - 1], locale);
+            // A finished turn far off screen is not laid out or painted (`content-visibility`), which
+            // is most of a long transcript; the newest turn is left alone so streaming and the
+            // follow-the-bottom logic measure real sizes. `auto` remembers the last rendered size.
+            const settled = i < session.messages.length - 1;
             return (
-              <Fragment key={i}>
+              <div
+                key={i}
+                className="space-y-2.5"
+                style={settled ? { contentVisibility: "auto", containIntrinsicSize: "auto 120px" } : undefined}
+              >
                 {day && (
                   <div className="flex items-center gap-2 pt-1.5">
                     <div className="h-px flex-1 bg-[var(--cf-border)]" />
@@ -698,7 +757,7 @@ export function PanelChat({
                 />
                 {message.role === "assistant" && message.context && <ContextSources sources={message.context} />}
                 {message.role === "assistant" && message.changes && project && (
-                  <TurnReview repoPath={project.local_path} changes={message.changes} />
+                  <TurnReview repoPath={project.local_path} changes={message.changes} openProjectId={projectId} />
                 )}
                 {message.role === "assistant" &&
                   message.plan &&
@@ -720,7 +779,7 @@ export function PanelChat({
                     {queued.holder ? t("assistant.queuedBehind", { holder: queued.holder }) : t("assistant.queuedUnknown")}
                   </p>
                 )}
-              </Fragment>
+              </div>
             );
           })}
           {session.sending && session.runId && !queued && (
@@ -769,16 +828,16 @@ export function PanelChat({
             <span className="min-w-0 truncate">{t("assistant.contextCleared")}</span>
           </p>
         )}
-        {editing !== null && (
-          // Said out loud: the box looks the same either way, and nothing is replaced — the original
-          // turn and its answer stay, and this asks again with them in context.
+        {editing && (
+          // Said out loud: the box looks the same either way, and this one replaces the thread from
+          // that question on.
           <p className="mb-1.5 flex items-center gap-1.5 px-0.5 text-[11px] text-[var(--cf-text-muted)]">
             <Pencil size={10} className="shrink-0" />
-            <span className="min-w-0 flex-1 truncate">{t("chat.reAskingTurn", { n: editing })}</span>
+            <span className="min-w-0 flex-1 truncate">{t("chat.editingTurn", { n: editing.fromTurn })}</span>
             <button
               type="button"
               onClick={() => {
-                setEditing(null);
+                useChatStore.getState().cancelEdit(conversationId);
                 setDraft("");
               }}
               className="shrink-0 text-[var(--cf-accent)] hover:underline"
@@ -818,7 +877,7 @@ export function PanelChat({
             }
           />
         )}
-        {mentions.open && !menuOpen && <MentionMenu items={mentions.items} index={mentions.index} onPick={mentions.pick} />}
+        {mentions.open && !menuOpen && <MentionMenu items={mentions.items} index={mentions.index} onPick={mentions.pick} listboxId={mentions.listboxId} />}
         <QueuedMessages queue={queue} />
         {textMenu.menu}
         <div
@@ -837,6 +896,7 @@ export function PanelChat({
           <textarea
             ref={boxRef}
             data-ai-input="inline"
+            {...mentions.inputProps}
             value={draft}
             rows={1}
             onChange={(e) => {
@@ -849,6 +909,34 @@ export function PanelChat({
             onKeyDown={(e) => {
               // The `@` menu takes its keys first: arrows walk it, Enter/Tab pick, Escape hides it.
               if (mentions.onKeyDown(e)) return;
+              // Esc leaves an edit: the box goes back to a new question, empty.
+              if (e.key === "Escape" && editing && !menuOpen && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                useChatStore.getState().cancelEdit(conversationId);
+                setDraft("");
+                return;
+              }
+              // Esc stops the running turn from the box. The `/` menu's own Escape is left to it, and
+              // a key an input method is using is not ours.
+              if (e.key === "Escape" && session.sending && !menuOpen && !e.nativeEvent.isComposing) {
+                e.preventDefault();
+                stop();
+                return;
+              }
+              // ↑ in an empty box brings back the last question sent, to edit and ask again. Only when
+              // nothing above took the key (the `@` menu did, before this line) and nothing is typed.
+              if (e.key === "ArrowUp" && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !draft && !menuOpen) {
+                const last = [...session.messages].reverse().find((m) => m.role === "user" && !m.content.startsWith("/"));
+                if (last) {
+                  e.preventDefault();
+                  setDraft(last.content);
+                  requestAnimationFrame(() => {
+                    const box = boxRef.current;
+                    if (box) box.setSelectionRange(box.value.length, box.value.length);
+                  });
+                  return;
+                }
+              }
               // Enter sends; Shift+Enter breaks the line. Never mid-composition: an input method
               // uses Enter to accept a candidate, and sending then posts half a sentence.
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { ChatAttachment, SkillPick } from "../lib/tauri/chatCommands";
+import { getSetting, setSetting } from "../lib/tauri/commands";
 
 /**
  * Messages written while a conversation was still answering, waiting their turn.
@@ -29,11 +30,12 @@ import type { ChatAttachment, SkillPick } from "../lib/tauri/chatCommands";
  * Stop, keep spending on a conversation the user just tried to halt. Held messages stay visible
  * and each can still be edited or removed; resuming, or sending anything new, lets them go again.
  *
- * # Not persisted
+ * # Persisted, but never resumed by itself
  *
- * Like the composer's drafts, a queue lives as long as the window: switching conversations, tabs
- * or workspaces keeps it (it is keyed by conversation, never by what is on screen), a restart does
- * not. Nothing here has been sent to anyone, so there is nothing a restart could leave half-done.
+ * Like the composer's drafts, the two panel chats' queues survive a restart (see
+ * {@link loadChatQueues}); the chat app's do not. Nothing here has been sent to anyone, so there
+ * is nothing a restart could leave half-done — but a restart is an interruption, so what comes
+ * back is held ({@link QueueHold} `"restored"`) until the user sends or discards it.
  */
 
 /** Which chat a queue belongs to. The two key their conversations with ids that cannot collide,
@@ -70,8 +72,9 @@ export interface QueuedChatMessage {
   queuedAt: number;
 }
 
-/** Why a queue has stopped moving: the turn ahead of it failed, or the user stopped it. */
-export type QueueHold = "error" | "stopped";
+/** Why a queue has stopped moving: the turn ahead of it failed, the user stopped it, or the app
+ *  restarted with it non-empty. */
+export type QueueHold = "error" | "stopped" | "restored";
 
 interface ChatQueueState {
   /** First in, first out, per {@link chatQueueKey}. An absent key is an empty queue. */
@@ -207,3 +210,143 @@ export function useChatQueue(key: string | null): QueuedChatMessage[] {
 export function useChatQueueHold(key: string | null): QueueHold | null {
   return useChatQueueStore((s) => (key ? (s.held[key] ?? null) : null));
 }
+
+/** Drops a queue and the messages in it, whether it was restored or not — the strip's "Descartar". */
+export function discardChatQueue(key: string): void {
+  dropChatQueue(key);
+}
+
+// --- Persistence ------------------------------------------------------------------------------
+
+const QUEUES_KEY = "chat_queues";
+/** Caps: a queue is a handful of messages, and only the freshest conversations' are worth keeping. */
+export const MAX_QUEUED_PER_CHAT = 20;
+export const MAX_QUEUED_CHATS = 30;
+/** Only the panel chats (repo + workspace) persist; the chat app's queue is window-lived. */
+const PERSISTED_PREFIX = "panel:";
+
+let queuesLoad: Promise<void> | null = null;
+let queuesTimer: ReturnType<typeof setTimeout> | null = null;
+let applyingLoad = false;
+/** Keys that came off disk and have not had their attachments checked against the staged files. */
+const unvalidated = new Set<string>();
+
+function isQueued(value: unknown): value is QueuedChatMessage {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Record<string, unknown>;
+  return typeof item.id === "string" && typeof item.text === "string" && typeof item.queuedAt === "number";
+}
+
+function isAttachment(value: unknown): value is ChatAttachment {
+  if (!value || typeof value !== "object") return false;
+  const file = value as Record<string, unknown>;
+  return typeof file.id === "string" && typeof file.name === "string";
+}
+
+/** What goes to disk: the panel chats' queues, newest conversations kept, each capped. */
+export function serializeChatQueues(items: Record<string, QueuedChatMessage[]>): string {
+  const entries = Object.entries(items)
+    .filter(([key, list]) => key.startsWith(PERSISTED_PREFIX) && list.length > 0)
+    .sort((a, b) => (a[1][a[1].length - 1]?.queuedAt ?? 0) - (b[1][b[1].length - 1]?.queuedAt ?? 0))
+    .slice(-MAX_QUEUED_CHATS)
+    .map(([key, list]) => [key, list.slice(0, MAX_QUEUED_PER_CHAT)] as const);
+  return JSON.stringify(Object.fromEntries(entries));
+}
+
+function parseChatQueues(raw: string | null): Record<string, QueuedChatMessage[]> {
+  const out: Record<string, QueuedChatMessage[]> = {};
+  try {
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== "object") return out;
+    for (const [key, list] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!key.startsWith(PERSISTED_PREFIX) || !Array.isArray(list)) continue;
+      const kept = list
+        .filter(isQueued)
+        .slice(0, MAX_QUEUED_PER_CHAT)
+        .map((item) => ({
+          ...item,
+          attachments: Array.isArray(item.attachments) ? item.attachments.filter(isAttachment) : undefined,
+        }));
+      if (kept.length > 0) out[key] = kept;
+    }
+  } catch {
+    // A corrupt blob is a lost queue, never a broken chat.
+  }
+  return out;
+}
+
+/**
+ * Reads the persisted queues once and puts them under whatever was queued this session. Everything
+ * that comes back is held as `"restored"`: it does not send until the user says so.
+ */
+export function loadChatQueues(): Promise<void> {
+  if (!queuesLoad) {
+    queuesLoad = (async () => {
+      const raw = await Promise.resolve(getSetting(QUEUES_KEY)).catch(() => null);
+      const stored = parseChatQueues(raw ?? null);
+      applyingLoad = true;
+      try {
+        useChatQueueStore.setState((s) => {
+          const items = { ...s.items };
+          const held = { ...s.held };
+          for (const [key, list] of Object.entries(stored)) {
+            // This session's queue for the key is newer than the disk copy.
+            if (items[key]?.length) continue;
+            items[key] = list;
+            held[key] = "restored";
+            unvalidated.add(key);
+          }
+          return { items, held };
+        });
+      } finally {
+        applyingLoad = false;
+      }
+    })();
+  }
+  return queuesLoad;
+}
+
+/**
+ * Drops, from a restored queue, the attachments whose staged copy is gone. `staged` is the
+ * conversation's staged list, or `null` when it could not be read — in which case nothing is
+ * dropped, since "could not ask" is not "they are gone".
+ */
+export async function restoreChatQueue(key: string, staged: ChatAttachment[] | null): Promise<void> {
+  await loadChatQueues();
+  if (!unvalidated.delete(key) || staged === null) return;
+  const live = new Map(staged.map((file) => [file.id, file]));
+  useChatQueueStore.setState((s) => {
+    const list = s.items[key];
+    if (!list) return s;
+    return {
+      items: {
+        ...s.items,
+        [key]: list.map((item) =>
+          item.attachments
+            ? {
+                ...item,
+                attachments: item.attachments.filter((file) => live.has(file.id)).map((file) => live.get(file.id) ?? file),
+              }
+            : item,
+        ),
+      },
+    };
+  });
+}
+
+function persistChatQueues(): void {
+  if (queuesTimer) clearTimeout(queuesTimer);
+  queuesTimer = setTimeout(() => {
+    queuesTimer = null;
+    void (async () => {
+      // After the read, so a write can never clobber what the disk still holds.
+      await loadChatQueues();
+      await setSetting(QUEUES_KEY, serializeChatQueues(useChatQueueStore.getState().items));
+    })().catch(() => {});
+  }, 400);
+}
+
+useChatQueueStore.subscribe((state, prev) => {
+  if (applyingLoad || state.items === prev.items) return;
+  persistChatQueues();
+});

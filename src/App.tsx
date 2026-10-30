@@ -6,6 +6,7 @@ import { Sidebar } from "./components/layout/Sidebar";
 import { AppRail } from "./components/layout/AppRail";
 import { StatusBar } from "./components/layout/StatusBar";
 import { ErrorBoundary } from "./components/common/ErrorBoundary";
+import { KeepScroll } from "./components/common/KeepScroll";
 import { listenToAppMenu } from "./lib/menuBridge";
 import { installQuitGuard } from "./lib/quitGuard";
 import { installCloseNotice } from "./lib/closeNotice";
@@ -498,6 +499,8 @@ function MainContent() {
 
   const workspaceViewOpen =
     workspaceId !== null && WORKSPACE_VIEWS.some((v) => v.id === activeView);
+  // Scroll offsets are remembered per workspace and repository — see `KeepScroll`.
+  const scrollScope = `${workspaceId ?? "-"}:${project?.id ?? "-"}`;
 
   // Unconditional, and with an empty path when there is no project — a hook cannot be called
   // behind the early returns below, and `""` is in no verdict, so it answers `false`.
@@ -538,19 +541,19 @@ function MainContent() {
           sidebar, the tab bar, the status bar — keeps working, so there is somewhere to walk to. */}
       {project &&
         PROJECT_VIEWS.filter(({ id }) => visited.has(id)).map(({ id, render }) => (
-          <div key={id} className={activeView === id ? "h-full cf-panel-in" : "hidden"}>
+          <KeepScroll key={id} active={activeView === id} scope={scrollScope} className={activeView === id ? "h-full cf-panel-in" : "hidden"}>
             <ErrorBoundary resetKey={id}>
               <Suspense fallback={<ViewSkeleton />}>{render()}</Suspense>
             </ErrorBoundary>
-          </div>
+          </KeepScroll>
         ))}
       {workspaceId !== null &&
         WORKSPACE_VIEWS.filter(({ id }) => visited.has(id)).map(({ id, render }) => (
-          <div key={id} className={activeView === id ? "h-full cf-panel-in" : "hidden"}>
+          <KeepScroll key={id} active={activeView === id} scope={scrollScope} className={activeView === id ? "h-full cf-panel-in" : "hidden"}>
             <ErrorBoundary resetKey={id}>
               <Suspense fallback={<ViewSkeleton />}>{render()}</Suspense>
             </ErrorBoundary>
-          </div>
+          </KeepScroll>
         ))}
     </>
   );
