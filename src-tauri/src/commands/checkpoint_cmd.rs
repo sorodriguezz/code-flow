@@ -65,28 +65,30 @@ pub struct TurnFile {
     pub before: Option<String>,
     pub after: Option<String>,
     pub binary: bool,
+    pub revision: String,
 }
 
 #[tauri::command(async)]
 pub fn ai_checkpoint_file(repo_path: String, checkpoint_id: String, path: String) -> Result<TurnFile, String> {
     let before = checkpoint::file_at(&repo_path, &checkpoint_id, &path)?;
     let after = crate::fsops::read_bytes_in_repo(&repo_path, &path)?;
+    let revision = checkpoint::file_revision(after.as_deref());
     let text = |bytes: Option<Vec<u8>>| match bytes {
         None => Ok(None),
         Some(bytes) => String::from_utf8(bytes).map(Some).map_err(|_| ()),
     };
     match (text(before), text(after)) {
-        (Ok(before), Ok(after)) => Ok(TurnFile { before, after, binary: false }),
-        _ => Ok(TurnFile { before: None, after: None, binary: true }),
+        (Ok(before), Ok(after)) => Ok(TurnFile { before, after, binary: false, revision }),
+        _ => Ok(TurnFile { before: None, after: None, binary: true, revision }),
     }
 }
 
 /// Puts the named files back as the checkpoint has them — "discard" on a file of the per-turn
 /// review. Sync, like [`restore_ai_checkpoint`]: a write.
 #[tauri::command(async)]
-pub fn restore_ai_checkpoint_paths(repo_path: String, checkpoint_id: String, paths: Vec<String>) -> Result<Vec<String>, String> {
+pub fn restore_ai_checkpoint_paths(repo_path: String, checkpoint_id: String, edits: Vec<checkpoint::ReviewedEdit>) -> Result<Vec<String>, String> {
     let _write = crate::git::write_lock();
-    let restored = checkpoint::restore_paths(&repo_path, &checkpoint_id, &paths)?;
+    let restored = checkpoint::restore_reviewed(&repo_path, &checkpoint_id, &edits)?;
     record_revert(&repo_path, &checkpoint_id, &restored);
     Ok(restored)
 }

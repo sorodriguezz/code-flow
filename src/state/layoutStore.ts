@@ -260,10 +260,11 @@ const FLAG_DEFAULTS: Record<LayoutFlag, boolean> = {
  * Being in `app_settings` is also what puts it in the backup: that table travels whole.
  */
 const RAIL_ORDER_KEY = "layout_app_rail_order";
+const REPO_TAB_ORDER_KEY = "layout_repo_tab_order";
 
 /** Tolerant on purpose: a corrupt or hand-edited row means "no preference", not a rail that fails
  *  to render. Non-strings are dropped rather than trusted onward as keys. */
-function parseRailOrder(raw: string | null): string[] {
+function parseOrder(raw: string | null): string[] {
   if (!raw) return [];
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -319,6 +320,8 @@ interface LayoutState {
   /** Empty means "nobody has rearranged the rail", which is not the same as "no apps" — the rail
    *  falls back to its declared order rather than to nothing. */
   railOrder: string[];
+  /** Repository navigation order, including temporarily hidden tabs. */
+  repoTabOrder: string[];
   init: () => Promise<void>;
   /** Live update while dragging — cheap, no disk write. */
   setSize: (key: LayoutKey, value: number) => void;
@@ -329,12 +332,14 @@ interface LayoutState {
   /** Called once when an icon is dropped, for the same reason `commitSize` is: the rail previews
    *  the new order locally while the pointer is down, so this is one write per gesture. */
   setRailOrder: (order: string[]) => void;
+  setRepoTabOrder: (order: string[]) => void;
 }
 
 export const useLayoutStore = create<LayoutState>((set) => ({
   sizes: { ...LAYOUT_DEFAULTS },
   flags: { ...FLAG_DEFAULTS },
   railOrder: [],
+  repoTabOrder: [],
 
   // Every stored size and flag in ONE round-trip. This used to be 33 `getSetting` calls plus 2 more
   // for the flags, wrapped in `Promise.all` — which bought nothing: `get_setting` takes the database
@@ -355,6 +360,7 @@ export const useLayoutStore = create<LayoutState>((set) => ({
       ...sizeKeys.map((key) => STORAGE_KEYS[key]),
       ...flagKeys.map((key) => FLAG_STORAGE_KEYS[key]),
       RAIL_ORDER_KEY,
+      REPO_TAB_ORDER_KEY,
     ]).catch(() => ({}) as Record<string, string>);
 
     const sizes = {} as Record<LayoutKey, number>;
@@ -368,7 +374,12 @@ export const useLayoutStore = create<LayoutState>((set) => ({
       const raw = stored[FLAG_STORAGE_KEYS[key]] ?? null;
       flags[key] = raw === null ? FLAG_DEFAULTS[key] : raw === "1";
     }
-    set({ sizes, flags, railOrder: parseRailOrder(stored[RAIL_ORDER_KEY] ?? null) });
+    set({
+      sizes,
+      flags,
+      railOrder: parseOrder(stored[RAIL_ORDER_KEY] ?? null),
+      repoTabOrder: parseOrder(stored[REPO_TAB_ORDER_KEY] ?? null),
+    });
   },
 
   setSize: (key, value) => set((s) => ({ sizes: { ...s.sizes, [key]: value } })),
@@ -387,5 +398,9 @@ export const useLayoutStore = create<LayoutState>((set) => ({
   setRailOrder: (order) => {
     persist(RAIL_ORDER_KEY, JSON.stringify(order));
     set({ railOrder: order });
+  },
+  setRepoTabOrder: (order) => {
+    persist(REPO_TAB_ORDER_KEY, JSON.stringify(order));
+    set({ repoTabOrder: order });
   },
 }));

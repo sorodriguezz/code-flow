@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 /** The Knowledge Engine. Mirrors `src-tauri/src/commands/knowledge_cmd.rs` and `knowledge/mod.rs`. */
 

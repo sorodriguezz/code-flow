@@ -20,6 +20,7 @@ use std::path::Path;
 
 use git2::{DiffOptions, Repository};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::repo::open;
 
@@ -284,34 +285,58 @@ pub fn file_at(path: &str, id: &str, rel: &str) -> Result<Option<Vec<u8>>, Strin
     }
 }
 
-/// [`restore`] for the named paths only — "discard this file" in the per-turn review. A path the
-/// checkpoint does not have is deleted, as there; a path outside the repository is refused.
-pub fn restore_paths(path: &str, id: &str, rels: &[String]) -> Result<Vec<String>, String> {
-    let repo = open(path)?;
-    let commit = read_checkpoint(&repo, id)?;
-    let tree = commit.tree().map_err(|e| e.message().to_string())?;
-    let workdir = repo.workdir().ok_or_else(|| "bare repository".to_string())?.to_path_buf();
-    let mut done = Vec::new();
-    for rel in rels {
-        if Path::new(rel).components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
-            return Err(format!("{rel}: invalid path"));
-        }
-        let target = workdir.join(rel);
-        match tree.get_path(Path::new(rel)) {
-            Ok(entry) => {
-                let blob = repo.find_blob(entry.id()).map_err(|e| format!("{rel}: {}", e.message()))?;
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| format!("{rel}: {e}"))?;
-                }
-                std::fs::write(&target, blob.content()).map_err(|e| format!("{rel}: {e}"))?;
-            }
-            Err(_) => {
-                let _ = std::fs::remove_file(&target);
-            }
-        }
-        done.push(rel.clone());
+/// The exact bytes displayed by the review, including binary files and missing files.
+pub fn file_revision(bytes: Option<&[u8]>) -> String {
+    match bytes {
+        Some(bytes) => format!("sha256:{:x}", Sha256::digest(bytes)),
+        None => "missing".to_string(),
     }
-    Ok(done)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewedEdit {
+    pub path: String,
+    pub expected_revision: String,
+    /// None restores the checkpoint (or deletes a file created by the turn).
+    /// Some replaces a reviewed hunk, preserving the rest of the reviewed file.
+    pub content: Option<String>,
+}
+
+/// Called under the repository write lock. Validate the entire selection before touching a file:
+/// one stale review must not partially discard the other files. Never refresh the expected
+/// revision on the user's behalf: seeing the new diff must precede another discard.
+pub fn restore_reviewed(path: &str, id: &str, edits: &[ReviewedEdit]) -> Result<Vec<String>, String> {
+    let mut seen = HashSet::new();
+    let mut prepared = Vec::new();
+    for edit in edits {
+        if !seen.insert(&edit.path) {
+            return Err(format!("duplicate reviewed path: {}", edit.path));
+        }
+        let current = crate::fsops::read_bytes_in_repo(path, &edit.path)?;
+        if file_revision(current.as_deref()) != edit.expected_revision {
+            return Err(format!("CHECKPOINT_CONFLICT:{}", edit.path));
+        }
+        // Read the checkpoint even for a hunk replacement: a rotated restore point is an error,
+        // not permission to write a replacement against a before-version that no longer exists.
+        let before = file_at(path, id, &edit.path)?;
+        let next = edit.content.as_ref().map(|text| text.as_bytes().to_vec()).or(before);
+        prepared.push((&edit.path, next));
+    }
+    for (rel, next) in &prepared {
+        match next {
+            Some(bytes) => crate::fsops::write_bytes_in_repo(path, rel, bytes)?,
+            None => {
+                let target = crate::fsops::resolve_existing_for_write(path, rel)?;
+                match std::fs::remove_file(target) {
+                    Ok(()) => {},
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+        }
+    }
+    Ok(edits.iter().map(|edit| edit.path.clone()).collect())
 }
 
 /// Forgets a checkpoint. Its objects stay in the odb until git's own gc reaps them.
@@ -563,6 +588,72 @@ mod tests {
             repo.commit(Some("HEAD"), &sig, &sig, "initial", &tree, &[]).unwrap();
         }
         (dir, repo)
+    }
+
+    fn reviewed(path: &str, rel: &str, content: Option<&str>) -> ReviewedEdit {
+        ReviewedEdit {
+            path: rel.into(),
+            expected_revision: file_revision(crate::fsops::read_bytes_in_repo(path, rel).unwrap().as_deref()),
+            content: content.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_stale_hunk_cannot_overwrite_later_user_edits() {
+        let (dir, _repo) = fixture();
+        let path = dir.to_str().unwrap();
+        let id = create(path, "chat").unwrap();
+        fs::write(dir.join("tracked.txt"), "AI change\n").unwrap();
+        let edit = reviewed(path, "tracked.txt", Some("original\n"));
+        fs::write(dir.join("tracked.txt"), "later user edit\n").unwrap();
+        assert!(restore_reviewed(path, &id, &[edit]).unwrap_err().starts_with("CHECKPOINT_CONFLICT:"));
+        assert_eq!(fs::read_to_string(dir.join("tracked.txt")).unwrap(), "later user edit\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn one_conflict_refuses_the_whole_selection_before_any_write() {
+        let (dir, _repo) = fixture();
+        let path = dir.to_str().unwrap();
+        let id = create(path, "chat").unwrap();
+        fs::write(dir.join("tracked.txt"), "AI change\n").unwrap();
+        fs::write(dir.join("new.txt"), "AI created this\n").unwrap();
+        let edits = vec![reviewed(path, "tracked.txt", None), reviewed(path, "new.txt", None)];
+        fs::write(dir.join("new.txt"), "user extended this\n").unwrap();
+        assert!(restore_reviewed(path, &id, &edits).is_err());
+        assert_eq!(fs::read_to_string(dir.join("tracked.txt")).unwrap(), "AI change\n");
+        assert_eq!(fs::read_to_string(dir.join("new.txt")).unwrap(), "user extended this\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reviewed_hunk_replacement_preserves_other_lines_and_crlf() {
+        let (dir, _repo) = fixture();
+        let path = dir.to_str().unwrap();
+        let id = create(path, "chat").unwrap();
+        fs::write(dir.join("tracked.txt"), "AI change\r\nuser line\r\n").unwrap();
+        let edit = reviewed(path, "tracked.txt", Some("original\r\nuser line\r\n"));
+        restore_reviewed(path, &id, &[edit]).unwrap();
+        assert_eq!(fs::read(dir.join("tracked.txt")).unwrap(), b"original\r\nuser line\r\n");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reviewed_restore_handles_binary_created_and_deleted_files() {
+        let (dir, _repo) = fixture();
+        let path = dir.to_str().unwrap();
+        fs::write(dir.join("image.bin"), [0, 255, 7]).unwrap();
+        let id = create(path, "chat").unwrap();
+        fs::write(dir.join("image.bin"), [0, 255, 8]).unwrap();
+        fs::write(dir.join("new.txt"), "new").unwrap();
+        fs::remove_file(dir.join("tracked.txt")).unwrap();
+        let edits = vec![reviewed(path, "image.bin", None), reviewed(path, "new.txt", None), reviewed(path, "tracked.txt", None)];
+        restore_reviewed(path, &id, &edits).unwrap();
+        assert_eq!(fs::read(dir.join("image.bin")).unwrap(), [0, 255, 7]);
+        assert!(!dir.join("new.txt").exists());
+        assert_eq!(fs::read_to_string(dir.join("tracked.txt")).unwrap(), "original\n");
+        assert_ne!(file_revision(None), file_revision(Some(b"")));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

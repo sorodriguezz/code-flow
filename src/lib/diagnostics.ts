@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./tauri/invoke";
 
 /**
  * What the app knows about itself when something went wrong — and the way a webview's own errors

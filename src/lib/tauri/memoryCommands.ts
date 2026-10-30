@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 /** The Memory Engine. Mirrors `src-tauri/src/ai_memory/mod.rs` and `commands/memory_cmd.rs`. */
 

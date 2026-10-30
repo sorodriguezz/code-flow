@@ -5,6 +5,14 @@ use crate::db::{
     queries, Db,
 };
 
+#[tauri::command(async)]
+pub fn search_assistant_chats(
+    db: State<'_, Db>, project_ids: Vec<String>, workspace_id: Option<String>, query: String,
+) -> Result<Vec<crate::db::assistant_search::AssistantChatHit>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    crate::db::assistant_search::search(&conn, &project_ids, workspace_id.as_deref(), &query).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn list_chat_conversations(
     db: State<'_, Db>,

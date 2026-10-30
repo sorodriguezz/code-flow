@@ -18,6 +18,9 @@ import { APPS } from "../../lib/railApps";
 import { StageChip } from "../common/StageChip";
 import { setChromeSlot } from "./ChromeSlot";
 import { WORKSPACE_ICONS } from "./WorkspaceGlyph";
+import { useLayoutStore } from "../../state/layoutStore";
+import { HoldProgress, useHoldReorder, type HoldReorder } from "../../lib/holdReorder";
+import { moveVisibleRepoTab, orderedRepoTabs } from "../../lib/repoTabOrder";
 
 interface Tab {
   id: MainView;
@@ -53,6 +56,7 @@ const CODEMAP_TAB: Tab = { id: "codemap", labelKey: "tabbar.codemap", icon: Netw
 /** «Entorno», after the map: the repository's env files compared (user, 2026-10-23). */
 const ENV_TAB: Tab = { id: "env", labelKey: "tabbar.env", icon: SquareAsterisk, shortcut: "view.env" };
 
+const ALL_TABS = [...TABS, REVIEWER_TAB, CODEMAP_TAB, ENV_TAB, PIPELINES_TAB];
 
 /**
  * The colour of the dot the Revisor tab wears: the selected repository's last review. Nothing while
@@ -82,7 +86,9 @@ function useUncommittedCount(): number {
   }, [status]);
 }
 
-function TabButton({ tab, active, badge, dot }: { tab: Tab; active: boolean; badge?: number; dot?: string | null }) {
+function TabButton({ tab, active, badge, dot, reorder, index }: {
+  tab: Tab; active: boolean; badge?: number; dot?: string | null; reorder: HoldReorder; index: number;
+}) {
   const setActiveView = useUiStore((s) => s.setActiveView);
   const t = useT();
   const chord = useShortcutChord();
@@ -90,17 +96,26 @@ function TabButton({ tab, active, badge, dot }: { tab: Tab; active: boolean; bad
   const key = chord(tab.shortcut);
 
   return (
-    <Tooltip label={t(tab.labelKey)} trailing={key ? <Kbd>{key}</Kbd> : undefined}>
+    <Tooltip label={t(tab.labelKey)} description={t("tabbar.reorderHint")}
+      disabled={reorder.arming !== null || reorder.drag !== null}
+      trailing={key ? <Kbd>{key}</Kbd> : undefined}>
       <button
-        onClick={() => setActiveView(tab.id)}
+        data-reorder={tab.id}
+        onPointerDown={(e) => reorder.beginHold(e, index, tab.id)}
+        onClick={() => { if (!reorder.swallowsClick()) setActiveView(tab.id); }}
         data-tour={`tab-${tab.id}`}
         aria-current={active ? "page" : undefined}
-        className={`relative flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[13px] font-medium transition-colors ${
+        style={reorder.drag?.key === tab.id ? {
+          transform: `translateX(${reorder.drag.dx}px)`, zIndex: 2,
+          background: "var(--cf-surface)", boxShadow: "0 0 0 1px var(--cf-accent), 0 4px 12px #0003",
+        } : undefined}
+        className={`relative flex h-7 shrink-0 touch-none select-none items-center gap-1.5 rounded-md px-2.5 text-[13px] font-medium transition-colors ${
           active
             ? "text-[var(--cf-text)]"
             : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         }`}
       >
+        {reorder.arming === tab.id && <HoldProgress shape="bar" />}
         {/* The same lifted sheet the active project and the active app wear: one way to say
             "selected" across the frame. */}
         {active && <ActivePill layoutId="cf-tab-pill" variant="raised" />}
@@ -127,6 +142,30 @@ function TabButton({ tab, active, badge, dot }: { tab: Tab; active: boolean; bad
         </span>
       </button>
     </Tooltip>
+  );
+}
+
+function RepositoryTabs({ activeView, reviewerEnabled, pipelinesEnabled, uncommitted, reviewerDot }: {
+  activeView: MainView; reviewerEnabled: boolean; pipelinesEnabled: boolean; uncommitted: number; reviewerDot: string | null;
+}) {
+  const order = useLayoutStore((s) => s.repoTabOrder);
+  const setOrder = useLayoutStore((s) => s.setRepoTabOrder);
+  const all = orderedRepoTabs(ALL_TABS, order);
+  const tabs = all.filter((tab) => (tab.id !== "reviewer" || reviewerEnabled) && (tab.id !== "pipelines" || pipelinesEnabled));
+  const reorder = useHoldReorder((from, to) => setOrder(moveVisibleRepoTab(all, tabs, from, to)), { axis: "x" });
+  const drag = reorder.drag;
+  return (
+    <div ref={reorder.listRef} data-tour="repo-tabs" className="relative flex min-w-0 items-center gap-0.5">
+      {drag && drag.to !== drag.from && (
+        <span aria-hidden className="pointer-events-none absolute inset-y-0 z-[3] w-0.5 rounded bg-[var(--cf-accent)]"
+          style={{ left: drag.ghost.left + (drag.to > drag.from ? drag.ghost.width : 0) }} />
+      )}
+      {tabs.map((tab, index) => (
+        <TabButton key={tab.id} tab={tab} index={index} reorder={reorder}
+          active={tab.id === activeView} badge={tab.id === "changes" ? uncommitted : undefined}
+          dot={tab.id === "reviewer" ? reviewerDot : undefined} />
+      ))}
+    </div>
   );
 }
 
@@ -160,13 +199,6 @@ export function ChromeScope() {
   const t = useT();
 
   if (REPO_VIEWS.includes(activeView)) {
-    const tabs = [
-      ...TABS,
-      ...(reviewerEnabled ? [REVIEWER_TAB] : []),
-      CODEMAP_TAB,
-      ENV_TAB,
-      ...(pipelinesAvailable(project, connections) ? [PIPELINES_TAB] : []),
-    ];
     return (
       <div className="flex min-w-0 items-center gap-1">
         <Tooltip
@@ -191,17 +223,8 @@ export function ChromeScope() {
           </span>
         </Tooltip>
         <ChevronRight size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
-        <div data-tour="repo-tabs" className="flex min-w-0 items-center gap-0.5">
-          {tabs.map((tab) => (
-            <TabButton
-              key={tab.id}
-              tab={tab}
-              active={tab.id === activeView}
-              badge={tab.id === "changes" ? uncommitted : undefined}
-              dot={tab.id === "reviewer" ? reviewerDot : undefined}
-            />
-          ))}
-        </div>
+        <RepositoryTabs activeView={activeView} reviewerEnabled={reviewerEnabled}
+          pipelinesEnabled={pipelinesAvailable(project, connections)} uncommitted={uncommitted} reviewerDot={reviewerDot} />
       </div>
     );
   }

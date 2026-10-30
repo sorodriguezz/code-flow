@@ -141,6 +141,7 @@ const REPO_TABS: { id: MainView; labelKey: "tabbar.graph" | "tabbar.changes" | "
 /** Everything a view needs to be able to read, and nothing the shell needed. */
 function useSatelliteBoot(): boolean {
   const [ready, setReady] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -187,7 +188,11 @@ function useSatelliteBoot(): boolean {
       // holds a question rather than a screen of the app, nor Codi's own window, which holds Codi.
       const kind = WINDOW.satellite?.kind;
       if (kind && kind !== "quick" && kind !== "codi") startCodiBus();
-    })();
+    })().catch((cause: unknown) => {
+      // Effects are outside React's error boundaries. Re-throw during render so a failed boot
+      // offers the existing reload screen instead of leaving the loading skeleton forever.
+      setError(cause instanceof Error ? cause : new Error(String(cause)));
+    });
   }, []);
 
   /**
@@ -209,6 +214,7 @@ function useSatelliteBoot(): boolean {
    * `workspaceStore` answers it at module scope — in this window as in every other.
    */
 
+  if (error) throw error;
   return ready;
 }
 

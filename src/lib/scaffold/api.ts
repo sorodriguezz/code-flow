@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../tauri/invoke";
 
 /**
  * The project initializer's bindings to `src-tauri/src/scaffold/`. Kept beside the catalogue rather

@@ -1,5 +1,5 @@
 import type { ContextSource, EditorContextPayload } from "../editorContext";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 import type {
   ToolInstallResult,
   ToolStatus,
@@ -2377,13 +2377,30 @@ export interface TurnFile {
   before: string | null;
   after: string | null;
   binary: boolean;
+  revision: string;
 }
 
 export const aiCheckpointFile = (repoPath: string, checkpointId: string, path: string) =>
   invoke<TurnFile>("ai_checkpoint_file", { repoPath, checkpointId, path });
 
-export const restoreAiCheckpointPaths = (repoPath: string, checkpointId: string, paths: string[]) =>
-  invoke<string[]>("restore_ai_checkpoint_paths", { repoPath, checkpointId, paths });
+export interface ReviewedEdit {
+  path: string;
+  expectedRevision: string;
+  /** null restores the checkpoint; text discards one reviewed hunk. */
+  content: string | null;
+}
+
+export interface AssistantChatHit {
+  projectId: string;
+  conversationId: string;
+  snippet: string;
+}
+
+export const searchAssistantChats = (projectIds: string[], workspaceId: string | null, query: string) =>
+  invoke<AssistantChatHit[]>("search_assistant_chats", { projectIds, workspaceId, query });
+
+export const restoreAiCheckpointPaths = (repoPath: string, checkpointId: string, edits: ReviewedEdit[]) =>
+  invoke<string[]>("restore_ai_checkpoint_paths", { repoPath, checkpointId, edits });
 
 /** A version of a file in the editor's local history (`local_history.rs`); `savedAt` in unix ms. */
 export interface LocalVersion {

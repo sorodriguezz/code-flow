@@ -27,6 +27,7 @@ pub fn read_file_bytes(repo_path: String, rel_path: String, offset: u64, len: us
 
 #[tauri::command]
 pub fn write_file_text(repo_path: String, rel_path: String, content: String) -> Result<(), String> {
+    let _write = crate::git::write_lock();
     fsops::write_file_text(&repo_path, &rel_path, &content)
 }
 
@@ -71,6 +72,7 @@ pub fn write_editor_file(
     expected: Option<fsops::DiskVersion>,
     encoding: Option<String>,
 ) -> Result<fsops::DiskVersion, String> {
+    let _write = crate::git::write_lock();
     // The file's own encoding when it is not UTF-8 — refused, not mangled, when the text no longer
     // fits it (see `fsops::encode_as`).
     let bytes = match encoding.as_deref().filter(|e| !e.is_empty()) {

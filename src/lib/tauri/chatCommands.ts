@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 import type { ChatReply as EngineReply } from "./commands";
 // Type-only, so nothing here depends on the store at runtime and no import cycle can form. The
 // alternative — a third copy of `{ stream, text }` under `src/types/` — would be a shape that has

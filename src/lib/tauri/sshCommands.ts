@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 /**
  * SSH host-key trust — generic, for every part of the app that connects through the system's `ssh`

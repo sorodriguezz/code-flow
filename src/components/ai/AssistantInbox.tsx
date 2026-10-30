@@ -60,6 +60,8 @@ import { followTarget } from "../../state/notificationStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { translate, useLanguageStore, useT } from "../../state/languageStore";
 import type { ChatConversationSummary, Project } from "../../types/domain";
+import { searchAssistantChats, type AssistantChatHit } from "../../lib/tauri/commands";
+import { activitySearchMatch } from "../../lib/activitySearch";
 
 type Filter = "all" | "chat" | "pr" | "analysis";
 type Scope = "repo" | "workspace";
@@ -95,6 +97,10 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
   const [scope, setScope] = useState<Scope>("repo");
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
+  const [search, setSearch] = useState<{ key: string; hits: AssistantChatHit[]; pending: boolean; error: string | null }>({
+    key: "", hits: [], pending: false, error: null,
+  });
+  const [searchRetry, setSearchRetry] = useState(0);
   const scopedProjects = useMemo(
     () => (scope === "workspace" || !activeProject ? projects : [activeProject]),
     [scope, activeProject, projects],
@@ -204,14 +210,32 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
     [runs, about, queuedRuns, workspaceId],
   );
 
+  const searchKey = JSON.stringify([scopedProjects.map((p) => p.id), scope === "workspace" ? workspaceId : null, query.trim()]);
+  useEffect(() => {
+    if (!query.trim()) return;
+    let cancelled = false;
+    setSearch({ key: searchKey, hits: [], pending: true, error: null });
+    const timer = setTimeout(() => {
+      void searchAssistantChats(scopedProjects.map((p) => p.id), scope === "workspace" ? workspaceId : null, query.trim())
+        .then((hits) => { if (!cancelled) setSearch({ key: searchKey, hits, pending: false, error: null }); })
+        .catch((error: unknown) => { if (!cancelled) setSearch({ key: searchKey, hits: [], pending: false, error: String(error) }); });
+    }, 250);
+    return () => { cancelled = true; clearTimeout(timer); };
+    // The key includes query and scope; changes to the loaded history re-run a live search too.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchKey, entries, searchRetry]);
+  const searching = !!query.trim() && (search.key !== searchKey || search.pending);
+  const searchError = query.trim() && search.key === searchKey ? search.error : null;
+  const matches = useMemo(() => new Map(entries.map((entry) => [entryKey(entry), activitySearchMatch(
+    entry, query, search.key === searchKey ? search.hits : [],
+  )])), [entries, query, search, searchKey]);
   const recent = useMemo(() => {
-    const q = query.trim().toLowerCase();
     return entries.filter((entry) => {
       if (entryIsRunning(entry)) return false;
       if (filter !== "all" && kindOf(entry) !== filter) return false;
-      return !q || entryTitle(entry).toLowerCase().includes(q);
+      return matches.get(entryKey(entry)) !== null;
     });
-  }, [entries, filter, query]);
+  }, [entries, filter, matches]);
 
   const empty = needs.length === 0 && running.length === 0 && entries.length === 0;
 
@@ -349,8 +373,15 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
           </div>
           {/* The one part that moves. */}
           <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-            <RecentList entries={recent} showRepo={showRepo} projectName={projectName} />
-            {recent.length === 0 && (
+            {searching && <p role="status" className="px-1 py-2 text-[12px] text-[var(--cf-text-muted)]">{t("assistant.searchingMessages")}</p>}
+            {searchError && (
+              <div role="alert" className="flex items-start gap-2 px-1 py-2 text-[12px] text-[var(--cf-danger)]">
+                <span className="min-w-0 flex-1 break-words">{t("assistant.searchFailed", { error: searchError })}</span>
+                <button onClick={() => setSearchRetry((n) => n + 1)} className="shrink-0 text-[var(--cf-accent)]">{t("turnReview.retry")}</button>
+              </div>
+            )}
+            <RecentList entries={recent} showRepo={showRepo} projectName={projectName} snippets={query.trim() ? matches : undefined} />
+            {recent.length === 0 && !searching && !searchError && (
               <p className="px-1 py-3 text-center text-[12px] text-[var(--cf-text-faint)]">{t("ai.noMatches")}</p>
             )}
             {hasMore && (
@@ -576,10 +607,12 @@ function RecentList({
   entries,
   showRepo,
   projectName,
+  snippets,
 }: {
   entries: ActivityEntry[];
   showRepo: boolean;
   projectName: (id: string) => string;
+  snippets?: Map<string, string | null>;
 }) {
   const t = useT();
   // The app's language, not the OS's — a Spanish UI prints Spanish dates.
@@ -594,7 +627,7 @@ function RecentList({
         return (
           <div key={entryKey(entry)}>
             {header && <p className="px-1.5 pb-1 pt-2 text-[11px] font-semibold text-[var(--cf-text-faint)]">{header}</p>}
-            <RecentRow entry={entry} repo={showRepo ? projectOf(entry, projectName) : null} />
+            <RecentRow entry={entry} repo={showRepo ? projectOf(entry, projectName) : null} snippet={snippets?.get(entryKey(entry)) ?? undefined} />
           </div>
         );
       })}
@@ -611,7 +644,7 @@ function projectOf(entry: ActivityEntry, projectName: (id: string) => string): s
 }
 
 /** One row of history. Rename and delete happen here — no modal between the list and the action. */
-function RecentRow({ entry, repo }: { entry: ActivityEntry; repo: string | null }) {
+function RecentRow({ entry, repo, snippet }: { entry: ActivityEntry; repo: string | null; snippet?: string }) {
   const t = useT();
   const [mode, setMode] = useState<"idle" | "renaming" | "deleting">("idle");
   const [value, setValue] = useState("");
@@ -701,6 +734,7 @@ function RecentRow({ entry, repo }: { entry: ActivityEntry; repo: string | null 
         {entryIsGlobal(entry) && <Globe size={12} className="shrink-0 text-[var(--cf-text-muted)]" aria-label={t("activity.workspaceWide")} />}
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[13px] text-[var(--cf-text)]">{title}</span>
+          {snippet && <span className="block truncate text-[11px] text-[var(--cf-text-muted)]" title={snippet}>{snippet}</span>}
           {(repo || runs > 1) && (
             <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
               {[repo, runs > 1 ? t("ai.runCount", { n: runs }) : null].filter(Boolean).join(" · ")}

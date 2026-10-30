@@ -1,7 +1,7 @@
 /**
  * Which backend calls are worth a counter in Settings › Estadísticas, and under what name.
  *
- * Read by the one hook in `usageTracker` that sees every `invoke` — so an app's actions are counted
+ * Read by the observer in `usageTracker` that sees application commands — so actions are counted
  * where they reach the backend rather than in each of the components that start them. Every key
  * names a *kind* of thing (`api.send`, `api.method.POST`, `editor.save.ts`); none carries content:
  * no request URL, no SQL, no prompt, no file name — a file is reduced to its extension.

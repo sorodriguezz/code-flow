@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 /**
  * The bench and the model registry. Mirrors `src-tauri/src/commands/evals_cmd.rs`,

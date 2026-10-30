@@ -6,7 +6,7 @@
  * `src-tauri/src/ai_accounts.rs`.
  */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 /** One account the user added. The CLI's own login — the system account — is never one of these;
  * it is `null` wherever an account id is expected. */

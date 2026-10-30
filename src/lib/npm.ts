@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./tauri/invoke";
 
 /**
  * The npm registry, as the editor's annotations see it.

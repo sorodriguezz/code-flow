@@ -6,6 +6,7 @@ pub mod api_secrets;
 pub mod api_sync;
 pub mod api_trust;
 pub mod chat_queries;
+pub mod assistant_search;
 pub mod datasource_queries;
 pub mod diagram_queries;
 pub mod flow_queries;

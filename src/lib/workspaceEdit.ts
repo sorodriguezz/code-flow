@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./tauri/invoke";
 import { readEditorFile, writeEditorFile, type DiskVersion } from "./tauri/commands";
 import { isChangedOnDisk } from "./editorFiles";
 import type { LspTextEdit, LspWorkspaceEdit } from "./lsp/protocol";

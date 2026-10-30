@@ -40,7 +40,7 @@ const CHAT_FILE_GENERATION_KEY = "chat_file_generation";
  *  `chat_cmd.rs`. */
 const CHAT_AUTO_COMPACT_KEY = "chat_auto_compact";
 const WINDOW_LIMIT_KEY = "satellite_window_limit";
-/** Whether the Revisor tab is shown. Unset is off: it needs a gigabyte of SonarQube to do anything. */
+/** Whether the Revisor tab is shown. On unless explicitly hidden in Settings. */
 const REVIEWER_KEY = "reviewer_enabled";
 export const MIN_AUTO_FETCH_SECONDS = 10;
 
@@ -155,9 +155,7 @@ interface PreferencesState {
    * Whether the Revisor tab sits beside Editor — the project's quality pipeline (build, tests,
    * SonarQube, Quality Gate).
    *
-   * Off by default and only switched on in Settings › Revisor, where its download lives: the tab is
-   * useless until SonarQube is on the disk, and a tab that opens onto "go download a gigabyte first"
-   * is not one to show everybody.
+   * On by default; Settings › Revisor can hide it and manages the optional SonarQube download.
    */
   reviewerEnabled: boolean;
   /**
@@ -233,7 +231,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   pipelinePollSeconds: 5,
   blameAnnotationEnabled: false,
   satelliteLimit: DEFAULT_SATELLITE_LIMIT,
-  reviewerEnabled: false,
+  reviewerEnabled: true,
   lockedBranchRules: null,
 
   init: async () => {
@@ -308,8 +306,8 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       chatAutoCompactEnabled: (stored[CHAT_AUTO_COMPACT_KEY] ?? null) === null
         ? true
         : stored[CHAT_AUTO_COMPACT_KEY] === "true",
-      // Unset and explicit-false are both off: the tab is opted into, never out of.
-      reviewerEnabled: stored[REVIEWER_KEY] === "true",
+      // Show the tab by default, preserving an explicit choice to hide it.
+      reviewerEnabled: stored[REVIEWER_KEY] !== "false",
       lockedBranchRules: rules,
     });
     // The store that enforces it keeps its own copy, so the rail can refuse without reaching across

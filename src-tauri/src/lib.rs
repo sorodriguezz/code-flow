@@ -1683,6 +1683,7 @@ sharded_invoke_handler! {
         commands::checkpoint_cmd::ai_checkpoint_file,
         commands::tests_cmd::run_test_command,
         commands::checkpoint_cmd::restore_ai_checkpoint_paths,
+        commands::activity_cmd::search_assistant_chats,
         commands::checkpoint_cmd::delete_ai_checkpoint,
         commands::ado_cmd::ado_verify_pat,
         commands::ado_cmd::ado_check_org,

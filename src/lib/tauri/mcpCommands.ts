@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 /**
  * Mirrors `mcp_registry::McpServer` — one MCP server declared in CodeFlow, for every model. Env and

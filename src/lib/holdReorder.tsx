@@ -81,6 +81,8 @@ export interface HoldDrag {
   to: number;
   /** How far it has been dragged from its own slot, clamped to the list's extent. */
   dy: number;
+  /** Horizontal displacement; vertical callers continue to use `dy`. */
+  dx: number;
   /** The average distance between two slots. Meaningful for a list of equal-sized items, which is
    *  the only kind that can use it to preview a reorder by sliding things about. */
   pitch: number;
@@ -97,7 +99,7 @@ export interface HoldDrag {
    * under the pointer by then. Relative to the container's border box, so the container it is drawn
    * in must be `relative` and must not scroll or carry a border.
    */
-  ghost: { top: number; height: number };
+  ghost: { top: number; height: number; left: number; width: number };
 }
 
 export interface HoldReorder {
@@ -146,15 +148,15 @@ export function slotShift(index: number, drag: HoldDrag): number {
  * they are taken at the same instant by construction — measuring the centres and the boxes
  * separately would be two layout reads of a list that is about to start moving.
  */
-function measure(list: HTMLElement | null): { centres: number[]; boxes: { top: number; height: number }[] } {
+function measure(list: HTMLElement | null, axis: "x" | "y"): { centres: number[]; boxes: HoldDrag["ghost"][] } {
   const items = Array.from(list?.querySelectorAll<HTMLElement>("[data-reorder]") ?? []);
-  const origin = list?.getBoundingClientRect().top ?? 0;
+  const origin = list?.getBoundingClientRect();
   const centres: number[] = [];
-  const boxes: { top: number; height: number }[] = [];
+  const boxes: HoldDrag["ghost"][] = [];
   for (const el of items) {
     const box = el.getBoundingClientRect();
-    centres.push(box.top + box.height / 2);
-    boxes.push({ top: box.top - origin, height: box.height });
+    centres.push(axis === "x" ? box.left + box.width / 2 : box.top + box.height / 2);
+    boxes.push({ top: box.top - (origin?.top ?? 0), height: box.height, left: box.left - (origin?.left ?? 0), width: box.width });
   }
   return { centres, boxes };
 }
@@ -172,6 +174,8 @@ function nearest(slots: number[], y: number): number {
 export function useHoldReorder(
   commit: (from: number, to: number) => void,
   options: {
+    /** Vertical for rails and sidebar rows; horizontal for repository tabs. */
+    axis?: "x" | "y";
     /**
      * Asked first when a lifted item is let go: answers `true` when it took the drop somewhere
      * other than the list — the projects panel moving a repository onto another workspace — and
@@ -215,7 +219,7 @@ export function useHoldReorder(
      *  what makes a list flicker between two orders. */
     let slots: number[] = [];
     /** The same slots as boxes to draw in — see `HoldDrag.ghost`. */
-    let boxes: { top: number; height: number }[] = [];
+    let boxes: HoldDrag["ghost"][] = [];
     let timer: number | null = null;
     /** The countdown's *appearance*, which lands a quarter of a second before anything else does.
      *  Its own handle because `stop()` has to be able to cancel a press that ends inside that
@@ -223,7 +227,8 @@ export function useHoldReorder(
     let revealTimer: number | null = null;
     let armed = false;
     let to = index;
-    let dy = 0;
+    let delta = 0;
+    const axis = options.axis ?? "y";
 
     const stop = () => {
       if (timer !== null) window.clearTimeout(timer);
@@ -252,20 +257,21 @@ export function useHoldReorder(
         if (Math.hypot(ev.clientX - origin.x, ev.clientY - origin.y) > HOLD_SLOP) stop();
         return;
       }
-      const nextTo = nearest(slots, ev.clientY);
+      const position = axis === "x" ? ev.clientX : ev.clientY;
+      const nextTo = nearest(slots, position);
       // Clamped to the list's own extent: an item draggable to the bottom of the window would be an
       // item with nowhere left to go, since where it lands is decided by `nearest` regardless.
-      const nextDy = Math.round(
+      const nextDelta = Math.round(
         Math.min(
-          Math.max(ev.clientY - origin.y, slots[0] - slots[index]),
+          Math.max(position - origin[axis], slots[0] - slots[index]),
           slots[slots.length - 1] - slots[index],
         ),
       );
       // Pointer moves arrive continuously; a pixel nobody can see is not worth a render.
-      if (nextTo === to && nextDy === dy) return;
+      if (nextTo === to && nextDelta === delta) return;
       to = nextTo;
-      dy = nextDy;
-      setDrag((d) => (d ? { ...d, to, dy, ghost: boxes[to] ?? d.ghost } : d));
+      delta = nextDelta;
+      setDrag((d) => (d ? { ...d, to, dy: axis === "y" ? delta : 0, dx: axis === "x" ? delta : 0, ghost: boxes[to] ?? d.ghost } : d));
     };
 
     const onUp = (ev: PointerEvent) => {
@@ -293,7 +299,7 @@ export function useHoldReorder(
 
     timer = window.setTimeout(() => {
       timer = null;
-      const measured = measure(list.current);
+      const measured = measure(list.current, axis);
       slots = measured.centres;
       boxes = measured.boxes;
       // Nothing to swap with — leave the press a plain click rather than starting a drag with no
@@ -310,6 +316,7 @@ export function useHoldReorder(
         from: index,
         to: index,
         dy: 0,
+        dx: 0,
         // Averaged rather than taken from the first gap, so a rule or a badge landing between two
         // items one day doesn't quietly make every shift the wrong height.
         pitch: (slots[slots.length - 1] - slots[0]) / (slots.length - 1),

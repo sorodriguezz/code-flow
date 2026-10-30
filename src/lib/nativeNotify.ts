@@ -16,7 +16,7 @@
  * asked for a code review needs to hear about. The in-app bell already has the message.
  */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./tauri/invoke";
 
 type Permission = "granted" | "denied" | "default";
 

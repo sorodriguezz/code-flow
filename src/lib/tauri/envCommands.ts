@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 /**
  * «Entorno» — a repository's env files (`repo_env` in Rust). A scan carries keys and whether each

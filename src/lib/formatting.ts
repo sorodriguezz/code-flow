@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./tauri/invoke";
 import { lineHunks } from "./liveGutter";
 import type { TextEdit } from "./workspaceEdit";
 

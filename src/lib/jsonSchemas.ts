@@ -1,5 +1,5 @@
 import type * as Monaco from "monaco-editor";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./tauri/invoke";
 import { MODEL_SCHEME } from "./editorModel";
 import { useEditorDisplayStore } from "../state/editorDisplayStore";
 

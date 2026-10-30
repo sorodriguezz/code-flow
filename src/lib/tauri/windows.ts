@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 import type { DetachableKind, SatelliteKind } from "../windowIdentity";
 
 /** One open satellite, as `windows.rs` reports it. Snake case because it crosses the IPC boundary

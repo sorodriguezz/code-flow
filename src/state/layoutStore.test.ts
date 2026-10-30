@@ -12,9 +12,11 @@ const writes: { key: string; value: string }[] = [];
 const releases: (() => void)[] = [];
 let failNext = false;
 let holdWrites = false;
+let stored: Record<string, string> = {};
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (name: string, args: Record<string, unknown> = {}) => {
+    if (name === "get_settings") return Promise.resolve({ ...stored });
     if (name !== "set_setting") return Promise.resolve(null);
     if (failNext) {
       failNext = false;
@@ -23,11 +25,13 @@ vi.mock("@tauri-apps/api/core", () => ({
     const write = { key: String(args.key), value: String(args.value) };
     if (!holdWrites) {
       writes.push(write);
+      stored[write.key] = write.value;
       return Promise.resolve(null);
     }
     return new Promise<null>((resolve) =>
       releases.push(() => {
         writes.push(write);
+        stored[write.key] = write.value;
         resolve(null);
       }),
     );
@@ -46,11 +50,28 @@ beforeEach(() => {
   releases.length = 0;
   failNext = false;
   holdWrites = false;
+  stored = {};
   useToastStore.setState({ toasts: [] });
-  useLayoutStore.setState({ flags: { sidebarCollapsed: false, notesTagsByCount: false }, railOrder: [] });
+  useLayoutStore.setState({ flags: { sidebarCollapsed: false, notesTagsByCount: false }, railOrder: [], repoTabOrder: [] });
 });
 
 describe("persisting layout", () => {
+  it("restores the repository tab order after reloading settings", async () => {
+    const order = ["reviewer", "graph", "changes", "editor"];
+    useLayoutStore.getState().setRepoTabOrder(order);
+    await flush();
+    useLayoutStore.setState({ repoTabOrder: [] });
+    await useLayoutStore.getState().init();
+    expect(useLayoutStore.getState().repoTabOrder).toEqual(order);
+    expect(writes).toEqual([{ key: "layout_repo_tab_order", value: JSON.stringify(order) }]);
+  });
+
+  it("uses the default order for invalid saved data", async () => {
+    stored.layout_repo_tab_order = "invalid json";
+    await useLayoutStore.getState().init();
+    expect(useLayoutStore.getState().repoTabOrder).toEqual([]);
+  });
+
   it("keeps a flag flipped when the write fails, and says it was not saved", async () => {
     failNext = true;
     useLayoutStore.getState().toggleFlag("sidebarCollapsed");

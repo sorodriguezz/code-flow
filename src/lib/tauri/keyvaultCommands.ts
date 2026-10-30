@@ -8,7 +8,7 @@
  * call. See `commands/keyvault_cmd.rs`.
  */
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 import type {
   PasswordRecipe,

@@ -4,10 +4,10 @@
  * commands and failures. AI runs and git operations are counted by the backend where they happen
  * (`usage_stats.rs`), so nothing that spends or writes can be missed.
  *
- * **One hook for every app's actions.** Rather than a counter in each of the components that send a
- * request, run a query or save a file, the tracker wraps `window.__TAURI_INTERNALS__.invoke` — the
- * function every `invoke` in the app goes through — and asks `usageActions` what each finished call
- * counts as. A call nobody counts costs one map lookup.
+ * **One observer for every app's actions.** Rather than a counter in each component, the app's
+ * `tauri/invoke` wrapper reports completed commands and `usageActions` decides what each counts as.
+ * Tauri's own IPC functions are read-only and must never be replaced: doing so throws during boot
+ * and used to leave every satellite on its loading skeleton.
  *
  * **Batched.** Increments add up in memory under `day|hour|workspace|repo|kind|key` and go to the
  * database every {@link FLUSH_MS}, when the window is hidden and before it unloads.
@@ -20,6 +20,7 @@
  */
 
 import { usageRecord, usageSetContext } from "./tauri/commands";
+import { setInvokeObserver } from "./tauri/invoke";
 import { paletteKey, usageHitsFor, type ChatSurface } from "./usageActions";
 import { REPO_VIEWS, useUiStore } from "../state/uiStore";
 import { useWorkspaceStore } from "../state/workspaceStore";
@@ -138,7 +139,7 @@ export async function flushUsage(): Promise<void> {
   await usageRecord(events).catch(() => {});
 }
 
-// --------------------------------------------------------------------------- the invoke hook
+// ----------------------------------------------------------------------- the command observer
 
 let workspaceChatIds: (() => Record<string, unknown>) | null = null;
 
@@ -160,31 +161,10 @@ function observe(cmd: string, args: Record<string, unknown>, ok: boolean, result
   }
 }
 
-type Internals = { invoke: (cmd: string, args?: unknown, options?: unknown) => Promise<unknown>; __cfUsage?: boolean };
-
-/** Wraps the one function every `invoke` goes through. The caller gets the original promise back. */
-function hookInvoke() {
-  const internals = (window as unknown as { __TAURI_INTERNALS__?: Internals }).__TAURI_INTERNALS__;
-  if (!internals?.invoke || internals.__cfUsage) return;
-  const original = internals.invoke.bind(internals);
-  internals.invoke = (cmd, args, options) => {
-    const promise = original(cmd, args, options);
-    if (typeof cmd === "string" && !cmd.startsWith("plugin:")) {
-      const plain = (args && typeof args === "object" ? args : {}) as Record<string, unknown>;
-      promise.then(
-        (result) => observe(cmd, plain, true, result),
-        () => observe(cmd, plain, false, undefined),
-      );
-    }
-    return promise;
-  };
-  internals.__cfUsage = true;
-}
-
 let started = false;
 
 function startCommon() {
-  hookInvoke();
+  setInvokeObserver(observe);
   window.addEventListener("pagehide", () => void flushUsage());
   window.setInterval(() => void flushUsage(), FLUSH_MS);
   void import("../state/workspaceChatStore")
@@ -268,6 +248,7 @@ export function startUsageTracking() {
 
 /** For tests: forget what is queued and the started flag. */
 export function resetUsageTrackingForTests() {
+  setInvokeObserver(null);
   pending.clear();
   started = false;
   current = null;

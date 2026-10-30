@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, ChevronDown, ChevronRight, ExternalLink, FileDiff, Loader2, Undo2 } from "lucide-react";
+import { AlertCircle, Check, ChevronDown, ChevronRight, ExternalLink, FileDiff, Loader2, RotateCcw, Undo2 } from "lucide-react";
 import { FileGlyph } from "../common/FileGlyph";
-import { aiCheckpointFile, restoreAiCheckpointPaths, writeFileText, type TurnFile } from "../../lib/tauri/commands";
+import { aiCheckpointFile, restoreAiCheckpointPaths, type ReviewedEdit, type TurnFile } from "../../lib/tauri/commands";
 import { lineHunks, type LineHunk } from "../../lib/liveGutter";
 import type { TurnChanges } from "../../state/chatStore";
 import { useUiStore } from "../../state/uiStore";
-import { pushErrorToast } from "../../state/toastStore";
 import { recordExperience } from "../../lib/tauri/experiencesCommands";
 import { useT } from "../../state/languageStore";
 
@@ -72,6 +71,8 @@ export function TurnReview({
   const [kept, setKept] = useState(() => readKept(changes.checkpointId));
   const [gone, setGone] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [reviewed, setReviewed] = useState<Record<string, { version: number; file: TurnFile }>>({});
   /** Bumped after every discard, so each file re-reads what is on disk now. */
   const [version, setVersion] = useState(0);
 
@@ -92,17 +93,29 @@ export function TurnReview({
     });
   };
 
-  const discardAll = async () => {
+  const refresh = () => {
+    setError(null);
+    setVersion((v) => v + 1);
+  };
+  const discard = async (edits: ReviewedEdit[]) => {
     setBusy(true);
+    setError(null);
     try {
-      await restoreAiCheckpointPaths(repoPath, changes.checkpointId, changes.paths);
+      await restoreAiCheckpointPaths(repoPath, changes.checkpointId, edits);
       setVersion((v) => v + 1);
     } catch (error) {
       if (String(error).includes("no longer exists")) setGone(true);
-      else pushErrorToast(String(error));
+      else if (String(error).startsWith("CHECKPOINT_CONFLICT:")) {
+        setError(t("turnReview.conflict", { path: String(error).slice("CHECKPOINT_CONFLICT:".length) }));
+      } else setError(String(error));
     } finally {
       setBusy(false);
     }
+  };
+  const allReady = changes.paths.every((path) => reviewed[path]?.version === version);
+  const discardAll = () => {
+    if (!allReady || busy) return;
+    void discard(changes.paths.map((path) => ({ path, expectedRevision: reviewed[path].file.revision, content: null })));
   };
 
   if (gone) {
@@ -125,17 +138,26 @@ export function TurnReview({
             {t("turnReview.title", { count: changes.paths.length })}
           </span>
         </button>
-        <button
+        {open && <button
           type="button"
           onClick={() => void discardAll()}
-          disabled={busy}
+          disabled={busy || !allReady}
           title={t("turnReview.discardAllHint")}
           className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)] disabled:opacity-50"
         >
           {busy ? <Loader2 size={11} className="animate-spin" /> : <Undo2 size={11} />}
           {t("turnReview.discardAll")}
-        </button>
+        </button>}
       </div>
+      {error && (
+        <div role="alert" className="flex items-start gap-2 border-t border-[var(--cf-border)] px-2 py-2 text-[var(--cf-danger)]">
+          <AlertCircle size={12} className="mt-0.5 shrink-0" />
+          <span className="min-w-0 flex-1 break-words">{error}</span>
+          <button type="button" onClick={refresh} disabled={busy} className="shrink-0 text-[var(--cf-accent)]">
+            {t("turnReview.refresh")}
+          </button>
+        </div>
+      )}
       {open && (
         <div className="border-t border-[var(--cf-border)] px-1 py-1">
           {changes.paths.map((path) => (
@@ -147,7 +169,15 @@ export function TurnReview({
               version={version}
               kept={kept}
               onKeep={keep}
-              onChanged={() => setVersion((v) => v + 1)}
+              busy={busy}
+              onDiscard={discard}
+              onRetry={refresh}
+              onLoaded={(file) => setReviewed((current) => {
+                const next = { ...current };
+                if (file) next[path] = { version, file };
+                else delete next[path];
+                return next;
+              })}
               onGone={() => setGone(true)}
               canOpen={canOpen}
             />
@@ -165,7 +195,10 @@ function TurnFileRow({
   version,
   kept,
   onKeep,
-  onChanged,
+  busy,
+  onDiscard,
+  onRetry,
+  onLoaded,
   onGone,
   canOpen,
 }: {
@@ -176,23 +209,33 @@ function TurnFileRow({
   version: number;
   kept: Set<string>;
   onKeep: (key: string) => void;
-  onChanged: () => void;
+  busy: boolean;
+  onDiscard: (edits: ReviewedEdit[]) => Promise<void>;
+  onRetry: () => void;
+  onLoaded: (file: TurnFile | null) => void;
   onGone: () => void;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
   const [file, setFile] = useState<TurnFile | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    setFile(null);
+    setError(null);
+    onLoaded(null);
     aiCheckpointFile(repoPath, checkpointId, path)
       .then((next) => {
-        if (!cancelled) setFile(next);
+        if (!cancelled) {
+          setFile(next);
+          onLoaded(next);
+        }
       })
       .catch((error: unknown) => {
         if (cancelled) return;
         if (String(error).includes("no longer exists")) onGone();
-        else setFile({ before: null, after: null, binary: true });
+        else setError(String(error));
       });
     return () => {
       cancelled = true;
@@ -205,7 +248,8 @@ function TurnFileRow({
     () => (file && !file.binary ? lineHunks(file.before ?? "", file.after ?? "") : []),
     [file],
   );
-  const open_ = hunks.filter((h) => !kept.has(`${path}:${h.baseStart}:${h.bufferStart}`));
+  const hunkKey = (h: LineHunk) => `${path}:${file?.revision}:${h.baseStart}:${h.bufferStart}`;
+  const open_ = hunks.filter((h) => !kept.has(hunkKey(h)));
   const added = hunks.reduce((n, h) => n + h.bufferEnd - h.bufferStart, 0);
   const removed = hunks.reduce((n, h) => n + h.baseEnd - h.baseStart, 0);
   const name = path.slice(path.lastIndexOf("/") + 1);
@@ -213,26 +257,18 @@ function TurnFileRow({
   const unchanged = file !== null && !file.binary && hunks.length === 0;
 
   const discardFile = async () => {
-    try {
-      await restoreAiCheckpointPaths(repoPath, checkpointId, [path]);
-      onChanged();
-    } catch (error) {
-      pushErrorToast(String(error));
-    }
+    if (!file || busy) return;
+    await onDiscard([{ path, expectedRevision: file.revision, content: null }]);
   };
 
   /** Puts one hunk's "before" lines back in place of its "now" lines, in the file as read. */
   const discardHunk = async (hunk: LineHunk) => {
-    if (!file || file.after === null) return discardFile();
+    if (!file || busy) return;
+    if (file.after === null) return discardFile();
     const now = splitLines(file.after);
     const before = splitLines(file.before ?? "");
     const next = [...now.slice(0, hunk.bufferStart), ...before.slice(hunk.baseStart, hunk.baseEnd), ...now.slice(hunk.bufferEnd)];
-    try {
-      await writeFileText(repoPath, path, next.join(eolOf(file.after)));
-      onChanged();
-    } catch (error) {
-      pushErrorToast(String(error));
-    }
+    await onDiscard([{ path, expectedRevision: file.revision, content: next.join(eolOf(file.after)) }]);
   };
 
   return (
@@ -253,7 +289,9 @@ function TurnFileRow({
           <span className={`shrink-0 ${unchanged ? "text-[var(--cf-text-faint)] line-through" : "text-[var(--cf-text)]"}`}>{name}</span>
           <span className="min-w-0 truncate text-[10.5px] text-[var(--cf-text-faint)]">{dir}</span>
         </button>
-        {file === null ? (
+        {error ? (
+          <AlertCircle size={11} className="shrink-0 text-[var(--cf-danger)]" />
+        ) : file === null ? (
           <Loader2 size={11} className="shrink-0 animate-spin text-[var(--cf-text-faint)]" />
         ) : file.binary ? (
           <span className="shrink-0 text-[10.5px] text-[var(--cf-text-faint)]">{t("turnReview.binary")}</span>
@@ -265,7 +303,7 @@ function TurnFileRow({
             <span className="text-[var(--cf-danger)]">−{removed}</span>
           </span>
         )}
-        {canOpen && file?.after !== null && (
+        {canOpen && file && !file.binary && file.after !== null && (
           <button
             type="button"
             onClick={() => useUiStore.getState().openInEditor(path, (hunks[0]?.bufferStart ?? 0) + 1)}
@@ -276,10 +314,11 @@ function TurnFileRow({
             <ExternalLink size={11} />
           </button>
         )}
-        {!unchanged && (
+        {file && !unchanged && (
           <button
             type="button"
             onClick={() => void discardFile()}
+            disabled={busy}
             title={t("turnReview.discardFile")}
             aria-label={t("turnReview.discardFile")}
             className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-danger)] group-hover:opacity-100"
@@ -288,6 +327,14 @@ function TurnFileRow({
           </button>
         )}
       </div>
+      {error && (
+        <div role="alert" className="mb-1 ml-4 flex items-start gap-2 px-1 text-[11px] text-[var(--cf-danger)]">
+          <span className="min-w-0 flex-1 break-words">{t("turnReview.readFailed", { error })}</span>
+          <button type="button" onClick={onRetry} disabled={busy} className="flex shrink-0 items-center gap-1 text-[var(--cf-accent)]">
+            <RotateCcw size={11} />{t("turnReview.retry")}
+          </button>
+        </div>
+      )}
       {open && file && !file.binary && (
         <div className="mb-1 ml-4 space-y-1">
           {open_.length === 0 && hunks.length > 0 && (
@@ -299,8 +346,9 @@ function TurnFileRow({
               hunk={hunk}
               before={file.before ?? ""}
               after={file.after ?? ""}
-              onKeep={() => onKeep(`${path}:${hunk.baseStart}:${hunk.bufferStart}`)}
+              onKeep={() => onKeep(hunkKey(hunk))}
               onDiscard={() => void discardHunk(hunk)}
+              busy={busy}
             />
           ))}
         </div>
@@ -315,12 +363,14 @@ function HunkView({
   after,
   onKeep,
   onDiscard,
+  busy,
 }: {
   hunk: LineHunk;
   before: string;
   after: string;
   onKeep: () => void;
   onDiscard: () => void;
+  busy: boolean;
 }) {
   const t = useT();
   const removed = splitLines(before).slice(hunk.baseStart, hunk.baseEnd);
@@ -354,6 +404,7 @@ function HunkView({
         <button
           type="button"
           onClick={onKeep}
+          disabled={busy}
           className="flex items-center gap-0.5 rounded px-1 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-success)]"
         >
           <Check size={10} />
@@ -362,6 +413,7 @@ function HunkView({
         <button
           type="button"
           onClick={onDiscard}
+          disabled={busy}
           className="flex items-center gap-0.5 rounded px-1 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"
         >
           <Undo2 size={10} />

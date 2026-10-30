@@ -319,6 +319,14 @@ pub fn write_file_text(repo_path: &str, rel_path: &str, content: &str) -> Result
     replace_file(&full, content.as_bytes())
 }
 
+pub(crate) fn write_bytes_in_repo(repo_path: &str, rel_path: &str, content: &[u8]) -> Result<(), String> {
+    let full = resolve_within_repo(repo_path, rel_path)?;
+    if let Some(parent) = full.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    replace_file(&full, content)
+}
+
 /// Writes `content` over `full` whole or not at all: into a sibling temporary file first, flushed to
 /// disk, then renamed over the target. `std::fs::write` truncates first, so a full disk or a crash
 /// half-way left the user's file cut short — and a save is exactly when the only other copy is the

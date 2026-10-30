@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 /** An editor CodeFlow can open a folder in (`external_editor::EDITORS`). */
 export interface ExternalEditor {

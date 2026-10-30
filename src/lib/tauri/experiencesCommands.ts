@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 /**
  * Experiences — what happened after an AI answer, kept as evidence. Mirrors

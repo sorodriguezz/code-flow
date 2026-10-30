@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./tauri/invoke";
 import { listen } from "@tauri-apps/api/event";
 import { relPathFromModelUri } from "./editorModel";
 import type { TsRenameGroup } from "./workspaceEdit";

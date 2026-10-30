@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 import type { AzActivity, AzGroup, AzHealth, AzQueryResult, AzResource, AzSubscriptions, AzTopology, AzWorkspace } from "../../types/containers";
 
 /**

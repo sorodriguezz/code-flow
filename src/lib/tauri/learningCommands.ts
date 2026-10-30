@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./invoke";
 
 /**
  * Fine-tuning: datasets, the training environment, runs, adapters. Mirrors

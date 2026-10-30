@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { editor as MonacoEditorNS } from "monaco-editor";
 import type { Monaco } from "@monaco-editor/react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "../../lib/tauri/invoke";
 import { scriptKind } from "../../lib/tsserver";
 
 /**
