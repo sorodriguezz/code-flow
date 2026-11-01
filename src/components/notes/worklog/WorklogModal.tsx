@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { create } from "zustand";
 import { ClipboardCopy, Download, ListChecks, MessageSquare, RotateCw, X } from "lucide-react";
 import type { WorklogFormat, WorklogOutcome, WorklogPeriodKind, WorklogRequest } from "../../../lib/tauri/worklogCommands";
@@ -90,8 +91,10 @@ function WorklogModal({ onClose }: { onClose: () => void }) {
     { value: "custom", label: t("worklog.period.custom") },
   ];
 
-  return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4" onClick={busy ? undefined : onClose}>
+  // Portalled to the body: the Notes view sits in an isolated stacking context (`.cf-ambient-bg`),
+  // which trapped this overlay *under* the AI panel and the rail. `z-40` matches `ApiModal`.
+  return createPortal(
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/30 p-4" onClick={busy ? undefined : onClose}>
       <form
         onClick={(event) => event.stopPropagation()}
         onSubmit={(event) => {
@@ -216,6 +219,7 @@ function WorklogModal({ onClose }: { onClose: () => void }) {
           </div>
         )}
       </form>
-    </div>
+    </div>,
+    document.body,
   );
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detectFormat, importAny, importBrunoFolder, parseBru } from "./importers";
+import { detectFormat, importAny, importBrunoAnyFolder, importBrunoFolder, parseBru } from "./importers";
 import { buildImportPayload } from "./importPayload";
 import type { ApiRequestSpec, ImportedItem, ImportResult } from "../../types/api";
 
@@ -571,5 +571,56 @@ describe("buildImportPayload", () => {
     const empty = { description: "", auth: null, variables: [], preScript: "", postScript: "", items: [] };
     const payload = buildImportPayload("insomnia", [{ name: "A", ...empty }, { name: "B", ...empty }], [], "X");
     expect(payload.collections.map((c) => c.name)).toEqual(["A", "B"]);
+  });
+});
+
+
+describe("Bruno OpenCollection (YAML)", () => {
+  const request = [
+    "info:",
+    "  name: login getToken",
+    "  type: http",
+    "  seq: 1",
+    "http:",
+    "  method: POST",
+    "  url: https://api.example.com/login?x=1",
+    "  headers:",
+    "    - name: Content-Type",
+    "      value: application/json",
+    "  body:",
+    "    type: json",
+    "    data: |-",
+    '      {"user":"a"}',
+    "  auth:",
+    "    type: bearer",
+    '    token: "{{token}}"',
+    "",
+  ].join("\n");
+
+  it("recognises a lone request file", async () => {
+    expect(detectFormat(request)).toBe("bruno");
+    const result = await importAny(request);
+    const item = result.collections[0]?.items[0];
+    expect(item?.kind).toBe("request");
+    if (item?.kind !== "request") return;
+    expect(item.name).toBe("login getToken");
+    expect(item.spec.method).toBe("POST");
+    expect(item.spec.body.raw).toBe('{"user":"a"}');
+    expect(item.spec.params[0]?.key).toBe("x");
+  });
+
+  it("reads a folder with opencollection.yml", async () => {
+    const result = await importBrunoAnyFolder(
+      [
+        { path: "opencollection.yml", text: "opencollection: 1.0.0\ninfo:\n  name: Orders\n" },
+        { path: "users/folder.yml", text: "info:\n  name: Users\n  type: folder\n  seq: 1\n" },
+        { path: "users/List.yml", text: request },
+        { path: "environments/Local.yml", text: "name: Local\nvariables:\n  - name: host\n    value: x\n" },
+      ],
+      "fallback",
+    );
+    expect(result.collections[0]?.name).toBe("Orders");
+    expect(result.collections[0]?.items[0]?.kind).toBe("folder");
+    expect(result.environments[0]?.variables[0]?.key).toBe("host");
   });
 });

@@ -17765,6 +17765,8 @@ export const es = {
   "stats.actionsN": "{n} acciones",
   "stats.heatTitle": "Cuándo trabajas",
   "stats.heatHint": "Tiempo en la app por día de la semana y hora",
+  "stats.heatLess": "Menos",
+  "stats.heatMore": "Más",
   "stats.heatWorkspaceNote": "Las horas se guardan por workspace, no por repositorio",
   "stats.appsExpandHint": "Despliega una app para ver qué se hizo en ella.",
   "stats.toolActions": "Otras herramientas",

@@ -969,7 +969,7 @@ const COLLECTION_DIR_MAX_FILES: usize = 5000;
 const COLLECTION_DIR_MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 const COLLECTION_DIR_MAX_DEPTH: usize = 32;
 
-/// Reads a Bruno collection folder: every `.bru` file and `bruno.json`, recursively. `None` when
+/// Reads a Bruno collection folder: every `.bru` file and `bruno.json` (plus `.yml` for a Bruno 3 one), recursively. `None` when
 /// `path` is not a directory, so a dropped file falls back to being read as one.
 ///
 /// Hidden folders and `node_modules` are skipped — a collection kept in a repo sits beside both.
@@ -979,8 +979,11 @@ pub fn api_read_collection_dir(path: String) -> Result<Option<Vec<CollectionFile
     if !root.is_dir() {
         return Ok(None);
     }
+    // A Bruno 3 collection is YAML (`opencollection.yml` at its root); the `.yml` files are only
+    // collected then, so a repo folder full of CI configs doesn't trip the file cap.
+    let yaml = root.join("opencollection.yml").is_file() || root.join("opencollection.yaml").is_file();
     let mut files = Vec::new();
-    read_collection_dir(root, root, 0, &mut files)?;
+    read_collection_dir(root, root, 0, yaml, &mut files)?;
     files.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(Some(files))
 }
@@ -989,6 +992,7 @@ fn read_collection_dir(
     root: &std::path::Path,
     dir: &std::path::Path,
     depth: usize,
+    yaml: bool,
     out: &mut Vec<CollectionFile>,
 ) -> Result<(), String> {
     if depth > COLLECTION_DIR_MAX_DEPTH {
@@ -1004,10 +1008,13 @@ fn read_collection_dir(
             if name.starts_with('.') || name == "node_modules" {
                 continue;
             }
-            read_collection_dir(root, &entry.path(), depth + 1, out)?;
+            read_collection_dir(root, &entry.path(), depth + 1, yaml, out)?;
             continue;
         }
-        if !meta.is_file() || !(name.ends_with(".bru") || name == "bruno.json") {
+        let wanted = name.ends_with(".bru")
+            || name == "bruno.json"
+            || (yaml && (name.ends_with(".yml") || name.ends_with(".yaml")));
+        if !meta.is_file() || !wanted {
             continue;
         }
         if out.len() >= COLLECTION_DIR_MAX_FILES {

@@ -225,10 +225,12 @@ export function detectFormat(text: string): ImportFormat | null {
     // A YAML spec is still recognizably OpenAPI; `importAny` explains why it can't read it.
     if (/^\s*(?:openapi|swagger)\s*:\s*["']?\d/m.test(trimmed)) return "openapi";
     if (/^\s*type\s*:\s*["']?(?:collection|spec|environment)\.insomnia\.rest\/5/m.test(trimmed)) return "insomnia";
+    if (looksLikeOpenCollectionYaml(trimmed)) return "bruno";
     return null;
   }
 
   if (str(doc.format) === "codeflow-api") return "codeflow";
+  if (typeof doc.opencollection === "string" || isObj(doc.opencollection)) return "bruno";
   if (isObj(doc.log) && Array.isArray(doc.log.entries)) return "har";
   if (str(doc._type) === "export" && Array.isArray(doc.resources)) return "insomnia";
   if (str(doc.type).includes("insomnia.rest/5")) return "insomnia";
@@ -249,6 +251,15 @@ export function detectFormat(text: string): ImportFormat | null {
   if (info && Array.isArray(doc.item)) return "postman";
   if (info && isObj(doc.paths)) return "openapi";
   return null;
+}
+
+/**
+ * Bruno 3's YAML ("OpenCollection") files: a whole collection (`opencollection:` on top) or one
+ * request/folder, which opens with an `info:` block naming it and its `type`.
+ */
+function looksLikeOpenCollectionYaml(text: string): boolean {
+  if (/^opencollection\s*:/m.test(text)) return true;
+  return /^info\s*:\s*\r?\n(?:[ \t]+[^\n]*\r?\n)*?[ \t]+type\s*:\s*["']?(?:http|graphql|folder|grpc|ws)["']?\s*$/m.test(text);
 }
 
 /** A `.bru` request file: a `meta` block and an HTTP method block, each opening a line. */
@@ -316,6 +327,12 @@ async function runImport(
   if (format === "curl") return importCurl(text, warnings);
   if (format === "http") return importHttpFile(text, warnings);
   if (format === null) {
+    if (/["']?(?:apidogProject|apifoxProject)["']?\s*:/.test(text.slice(0, 2000))) {
+      warnings.push(
+        "This is Apidog's own project format. Export it from Apidog as OpenAPI (JSON or YAML) or Postman Collection and import that file instead.",
+      );
+      return empty("codeflow");
+    }
     warnings.push(
       "Unrecognized format — expected a Postman, OpenAPI/Swagger, HAR, Insomnia, Bruno or CodeFlow export, or a cURL command.",
     );
@@ -346,6 +363,10 @@ async function runImport(
       case "insomnia":
         return importInsomnia(doc, warnings);
       case "bruno":
+        if (typeof doc.opencollection === "string" || isObj(doc.opencollection)) {
+          return importOpenCollectionDoc(doc, warnings);
+        }
+        if (isObj(doc.info) && !Array.isArray(doc.items)) return importOpenCollectionRequest(doc, warnings);
         return importBrunoJson(doc, warnings);
       case "codeflow":
         return importNative(doc, warnings);
@@ -3068,7 +3089,7 @@ function brunoAuth(mode: string, fields: Record<string, unknown>, warnings: stri
     }
     case "oauth2": {
       const auth = defaultAuth("oauth2");
-      const grant = pick("grant_type", "grantType");
+      const grant = pick("grant_type", "grantType", "flow");
       const pkce = pick("pkce") === "true";
       const grantType: OAuth2GrantType =
         grant === "authorization_code"
@@ -3561,6 +3582,288 @@ export function importBrunoFolder(files: { path: string; text: string }[], folde
     environments,
     warnings: [...new Set(warnings)],
   };
+}
+
+// ----- OpenCollection (Bruno's YAML collections) -----
+
+interface OcRequest {
+  item: ImportedItem | null;
+  seq: number;
+  scripts: boolean;
+}
+
+/** `[{ name, value, disabled }]` — the shape every OpenCollection table has. */
+function ocKeyValues(v: unknown): KeyValue[] {
+  return objs(v).map((row) =>
+    kv(str(row.name), scalarText(row.value), { enabled: row.disabled !== true, description: str(row.description) }),
+  );
+}
+
+function ocAuth(v: unknown, warnings: string[]): AuthConfig | null {
+  if (typeof v === "string") return v === "" ? null : brunoAuth(v, {}, warnings);
+  if (!isObj(v)) return null;
+  const mode = str(v.type) || str(v.mode);
+  return brunoAuth(mode, v, warnings);
+}
+
+/** Scripts live in a list of `{ type, code }`; `tests` and `after-response` both run afterwards. */
+function ocScripts(node: unknown): { pre: string; post: string } {
+  const list = objs(isObj(node) ? node.scripts : undefined);
+  const code = (...types: string[]) =>
+    list
+      .filter((script) => types.includes(str(script.type)))
+      .map((script) => str(script.code))
+      .join("\n\n");
+  return { pre: code("before-request"), post: joinScripts(code("after-response"), code("tests")) };
+}
+
+function ocRequest(doc: Json, fallbackName: string, warnings: string[]): OcRequest {
+  const info = isObj(doc.info) ? doc.info : {};
+  const type = str(info.type) || "http";
+  const name = str(info.name) || fallbackName;
+  const seq = num(info.seq, 0);
+  if (type !== "http" && type !== "graphql") {
+    warnings.push(`Bruno ${type} request "${name}" can't be imported.`);
+    return { item: null, seq, scripts: false };
+  }
+  const block = isObj(doc[type]) ? (doc[type] as Json) : isObj(doc.http) ? doc.http : {};
+  const params = objs(block.params);
+  const queryParams = params.filter((p) => str(p.type) !== "path");
+  const body = isObj(block.body) ? block.body : {};
+  const data = body.data;
+  const text = typeof data === "string" ? data : "";
+  const rows = Array.isArray(data) ? objs(data) : [];
+  const bodyType = str(body.type);
+  const scripts = ocScripts(isObj(doc.runtime) ? doc.runtime : undefined);
+  const runtime = isObj(doc.runtime) ? doc.runtime : {};
+  noteBrunoExtras(name, objs(runtime.vars).length > 0, objs(runtime.assertions).length > 0, warnings);
+  const item = brunoRequest(
+    {
+      name,
+      type,
+      method: str(block.method),
+      url: str(block.url),
+      query: queryParams.length > 0 ? ocKeyValues(queryParams) : null,
+      pathVars: ocKeyValues(params.filter((p) => str(p.type) === "path")),
+      headers: ocKeyValues(block.headers),
+      auth: ocAuth(block.auth, warnings) ?? defaultAuth("inherit"),
+      bodyMode: bodyType,
+      body: {
+        json: text,
+        text,
+        xml: text,
+        formUrlEncoded: ocKeyValues(rows),
+        multipart: rows.map((row) => {
+          const file = str(row.type) === "file";
+          const value = Array.isArray(row.value) ? str(row.value[0]) : str(row.value);
+          return kv(str(row.name), file ? "" : value, {
+            enabled: row.disabled !== true,
+            type: file ? "file" : "text",
+            src: file ? value : "",
+          });
+        }),
+        graphqlQuery: str(body.query) || (type === "graphql" ? text : ""),
+        graphqlVariables: str(body.variables),
+        file: str(rows[0]?.filePath ?? rows[0]?.path),
+      },
+      preScript: scripts.pre,
+      postScript: scripts.post,
+      docs: typeof doc.docs === "string" ? doc.docs : str(isObj(doc.docs) ? doc.docs.content : ""),
+    },
+    [],
+  );
+  return { item, seq, scripts: scripts.pre !== "" || scripts.post !== "" };
+}
+
+function ocEnvironment(doc: Json, fallbackName: string): { name: string; variables: ApiVariable[] } {
+  return {
+    name: str(doc.name) || fallbackName,
+    variables: objs(doc.variables).map((row) =>
+      variable(str(row.name), scalarText(isObj(row.value) ? row.value.data : row.value), {
+        enabled: row.disabled !== true && row.enabled !== false,
+        secret: row.secret === true,
+      }),
+    ),
+  };
+}
+
+/** One request, pasted or opened on its own: a one-request collection, like a lone `.bru`. */
+function importOpenCollectionRequest(doc: Json, warnings: string[]): ImportResult {
+  const request = ocRequest(doc, "Request", warnings);
+  if (request.scripts) warnings.push(BRUNO_SCRIPT_WARNING);
+  const collection = emptyCollection("Bruno import");
+  if (request.item) collection.items = [request.item];
+  if (collection.items.length === 0) warnings.push("No Bruno requests were found.");
+  return {
+    format: "bruno",
+    collections: collection.items.length > 0 ? [collection] : [],
+    environments: [],
+    warnings: [...new Set(warnings)],
+  };
+}
+
+function ocItems(nodes: Json[], warnings: string[], depth: number, seen: { scripts: boolean }): ImportedItem[] {
+  if (depth > 32) return [];
+  const entries: { folder: boolean; seq: number; name: string; item: ImportedItem }[] = [];
+  for (const node of nodes) {
+    const info = isObj(node.info) ? node.info : {};
+    if (str(info.type) === "folder" || Array.isArray(node.items)) {
+      const name = str(info.name) || "Folder";
+      const scripts = ocScripts(isObj(node.request) ? node.request : node.runtime);
+      if (scripts.pre || scripts.post) seen.scripts = true;
+      entries.push({
+        folder: true,
+        seq: num(info.seq, 0),
+        name,
+        item: {
+          kind: "folder",
+          name,
+          description: typeof node.docs === "string" ? node.docs : "",
+          auth: ocAuth(isObj(node.request) ? node.request.auth : undefined, warnings),
+          preScript: scripts.pre,
+          postScript: scripts.post,
+          items: ocItems(objs(node.items), warnings, depth + 1, seen),
+        },
+      });
+      continue;
+    }
+    const request = ocRequest(node, "Request", warnings);
+    if (request.scripts) seen.scripts = true;
+    if (request.item) entries.push({ folder: false, seq: request.seq, name: request.item.name, item: request.item });
+  }
+  return sortBruno(entries).map((entry) => entry.item);
+}
+
+/** A bundled OpenCollection document: the whole collection in one YAML/JSON file. */
+function importOpenCollectionDoc(doc: Json, warnings: string[]): ImportResult {
+  const info = isObj(doc.info) ? doc.info : {};
+  const collection = emptyCollection(str(info.name) || "Bruno import");
+  const seen = { scripts: false };
+  collection.items = ocItems(objs(doc.items), warnings, 0, seen);
+  if (seen.scripts) warnings.push(BRUNO_SCRIPT_WARNING);
+  const environments = objs(doc.environments).map((env) => ocEnvironment(env, "Environment"));
+  if (collection.items.length === 0 && environments.length === 0) warnings.push("No Bruno requests were found.");
+  return {
+    format: "bruno",
+    collections: collection.items.length > 0 ? [collection] : [],
+    environments,
+    warnings: [...new Set(warnings)],
+  };
+}
+
+/**
+ * A Bruno 3 collection as it lives on disk: `opencollection.yml` at the root, one `.yml` per
+ * request, a `folder.yml` in subfolders that have settings, `environments/*.yml`.
+ */
+export async function importOpenCollectionFolder(
+  files: { path: string; text: string }[],
+  folderName = "",
+): Promise<ImportResult> {
+  const warnings: string[] = [];
+  const { parse: parseYaml } = await import("yaml");
+  const read = (file: { path: string; text: string }): Json | null => {
+    try {
+      const doc = parseYaml(file.text, { maxAliasCount: 1000 });
+      return isObj(doc) ? doc : null;
+    } catch {
+      warnings.push(`${file.path} isn't valid YAML; it was skipped.`);
+      return null;
+    }
+  };
+  const byDir = new Map<string, { path: string; doc: Json }[]>();
+  const folderDocs = new Map<string, Json>();
+  const environments: { name: string; variables: ApiVariable[] }[] = [];
+  let root: Json = {};
+
+  for (const file of files) {
+    if (!/\.ya?ml$/i.test(file.path)) continue;
+    const doc = read(file);
+    if (!doc) continue;
+    const dir = parentDir(file.path);
+    const base = file.path.slice(file.path.lastIndexOf("/") + 1);
+    if (dir === "" && /^opencollection\.ya?ml$/i.test(base)) root = doc;
+    else if (/^folder\.ya?ml$/i.test(base)) folderDocs.set(dir, doc);
+    else if (dir === "environments") environments.push(ocEnvironment(doc, base.replace(/\.ya?ml$/i, "")));
+    else if (isObj(doc.info)) {
+      const bucket = byDir.get(dir) ?? [];
+      bucket.push({ path: file.path, doc });
+      byDir.set(dir, bucket);
+    }
+  }
+
+  const info = isObj(root.info) ? root.info : {};
+  const collection = emptyCollection(str(info.name) || folderName || "Bruno import");
+  const rootRequest = isObj(root.request) ? root.request : {};
+  collection.auth = ocAuth(rootRequest.auth, warnings);
+  if (collection.auth?.type === "inherit") collection.auth = null;
+  const rootScripts = ocScripts(rootRequest);
+  collection.preScript = rootScripts.pre;
+  collection.postScript = rootScripts.post;
+  let scripts = rootScripts.pre !== "" || rootScripts.post !== "";
+
+  const dirs = new Set<string>();
+  for (const dir of [...byDir.keys(), ...folderDocs.keys()]) {
+    for (let at = dir; at !== ""; at = parentDir(at)) dirs.add(at);
+  }
+
+  const build = (dir: string, depth: number): ImportedItem[] => {
+    if (depth > 32) return [];
+    const entries: { folder: boolean; seq: number; name: string; item: ImportedItem }[] = [];
+    for (const child of dirs) {
+      if (parentDir(child) !== dir) continue;
+      const doc = folderDocs.get(child) ?? {};
+      const folderInfo = isObj(doc.info) ? doc.info : {};
+      const request = isObj(doc.request) ? doc.request : {};
+      const own = ocScripts(request);
+      if (own.pre !== "" || own.post !== "") scripts = true;
+      const name = str(folderInfo.name) || child.slice(child.lastIndexOf("/") + 1);
+      entries.push({
+        folder: true,
+        seq: num(folderInfo.seq, 0),
+        name,
+        item: {
+          kind: "folder",
+          name,
+          description: typeof doc.docs === "string" ? doc.docs : "",
+          auth: ocAuth(request.auth, warnings),
+          preScript: own.pre,
+          postScript: own.post,
+          items: build(child, depth + 1),
+        },
+      });
+    }
+    for (const file of byDir.get(dir) ?? []) {
+      const fallback = file.path.slice(file.path.lastIndexOf("/") + 1).replace(/\.ya?ml$/i, "");
+      const request = ocRequest(file.doc, fallback, warnings);
+      if (!request.item) continue;
+      if (request.scripts) scripts = true;
+      entries.push({ folder: false, seq: request.seq, name: request.item.name, item: request.item });
+    }
+    return sortBruno(entries).map((entry) => entry.item);
+  };
+
+  collection.items = build("", 0);
+  if (scripts) warnings.push(BRUNO_SCRIPT_WARNING);
+  if (collection.items.length === 0 && environments.length === 0) warnings.push("No Bruno requests were found.");
+  return {
+    format: "bruno",
+    collections: collection.items.length > 0 ? [collection] : [],
+    environments,
+    warnings: [...new Set(warnings)],
+  };
+}
+
+/** True when a folder read from disk holds a Bruno 3 (YAML) collection rather than `.bru` files. */
+export function isOpenCollectionFolder(files: { path: string; text: string }[]): boolean {
+  return files.some((file) => /^opencollection\.ya?ml$/i.test(file.path));
+}
+
+/** Either on-disk Bruno layout, whichever the folder holds. */
+export async function importBrunoAnyFolder(
+  files: { path: string; text: string }[],
+  folderName = "",
+): Promise<ImportResult> {
+  return isOpenCollectionFolder(files) ? importOpenCollectionFolder(files, folderName) : importBrunoFolder(files, folderName);
 }
 
 // ---------------------------------------------------------------------------

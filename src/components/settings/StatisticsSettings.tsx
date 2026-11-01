@@ -260,7 +260,7 @@ export function StatisticsSettings() {
             <p className="px-3 py-6 text-center text-[12px] text-[var(--cf-text-muted)]">{t("stats.loading")}</p>
           ) : (
             <>
-              {tab === "overview" && <Overview report={report} repoScope={!!repoId} onClear={clear} />}
+              {tab === "overview" && <Overview report={report} repoScope={!!repoId} workspaceId={workspaceId} repoId={repoId} onClear={clear} />}
               {tab === "apps" && <AppsPane report={report} />}
               {tab === "workspaces" && (
                 <WorkspacesPane report={report} global={!workspaceId && !repoId} onPick={(id) => id && pickWorkspace(id)} />
@@ -324,7 +324,7 @@ function Kpi({ icon: Icon, label, value, note }: { icon: typeof Clock; label: st
   );
 }
 
-function Overview({ report, repoScope, onClear }: { report: UsageReport; repoScope: boolean; onClear: () => void }) {
+function Overview({ report, repoScope, workspaceId, repoId, onClear }: { report: UsageReport; repoScope: boolean; workspaceId: string | null; repoId: string | null; onClear: () => void }) {
   const t = useT();
   const locale = useLanguageStore((s) => (s.language === "es" ? "es-ES" : "en-US"));
   const now = report.totals;
@@ -379,7 +379,7 @@ function Overview({ report, repoScope, onClear }: { report: UsageReport; repoSco
           }
         />
       )}
-      <HeatMap seconds={report.heatSeconds} events={report.heatEvents} locale={locale} repoScope={repoScope} />
+      <YearCalendar workspaceId={workspaceId} repoId={repoId} locale={locale} />
       {top.length > 0 && (
         <BarList
           title={t("stats.topApps")}
@@ -478,51 +478,173 @@ function DailyChart({
   );
 }
 
-/** Time in front of the app by weekday and hour — when the work happens. */
-function HeatMap({ seconds, events, locale, repoScope }: { seconds: number[][]; events: number[][]; locale: string; repoScope: boolean }) {
+/** Side of a legend swatch, in px. The calendar's own cells are fluid squares that fill the width. */
+const HEAT_CELL = 12;
+const HEAT_GAP = 3;
+/** Narrowest a cell gets before the calendar scrolls sideways instead of shrinking further. */
+const HEAT_MIN = 9;
+
+/** GitHub's five steps: nothing, then four quartiles of the busiest day of the year. */
+function heatLevel(value: number, peak: number): number {
+  if (value <= 0) return 0;
+  return Math.min(4, Math.max(1, Math.ceil((value / peak) * 4)));
+}
+
+function heatShade(level: number): string {
+  if (level === 0) return "var(--cf-press)";
+  const strength = [0, 30, 55, 78, 100][level];
+  return `color-mix(in oklab, var(--cf-accent) ${strength}%, transparent)`;
+}
+
+const dayKey = (date: Date) =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+
+/**
+ * One calendar year of time in the app, laid out as GitHub lays out contributions: a column per
+ * week (Monday first), a row per weekday, month names on top and the years to pick on the right.
+ * It reads the scope's whole history itself, whatever window the pane above is showing.
+ */
+function YearCalendar({ workspaceId, repoId, locale }: { workspaceId: string | null; repoId: string | null; locale: string }) {
   const t = useT();
-  const [hover, setHover] = useState<[number, number] | null>(null);
-  const peak = Math.max(1, ...seconds.flat());
-  if (seconds.flat().every((value) => value === 0) && events.flat().every((value) => value === 0)) return null;
-  // Monday first: 2024-01-01 was a Monday.
+  const thisYear = new Date().getFullYear();
+  const [year, setYear] = useState(thisYear);
+  const [recorded, setRecorded] = useState<UsageDayStat[]>([]);
+  const [hover, setHover] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    void usageReport(workspaceId, repoId, null)
+      .then((full) => live && setRecorded(full.daily))
+      .catch(() => live && setRecorded([]));
+    return () => {
+      live = false;
+    };
+  }, [workspaceId, repoId]);
+
+  const byDay = useMemo(() => new Map(recorded.map((day) => [day.day, day])), [recorded]);
+  const years = useMemo(() => {
+    const first = recorded.length > 0 ? Number(recorded[0].day.slice(0, 4)) : thisYear;
+    const out: number[] = [];
+    for (let y = thisYear; y >= Math.min(first, thisYear); y -= 1) out.push(y);
+    return out;
+  }, [recorded, thisYear]);
+
+  const layout = useMemo(() => {
+    const start = new Date(year, 0, 1);
+    const lead = (start.getDay() + 6) % 7; // Monday = 0
+    // The running year ends today: weeks that haven't happened aren't drawn, so nothing sits empty
+    // between the last month and the year picker.
+    const end = year === thisYear ? new Date() : new Date(year, 11, 31);
+    const total = Math.floor((new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime() - start.getTime()) / 86_400_000) + 1;
+    const weeks = Math.ceil((lead + total) / 7);
+    const cells: (Date | null)[][] = Array.from({ length: weeks }, () => Array<Date | null>(7).fill(null));
+    for (let i = 0; i < total; i += 1) {
+      const slot = lead + i;
+      cells[Math.floor(slot / 7)][slot % 7] = new Date(year, 0, 1 + i);
+    }
+    const months: { week: number; name: string }[] = [];
+    for (let month = 0; month < 12; month += 1) {
+      const first = new Date(year, month, 1);
+      if (first > end) break;
+      const week = Math.floor((lead + (first.getTime() - start.getTime()) / 86_400_000) / 7);
+      if (months.length > 0 && week - months[months.length - 1].week < 3) continue;
+      months.push({ week, name: new Date(year, month, 1).toLocaleDateString(locale, { month: "short" }) });
+    }
+    return { cells, months };
+  }, [year, thisYear, locale]);
+
+  const { peak, totalSeconds } = useMemo(() => {
+    let top = 1;
+    let sum = 0;
+    for (const day of recorded) {
+      if (!day.day.startsWith(`${year}-`)) continue;
+      top = Math.max(top, day.seconds);
+      sum += day.seconds;
+    }
+    return { peak: top, totalSeconds: sum };
+  }, [recorded, year]);
+
+  const today = dayKey(new Date());
   const weekday = (index: number) => new Date(2024, 0, 1 + index).toLocaleDateString(locale, { weekday: "short" });
+  const hovered = hover ? byDay.get(hover) : undefined;
+  const hoverLabel = hover
+    ? `${new Date(`${hover}T00:00:00`).toLocaleDateString(locale, { day: "numeric", month: "short", year: "numeric" })} · ${formatSeconds(hovered?.seconds ?? 0)} · ${t("stats.actionsN", { n: hovered?.actions ?? 0 })}`
+    : `${formatSeconds(totalSeconds)} · ${year}`;
+
   return (
     <div className="rounded-lg border border-[var(--cf-border)] p-3">
-      <div className="mb-1.5 flex items-baseline gap-2">
+      <div className="mb-2 flex items-baseline gap-2">
         <span className={SECTION_LABEL}>{t("stats.heatTitle")}</span>
-        <span className="ml-auto min-w-0 truncate text-[11px] tabular-nums text-[var(--cf-text-muted)]">
-          {hover
-            ? `${weekday(hover[0])} ${String(hover[1]).padStart(2, "0")}:00 · ${formatSeconds(seconds[hover[0]][hover[1]])} · ${t("stats.actionsN", { n: events[hover[0]][hover[1]] })}`
-            : repoScope
-              ? t("stats.heatWorkspaceNote")
-              : t("stats.heatHint")}
-        </span>
+        <span className="ml-auto min-w-0 truncate text-[11px] tabular-nums text-[var(--cf-text-muted)]">{hoverLabel}</span>
       </div>
-      <div className="grid gap-[2px]" style={{ gridTemplateColumns: "28px repeat(24, minmax(0, 1fr))" }} onMouseLeave={() => setHover(null)}>
-        {seconds.map((row, day) => (
-          <div key={day} className="contents">
-            <span className="text-[10px] leading-[14px] text-[var(--cf-text-muted)]">{weekday(day)}</span>
-            {row.map((value, hour) => (
-              <div
-                key={hour}
-                onMouseEnter={() => setHover([day, hour])}
-                className="h-[14px] rounded-[2px]"
-                style={{
-                  background:
-                    value > 0
-                      ? `color-mix(in oklab, var(--cf-accent) ${Math.round(20 + (value / peak) * 80)}%, transparent)`
-                      : "var(--cf-press)",
-                }}
-              />
+      <div className="flex items-start gap-4">
+        <div className="min-w-0 flex-1 overflow-x-auto pb-1">
+          <div
+            className="grid"
+            style={{
+              gridTemplateColumns: `28px repeat(${layout.cells.length}, minmax(${HEAT_MIN}px, 1fr))`,
+              columnGap: HEAT_GAP,
+              rowGap: HEAT_GAP,
+              minWidth: 28 + layout.cells.length * (HEAT_MIN + HEAT_GAP),
+            }}
+            onMouseLeave={() => setHover(null)}
+          >
+            {layout.months.map((month) => (
+              <span
+                key={month.week}
+                className="whitespace-nowrap pb-0.5 text-[10.5px] text-[var(--cf-text-muted)]"
+                style={{ gridRow: 1, gridColumn: month.week + 2 }}
+              >
+                {month.name}
+              </span>
             ))}
+            {Array.from({ length: 7 }, (_, row) =>
+              row % 2 === 0 ? (
+                <span key={row} className="self-center text-[10px] text-[var(--cf-text-muted)]" style={{ gridRow: row + 2, gridColumn: 1 }}>
+                  {weekday(row)}
+                </span>
+              ) : null,
+            )}
+            {layout.cells.flatMap((week, index) =>
+              week.map((date, row) => {
+                if (!date) return null;
+                const key = dayKey(date);
+                if (key > today) return null;
+                return (
+                  <span
+                    key={key}
+                    onMouseEnter={() => setHover(key)}
+                    className="aspect-square rounded-[3px] outline outline-1 -outline-offset-1 outline-[color-mix(in_oklab,var(--cf-text)_6%,transparent)]"
+                    style={{ gridRow: row + 2, gridColumn: index + 2, background: heatShade(heatLevel(byDay.get(key)?.seconds ?? 0, peak)) }}
+                  />
+                );
+              }),
+            )}
           </div>
-        ))}
-        <span />
-        {Array.from({ length: 24 }, (_, hour) => (
-          <span key={hour} className="text-center text-[9.5px] tabular-nums text-[var(--cf-text-muted)]">
-            {hour % 3 === 0 ? hour : ""}
-          </span>
-        ))}
+          <div className="mt-2 flex items-center justify-end gap-1 text-[10.5px] text-[var(--cf-text-muted)]">
+            <span className="mr-0.5">{t("stats.heatLess")}</span>
+            {[0, 1, 2, 3, 4].map((level) => (
+              <span key={level} className="rounded-[3px]" style={{ width: HEAT_CELL, height: HEAT_CELL, background: heatShade(level) }} />
+            ))}
+            <span className="ml-0.5">{t("stats.heatMore")}</span>
+          </div>
+        </div>
+        <div className="flex shrink-0 flex-col gap-1">
+          {years.map((y) => (
+            <button
+              key={y}
+              type="button"
+              onClick={() => setYear(y)}
+              className={`rounded-md px-3 py-1 text-left text-[12px] tabular-nums transition-colors ${
+                y === year
+                  ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)]"
+                  : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-press)] hover:text-[var(--cf-text)]"
+              }`}
+            >
+              {y}
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );

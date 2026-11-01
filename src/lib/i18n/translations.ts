@@ -17926,6 +17926,8 @@ const en = {
   "stats.actionsN": "{n} actions",
   "stats.heatTitle": "When you work",
   "stats.heatHint": "Time in the app by weekday and hour",
+  "stats.heatLess": "Less",
+  "stats.heatMore": "More",
   "stats.heatWorkspaceNote": "Hours are kept per workspace, not per repository",
   "stats.appsExpandHint": "Open an app to see what was done in it.",
   "stats.toolActions": "Other tools",

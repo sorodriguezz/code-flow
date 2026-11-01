@@ -24,7 +24,7 @@ import { badgeColor, badgeLabel, statusColor } from "./methodStyle";
 import { useApiStore } from "../../state/apiStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
-import { detectFormat, importAny, importBrunoFolder } from "../../lib/api/importers";
+import { detectFormat, importAny, importBrunoAnyFolder } from "../../lib/api/importers";
 import { buildImportPayload } from "../../lib/api/importPayload";
 import { SpecFetchError, fetchSpec } from "../../lib/api/specFetch";
 import { apiImportTree, apiPickFile, apiReadCollectionDir, apiReadTextFile } from "../../lib/tauri/apiCommands";
@@ -389,8 +389,13 @@ export function ImportModal({ onClose }: { onClose: () => void }) {
   useEffect(() => {
     if (folder) {
       const name = folder.path.split(/[\\/]/).filter(Boolean).pop() ?? "";
-      setResult(importBrunoFolder(folder.files, name));
-      return;
+      let current = true;
+      void importBrunoAnyFolder(folder.files, name).then((parsed) => {
+        if (current) setResult(parsed);
+      });
+      return () => {
+        current = false;
+      };
     }
     if (!text.trim()) {
       setResult(null);
