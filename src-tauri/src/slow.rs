@@ -51,6 +51,38 @@ pub fn ms(d: Duration) -> u128 {
     d.as_millis()
 }
 
+/// The main thread not answering for this long is a freeze, whatever held it.
+pub const MAIN_THREAD_THRESHOLD: Duration = Duration::from_millis(750);
+
+/// Asks the main thread for a no-op once a second and writes how long the answer took when it is a
+/// freeze. The IPC line above only sees a sync command; this sees anything that holds the thread the
+/// window runs on — an event the webview is handed, a native dialog, a window call — and says
+/// whether a freeze reported on Windows (user, 2026-11-02: the container tabs) was there at all, or
+/// in the webview's own thread (`lib/diagnostics.ts`, long tasks).
+pub fn watch_main_thread(app: tauri::AppHandle) {
+    let spawned = std::thread::Builder::new().name("main-thread-watch".into()).spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let asked = Instant::now();
+        if app.run_on_main_thread(move || {
+            let _ = tx.send(());
+        }).is_err() {
+            return; // The event loop is gone: the app is closing.
+        }
+        // Waits for the answer however long it takes, so one freeze is one line with its length.
+        if rx.recv().is_err() {
+            return;
+        }
+        let took = asked.elapsed();
+        if took > MAIN_THREAD_THRESHOLD {
+            report("main thread".into(), || format!("main thread: did not answer for {} ms", ms(took)));
+        }
+    });
+    if let Err(error) = spawned {
+        crate::applog::warn(&format!("slow: the main-thread watch did not start — {error}"));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

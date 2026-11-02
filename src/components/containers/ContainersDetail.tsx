@@ -339,7 +339,9 @@ function ContainerInfo({ selection, row }: { selection: ContainerSelection; row:
   const running = row.state === "running";
   useInterval(
     () => {
-      containersContainerDetail(selection.runtime, selection.context, row.id, running)
+      // `false`: no live sample. This tab shows none of it, and `docker stats --no-stream` is the
+      // engine CLI's heaviest call (two seconds sampling) — every five seconds, for nothing.
+      containersContainerDetail(selection.runtime, selection.context, row.id, false)
         .then((s) => {
           setSummary(s);
           setError(null);

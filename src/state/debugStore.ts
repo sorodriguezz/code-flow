@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { type DebugAdapter } from "../lib/debugAdapters";
 import {
+  debugAttach,
   debugContinue,
   debugEvaluate,
   debugIsRunning,
@@ -94,6 +95,13 @@ interface DebugState {
   console: ConsoleLine[];
   /** Last launch error, shown in the panel instead of a toast that a running app would bury. */
   error: string | null;
+  /** The service the running session is attached to (a service run in debug mode), or `null` for a
+   *  program this panel launched. Its stops bring the editor to the line; Stop stops the service. */
+  serviceId: string | null;
+  /** A stop asked for the Debug panel to be on screen. The editor shows it and clears this — a flag
+   *  rather than a counter, so an editor that mounts *because* of the stop still sees it. */
+  wantsPanel: boolean;
+  clearPanelRequest: () => void;
   init: () => void;
   loadWorkspace: (workspaceId: string | null) => Promise<void>;
   toggleBreakpoint: (file: string, line: number) => void;
@@ -122,6 +130,9 @@ interface DebugState {
     command?: string,
     config?: { args?: string[]; launch?: Record<string, unknown> },
   ) => Promise<void>;
+  /** Attaches to the inspector a service in debug mode announced. A launcher's inspector (`pnpm`) is
+   *  skipped and the session stays as it is; the program's own replaces whatever was attached. */
+  attachService: (serviceId: string, wsUrl: string, cwd: string | null) => Promise<void>;
   stop: () => Promise<void>;
   resume: () => Promise<void>;
   pause: () => Promise<void>;
@@ -250,6 +261,25 @@ function freshStop() {
   return { expanded: {}, scopes: [] as DebugVariable[], watchValues: {} as Record<string, WatchResult> };
 }
 
+/** Opens the editor on a frame's file and line, in the workspace repository that holds the file. A
+ *  file outside every repository (a dependency's) is left to the stack list. */
+async function revealFrame(frame: StackFrame): Promise<void> {
+  // Windows names a file without regard to case — and V8 and the repository list may not agree on
+  // the drive letter's.
+  const key = (path: string) => (/^[a-z]:/i.test(path) ? normalizePath(path).toLowerCase() : normalizePath(path));
+  const file = key(frame.file);
+  const workspaces = useWorkspaceStore.getState();
+  const projects = Object.values(workspaces.projectsByWorkspace).flat();
+  const owner = projects
+    .filter((project) => file.startsWith(key(`${project.local_path}/`)))
+    .sort((a, b) => b.local_path.length - a.local_path.length)[0];
+  if (!owner) return;
+  const relative = normalizePath(frame.file).slice(key(`${owner.local_path}/`).length);
+  const [{ focusEditorOn }, { useUiStore }] = await Promise.all([import("../lib/editorIslands"), import("./uiStore")]);
+  await focusEditorOn(owner.id);
+  useUiStore.getState().openInEditor(relative, frame.line);
+}
+
 export const useDebugStore = create<DebugState>((set, get) => {
   /** Sends the current breakpoints to a live session. With none running this is a no-op, and the
    * set is sent again at launch. */
@@ -292,6 +322,9 @@ export const useDebugStore = create<DebugState>((set, get) => {
     pauseDescription: null,
     console: [],
     error: null,
+    serviceId: null,
+    wantsPanel: false,
+    clearPanelRequest: () => set({ wantsPanel: false }),
 
     init: () => {
       if (subscribed) return;
@@ -308,6 +341,12 @@ export const useDebugStore = create<DebugState>((set, get) => {
         });
         // The top frame's locals are what anyone looks at first, so they're fetched without asking.
         void get().selectFrame(0);
+        // A service stopping at a breakpoint is noticed in whatever view is open, as an IDE does:
+        // the editor comes forward on the line, with the Debug panel beside it.
+        if (get().serviceId && event.frames[0]) {
+          set({ wantsPanel: true });
+          void revealFrame(event.frames[0]);
+        }
       });
       void onDebugResumed(() => {
         pauseSeq += 1;
@@ -332,7 +371,7 @@ export const useDebugStore = create<DebugState>((set, get) => {
       });
       void onDebugTerminated(() => {
         pauseSeq += 1;
-        set({ status: "idle", frames: [], selectedFrame: 0, pauseReason: null, pauseDescription: null, ...freshStop() });
+        set({ status: "idle", serviceId: null, frames: [], selectedFrame: 0, pauseReason: null, pauseDescription: null, ...freshStop() });
       });
       void getSetting(FILTERS_KEY)
         .then((stored) => set({ exceptionFilters: { ...parseFilters(stored), ...get().exceptionFilters } }))
@@ -530,11 +569,42 @@ export const useDebugStore = create<DebugState>((set, get) => {
       }
     },
 
+    attachService: async (serviceId, wsUrl, cwd) => {
+      get().init();
+      const breakpoints = specsFor(get().breakpoints, new Set());
+      try {
+        const attached = await debugAttach(wsUrl, cwd ?? "", breakpoints, get().enabledFiltersFor("node"));
+        if (!attached) return;
+        startToken += 1;
+        sentFiles = new Set(Object.keys(breakpoints));
+        pauseSeq += 1;
+        set({
+          sessionDebugger: "node",
+          serviceId,
+          status: "running",
+          error: null,
+          console: [],
+          frames: [],
+          pauseReason: null,
+          pauseDescription: null,
+          ...freshStop(),
+        });
+      } catch (e) {
+        set({ error: String(e) });
+      }
+    },
+
     stop: async () => {
       startToken += 1;
+      const serviceId = get().serviceId;
       await debugStop().catch(() => {});
       pauseSeq += 1;
-      set({ status: "idle", frames: [], pauseReason: null, pauseDescription: null, ...freshStop() });
+      set({ status: "idle", serviceId: null, frames: [], pauseReason: null, pauseDescription: null, ...freshStop() });
+      // An attached session only detaches; stopping a service's debug run means stopping the service.
+      if (serviceId) {
+        const { useServicesStore } = await import("./servicesStore");
+        await useServicesStore.getState().stop(serviceId);
+      }
     },
 
     resume: async () => {

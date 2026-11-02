@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  Bug,
   CirclePlay,
   Cpu,
   Download,
@@ -13,6 +14,7 @@ import {
   TerminalSquare,
   TriangleAlert,
 } from "lucide-react";
+import { canDebugService } from "../../lib/serviceDebug";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { Tooltip } from "../common/Tooltip";
 import { useT } from "../../state/languageStore";
@@ -54,6 +56,8 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
   const runtime = useServicesStore((s) => s.runtime[service.id]);
   const services = useServicesStore((s) => s.services);
   const start = useServicesStore((s) => s.start);
+  const debug = useServicesStore((s) => s.debug);
+  const debuggable = canDebugService(service.command);
   const stop = useServicesStore((s) => s.stop);
   const restart = useServicesStore((s) => s.restart);
   const projects = useWorkspaceStore((s) => s.projectsByWorkspace[service.workspace_id]);
@@ -136,6 +140,11 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
             ))}
           </div>
         )}
+        {runtime?.debug && runtime.alive && (
+          <span className="flex shrink-0 items-center gap-1 rounded bg-[var(--cf-accent-soft)] px-1.5 text-[10.5px] text-[var(--cf-accent)]">
+            <Bug size={10} /> {t("services.debugging")}
+          </span>
+        )}
         {(runtime?.restarts ?? 0) > 0 && (
           <Tooltip label={t("services.restartsBadge", { count: runtime!.restarts })}>
             <span className="flex shrink-0 items-center gap-0.5 rounded bg-[color-mix(in_srgb,var(--cf-warning)_14%,transparent)] px-1 text-[10.5px] tabular-nums text-[var(--cf-warning)]">
@@ -200,13 +209,28 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
             </ToolbarButton>
           </>
         ) : (
-          <button
-            onClick={() => void start(service.id)}
-            className={buttonClass({ variant: "primary", size: "sm" })}
-          >
-            <CirclePlay size={12} />
-            {t("services.start")}
-          </button>
+          <>
+            <button
+              onClick={() => void start(service.id)}
+              className={buttonClass({ variant: "primary", size: "sm" })}
+            >
+              <CirclePlay size={12} />
+              {t("services.start")}
+            </button>
+            {/* Run and Debug side by side, as an IDE has them — only where there is a debugger to
+                attach (`canDebugService`). */}
+            {debuggable && (
+              <Tooltip label={t("services.debug")} description={t("services.debugHint")}>
+                <button
+                  onClick={() => void debug(service.id)}
+                  className={buttonClass({ variant: "secondary", size: "sm" })}
+                >
+                  <Bug size={12} />
+                  {t("services.debug")}
+                </button>
+              </Tooltip>
+            )}
+          </>
         )}
         <div className="mx-0.5 h-4 w-px bg-[var(--cf-border)]" />
         <IconButton onClick={onEdit} label={t("services.edit")}>
@@ -310,7 +334,13 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
             backlog={backlog}
           />
         ) : (
-          <NeverRun service={service} onStart={() => void start(service.id)} where={where} deps={deps} />
+          <NeverRun
+            service={service}
+            onStart={() => void start(service.id)}
+            onDebug={debuggable ? () => void debug(service.id) : undefined}
+            where={where}
+            deps={deps}
+          />
         )}
       </div>
     </div>
@@ -321,11 +351,14 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
 function NeverRun({
   service,
   onStart,
+  onDebug,
   where,
   deps,
 }: {
   service: ServiceRow;
   onStart: () => void;
+  /** Present when the service can run in debug mode. */
+  onDebug?: () => void;
   where: string;
   deps: string[];
 }) {
@@ -346,13 +379,23 @@ function NeverRun({
       <code className="max-w-md truncate rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2 py-1 text-[11px] text-[var(--cf-text)]">
         {where} $ {service.command}
       </code>
-      <button
-        onClick={onStart}
-        className={buttonClass({ variant: "primary" })}
-      >
-        <CirclePlay size={13} />
-        {t("services.start")}
-      </button>
+      <div className="flex items-center gap-2">
+        <button
+          onClick={onStart}
+          className={buttonClass({ variant: "primary" })}
+        >
+          <CirclePlay size={13} />
+          {t("services.start")}
+        </button>
+        {onDebug && (
+          <Tooltip label={t("services.debug")} description={t("services.debugHint")}>
+            <button onClick={onDebug} className={buttonClass({ variant: "secondary" })}>
+              <Bug size={13} />
+              {t("services.debug")}
+            </button>
+          </Tooltip>
+        )}
+      </div>
     </div>
   );
 }

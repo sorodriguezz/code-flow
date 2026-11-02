@@ -2678,6 +2678,16 @@ export const debugStartAdapter = (
     exceptionFilters,
   });
 
+/** Attaches the Node debugger to a process that announced its inspector at `wsUrl` — a service run
+ * in debug mode. Resolves `false` when that inspector is a launcher's (`pnpm`, a watcher), not the
+ * program's, which announces its own next. */
+export const debugAttach = (
+  wsUrl: string,
+  cwd: string,
+  breakpoints: Record<string, BreakpointSpec[]>,
+  exceptionFilters: string[],
+) => invoke<boolean>("debug_attach", { wsUrl, cwd, breakpoints, exceptionFilters });
+
 export const debugStop = () => invoke<void>("debug_stop");
 export const debugContinue = () => invoke<void>("debug_continue");
 export const debugPause = () => invoke<void>("debug_pause");

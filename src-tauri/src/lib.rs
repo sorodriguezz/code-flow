@@ -132,6 +132,7 @@ mod shell_rules;
 /// The one cleanup every way out of the app runs — the `Exit` event and a Windows update alike.
 mod shutdown;
 mod slow;
+mod sourcemap;
 /// AWS request signing, shared by the API client and the Remote workspace's S3 transport.
 mod sigv4;
 mod skill_builder;
@@ -601,6 +602,7 @@ pub fn run() {
         .manage(sandbox::SandboxRegistry::default())
         .setup(|app| {
             background::init(app.handle());
+            slow::watch_main_thread(app.handle().clone());
             // The database, before anything else here reaches for it — and here, not at `.manage()`
             // time where it used to be opened, for two reasons.
             //
@@ -2216,6 +2218,7 @@ sharded_invoke_handler! {
         commands::diagrams_cmd::diagrams_read_import,
         commands::debug_cmd::debug_start,
         commands::debug_cmd::debug_start_adapter,
+        commands::debug_cmd::debug_attach,
     ]
     shard_24 => [
         commands::debug_cmd::debug_stop,

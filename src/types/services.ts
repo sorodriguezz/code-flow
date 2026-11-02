@@ -119,6 +119,15 @@ export interface ServiceRuntime {
   cpu?: number | null;
   /** The process tree's resident memory, in MiB, while it runs. */
   memoryMb?: number | null;
+  /** Started (or last started) in debug mode — see `servicesStore.debug`. */
+  debug?: boolean;
+}
+
+/** A Node inspector a service in debug mode opened (`services:inspector`). */
+export interface InspectorAnnounced {
+  serviceId: string;
+  wsUrl: string;
+  cwd: string | null;
 }
 
 /** One thing a folder can run, as the detector read it. See `services/detect.rs`. */

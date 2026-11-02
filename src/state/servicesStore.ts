@@ -74,6 +74,9 @@ interface ServicesState {
   /** Brings one service up, and everything it waits for — pressing play on the API means "make the
    *  API work", which includes its database. */
   start: (id: string) => Promise<void>;
+  /** The same in debug mode: Node's inspector open, the debugger attached to the program, and the
+   *  editor's breakpoints live — IntelliJ's Debug beside its Run. Kept on a restart. */
+  debug: (id: string) => Promise<void>;
   /** Stops one service. Its dependents are left alone: stopping the database under a running API is
    *  a thing people do on purpose, to watch what the API does about it. */
   stop: (id: string) => Promise<void>;
@@ -110,6 +113,13 @@ function startSync(): void {
   if (syncStarted || !isMainWindow()) return;
   syncStarted = true;
   const fresh = new Set<string>();
+  // The debugger lives in the editor's store, which owns the breakpoints; it decides whether the
+  // inspector is the program's (and not `pnpm`'s) and attaches.
+  void api.onServiceInspector((announced) => {
+    void import("./debugStore").then(({ useDebugStore }) =>
+      useDebugStore.getState().attachService(announced.serviceId, announced.wsUrl, announced.cwd),
+    );
+  });
   void api.onServiceRuntime((runtime) => {
     fresh.add(runtime.id);
     if (runtime.sessionId) disownTerminalBacklog(runtime.sessionId);
@@ -288,7 +298,13 @@ export const useServicesStore = create<ServicesState>((set, get) => {
     start: (id) => {
       const workspaceId = workspaceOf(id);
       if (!workspaceId) return Promise.resolve();
-      return attempt(api.startServices(workspaceId, [id]));
+      return attempt(api.startServices(workspaceId, [id], false));
+    },
+
+    debug: (id) => {
+      const workspaceId = workspaceOf(id);
+      if (!workspaceId) return Promise.resolve();
+      return attempt(api.startServices(workspaceId, [id], true));
     },
 
     stop: (id) => attempt(api.stopServices([id])),

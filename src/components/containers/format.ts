@@ -45,6 +45,23 @@ export function fmtBytes(bytes: number | null | undefined): string {
   return unit === 0 ? `${Math.round(value)} B` : `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
 }
 
+/**
+ * Bytes in powers of 1024, labelled KB/MB/GB as Docker Desktop's own graphs label them — what the
+ * «Estadísticas» tab shows, so a container's 722 MB reads 722 MB here too and not 757 (user,
+ * 2026-11-02, comparing the same container in another client).
+ */
+export function fmtBinaryBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return unit === 0 ? `${Math.round(value)} B` : `${value >= 100 ? value.toFixed(0) : value.toFixed(1)} ${units[unit]}`;
+}
+
 export function fmtPercent(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
   return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)}%`;

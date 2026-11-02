@@ -182,7 +182,20 @@ pub async fn browse(target: &Target, id: &str, path: &str) -> Result<Vec<FileEnt
     if !output.ok() {
         return Err(exec_failure(&output, &path, "this container has no shell — download a path instead"));
     }
-    let entries = parse_listing(&output.stdout);
+    // The script always prints something when it ran (`./.*` matches `.` and `..`), so nothing at
+    // all means it never arrived: from Windows the script on stdin has reached the container as an
+    // empty input (user, 2026-11-02 — every folder, `/` included, "listed nothing"). `ls` as plain
+    // arguments needs neither a shell nor stdin, and gives names and which are folders.
+    let entries = if output.stdout.trim().is_empty() {
+        let args: Vec<String> = ["exec", id, "ls", "-1Ap", "--", &path].map(String::from).to_vec();
+        let listed = target.run_owned(args, engine::LIST_TIMEOUT).await?;
+        if !listed.ok() {
+            return Err(exec_failure(&listed, &path, "this container has no `ls` — download a path instead"));
+        }
+        parse_listing(&format!("::ls\n{}", listed.stdout))
+    } else {
+        parse_listing(&output.stdout)
+    };
     // A container's `/` always holds something (`/proc`, `/etc`), so nothing at all there is a
     // listing that went wrong — said as such, with whatever the container said, never shown as an
     // empty folder.

@@ -2406,7 +2406,7 @@ const TO_MARKDOWN: &[ParamSpec] = &[
     p("path", file("{{ $json.path }}"), "\"\""),
     p("scanned", select(&["scanOcr", "scanFail"]), "\"scanOcr\"").literal(),
     p("ocrLanguages", text("es-ES, en-US"), "\"\"").when("scanned", &["scanOcr"]),
-    p("savePath", file_to_write("~/Documentos/salida.md", &["md"]), "\"\""),
+    p("savePath", file_to_write("~/Documentos/salida.md", &["*"]), "\"\""),
     EACH,
 ];
 
@@ -2807,6 +2807,35 @@ mod tests {
             names.sort_unstable();
             names.dedup();
             assert_eq!(names.len(), specs.len(), "{} declares a parameter twice", descriptor.type_id);
+        }
+    }
+
+    /// A file field's `save` names operations the node has (or is `*`): the form matches it against
+    /// `params.operation`, so a value no operation carries leaves "save as" asking for a file to open.
+    #[test]
+    fn every_save_file_names_an_operation() {
+        for descriptor in CATALOG {
+            let specs = for_type(descriptor.type_id);
+            let operations: &[&str] = specs
+                .iter()
+                .find(|spec| spec.name == "operation")
+                .and_then(|spec| match spec.kind {
+                    Kind::Select { options, .. } => Some(options),
+                    _ => None,
+                })
+                .unwrap_or(&[]);
+            for spec in specs {
+                if let Kind::File { save, .. } = spec.kind {
+                    for op in save.iter().filter(|op| **op != "*") {
+                        assert!(
+                            operations.contains(op),
+                            "{}.{} saves on operation {op}, which the node does not have",
+                            descriptor.type_id,
+                            spec.name
+                        );
+                    }
+                }
+            }
         }
     }
 

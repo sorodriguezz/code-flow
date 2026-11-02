@@ -1,4 +1,4 @@
-import { invoke } from "./tauri/invoke";
+import { invoke, pendingInvokes } from "./tauri/invoke";
 
 /**
  * What the app knows about itself when something went wrong — and the way a webview's own errors
@@ -81,4 +81,33 @@ export function installErrorReporting(): void {
   window.addEventListener("unhandledrejection", (event) => {
     reportError("unhandledrejection", event.reason);
   });
+  watchLongTasks();
+}
+
+/** A task on the webview's thread this long is a freeze the user feels. */
+const LONG_TASK_MS = 500;
+
+/**
+ * Writes each long task of this webview to the app log, with the commands still waiting for an
+ * answer and the tabs on screen — so a freeze says whether the page itself was busy (a render, an
+ * xterm) and what was going on around it. The backend side is `slow.rs` (the main thread and sync
+ * commands). Chromium (WebView2) reports long tasks; WebKit does not, and this then does nothing.
+ */
+function watchLongTasks(): void {
+  if (typeof PerformanceObserver === "undefined" || !PerformanceObserver.supportedEntryTypes?.includes("longtask")) return;
+  try {
+    new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        if (entry.duration < LONG_TASK_MS) continue;
+        const tabs = [...document.querySelectorAll('[role="tab"][aria-selected="true"]')]
+          .map((tab) => tab.textContent?.trim())
+          .filter(Boolean)
+          .join(" › ");
+        const pending = pendingInvokes(entry.startTime + entry.duration);
+        reportError("slow", `long task ${Math.round(entry.duration)} ms`, `tabs: ${tabs || "—"} · waiting: ${pending.join(", ") || "nothing"}`);
+      }
+    }).observe({ type: "longtask", buffered: false });
+  } catch {
+    // An observer the webview refuses: nothing to watch with.
+  }
 }

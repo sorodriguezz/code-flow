@@ -233,6 +233,13 @@ struct Run {
     /// The tree's CPU (whole percent) and memory (MiB) at the monitor's last reading — rounded, so
     /// a row is re-sent when what it shows changes, not on every flicker.
     usage: Option<(u32, u64)>,
+    /// Run in debug mode: started with Node's inspector open (`with_inspector`), and every inspector
+    /// it announces reported as `services:inspector` for the debugger to attach to. Kept across a
+    /// restart, as an IDE's rerun keeps the mode it was started in.
+    debug: bool,
+    /// The end of the last chunk when it stopped mid-line, so an announcement split across two
+    /// chunks is still read whole.
+    inspect_tail: String,
 }
 
 impl Run {
@@ -271,6 +278,8 @@ impl Run {
             cwd: None,
             env: Vec::new(),
             usage: None,
+            debug: false,
+            inspect_tail: String::new(),
         }
     }
 
@@ -294,6 +303,7 @@ impl Run {
             known_ports: parse_ports(&self.def.detected_ports),
             cpu: self.usage.map(|(cpu, _)| cpu),
             memory_mb: self.usage.map(|(_, memory)| memory),
+            debug: self.debug,
         }
     }
 }
@@ -325,6 +335,18 @@ pub struct RuntimeView {
     pub cpu: Option<u32>,
     /// The process tree's resident memory, in MiB, while it runs.
     pub memory_mb: Option<u64>,
+    /// Started (or last started) in debug mode.
+    pub debug: bool,
+}
+
+/// A Node inspector a service in debug mode opened — what the debugger attaches to.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InspectorAnnounced {
+    pub service_id: String,
+    pub ws_url: String,
+    /// Where the service runs, for the debugger's path mapping.
+    pub cwd: Option<String>,
 }
 
 /// A service's output so far, for a pane that is mounting.
@@ -490,6 +512,12 @@ impl Supervisor {
     /// it — and a one-shot that already completed satisfies its dependents without running again
     /// unless it was asked for by name.
     pub fn start<R: Runtime>(self: &Arc<Self>, app: &AppHandle<R>, workspace_id: &str, ids: &[String]) -> Result<(), String> {
+        self.start_in(app, workspace_id, ids, None)
+    }
+
+    /// [`Supervisor::start`], with the services named in `ids` put in debug mode (`Some(true)`), out
+    /// of it (`Some(false)`), or left as they last ran (`None`). What they wait on starts as it is.
+    pub fn start_in<R: Runtime>(self: &Arc<Self>, app: &AppHandle<R>, workspace_id: &str, ids: &[String], debug: Option<bool>) -> Result<(), String> {
         let services = {
             let db = app.state::<Db>();
             let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -532,6 +560,9 @@ impl Supervisor {
                 run.exit_code = None;
                 if named {
                     run.restarts = 0;
+                    if let Some(debug) = debug {
+                        run.debug = debug;
+                    }
                 }
                 launch.push((service.id.clone(), run.generation));
                 views.push(run.view());
@@ -701,7 +732,11 @@ impl Supervisor {
             let marker = start_marker(&run.def.command, !run.log.text().is_empty());
             run.log.push(&marker);
 
-            let launched = env_of(&run.def).and_then(|env| launch(app, &run.def, self.hooks(app, id, spawn_id, env)));
+            run.inspect_tail.clear();
+            let debug = run.debug;
+            let launched = env_of(&run.def)
+                .map(|env| if debug { with_inspector(env) } else { env })
+                .and_then(|env| launch(app, &run.def, self.hooks(app, id, spawn_id, env)));
             match launched {
                 Ok(Launched { session, pid, cwd, env, notes }) => {
                     // Still under the lock, so these land before the first byte the process prints.
@@ -738,8 +773,12 @@ impl Supervisor {
     fn hooks<R: Runtime>(self: &Arc<Self>, app: &AppHandle<R>, id: &str, spawn_id: u64, env: Vec<(String, String)>) -> PtyHooks {
         let sup = self.clone();
         let key = id.to_string();
-        let on_output: Arc<dyn Fn(u64, &str) + Send + Sync> =
-            Arc::new(move |seq: u64, data: &str| sup.on_output(&key, spawn_id, seq, data));
+        let announce_to = app.clone();
+        let on_output: Arc<dyn Fn(u64, &str) + Send + Sync> = Arc::new(move |seq: u64, data: &str| {
+            for announced in sup.on_output(&key, spawn_id, seq, data) {
+                let _ = announce_to.emit("services:inspector", announced);
+            }
+        });
         let sup = self.clone();
         let key = id.to_string();
         let app = app.clone();
@@ -748,12 +787,21 @@ impl Supervisor {
         PtyHooks { env, env_remove: Vec::new(), on_output: Some(on_output), on_exit: Some(on_exit), agent_status: false }
     }
 
-    fn on_output(&self, id: &str, spawn_id: u64, seq: u64, data: &str) {
+    /// Keeps a chunk of output; answers with the inspectors it announced, for a service in debug mode.
+    fn on_output(&self, id: &str, spawn_id: u64, seq: u64, data: &str) -> Vec<InspectorAnnounced> {
+        let mut announced = Vec::new();
         let matched = {
             let mut runs = self.runs();
-            let Some(run) = runs.get_mut(id) else { return };
+            let Some(run) = runs.get_mut(id) else { return announced };
             if run.spawn_id != spawn_id {
-                return;
+                return announced;
+            }
+            if run.debug {
+                let text = format!("{}{}", run.inspect_tail, strip_ansi(data));
+                let (urls, tail) = inspector_urls(&text);
+                run.inspect_tail = tail;
+                let cwd = run.cwd.as_ref().map(|p| p.to_string_lossy().into_owned());
+                announced.extend(urls.into_iter().map(|ws_url| InspectorAnnounced { service_id: id.to_string(), ws_url, cwd: cwd.clone() }));
             }
             run.log.push(data);
             run.seq = seq;
@@ -778,6 +826,7 @@ impl Supervisor {
         if matched {
             self.changed.notify_waiters();
         }
+        announced
     }
 
     fn on_exit<R: Runtime>(self: &Arc<Self>, app: &AppHandle<R>, id: &str, spawn_id: u64, code: Option<i32>) {
@@ -1484,6 +1533,41 @@ fn for_cmd(command: &str) -> String {
 /// often than not when a group starts, and a reference does not even say which of the entry's
 /// fields it means. It used to be left out silently, so the service started without the token it
 /// was configured with and failed later, somewhere else, for a reason nothing on screen showed.
+/// `env` with Node's inspector switched on for every Node the command starts, on a port each picks
+/// (`:0`, so a package manager's own Node and the app's never fight over one) — appended to a
+/// `NODE_OPTIONS` the service sets, or else the one this process was started with.
+fn with_inspector(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
+    const FLAG: &str = "--inspect=127.0.0.1:0";
+    let base = env
+        .iter()
+        .position(|(key, _)| key == "NODE_OPTIONS")
+        .map(|at| env.remove(at).1)
+        .or_else(|| std::env::var("NODE_OPTIONS").ok())
+        .unwrap_or_default();
+    let value = if base.trim().is_empty() { FLAG.to_string() } else { format!("{} {FLAG}", base.trim()) };
+    env.push(("NODE_OPTIONS".to_string(), value));
+    env
+}
+
+/// The `ws://` urls of the "Debugger listening on ws://…" lines in `text`, and what follows its last
+/// line break — an unfinished line, read again with the next chunk.
+fn inspector_urls(text: &str) -> (Vec<String>, String) {
+    let (whole, tail) = match text.rfind('\n') {
+        Some(at) => (&text[..at], &text[at + 1..]),
+        None => ("", text),
+    };
+    let urls = whole
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("Debugger listening on "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter(|url| url.starts_with("ws://"))
+        .map(str::to_string)
+        .collect();
+    // A line that never ends is not kept for ever.
+    let tail = if tail.len() > 512 { String::new() } else { tail.to_string() };
+    (urls, tail)
+}
+
 fn env_of(service: &Service) -> Result<Vec<(String, String)>, String> {
     let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&service.env) else {
         return Ok(Vec::new());
@@ -1739,6 +1823,25 @@ fn exit_marker(code: Option<i32>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inspector_announcements_are_read_across_chunks() {
+        let (urls, tail) = inspector_urls("Debugger listening on ws://127.0.0.1:41233/0f2c\r\nFor help, see: https://nodejs.org/en/docs/inspector\r\nDebugger listen");
+        assert_eq!(urls, vec!["ws://127.0.0.1:41233/0f2c".to_string()]);
+        assert_eq!(tail, "Debugger listen");
+        let (urls, tail) = inspector_urls(&format!("{tail}ing on ws://127.0.0.1:5000/ab\n"));
+        assert_eq!(urls, vec!["ws://127.0.0.1:5000/ab".to_string()]);
+        assert_eq!(tail, "");
+        assert!(inspector_urls("[Nest] LOG Debugger listening is a word\n").0.is_empty());
+    }
+
+    #[test]
+    fn the_inspector_joins_the_service_node_options() {
+        let env = with_inspector(vec![("NODE_OPTIONS".into(), "--max-old-space-size=4096".into()), ("PORT".into(), "4001".into())]);
+        assert_eq!(env.iter().filter(|(k, _)| k == "NODE_OPTIONS").count(), 1);
+        assert!(env.contains(&("NODE_OPTIONS".into(), "--max-old-space-size=4096 --inspect=127.0.0.1:0".into())));
+        assert!(env.contains(&("PORT".into(), "4001".into())));
+    }
 
     fn service(id: &str, deps: &[&str]) -> Service {
         Service {

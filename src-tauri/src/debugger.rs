@@ -29,6 +29,8 @@ use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::sourcemap::SourceMap;
+
 /// How long to wait for Node to open its inspector port before giving up.
 const ATTACH_TIMEOUT_MS: u64 = 5_000;
 
@@ -153,6 +155,18 @@ struct Session {
     /// The program's own execution context. Its destruction is the program finishing — see the
     /// reader in [`start`].
     main_context: Mutex<Option<i64>>,
+    /// scriptId → its source map, for the scripts that name one outside `node_modules` (TypeScript
+    /// compiled by `tsc`, run by `tsx` or `vite-node`…). See [`crate::sourcemap`].
+    maps: Mutex<HashMap<String, Arc<SourceMap>>>,
+    /// The breakpoints last asked for — set again when a script whose map covers one of their files
+    /// is parsed after they were.
+    wanted: Mutex<Breakpoints>,
+    /// One [`apply_breakpoints`] at a time: it removes every breakpoint and sets them again, and two
+    /// interleaved would leave both sets behind.
+    applying: tokio::sync::Mutex<()>,
+    /// Attached to a process something else started (a service run in debug mode): stopping
+    /// detaches and the process runs on; it is never killed from here.
+    attached: bool,
 }
 
 type SessionSlot = Mutex<Option<Arc<Session>>>;
@@ -502,7 +516,7 @@ fn scope_rows(frame: &Value) -> Vec<Variable> {
 
 /// Reads `Debugger.paused` into the frame list the UI renders. `scripts` maps script ids to
 /// urls (see [`Session::scripts`]); `paths` puts each file back under the name the user knows.
-fn parse_paused(params: &Value, scripts: &HashMap<String, String>, paths: &PathMap) -> PausedEvent {
+fn parse_paused(params: &Value, scripts: &HashMap<String, String>, maps: &HashMap<String, Arc<SourceMap>>, paths: &PathMap) -> PausedEvent {
     let reason = params.get("reason").and_then(Value::as_str).unwrap_or("pause").to_string();
     let frames = params
         .get("callFrames")
@@ -540,14 +554,27 @@ fn parse_paused(params: &Value, scripts: &HashMap<String, String>, paths: &PathM
                         .and_then(|object| object.get("objectId"))
                         .and_then(Value::as_str)
                         .map(str::to_string);
+                    let generated_line = location.get("lineNumber").and_then(Value::as_u64).unwrap_or(0) as u32;
+                    let generated_column = location.get("columnNumber").and_then(Value::as_u64).unwrap_or(0) as u32;
+                    // A mapped script's frame is shown at its source: the `.ts` file and line.
+                    let original = location
+                        .get("scriptId")
+                        .and_then(Value::as_str)
+                        .and_then(|id| maps.get(id))
+                        .and_then(|map| map.original(generated_line, generated_column))
+                        .map(|(source, line)| (source.to_string(), line + 1));
+                    let (file, line) = match original {
+                        Some((source, line)) => (paths.to_user(&source), line),
+                        None => (paths.to_user(&url_to_path(&url)), generated_line + 1),
+                    };
                     StackFrame {
                         id: frame.get("callFrameId").and_then(Value::as_str).unwrap_or_default().to_string(),
                         name: match frame.get("functionName").and_then(Value::as_str) {
                             Some(name) if !name.is_empty() => name.to_string(),
                             _ => "(anonymous)".to_string(),
                         },
-                        file: paths.to_user(&url_to_path(&url)),
-                        line: location.get("lineNumber").and_then(Value::as_u64).unwrap_or(0) as u32 + 1,
+                        file,
+                        line,
                         scope_id,
                     }
                 })
@@ -715,10 +742,80 @@ pub async fn start<R: Runtime>(
         }
     };
 
-    let socket = match tokio_tungstenite::connect_async(&ws_url).await {
+    let mut paths = PathMap::default();
+    paths.learn(cwd);
+    paths.learn(&std::path::Path::new(cwd).join(program).to_string_lossy());
+    connect(app, &ws_url, paths, Some(child), breakpoints, exception_filters).await
+}
+
+/// Attaches to a Node process already listening for a debugger (`--inspect`) — a service started
+/// in debug mode, which printed `ws_url`. The process is not this session's: stopping detaches and
+/// it runs on, and breakpoints in code it already ran simply wait for that code to run again.
+pub async fn attach<R: Runtime>(
+    app: AppHandle<R>,
+    ws_url: &str,
+    cwd: &str,
+    breakpoints: &Breakpoints,
+    exception_filters: &[String],
+) -> Result<(), String> {
+    stop().await;
+    let mut paths = PathMap::default();
+    paths.learn(cwd);
+    connect(app, ws_url, paths, None, breakpoints, exception_filters).await
+}
+
+/// What a listening inspector runs — its target's url (`file:///…/main.js`), from `/json/list` —
+/// so a package manager's own Node is told apart from the program it starts.
+pub async fn inspector_target(ws_url: &str) -> Option<String> {
+    let host = ws_url.strip_prefix("ws://")?.split('/').next()?;
+    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2)).build().ok()?;
+    let targets: Vec<Value> = client.get(format!("http://{host}/json/list")).send().await.ok()?.json().await.ok()?;
+    targets.iter().find_map(|t| t.get("url").and_then(Value::as_str)).map(str::to_string)
+}
+
+/// Whether an inspector's target is a launcher rather than the program: a package manager, a
+/// watcher or a CLI that starts the real process as its child. `NODE_OPTIONS=--inspect` reaches
+/// every Node in the tree, and `pnpm start` is a Node of its own that announces itself first.
+pub fn is_launcher(url: &str) -> bool {
+    const LAUNCHERS: &[&str] = &[
+        "npm-cli.js",
+        "npx-cli.js",
+        "/pnpm.cjs",
+        "/pnpm.mjs",
+        "/pnpm/bin/",
+        "/yarn.js",
+        "/yarn.cjs",
+        "/corepack/",
+        "/@nestjs/cli/",
+        "/nodemon/",
+        "/tsx/dist/cli",
+        "/ts-node-dev/",
+        "/concurrently/",
+        "/npm-run-all",
+        "/turbo/",
+        "/nx/bin/",
+    ];
+    let url = url.replace('\\', "/").to_ascii_lowercase();
+    LAUNCHERS.iter().any(|launcher| url.contains(launcher))
+}
+
+/// The CDP session over `ws_url`: launched (`child` is the process, ended with the session) or
+/// attached (`None`). Breakpoints and exception filters are in place before the program runs on.
+async fn connect<R: Runtime>(
+    app: AppHandle<R>,
+    ws_url: &str,
+    paths: PathMap,
+    mut child: Option<tokio::process::Child>,
+    breakpoints: &Breakpoints,
+    exception_filters: &[String],
+) -> Result<(), String> {
+    let attached = child.is_none();
+    let socket = match tokio_tungstenite::connect_async(ws_url).await {
         Ok((socket, _)) => socket,
         Err(e) => {
-            crate::ai_runs::kill_tree(&mut child).await;
+            if let Some(child) = child.as_mut() {
+                crate::ai_runs::kill_tree(child).await;
+            }
             return Err(format!("inspector connection failed: {e}"));
         }
     };
@@ -734,25 +831,27 @@ pub async fn start<R: Runtime>(
         }
     });
 
-    let mut paths = PathMap::default();
-    paths.learn(cwd);
-    paths.learn(&std::path::Path::new(cwd).join(program).to_string_lossy());
     let session = Arc::new(Session {
         outbound,
         next_id: AtomicI64::new(1),
         pending: Mutex::new(HashMap::new()),
-        child: Mutex::new(Some(child)),
+        child: Mutex::new(child),
         breakpoint_ids: Mutex::new(Vec::new()),
         scripts: Mutex::new(HashMap::new()),
         paths: Mutex::new(paths),
         paused: Mutex::new(None),
         main_context: Mutex::new(None),
+        maps: Mutex::new(HashMap::new()),
+        wanted: Mutex::new(Breakpoints::new()),
+        applying: tokio::sync::Mutex::new(()),
+        attached,
     });
 
     let reader_session = Arc::clone(&session);
     let reader_app = app.clone();
-    // `--inspect-brk`'s halt on the first statement is consumed here, once.
-    let entry_seen = AtomicBool::new(false);
+    // `--inspect-brk`'s halt on the first statement is consumed here, once. An attached process was
+    // started with `--inspect`, which never halts: there is no such stop to swallow.
+    let entry_seen = AtomicBool::new(attached);
     tokio::spawn(async move {
         while let Some(Ok(message)) = stream.next().await {
             let Message::Text(text) = message else { continue };
@@ -779,9 +878,10 @@ pub async fn start<R: Runtime>(
                         continue;
                     }
                     let scripts = reader_session.scripts.lock().map(|s| s.clone()).unwrap_or_default();
+                    let maps = reader_session.maps.lock().map(|m| m.clone()).unwrap_or_default();
                     let event = match reader_session.paths.lock() {
-                        Ok(paths) => parse_paused(&params, &scripts, &paths),
-                        Err(_) => parse_paused(&params, &scripts, &PathMap::default()),
+                        Ok(paths) => parse_paused(&params, &scripts, &maps, &paths),
+                        Err(_) => parse_paused(&params, &scripts, &maps, &PathMap::default()),
                     };
                     if let Ok(mut paused) = reader_session.paused.lock() {
                         *paused = Some((event.clone(), params));
@@ -798,6 +898,14 @@ pub async fn start<R: Runtime>(
                     if let (Some(id), Some(url)) = (id, url) {
                         if let Ok(mut scripts) = reader_session.scripts.lock() {
                             scripts.insert(id.to_string(), url.to_string());
+                        }
+                        // Read off the reader: loading a map is file work, and setting breakpoints
+                        // from it waits on replies this loop has to deliver.
+                        let map_url = params.get("sourceMapURL").and_then(Value::as_str).filter(|u| !u.is_empty());
+                        if let Some(map_url) = map_url {
+                            let session = Arc::clone(&reader_session);
+                            let (id, url, map_url) = (id.to_string(), url.to_string(), map_url.to_string());
+                            tokio::spawn(async move { learn_source_map(session, id, url, map_url).await });
                         }
                     }
                 }
@@ -927,7 +1035,49 @@ fn pick_free_port() -> Result<u16, String> {
     Ok(port)
 }
 
+/// A script's source map, kept for its id — and the breakpoints set again when the map covers a file
+/// one is on, since a breakpoint on a `.ts` line can only be placed once its compiled script exists.
+/// Scripts under `node_modules` are skipped: a framework ships thousands of maps nobody steps into.
+async fn learn_source_map(session: Arc<Session>, script_id: String, script_url: String, map_url: String) {
+    if script_url.replace('\\', "/").contains("/node_modules/") {
+        return;
+    }
+    let script_path = if script_url.starts_with("file://") {
+        Some(url_to_path(&script_url))
+    } else {
+        std::path::Path::new(&script_url).is_absolute().then(|| script_url.clone())
+    };
+    let loaded = tokio::task::spawn_blocking(move || crate::sourcemap::load(&map_url, script_path.as_deref().map(std::path::Path::new)))
+        .await
+        .ok()
+        .flatten();
+    let Some(map) = loaded else { return };
+    let map = Arc::new(map);
+    // Kept *before* the breakpoints are read, the reverse of `apply_breakpoints` (which records them
+    // before reading the maps): whichever runs second sees the other's half, so a map arriving while
+    // the session is still being configured is never missed by both.
+    if let Ok(mut maps) = session.maps.lock() {
+        maps.insert(script_id, Arc::clone(&map));
+    }
+    let wanted = session.wanted.lock().map(|w| w.clone()).unwrap_or_default();
+    let covers_wanted = wanted.keys().any(|path| spellings(path).iter().any(|s| map.covers(s)));
+    if covers_wanted {
+        let _ = apply_breakpoints(&session, &wanted).await;
+    }
+}
+
+/// A path as given and as its symlinks resolve — V8 and a map's sources name the resolved one.
+fn spellings(path: &str) -> Vec<String> {
+    let mut all = vec![path.to_string()];
+    all.extend(canonical(path));
+    all
+}
+
 async fn apply_breakpoints(session: &Session, breakpoints: &Breakpoints) -> Result<(), String> {
+    let _one_at_a_time = session.applying.lock().await;
+    if let Ok(mut wanted) = session.wanted.lock() {
+        *wanted = breakpoints.clone();
+    }
     let existing: Vec<String> = session
         .breakpoint_ids
         .lock()
@@ -937,24 +1087,53 @@ async fn apply_breakpoints(session: &Session, breakpoints: &Breakpoints) -> Resu
         let _ = session.call("Debugger.removeBreakpoint", json!({ "breakpointId": id })).await;
     }
 
+    let maps: Vec<(String, Arc<SourceMap>)> = session
+        .maps
+        .lock()
+        .map(|maps| maps.iter().map(|(id, map)| (id.clone(), Arc::clone(map))).collect())
+        .unwrap_or_default();
     let mut fresh = Vec::new();
     for (path, specs) in breakpoints {
-        let mut spellings = vec![path.clone()];
-        spellings.extend(canonical(path));
+        let spellings = spellings(path);
         if let Ok(mut paths) = session.paths.lock() {
             paths.learn(path);
         }
+        // The compiled scripts whose maps name this file. With any, a breakpoint goes where the map
+        // puts its line — a url breakpoint would land on the *compiled* line of that number, and
+        // under `vite-node` the compiled script even carries the `.ts` file's own url.
+        let mapped: Vec<(&String, &SourceMap, &String)> = maps
+            .iter()
+            .filter_map(|(id, map)| spellings.iter().find(|s| map.covers(s)).map(|s| (id, map.as_ref(), s)))
+            .collect();
         let pattern = url_regex(&spellings, cfg!(windows));
         // V8 refuses a second breakpoint on a location that already has one.
         let mut lines = HashSet::new();
         for spec in specs.iter().filter(|spec| lines.insert(spec.line)) {
-            let mut params = json!({ "lineNumber": spec.line.saturating_sub(1), "urlRegex": pattern });
-            if let Some(condition) = node_condition(spec) {
-                params["condition"] = json!(condition);
+            let condition = node_condition(spec);
+            if mapped.is_empty() {
+                let mut params = json!({ "lineNumber": spec.line.saturating_sub(1), "urlRegex": pattern });
+                if let Some(condition) = &condition {
+                    params["condition"] = json!(condition);
+                }
+                let result = session.call("Debugger.setBreakpointByUrl", params).await?;
+                if let Some(id) = result.get("breakpointId").and_then(Value::as_str) {
+                    fresh.push(id.to_string());
+                }
+                continue;
             }
-            let result = session.call("Debugger.setBreakpointByUrl", params).await?;
-            if let Some(id) = result.get("breakpointId").and_then(Value::as_str) {
-                fresh.push(id.to_string());
+            for (script_id, map, spelling) in &mapped {
+                let Some((line, column)) = map.generated(spelling, spec.line.saturating_sub(1)) else { continue };
+                let mut params = json!({ "location": { "scriptId": script_id, "lineNumber": line, "columnNumber": column } });
+                if let Some(condition) = &condition {
+                    params["condition"] = json!(condition);
+                }
+                // Two maps sending one line to the same place is refused the second time; the first
+                // stands, so that is not an error.
+                if let Ok(result) = session.call("Debugger.setBreakpoint", params).await {
+                    if let Some(id) = result.get("breakpointId").and_then(Value::as_str) {
+                        fresh.push(id.to_string());
+                    }
+                }
             }
         }
     }
@@ -1078,6 +1257,11 @@ pub async fn evaluate(frame_id: &str, expression: &str, context: Option<&str>) -
 pub async fn stop() {
     let session = slot().lock().ok().and_then(|mut s| s.take());
     let Some(session) = session else { return };
+    if session.attached {
+        // Not ours to end: closing the socket detaches, and a paused program resumes.
+        let _ = session.outbound.send(Message::Close(None));
+        return;
+    }
     let child = session.child.lock().ok().and_then(|mut c| c.take());
     if let Some(mut child) = child {
         crate::ai_runs::kill_tree(&mut child).await;
@@ -1099,6 +1283,16 @@ pub fn paused_state() -> Option<PausedEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launchers_are_told_from_programs() {
+        assert!(is_launcher("file:///Users/dev/Library/pnpm/global/5/node_modules/pnpm/bin/pnpm.cjs"));
+        assert!(is_launcher("file:///C:/Program%20Files/nodejs/node_modules/npm/bin/npm-cli.js"));
+        assert!(is_launcher(r"C:\Users\dev\AppData\Roaming\npm\node_modules\pnpm\bin\pnpm.cjs"));
+        assert!(is_launcher("file:///repo/node_modules/@nestjs/cli/bin/nest.js"));
+        assert!(!is_launcher("file:///repo/node_modules/vite-node/dist/cli.mjs"));
+        assert!(!is_launcher("file:///repo/dist/main.js"));
+    }
 
     #[test]
     fn windows_paths_become_file_urls_and_back() {
@@ -1320,7 +1514,7 @@ mod tests {
                 ]
             }]
         });
-        let event = parse_paused(&params, &HashMap::new(), &PathMap::default());
+        let event = parse_paused(&params, &HashMap::new(), &HashMap::new(), &PathMap::default());
         assert_eq!(event.reason, "other");
         let frame = &event.frames[0];
         assert_eq!(frame.name, "compute");
@@ -1338,7 +1532,7 @@ mod tests {
             "data": { "type": "object", "description": "TypeError: x is not a function\n    at compute (app.js:3:5)" },
             "callFrames": []
         });
-        let event = parse_paused(&params, &HashMap::new(), &PathMap::default());
+        let event = parse_paused(&params, &HashMap::new(), &HashMap::new(), &PathMap::default());
         assert_eq!(event.description.as_deref(), Some("TypeError: x is not a function"));
     }
 
@@ -1386,7 +1580,7 @@ mod tests {
             "reason": "step",
             "callFrames": [{ "callFrameId": "f", "functionName": "", "url": "", "location": { "lineNumber": 0 } }]
         });
-        assert_eq!(parse_paused(&params, &HashMap::new(), &PathMap::default()).frames[0].name, "(anonymous)");
+        assert_eq!(parse_paused(&params, &HashMap::new(), &HashMap::new(), &PathMap::default()).frames[0].name, "(anonymous)");
     }
 
     #[test]
@@ -1492,6 +1686,10 @@ mod live_tests {
             paths: Mutex::new(PathMap::default()),
             paused: Mutex::new(None),
             main_context: Mutex::new(None),
+            maps: Mutex::new(HashMap::new()),
+            wanted: Mutex::new(Breakpoints::new()),
+            applying: tokio::sync::Mutex::new(()),
+            attached: false,
         });
 
         let (events_tx, events_rx) = mpsc::unbounded_channel::<Value>();
@@ -1559,7 +1757,7 @@ mod live_tests {
             }
             let scripts = session.scripts.lock().unwrap().clone();
             let paths = session.paths.lock().unwrap();
-            return parse_paused(&params, &scripts, &paths);
+            return parse_paused(&params, &scripts, &HashMap::new(), &paths);
         }
     }
 
@@ -1692,6 +1890,9 @@ mod live_tests {
     /// The whole session through `start`, as the app runs it: a program that runs to its end must
     /// end the session — Node would otherwise sit at "Waiting for the debugger to disconnect" and
     /// the panel at "Running" for ever.
+    /// The tests that go through the one global session slot, one at a time.
+    static SLOT_TESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     #[tokio::test]
     async fn a_program_that_finishes_ends_its_session() {
         use tauri::Listener;
@@ -1699,6 +1900,7 @@ mod live_tests {
             eprintln!("skipping: node not on PATH");
             return;
         }
+        let _slot = SLOT_TESTS.lock().await;
         let fixture = Fixture::in_folder("with space", "console.log('ran');\n");
         let app = tauri::test::mock_app();
         let (tx, mut rx) = mpsc::unbounded_channel::<&'static str>();
@@ -1724,5 +1926,107 @@ mod live_tests {
         }
         assert!(seen.contains(&"output"), "the program's output reached the console once: {seen:?}");
         assert!(!is_running());
+    }
+
+    const TS_SOURCE: &str = "interface Shape {\n  size: number;\n}\n\nconst a: number = 1;\n\nfunction f(): number {\n  return a;\n}\n\nsetInterval(f, 50);\n";
+    /// `tsc --sourceMap --target es2020 --module commonjs` of [`TS_SOURCE`]: `return a;` is line 8 of
+    /// the source and line 4 here.
+    const TS_COMPILED: &str = "\"use strict\";\nconst a = 1;\nfunction f() {\n    return a;\n}\nsetInterval(f, 50);\n";
+    const TS_MAPPINGS: &str = ";AAIA,MAAM,CAAC,GAAW,CAAC,CAAC;AAEpB,SAAS,CAAC;IACR,OAAO,CAAC,CAAC;AACX,CAAC;AAED,WAAW,CAAC,CAAC,EAAE,EAAE,CAAC,CAAC";
+
+    /// Runs `entry` (relative to `root`) under `node --inspect=127.0.0.1:0`, as a service in debug
+    /// mode is run; attaches by the url it announces with a breakpoint on line 8 of `src/app.ts`;
+    /// asserts the stop is reported at that `.ts` line, and that stopping detaches and leaves the
+    /// process running.
+    async fn stops_at_the_typescript_line(root: &std::path::Path, entry: &str) {
+        use tauri::Listener;
+        use tokio::io::AsyncBufReadExt;
+        let mut child = tokio::process::Command::new("node")
+            .arg("--inspect=127.0.0.1:0")
+            .arg(root.join(entry))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut stderr = tokio::io::BufReader::new(child.stderr.take().unwrap()).lines();
+        let ws_url = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while let Ok(Some(line)) = stderr.next_line().await {
+                if let Some(url) = line.strip_prefix("Debugger listening on ") {
+                    return url.trim().to_string();
+                }
+            }
+            panic!("node never announced its inspector");
+        })
+        .await
+        .expect("node announced its inspector");
+        // Drained, so a full pipe never stalls the program.
+        tokio::spawn(async move { while let Ok(Some(_)) = stderr.next_line().await {} });
+        assert!(!inspector_target(&ws_url).await.is_some_and(|url| is_launcher(&url)), "the program is not a launcher");
+
+        let app = tauri::test::mock_app();
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        app.listen_any("debug:paused", move |event| {
+            let _ = tx.send(event.payload().to_string());
+        });
+        let source = root.join("src/app.ts").to_string_lossy().into_owned();
+        let breakpoints: Breakpoints = HashMap::from([(source, vec![BreakpointSpec { line: 8, ..BreakpointSpec::default() }])]);
+        super::attach(app.handle().clone(), &ws_url, &root.to_string_lossy(), &breakpoints, &[]).await.expect("attached");
+
+        let payload = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await.expect("it paused").unwrap();
+        let paused: Value = serde_json::from_str(&payload).unwrap();
+        let top = &paused["frames"][0];
+        assert_eq!(top["line"], 8, "stopped at the TypeScript line: {paused}");
+        assert!(top["file"].as_str().unwrap().replace('\\', "/").ends_with("src/app.ts"), "shown in the .ts file: {paused}");
+
+        stop().await;
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert!(child.try_wait().unwrap().is_none(), "detaching left the program running");
+        let _ = child.kill().await;
+    }
+
+    /// `tsc` output with its map file beside it — `nest start`, `node dist/main.js`.
+    #[tokio::test]
+    async fn attaches_to_compiled_typescript_and_stops_at_its_source_line() {
+        if !node_available() {
+            eprintln!("skipping: node not on PATH");
+            return;
+        }
+        let _slot = SLOT_TESTS.lock().await;
+        let fixture = Fixture::in_folder("attach-tsc", "");
+        let root = std::path::Path::new(&fixture.script).parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        std::fs::write(root.join("src/app.ts"), TS_SOURCE).unwrap();
+        std::fs::write(root.join("dist/app.js"), format!("{TS_COMPILED}//# sourceMappingURL=app.js.map")).unwrap();
+        let map = format!(r#"{{"version":3,"file":"app.js","sourceRoot":"","sources":["../src/app.ts"],"names":[],"mappings":"{TS_MAPPINGS}"}}"#);
+        std::fs::write(root.join("dist/app.js.map"), map).unwrap();
+        stops_at_the_typescript_line(&root, "dist/app.js").await;
+    }
+
+    /// What `vite-node` (and `tsx`) do: the compiled code run under the `.ts` file's own name with
+    /// the map inline — so the script V8 reports *is* `src/app.ts`, and a breakpoint by url would
+    /// land on line 8 of the compiled code instead of the source's.
+    #[tokio::test]
+    async fn attaches_to_typescript_run_in_place_and_stops_at_its_source_line() {
+        use base64::Engine;
+        if !node_available() {
+            eprintln!("skipping: node not on PATH");
+            return;
+        }
+        let _slot = SLOT_TESTS.lock().await;
+        let fixture = Fixture::in_folder("attach-vm", "");
+        let root = std::path::Path::new(&fixture.script).parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/app.ts"), TS_SOURCE).unwrap();
+        let map = format!(r#"{{"version":3,"sources":["app.ts"],"names":[],"mappings":"{TS_MAPPINGS}"}}"#);
+        let inline = base64::engine::general_purpose::STANDARD.encode(map);
+        std::fs::write(root.join("compiled.js"), format!("{TS_COMPILED}//# sourceMappingURL=data:application/json;base64,{inline}")).unwrap();
+        std::fs::write(
+            root.join("runner.js"),
+            "const fs = require('fs'), vm = require('vm'), path = require('path');\nconst code = fs.readFileSync(path.join(__dirname, 'compiled.js'), 'utf8');\nvm.runInThisContext(code, { filename: path.join(__dirname, 'src', 'app.ts') });\n",
+        )
+        .unwrap();
+        stops_at_the_typescript_line(&root, "runner.js").await;
     }
 }

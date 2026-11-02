@@ -1169,7 +1169,9 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                       type="button"
                       onClick={() => void runSend(false)}
                       disabled={spec.url.trim() === ""}
-                      className={buttonClass({ variant: "primary", size: "lg", className: "rounded-r-none" })}
+                      // `h-auto`: stretch to the 32px row like the caret beside it. The size's own
+                      // height lets compact density shrink it to 28px while the caret stays at 32.
+                      className={buttonClass({ variant: "primary", size: "lg", className: "h-auto rounded-r-none" })}
                     >
                       <Send size={14} />
                       {t("api.send")}

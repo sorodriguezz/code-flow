@@ -61,6 +61,26 @@ pub async fn debug_start_adapter(
     dap::start(app, &cwd, &command, &args, launch_config, &specs(breakpoints), exception_filters.as_deref()).await
 }
 
+/// Attaches to a Node process listening for a debugger at `ws_url` — a service started in debug
+/// mode announcing its inspector. `false` when that inspector is a launcher's (`pnpm`, a watcher, a
+/// CLI) rather than the program's: the program announces its own a moment later.
+#[tauri::command]
+pub async fn debug_attach(
+    app: AppHandle,
+    ws_url: String,
+    cwd: String,
+    breakpoints: HashMap<String, Vec<BreakpointInput>>,
+    exception_filters: Option<Vec<String>>,
+) -> Result<bool, String> {
+    if debugger::inspector_target(&ws_url).await.is_some_and(|url| debugger::is_launcher(&url)) {
+        return Ok(false);
+    }
+    dap::stop().await;
+    let filters = exception_filters.unwrap_or_default();
+    debugger::attach(app, &ws_url, &cwd, &specs(breakpoints), &filters).await?;
+    Ok(true)
+}
+
 #[tauri::command]
 pub async fn debug_stop() -> Result<(), String> {
     stop_all().await;

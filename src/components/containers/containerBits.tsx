@@ -157,10 +157,12 @@ export function DetailTabs<T extends string>({
   trailing?: ReactNode;
 }) {
   return (
-    <div className="flex h-8 shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2">
+    <div role="tablist" className="flex h-8 shrink-0 items-center gap-0.5 border-b border-[var(--cf-border)] px-2">
       {tabs.map((tab) => (
         <button
           key={tab.id}
+          role="tab"
+          aria-selected={tab.id === value}
           onClick={() => onChange(tab.id)}
           className={`relative h-8 px-2.5 text-[12px] ${
             tab.id === value ? "text-[var(--cf-text)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"

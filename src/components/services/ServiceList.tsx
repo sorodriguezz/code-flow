@@ -1,5 +1,6 @@
 import { useState, type MouseEvent, type ReactNode } from "react";
 import {
+  Bug,
   ChevronDown,
   ChevronRight,
   CirclePlay,
@@ -16,6 +17,7 @@ import {
   Trash2,
   type LucideIcon,
 } from "lucide-react";
+import { canDebugService } from "../../lib/serviceDebug";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { Tooltip } from "../common/Tooltip";
 import { confirmAction } from "../../state/confirmStore";
@@ -433,6 +435,8 @@ function ServiceRowItem({
   const t = useT();
   const services = useServicesStore((s) => s.services);
   const start = useServicesStore((s) => s.start);
+  const debug = useServicesStore((s) => s.debug);
+  const debuggable = canDebugService(service.command);
   const stop = useServicesStore((s) => s.stop);
   const restart = useServicesStore((s) => s.restart);
   const remove = useServicesStore((s) => s.remove);
@@ -458,6 +462,7 @@ function ServiceRowItem({
     active
       ? { label: t("services.stop"), leading: still(Square), onClick: () => void stop(service.id), disabled: status === "stopping" }
       : { label: t("services.start"), icon: CirclePlay, onClick: () => void start(service.id) },
+    ...(!active && debuggable ? [{ label: t("services.debug"), icon: Bug, onClick: () => void debug(service.id) }] : []),
     { label: t("services.restart"), leading: still(RotateCw), onClick: () => void restart(service.id), disabled: !active },
     { label: t("services.edit"), icon: Pencil, onClick: onEdit, separated: true },
     { label: t("services.duplicate"), icon: Copy, onClick: duplicate },
@@ -523,6 +528,9 @@ function ServiceRowItem({
         {runsContainers(service.command) && (
           <Container size={10} className="shrink-0 opacity-50" aria-hidden />
         )}
+        {active && runtime?.debug && (
+          <Bug size={10} className="shrink-0 text-[var(--cf-accent)]" aria-label={t("services.debugging")} />
+        )}
         {meta}
         {!meta && ports.length > 0 && (
           <span className="flex shrink-0 items-center gap-0.5">
@@ -548,9 +556,16 @@ function ServiceRowItem({
               </RowButton>
             </>
           ) : (
-            <RowButton onClick={() => void start(service.id)} label={t("services.start")}>
-              <CirclePlay size={11} />
-            </RowButton>
+            <>
+              <RowButton onClick={() => void start(service.id)} label={t("services.start")}>
+                <CirclePlay size={11} />
+              </RowButton>
+              {debuggable && (
+                <RowButton onClick={() => void debug(service.id)} label={t("services.debug")}>
+                  <Bug size={10} />
+                </RowButton>
+              )}
+            </>
           )}
           <RowButton
             onClick={(e) => {

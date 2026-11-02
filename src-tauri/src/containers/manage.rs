@@ -349,9 +349,88 @@ async fn run_ok(target: &Target, args: Vec<String>, timeout: std::time::Duration
 /// Stats of `ids`, or of every running container when there are none.
 pub async fn stats_all(target: &Target, ids: &[String]) -> Result<Vec<ContainerStats>, String> {
     let engine = not_ctr(target, "live stats")?;
+    // One container is its «Estadísticas» tab, which turns totals into rates: those need its exact
+    // counters, read beside the sample.
+    let exact = async {
+        match ids {
+            [only] => exact_counters(target, only).await,
+            _ => None,
+        }
+    };
     // `--no-stream` still samples for a couple of seconds: the list's own limit is room enough.
-    let out = run_ok(target, stats_args(engine, ids)?, engine::LIST_TIMEOUT).await?;
-    Ok(parse_stats(&out))
+    let (out, exact) = tokio::join!(run_ok(target, stats_args(engine, ids)?, engine::LIST_TIMEOUT), exact);
+    let mut rows = parse_stats(&out?);
+    if let (Some(counters), [row]) = (exact, rows.as_mut_slice()) {
+        counters.apply(row);
+    }
+    Ok(rows)
+}
+
+/// A container's network and disk byte counters to the byte. `docker stats` prints them rounded
+/// ("2.8MB"), so two samples a second and a half apart mostly differ by nothing and every rate read
+/// 0 B/s (user, 2026-11-02, against another client showing 117 B/s for the same container).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ExactCounters {
+    pub net: Option<(u64, u64)>,
+    pub block: Option<(u64, u64)>,
+}
+
+impl ExactCounters {
+    fn apply(self, row: &mut ContainerStats) {
+        if let Some((rx, tx)) = self.net {
+            (row.net_rx, row.net_tx) = (rx, tx);
+        }
+        if let Some((read, write)) = self.block {
+            (row.block_read, row.block_write) = (read, write);
+        }
+    }
+}
+
+/// Reads them inside the container: `/proc/net/dev` (its own network namespace) and its cgroup's
+/// `io.stat` (cgroup v2), with `cat` as plain arguments — no shell, no stdin, nothing a Windows
+/// command line can mangle. `None` when the container has no `cat`; a missing `io.stat` (cgroup v1)
+/// keeps the engine's rounded disk totals.
+async fn exact_counters(target: &Target, id: &str) -> Option<ExactCounters> {
+    let id = id.trim();
+    engine::check_ref(id).ok()?;
+    let args: Vec<String> = ["exec", id, "cat", "/proc/net/dev", "/sys/fs/cgroup/io.stat"].map(String::from).to_vec();
+    // `cat` exits 1 when one file is missing and still prints the other: the code says nothing here.
+    let output = target.run_owned(args, std::time::Duration::from_secs(5)).await.ok()?;
+    let counters = parse_exact_counters(&output.stdout);
+    (counters != ExactCounters::default()).then_some(counters)
+}
+
+/// `/proc/net/dev` rows (`eth0: rx_bytes … tx_bytes …`, loopback left out as Docker leaves it out)
+/// and `io.stat` rows (`8:0 rbytes=… wbytes=…`), each summed over its devices.
+pub fn parse_exact_counters(out: &str) -> ExactCounters {
+    let mut net: Option<(u64, u64)> = None;
+    let mut block: Option<(u64, u64)> = None;
+    for line in out.lines() {
+        let line = line.trim();
+        if line.contains("rbytes=") {
+            let (mut read, mut write) = (0u64, 0u64);
+            for field in line.split_whitespace() {
+                if let Some(v) = field.strip_prefix("rbytes=") {
+                    read = v.parse().unwrap_or(0);
+                } else if let Some(v) = field.strip_prefix("wbytes=") {
+                    write = v.parse().unwrap_or(0);
+                }
+            }
+            let (r, w) = block.unwrap_or_default();
+            block = Some((r + read, w + write));
+        } else if let Some((name, rest)) = line.split_once(':') {
+            let name = name.trim();
+            if name.is_empty() || name.contains(' ') || name.contains('|') || name == "lo" {
+                continue;
+            }
+            let fields: Vec<u64> = rest.split_whitespace().filter_map(|f| f.parse().ok()).collect();
+            if fields.len() >= 16 {
+                let (r, t) = net.unwrap_or_default();
+                net = Some((r + fields[0], t + fields[8]));
+            }
+        }
+    }
+    ExactCounters { net, block }
 }
 
 /// New memory (MB) and CPU limits for a running container; `None` leaves one as it is.
@@ -517,6 +596,24 @@ pub async fn restore_volume(target: &Target, name: &str, source: &std::path::Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exact_counters_sum_devices_and_skip_loopback() {
+        let out = "Inter-|   Receive                                                |  Transmit
+ face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed
+    lo:  900 9 0 0 0 0 0 0  900 9 0 0 0 0 0 0
+  eth0: 2738 30 0 0 0 0 0 0 1290 12 0 0 0 0 0 0
+  eth1: 2 1 0 0 0 0 0 0 8 1 0 0 0 0 0 0
+8:0 rbytes=41943040 wbytes=56950784 rios=10 wios=20 dbytes=0 dios=0
+8:16 rbytes=10 wbytes=6 rios=1 wios=1 dbytes=0 dios=0
+";
+        let counters = parse_exact_counters(out);
+        assert_eq!(counters.net, Some((2740, 1298)));
+        assert_eq!(counters.block, Some((41943050, 56950790)));
+        // cgroup v1: no `io.stat`, so the engine's own disk totals stay.
+        assert_eq!(parse_exact_counters("  eth0: 5 1 0 0 0 0 0 0 7 1 0 0 0 0 0 0").block, None);
+        assert_eq!(parse_exact_counters("cat: /proc/net/dev: No such file"), ExactCounters::default());
+    }
 
     #[test]
     fn a_volume_backup_streams_a_tarball_and_a_restore_can_empty_first() {

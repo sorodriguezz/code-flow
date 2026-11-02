@@ -1,6 +1,7 @@
 import { invoke } from "./invoke";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  InspectorAnnounced,
   ListeningPort,
   ProjectCandidates,
   ServiceCandidate,
@@ -36,8 +37,8 @@ export const deleteServiceGroup = (id: string) => invoke<void>("delete_service_g
 
 /** Starts `ids` and everything they wait for, in dependency order. Resolves once queued; progress
  *  arrives through {@link onServiceRuntime}. */
-export const startServices = (workspaceId: string, ids: string[]) =>
-  invoke<void>("services_start", { workspaceId, ids });
+export const startServices = (workspaceId: string, ids: string[], debug?: boolean) =>
+  invoke<void>("services_start", { workspaceId, ids, debug: debug ?? null });
 
 /** Stops `ids` — dependents first — and resolves once they are all down. */
 export const stopServices = (ids: string[]) => invoke<void>("services_stop", { ids });
@@ -78,6 +79,10 @@ export const freePort = (pid: number) => invoke<void>("services_free_port", { pi
 
 /** Whether a working directory exists, for the editor to say so before the first run. */
 export const servicePathExists = (path: string) => invoke<boolean>("service_path_exists", { path });
+
+/** A service in debug mode opened a Node inspector. */
+export const onServiceInspector = (handler: (announced: InspectorAnnounced) => void) =>
+  listen<InspectorAnnounced>("services:inspector", (e) => handler(e.payload));
 
 /** One service's state changed. */
 export const onServiceRuntime = (handler: (runtime: ServiceRuntime) => void) =>

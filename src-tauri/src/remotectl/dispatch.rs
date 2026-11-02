@@ -1375,7 +1375,7 @@ pub async fn dispatch(
         )?),
         "services_runtime" => ok(commands::services_cmd::services_runtime(app.clone())),
         "services_start" => {
-            commands::services_cmd::services_start(app.clone(), arg(args, "workspaceId")?, arg(args, "ids")?)?;
+            commands::services_cmd::services_start(app.clone(), arg(args, "workspaceId")?, arg(args, "ids")?, None)?;
             ok(true)
         }
         "services_stop" => {

@@ -432,6 +432,14 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     setSidePanel(panel);
     setSideHidden(false);
   }, []);
+  // A service's debug session stopped at a breakpoint (`debugStore.wantsPanel`): the Debug panel
+  // comes up beside the line, with the stack and the variables.
+  const debugWantsPanel = useDebugStore((s) => s.wantsPanel);
+  useEffect(() => {
+    if (!debugWantsPanel) return;
+    useDebugStore.getState().clearPanelRequest();
+    showSidePanel("debug");
+  }, [debugWantsPanel, showSidePanel]);
   /** The docked Changes panel on the right. Closed by default and session-only: it's a mode you
    * step into while committing, not a layout preference — the editor's resting state is code. */
   const [changesOpen, setChangesOpen] = useState(false);

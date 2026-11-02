@@ -102,10 +102,11 @@ pub fn delete_service_group(db: State<Db>, id: String) -> Result<(), String> {
 }
 
 /// Starts `ids` and everything they wait for. Returns as soon as the work is queued; progress
-/// arrives as `services:runtime` events.
+/// arrives as `services:runtime` events. `debug` puts `ids` in debug mode or out of it (the Run and
+/// Debug buttons); left out, they start as they last ran.
 #[tauri::command(async)]
-pub fn services_start(app: AppHandle, workspace_id: String, ids: Vec<String>) -> Result<(), String> {
-    Supervisor::of(&app).start(&app, &workspace_id, &ids)
+pub fn services_start(app: AppHandle, workspace_id: String, ids: Vec<String>, debug: Option<bool>) -> Result<(), String> {
+    Supervisor::of(&app).start_in(&app, &workspace_id, &ids, debug)
 }
 
 /// Stops `ids`, dependents first, and returns once every one of them is down.
