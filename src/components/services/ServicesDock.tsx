@@ -3,6 +3,7 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   CirclePlay,
   Container,
+  FolderGit2,
   Maximize2,
   Minimize2,
   Palette,
@@ -55,6 +56,10 @@ import { isMainWindow } from "../../lib/windowIdentity";
 import { folderName, relativeInside } from "../../lib/folderPath";
 import { useSwapFade } from "../../lib/useSwapFade";
 import type { ServiceRow } from "../../types/services";
+import type { Project } from "../../types/domain";
+
+/** A stable empty list, so a workspace not loaded yet does not hand the dock a new array each render. */
+const NO_PROJECTS: Project[] = [];
 
 const MIN_HEIGHT = 140;
 const MAX_HEIGHT = 720;
@@ -79,7 +84,10 @@ const MAX_HEIGHT = 720;
  *
  * The scopes are what they were: a **service** belongs to the workspace, because the thing being
  * started is a system and a system spans repositories; a **terminal** belongs to the repository it
- * was opened in. Switching repository changes the terminals and leaves the services alone.
+ * was opened in. But the list shows the terminals of *every* repository of the workspace, one
+ * section each (user ask, 2026-11-02: switching repository just to see what another one's shell was
+ * doing was too limiting). The pane area shows one repository's split — `terminalStore.dockProjectId`,
+ * the one last focused — so a row of another repository shows its shell without switching the app.
  *
  * # In a satellite
  *
@@ -169,6 +177,8 @@ export function ServicesDock() {
   const project = useWorkspaceStore((s) => s.activeProject());
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const byProject = useTerminalStore((s) => s.byProject);
+  const dockProjectId = useTerminalStore((s) => s.dockProjectId);
+  const workspaceProjects = useWorkspaceStore((s) => (workspaceId ? s.projectsByWorkspace[workspaceId] : undefined)) ?? NO_PROJECTS;
   const openNew = useTerminalStore((s) => s.openNew);
   const closeTab = useTerminalStore((s) => s.close);
   const focusTab = useTerminalStore((s) => s.focus);
@@ -237,10 +247,35 @@ export function ServicesDock() {
   const [importing, setImporting] = useState(false);
 
   const activeProjectId = project?.id ?? null;
-  const activeProj = activeProjectId ? byProject[activeProjectId] : undefined;
-  const visibleIds = activeGroup(activeProj);
-  const visibleGroup = activeGroupOf(activeProj);
+  /**
+   * The repository whose split the pane area shows: the one the dock was last pointed at
+   * (`dockProjectId`) while it is in this workspace and still has terminals, the active one otherwise.
+   */
+  const viewed =
+    [dockProjectId, activeProjectId]
+      .map((id) => (id ? workspaceProjects.find((p) => p.id === id) : undefined))
+      .find((p) => p && (byProject[p.id]?.tabs.length ?? 0) > 0) ??
+    project ??
+    null;
+  const viewedId = viewed?.id ?? null;
+  const viewedProj = viewedId ? byProject[viewedId] : undefined;
+  const visibleIds = activeGroup(viewedProj);
+  const visibleGroup = activeGroupOf(viewedProj);
   const paneAreaRef = useRef<HTMLDivElement>(null);
+  /** The list's sections: every repository of the workspace that has terminals, plus the active one
+   *  even with none — its "open one" is where a first shell for it starts. Workspace order, so the
+   *  sections do not jump around as the user switches repository. */
+  const sections = workspaceProjects.filter((p) => p.id === activeProjectId || (byProject[p.id]?.tabs.length ?? 0) > 0);
+  const workspaceTabCount = workspaceProjects.reduce((sum, p) => sum + (byProject[p.id]?.tabs.length ?? 0), 0);
+
+  /** Switching repository shows its terminals when it has some; one with none leaves the other
+   *  repository's shell on screen — watching it is the point of the workspace-wide list. */
+  useEffect(() => {
+    if (!activeProjectId) return;
+    if ((useTerminalStore.getState().byProject[activeProjectId]?.tabs.length ?? 0) > 0) {
+      useTerminalStore.getState().setDockProject(activeProjectId);
+    }
+  }, [activeProjectId]);
 
   useEffect(() => {
     if (showServices && workspaceId) void loadServices(workspaceId);
@@ -262,19 +297,28 @@ export function ServicesDock() {
   useEffect(() => {
     // Open, too: the dock stays mounted while closed, and a project switched to then is not a shell
     // asked for — `openNew` would open the dock to show it.
-    if (!open || view !== "terminal" || !project || autoOpened.current.has(project.id)) return;
-    if ((activeProj?.tabs.length ?? 0) > 0) return;
-    autoOpened.current.add(project.id);
-    // The terminals this repository had when the app last closed come back first; only a repository
-    // with none gets a fresh shell.
+    if (!open || view !== "terminal" || !project) return;
+    const due = workspaceProjects.filter((p) => !autoOpened.current.has(p.id));
+    if (due.length === 0) return;
+    for (const p of due) autoOpened.current.add(p.id);
     const target = project;
-    void useTerminalStore
-      .getState()
-      .restore(target.id, target.local_path)
-      .then((restored) => (restored ? undefined : openNew(target.id, target.local_path)))
-      .catch((e: unknown) => pushErrorToast(String(e)));
+    const store = useTerminalStore.getState();
+    const hasTabs = (id: string) => (useTerminalStore.getState().byProject[id]?.tabs.length ?? 0) > 0;
+    void (async () => {
+      // Every repository's terminals from the last session come back, since the list shows them all:
+      // the others behind what is on screen, the active one last so it is what the dock ends on.
+      for (const p of due) {
+        if (p.id === target.id || hasTabs(p.id)) continue;
+        await store.restore(p.id, p.local_path, { background: true }).catch(() => false);
+      }
+      if (!due.some((p) => p.id === target.id) || hasTabs(target.id)) return;
+      const restored = await store.restore(target.id, target.local_path);
+      // A fresh shell only when the workspace has none at all: with another repository's shells in
+      // the list, switching here is not asking for a new one — "open one" in its section is.
+      if (!restored && !workspaceProjects.some((p) => hasTabs(p.id))) await openNew(target.id, target.local_path);
+    })().catch((e: unknown) => pushErrorToast(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProjectId, view, open]);
+  }, [activeProjectId, view, open, workspaceProjects]);
 
   /**
    * A shell in a folder picked from the disk — the subfolder three levels down that `+` (the
@@ -282,26 +326,26 @@ export function ServicesDock() {
    * is allowed, it is a shell, and it is filed under this repository like every terminal here.
    */
   const openInFolder = async () => {
-    // Captured before the dialog: the active repository can change while it is open.
-    const target = project;
+    // Captured before the dialog: the repository on screen can change while it is open.
+    const target = viewed;
     if (!target) return;
     const picked = await openDialog({ directory: true, multiple: false, defaultPath: target.local_path });
     if (typeof picked !== "string") return;
     await openNew(target.id, picked).catch((e: unknown) => pushErrorToast(String(e)));
   };
 
-  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<{ projectId: string; id: string } | null>(null);
+  const renamingId = renaming?.id ?? null;
   const [renameValue, setRenameValue] = useState("");
   /** A terminal row's right-click menu. */
-  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; tab: TerminalTab } | null>(null);
-  /** A row being dragged to another place in the list, and the gap it would land in. */
-  const [rowDrag, setRowDrag] = useState<{ id: string; index: number } | null>(null);
+  const [rowMenu, setRowMenu] = useState<{ x: number; y: number; tab: TerminalTab; projectId: string } | null>(null);
+  /** A row being dragged to another place in its repository's section, and the gap it would land in. */
+  const [rowDrag, setRowDrag] = useState<{ projectId: string; id: string; index: number } | null>(null);
 
   /** Opens beside the focused terminal, in the folder it is in — what VS Code's split does. */
-  const splitFrom = (tab: TerminalTab, dir: "row" | "column") => {
-    if (!project) return;
-    focusTab(project.id, tab.id);
-    void openNew(project.id, tab.liveCwd || tab.cwd, { split: true, splitDir: dir, profileId: tab.profileId }).catch((e: unknown) =>
+  const splitFrom = (projectId: string, tab: TerminalTab, dir: "row" | "column") => {
+    focusTab(projectId, tab.id);
+    void openNew(projectId, tab.liveCwd || tab.cwd, { split: true, splitDir: dir, profileId: tab.profileId }).catch((e: unknown) =>
       pushErrorToast(String(e)),
     );
   };
@@ -310,14 +354,14 @@ export function ServicesDock() {
    * Drag a row to reorder the list. Pointer events rather than HTML5 drag-and-drop, which the
    * webview's own file-drop handling takes over on Windows; the explorer drags its rows the same way.
    */
-  const beginRowDrag = (event: React.PointerEvent<HTMLElement>, tab: TerminalTab) => {
-    if (event.button !== 0 || !project || renamingId) return;
-    const projectId = project.id;
+  const beginRowDrag = (event: React.PointerEvent<HTMLElement>, projectId: string, tab: TerminalTab) => {
+    if (event.button !== 0 || renamingId) return;
     const from = { x: event.clientX, y: event.clientY };
     let started = false;
     let index = -1;
+    // Within its own repository's section: a terminal belongs to the repository it was opened in.
     const indexAt = (y: number) => {
-      const rows = Array.from(document.querySelectorAll<HTMLElement>("[data-cf-term-row]"));
+      const rows = Array.from(document.querySelectorAll<HTMLElement>(`[data-cf-term-row="${CSS.escape(projectId)}"]`));
       const at = rows.findIndex((row) => {
         const rect = row.getBoundingClientRect();
         return y < rect.top + rect.height / 2;
@@ -328,7 +372,7 @@ export function ServicesDock() {
       if (!started && Math.hypot(ev.clientX - from.x, ev.clientY - from.y) < 5) return;
       started = true;
       index = indexAt(ev.clientY);
-      setRowDrag({ id: tab.id, index });
+      setRowDrag({ projectId, id: tab.id, index });
     };
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
@@ -351,9 +395,9 @@ export function ServicesDock() {
   const beginResize = (event: React.PointerEvent<HTMLElement>, index: number) => {
     const area = paneAreaRef.current;
     const group = visibleGroup;
-    if (!area || !group || !project) return;
+    if (!area || !group || !viewedId) return;
     event.preventDefault();
-    const projectId = project.id;
+    const projectId = viewedId;
     const rect = area.getBoundingClientRect();
     const column = group.dir === "column";
     const start = column ? event.clientY : event.clientX;
@@ -375,19 +419,19 @@ export function ServicesDock() {
     window.addEventListener("pointercancel", onUp);
   };
 
-  const rowMenuItems = (tab: TerminalTab): MenuItem[] => {
-    if (!project) return [];
-    const projectId = project.id;
+  const rowMenuItems = (projectId: string, tab: TerminalTab): MenuItem[] => {
     const store = useTerminalStore.getState();
     const group = byProject[projectId]?.groups.find((g) => g.ids.includes(tab.id));
     const inSplit = (group?.ids.length ?? 0) > 1;
     const onScreen = visibleIds.includes(tab.id);
+    // Joining the split on screen only makes sense inside the same repository.
+    const sameRepo = projectId === viewedId;
     return [
-      { label: t("terminal.rename"), icon: Pencil, onClick: () => startRename(tab) },
-      { label: t("terminal.splitRight"), icon: SplitSquareHorizontal, separated: true, onClick: () => splitFrom(tab, "row") },
-      { label: t("terminal.splitDown"), icon: SplitSquareVertical, onClick: () => splitFrom(tab, "column") },
+      { label: t("terminal.rename"), icon: Pencil, onClick: () => startRename(projectId, tab) },
+      { label: t("terminal.splitRight"), icon: SplitSquareHorizontal, separated: true, onClick: () => splitFrom(projectId, tab, "row") },
+      { label: t("terminal.splitDown"), icon: SplitSquareVertical, onClick: () => splitFrom(projectId, tab, "column") },
       ...(inSplit ? [{ label: t("terminal.detach"), icon: SquareArrowUpLeft, onClick: () => store.detachTab(projectId, tab.id) }] : []),
-      ...(!onScreen && visibleIds.length > 0
+      ...(sameRepo && !onScreen && visibleIds.length > 0
         ? [{ label: t("terminal.joinSplit"), icon: SquareArrowOutUpRight, onClick: () => store.joinActive(projectId, tab.id) }]
         : []),
       ...(inSplit && group
@@ -437,50 +481,51 @@ export function ServicesDock() {
     ];
   };
 
-  const startRename = (tab: TerminalTab) => {
-    setRenamingId(tab.id);
+  const startRename = (projectId: string, tab: TerminalTab) => {
+    setRenaming({ projectId, id: tab.id });
     setRenameValue(tab.title);
   };
 
   const commitRename = () => {
-    const id = renamingId;
-    setRenamingId(null);
-    if (id && project) rename(project.id, id, renameValue);
+    const target = renaming;
+    setRenaming(null);
+    if (target) rename(target.projectId, target.id, renameValue);
   };
 
   // Every terminal ever opened stays mounted, hidden unless the terminals are the panel on screen and
-  // it belongs to the active project and to its current split — so switching project, or looking at
-  // the services, never kills a shell or loses its scrollback.
+  // it belongs to the repository on screen and to its current split — so switching project, or
+  // looking at the services, never kills a shell or loses its scrollback.
   const allPanes = Object.entries(byProject).flatMap(([projectId, proj]) =>
     proj.tabs.map((tab) => ({
       projectId,
       tab,
-      visible: open && view === "terminal" && projectId === activeProjectId && visibleIds.includes(tab.id),
+      visible: open && view === "terminal" && projectId === viewedId && visibleIds.includes(tab.id),
     })),
   );
 
   const selectedService = selectedId ? (services.find((s) => s.id === selectedId) ?? null) : null;
 
-  /** The terminal panel's two ways in: a shell in the repository, or one of the other shells (and
-   *  "in a folder…"). In the panel's title row in the main window, in the list's heading in a
-   *  satellite — see the note at the top. */
+  /** The terminal panel's two ways in: a shell in the repository on screen, or one of the other
+   *  shells (and "in a folder…"). In the panel's title row in the main window, in the list's heading
+   *  in a satellite — see the note at the top. Each section of the list has its own `+` too. */
   const terminalActions = (
     <>
       <HeaderButton
-        onClick={() => project && void openNew(project.id, project.local_path)}
-        disabled={!project}
+        onClick={() => viewed && void openNew(viewed.id, viewed.local_path)}
+        disabled={!viewed}
         label={shortcutHint("terminal.new", t("terminal.new"))}
       >
         <Plus size={11} />
       </HeaderButton>
       <ProfileMenu
-        disabled={!project}
-        onPick={(profileId) => project && void openNew(project.id, project.local_path, { profileId })}
+        disabled={!viewed}
+        onPick={(profileId) => viewed && void openNew(viewed.id, viewed.local_path, { profileId })}
         onOpenInFolder={() => void openInFolder()}
       />
     </>
   );
-  const terminalsLabel = project ? t("terminal.forRepo", { name: project.name }) : t("terminal.title");
+  /** Names the repository whose shell is on screen — no longer always the active one. */
+  const terminalsLabel = viewed ? t("terminal.forRepo", { name: viewed.name }) : t("terminal.title");
   /** What the title row calls the panel. A satellite keeps the one name it always had, with the
    *  list's heading below it naming the repository. */
   const panelTitle =
@@ -569,9 +614,9 @@ export function ServicesDock() {
 
         <div className="flex-1" />
 
-        {view === "terminal" && visibleGroup?.broadcast && project && (
+        {view === "terminal" && visibleGroup?.broadcast && viewedId && (
           <button
-            onClick={() => useTerminalStore.getState().toggleBroadcast(project.id, visibleGroup.id)}
+            onClick={() => useTerminalStore.getState().toggleBroadcast(viewedId, visibleGroup.id)}
             title={t("terminal.broadcastOff")}
             className="mr-1 flex items-center gap-1 rounded px-1.5 text-[11px] text-[var(--cf-warning)] hover:bg-[var(--cf-hover)]"
           >
@@ -654,49 +699,83 @@ export function ServicesDock() {
                   {t("terminal.noProject")}
                 </p>
               )}
-              {/* Said in the list, not only in the pane: a list with nothing in it reads as one
-                  still loading. */}
-              {project && (activeProj?.tabs.length ?? 0) === 0 && (
-                <button
-                  onClick={() => void openNew(project.id, project.local_path).catch((e: unknown) => pushErrorToast(String(e)))}
-                  className={`${showServices ? "ml-4" : "ml-6"} py-0.5 text-left text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]`}
-                >
-                  {t("terminal.noneOpen")}
-                </button>
-              )}
-              {(activeProj?.tabs ?? []).map((tab, index) => (
-                <TerminalRow
-                  key={tab.id}
-                  tab={tab}
-                  where={project ? whereOf(project.local_path, tab.liveCwd || tab.cwd) : ""}
-                  inSplit={visibleIds.includes(tab.id)}
-                  selected={visibleIds.includes(tab.id)}
-                  dropBefore={rowDrag !== null && rowDrag.id !== tab.id && rowDrag.index === index}
-                  dropAfter={rowDrag !== null && index === (activeProj?.tabs.length ?? 0) - 1 && rowDrag.index > index}
-                  dragging={rowDrag?.id === tab.id}
-                  onDragStart={(event) => beginRowDrag(event, tab)}
-                  onMenu={(event) => {
-                    event.preventDefault();
-                    setRowMenu({ x: event.clientX, y: event.clientY, tab });
-                  }}
-                  renaming={renamingId === tab.id}
-                  renameValue={renameValue}
-                  onRenameChange={setRenameValue}
-                  onRenameStart={() => startRename(tab)}
-                  onRenameCommit={commitRename}
-                  onRenameCancel={() => setRenamingId(null)}
-                  onSelect={() => {
-                    if (project) focusTab(project.id, tab.id);
-                  }}
-                  onSplit={() => splitFrom(tab, "row")}
-                  onClose={() =>
-                    project &&
-                    void confirmCloseTerminal(tab.id).then((ok) => {
-                      if (ok) void closeTab(project.id, tab.id);
-                    })
-                  }
-                />
-              ))}
+              {/* One section per repository of the workspace with terminals — see the note at the top. */}
+              {sections.map((section) => {
+                const tabs = byProject[section.id]?.tabs ?? [];
+                const isActive = section.id === activeProjectId;
+                const onScreen = section.id === viewedId;
+                return (
+                  <div key={section.id} className="pb-1">
+                    <div className="group/sec flex items-center gap-1.5 px-2 py-[2px] text-[11px] text-[var(--cf-text-muted)]">
+                      <FolderGit2 size={11} className={`shrink-0 ${onScreen ? "text-[var(--cf-accent)]" : "opacity-60"}`} />
+                      <span
+                        className={`min-w-0 flex-1 truncate ${isActive ? "font-medium text-[var(--cf-text)]" : ""}`}
+                        title={section.local_path}
+                      >
+                        {section.name}
+                      </span>
+                      {tabs.length > 0 && <span className="shrink-0 tabular-nums opacity-60">{tabs.length}</span>}
+                      <span className="flex shrink-0 opacity-0 focus-within:opacity-100 group-hover/sec:opacity-100">
+                        <RowButton
+                          onClick={() =>
+                            void openNew(section.id, section.local_path).catch((e: unknown) => pushErrorToast(String(e)))
+                          }
+                          label={t("terminal.newIn", { name: section.name })}
+                        >
+                          <Plus size={10} />
+                        </RowButton>
+                      </span>
+                    </div>
+                    {/* Said in the list, not only in the pane: a list with nothing in it reads as one
+                        still loading. */}
+                    {tabs.length === 0 && (
+                      <button
+                        onClick={() =>
+                          void openNew(section.id, section.local_path).catch((e: unknown) => pushErrorToast(String(e)))
+                        }
+                        className={`${showServices ? "ml-4" : "ml-6"} py-0.5 text-left text-[11px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]`}
+                      >
+                        {t("terminal.noneOpen")}
+                      </button>
+                    )}
+                    {tabs.map((tab, index) => {
+                      const dragHere = rowDrag !== null && rowDrag.projectId === section.id;
+                      const inSplit = onScreen && visibleIds.includes(tab.id);
+                      return (
+                        <TerminalRow
+                          key={tab.id}
+                          projectId={section.id}
+                          tab={tab}
+                          where={whereOf(section.local_path, tab.liveCwd || tab.cwd)}
+                          inSplit={inSplit}
+                          selected={inSplit}
+                          dropBefore={dragHere && rowDrag.id !== tab.id && rowDrag.index === index}
+                          dropAfter={dragHere && index === tabs.length - 1 && rowDrag.index > index}
+                          dragging={rowDrag?.id === tab.id}
+                          onDragStart={(event) => beginRowDrag(event, section.id, tab)}
+                          onMenu={(event) => {
+                            event.preventDefault();
+                            setRowMenu({ x: event.clientX, y: event.clientY, tab, projectId: section.id });
+                          }}
+                          renaming={renamingId === tab.id}
+                          renameValue={renameValue}
+                          onRenameChange={setRenameValue}
+                          onRenameStart={() => startRename(section.id, tab)}
+                          onRenameCommit={commitRename}
+                          onRenameCancel={() => setRenaming(null)}
+                          onSelect={() => focusTab(section.id, tab.id)}
+                          onSplit={() => splitFrom(section.id, tab, "row")}
+                          onClose={() =>
+                            void confirmCloseTerminal(tab.id).then((ok) => {
+                              if (ok) void closeTab(section.id, tab.id);
+                            })
+                          }
+                        />
+                      );
+                    })}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
@@ -734,7 +813,7 @@ export function ServicesDock() {
             <div className="absolute inset-0">
               <EmptyState icon={TerminalSquare} title={t("terminal.noProject")} />
             </div>
-          ) : (activeProj?.tabs.length ?? 0) === 0 ? (
+          ) : workspaceTabCount === 0 ? (
             <div className="absolute inset-0">
               <EmptyState icon={TerminalSquare} title={t("terminal.emptyHint")} />
             </div>
@@ -793,7 +872,7 @@ export function ServicesDock() {
       </div>
 
       {rowMenu && (
-        <ContextMenu x={rowMenu.x} y={rowMenu.y} items={rowMenuItems(rowMenu.tab)} onClose={() => setRowMenu(null)} />
+        <ContextMenu x={rowMenu.x} y={rowMenu.y} items={rowMenuItems(rowMenu.projectId, rowMenu.tab)} onClose={() => setRowMenu(null)} />
       )}
 
       {editing && workspaceId && (
@@ -825,6 +904,7 @@ function whereOf(root: string, cwd: string): string {
 
 /** One ad-hoc shell in the list. Everything the old tab strip's tab could do, in a row. */
 function TerminalRow({
+  projectId,
   tab,
   where,
   inSplit,
@@ -844,6 +924,8 @@ function TerminalRow({
   onSplit,
   onClose,
 }: {
+  /** The repository the row's section is — what a drag reorders within. */
+  projectId: string;
   tab: TerminalTab;
   /** The folder the shell was opened in, when it is not the repository's root — three shells all
    *  called `zsh` are told apart by where they stand. See `whereOf`. */
@@ -877,7 +959,7 @@ function TerminalRow({
     // on every side, and a click on that margin used to land on nothing. The button inside stays for
     // the keyboard — its click bubbles here — and the action buttons and the rename field stop theirs.
     <div
-      data-cf-term-row=""
+      data-cf-term-row={projectId}
       onClick={() => !renaming && onSelect()}
       onDoubleClick={() => !renaming && onRenameStart()}
       onPointerDown={(event) => !renaming && onDragStart(event)}

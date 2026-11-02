@@ -98,6 +98,17 @@ interface TerminalState {
    *  it was closed on. */
   dockView: DockView;
   byProject: Record<string, ProjectTerminals>;
+  /**
+   * The repository whose split the dock's pane area shows. The list shows every repository of the
+   * workspace (user ask, 2026-11-02: switching repo just to see what another one's shell is doing
+   * was too limiting), so what is on screen is no longer simply the active repository: clicking a
+   * row of another repository shows its shell without switching the app over to it. Set by anything
+   * that focuses or opens a terminal; the dock falls back to the active repository when this one is
+   * stale (another workspace, no terminals left). See `ServicesDock`.
+   */
+  dockProjectId: string | null;
+  /** Points the dock's pane area at `projectId`'s split without touching its terminals. */
+  setDockProject: (projectId: string | null) => void;
   init: () => Promise<void>;
   /** The terminal's own toggle — ⌘J, the palette, a satellite. With the services on screen it shows
    *  the terminals rather than closing the dock: that key is about the terminal. */
@@ -132,6 +143,9 @@ interface TerminalState {
       replay?: string;
       /** Runs the shell as one AI account — see `lib/aiAccounts.ts`. */
       account?: { provider: string; accountId: string };
+      /** Opened behind what the dock shows — neither pointing the dock at it nor opening the dock.
+       *  For restoring the other repositories of the workspace. */
+      background?: boolean;
     },
   ) => Promise<string>;
   /**
@@ -177,7 +191,7 @@ interface TerminalState {
    * Brings back the terminals this repository had when the app last closed, if any, and answers
    * whether it did. Main window only — see `terminalRestore`.
    */
-  restore: (projectId: string, fallbackCwd: string) => Promise<boolean>;
+  restore: (projectId: string, fallbackCwd: string, opts?: { background?: boolean }) => Promise<boolean>;
 }
 
 /** What a mounted `TerminalPane` hands the router: where to put this session's bytes, and what
@@ -400,6 +414,10 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   dockMaximized: false,
   toggleDockMaximized: () => set((s) => ({ dockMaximized: !s.dockMaximized })),
   byProject: {},
+  dockProjectId: null,
+  setDockProject: (projectId) => {
+    if (get().dockProjectId !== projectId) set({ dockProjectId: projectId });
+  },
 
   init: async () => {
     // At app start, so the router is live well before any pane asks for one.
@@ -461,6 +479,8 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
         return { tabs: [...proj.tabs, tab], groups, focusedId: id, nextNumber: proj.nextNumber + 1 };
       }),
     );
+    if (opts?.background) return id;
+    set({ dockProjectId: projectId });
     // The terminals, whichever panel was up: a shell was just asked for, from the `+`, the
     // explorer's "Open in Integrated Terminal" or a script — and a dock left on the services would
     // put it out of sight the moment it opened.
@@ -529,7 +549,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     set((s) => {
       const proj = s.byProject[projectId];
       if (!proj) return s;
-      return patchProject(s, projectId, () => ({ ...proj, focusedId: id }));
+      return { ...patchProject(s, projectId, () => ({ ...proj, focusedId: id })), dockProjectId: projectId };
     });
   },
 
@@ -576,7 +596,7 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     set((s) => {
       const proj = s.byProject[projectId];
       if (!proj) return s;
-      return patchProject(s, projectId, () => ({ ...proj, groups: detach(proj.groups, id), focusedId: id }));
+      return { ...patchProject(s, projectId, () => ({ ...proj, groups: detach(proj.groups, id), focusedId: id })), dockProjectId: projectId };
     }),
 
   joinActive: (projectId, id) =>
@@ -584,7 +604,10 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
       const proj = s.byProject[projectId];
       const target = activeGroupOf(proj);
       if (!proj || !target || target.ids.includes(id)) return s;
-      return patchProject(s, projectId, () => ({ ...proj, groups: joinGroup(proj.groups, id, target.id), focusedId: id }));
+      return {
+        ...patchProject(s, projectId, () => ({ ...proj, groups: joinGroup(proj.groups, id, target.id), focusedId: id })),
+        dockProjectId: projectId,
+      };
     }),
 
   setGroupSizes: (projectId, groupId, sizes) =>
@@ -637,13 +660,19 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     if (lines.length > 0) await writeTerminal(id, `${lines.join("\r")}\r`);
   },
 
-  restore: async (projectId, fallbackCwd) => {
+  restore: async (projectId, fallbackCwd, restoreOpts) => {
     const saved = savedAtStart?.projects[projectId];
     if (!saved || saved.tabs.length === 0 || (get().byProject[projectId]?.tabs.length ?? 0) > 0) return false;
     const label = translate("terminal.restored");
     const ids: (string | null)[] = [];
     for (const tab of saved.tabs) {
-      const opts = { title: tab.title, color: tab.color, icon: tab.icon, replay: replayText(tab.text, label) };
+      const opts = {
+        title: tab.title,
+        color: tab.color,
+        icon: tab.icon,
+        replay: replayText(tab.text, label),
+        background: restoreOpts?.background,
+      };
       // A folder that is gone, or a profile since removed, still gets the tab back — in the
       // repository, with the default shell — rather than losing it.
       const id = await get()

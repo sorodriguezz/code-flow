@@ -5647,6 +5647,7 @@ const en = {
   "terminal.panelTitle": "Terminal",
   "terminal.forRepo": "Terminals · {name}",
   "terminal.emptyHint": "No terminals open — click + to start one.",
+  "terminal.newIn": "New terminal in {name}",
   "terminal.noneOpen": "None open — open one",
   "terminal.new": "New terminal",
   "terminal.selectProfile": "Open a different shell",

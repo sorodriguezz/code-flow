@@ -5576,6 +5576,7 @@ export const es = {
   "terminal.panelTitle": "Terminal",
   "terminal.forRepo": "Terminales · {name}",
   "terminal.emptyHint": "No hay terminales abiertas — haz clic en + para iniciar una.",
+  "terminal.newIn": "Nueva terminal en {name}",
   "terminal.noneOpen": "Ninguna abierta — abrir una",
   "terminal.new": "Nueva terminal",
   "terminal.selectProfile": "Abrir otro shell",

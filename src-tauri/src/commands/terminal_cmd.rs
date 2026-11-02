@@ -27,7 +27,11 @@ pub fn list_shell_profiles(db: State<Db>) -> Result<Vec<ShellProfile>, String> {
 ///
 /// `account_provider` + `account_id` open the shell *as* one account of an AI CLI — see
 /// `crate::ai_accounts`. An id that no longer exists opens an ordinary shell.
-#[tauri::command]
+///
+/// `(async)`, like the bench's add/resume below: opening a shell creates a pseudo-console and starts
+/// a process, which on Windows (ConPTY, an antivirus looking at every process start) takes a second
+/// or two — on the main thread, the whole window frozen each time a terminal was opened.
+#[tauri::command(async)]
 pub fn open_terminal(
     app: AppHandle,
     registry: State<TerminalRegistry>,
@@ -368,7 +372,7 @@ pub struct Bench {
 /// Called every time the panel opens, which is what makes "closed but still running" work: the app
 /// may have been up the whole time with the shells alive behind a shut panel, and this is how the
 /// panel finds them again instead of starting a second set beside them.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_workspace_terminals(
     registry: State<TerminalRegistry>,
     db: State<Db>,
@@ -437,7 +441,7 @@ pub fn remove_bench_tab(
 /// The row is written first and the shell opened against its id, so the recording has somewhere to
 /// go from the very first byte — a shell that printed its prompt before the row existed would have
 /// lost exactly the line saying which shell it is.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_workspace_terminal(
     app: AppHandle,
     registry: State<TerminalRegistry>,
@@ -491,7 +495,7 @@ fn resume_seed(transcript: &str) -> String {
 /// read: it rewrites the stored transcript, appending the terminal-mode reset and the seam that
 /// [`resume_seed`] documents. A panel that kept the copy it read before this call would mount its
 /// pane against a version with neither.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resume_workspace_terminal(
     app: AppHandle,
     registry: State<TerminalRegistry>,

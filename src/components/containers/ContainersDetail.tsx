@@ -126,6 +126,28 @@ type ContainerTab = "logs" | "terminal" | "stats" | "files" | "config";
 /** The fallback for a list not read yet — see `ui.tsx`, where it now lives. */
 export { NO_ROWS };
 
+/**
+ * `value`, one painted frame late. A container's tabs build heavy things when shown — an xterm with a
+ * GPU renderer, the stats loop — and on Windows building them in the click's own frame froze the
+ * window before the tab even changed (user report, 2026-11-02). With this the tab strip and a
+ * spinner are drawn first, and what the tab holds is built on the next frame.
+ */
+function useSettled<T>(value: T): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    if (settled === value) return;
+    let timer = 0;
+    const frame = requestAnimationFrame(() => {
+      timer = window.setTimeout(() => setSettled(value), 0);
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+      clearTimeout(timer);
+    };
+  }, [value, settled]);
+  return settled;
+}
+
 function useContainerRow(selection: ContainerSelection): ContainerRow | undefined {
   return useContainersStore((s) => (s.lists[listKey(selection.runtime, selection.context, null, "containers")]?.rows as ContainerRow[] | undefined)?.find((r) => r.id === selection.id));
 }
@@ -159,7 +181,9 @@ function ContainerDetail({ selection }: { selection: ContainerSelection }) {
   /** What the log pane shows, as text — for its copy, save and «Analizar con IA». */
   const logText = useRef<(() => string) | null>(null);
   const ctr = selection.runtime === "ctr";
-  useEffect(() => setVisited((v) => (v.has(tab) ? v : new Set([...v, tab]))), [tab]);
+  /** The tab whose contents are built — `tab` a frame late, see `useSettled`. */
+  const shownTab = useSettled(tab);
+  useEffect(() => setVisited((v) => (v.has(shownTab) ? v : new Set([...v, shownTab]))), [shownTab]);
   if (!row) return <Gone />;
   const running = row.state === "running";
   const place = selection.context || runtimeLabel(selection.runtime, t);
@@ -174,6 +198,9 @@ function ContainerDetail({ selection }: { selection: ContainerSelection }) {
         { id: "config", label: t("containers.m.tab.config") },
       ];
   const current = ctr ? "config" : tab;
+  /** What the body shows: `current` once its frame has been painted. */
+  const body = ctr ? "config" : shownTab;
+  const pendingTab = body !== current;
   const menu = engineMenu({ runtime: selection.runtime, context: selection.context, object: "container", row, t, act, select: () => select(selection) });
   // What the engine is told the log is — data for the model, in the prompt's language.
   const logAbout = [
@@ -271,28 +298,33 @@ function ContainerDetail({ selection }: { selection: ContainerSelection }) {
         }
       />
       <div className="relative flex min-h-0 flex-1">
+        {pendingTab && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-[var(--cf-surface)] text-[var(--cf-text-muted)]">
+            <Loader2 size={14} className="animate-spin" />
+          </div>
+        )}
         {!ctr && visited.has("logs") && (
           <SessionPane
-            visible={current === "logs"}
+            visible={body === "logs"}
             liveToken={running ? "up" : "down"}
             request={{ kind: "logs", runtime: selection.runtime, context: selection.context, target: row.id, tail: Number(tail), timestamps }}
             textRef={logText}
           />
         )}
-        {!ctr && current === "logs" && <LogAnalysisPanel analysisKey={analysisKey} />}
+        {!ctr && body === "logs" && <LogAnalysisPanel analysisKey={analysisKey} />}
         {!ctr && visited.has("terminal") && (running ? (
-          <SessionPane visible={current === "terminal"} request={{ kind: "exec", runtime: selection.runtime, context: selection.context, target: row.id }} />
+          <SessionPane visible={body === "terminal"} request={{ kind: "exec", runtime: selection.runtime, context: selection.context, target: row.id }} />
         ) : (
-          current === "terminal" && (
+          body === "terminal" && (
             <div className="flex flex-1 flex-col items-center justify-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
               {t("containers.notRunningContainer")}
               <HeaderAction primary icon={<Play size={11} />} label={t("containers.start")} onClick={() => run("start", "containers.done.start")} />
             </div>
           )
         ))}
-        {current === "stats" && <ContainerStats runtime={selection.runtime} context={selection.context} id={row.id} running={running} memoryLimit={null} cpuLimit={null} />}
-        {current === "files" && <ContainerFiles runtime={selection.runtime} context={selection.context} id={row.id} running={running} />}
-        {current === "config" && (raw ? <InspectView selection={selection} object="container" id={row.id} /> : <ContainerInfo selection={selection} row={row} />)}
+        {body === "stats" && <ContainerStats runtime={selection.runtime} context={selection.context} id={row.id} running={running} memoryLimit={null} cpuLimit={null} />}
+        {body === "files" && <ContainerFiles runtime={selection.runtime} context={selection.context} id={row.id} running={running} />}
+        {body === "config" && (raw ? <InspectView selection={selection} object="container" id={row.id} /> : <ContainerInfo selection={selection} row={row} />)}
       </div>
     </>
   );
