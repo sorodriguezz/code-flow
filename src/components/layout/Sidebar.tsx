@@ -2524,9 +2524,16 @@ function SidebarFoot({ collapsed }: { collapsed: boolean }) {
               onClick={item.onClick}
               data-tour={item.tour}
               aria-label={item.label}
-              className={`flex h-8 shrink-0 items-center rounded-lg transition-colors duration-100 hover:bg-[var(--cf-hover)] ${
-                collapsed ? "w-8 justify-center hover:text-[var(--cf-accent)]" : "w-full pr-2 hover:text-[var(--cf-text)]"
-              } ${item.open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"}`}
+              aria-pressed={item.open}
+              // Open is a box, not only a colour (user, 2026-11-03): the accent's soft fill and a ring,
+              // the same in the folded rail.
+              className={`flex h-8 shrink-0 items-center rounded-lg border transition-colors duration-100 ${
+                collapsed ? "w-8 justify-center" : "w-full pr-2"
+              } ${
+                item.open
+                  ? "border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                  : `border-transparent text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] ${collapsed ? "hover:text-[var(--cf-accent)]" : "hover:text-[var(--cf-text)]"}`
+              }`}
             >
               {collapsed ? (
                 <FootIcon icon={item.icon} running={item.running} />

@@ -65,6 +65,22 @@ export function reportError(kind: string, error: unknown, detail?: string | null
   void invoke<void>("log_frontend_error", { kind, message, detail: stack }).catch(() => {});
 }
 
+/**
+ * Promises Monaco rejects and never catches itself, which say nothing went wrong:
+ * - `Canceled` — a request superseded by the next keystroke or a disposed editor (VS Code's own
+ *   error handler drops `isCancellationError` the same way).
+ * - `Model not found` — the ⌘/Ctrl-hover preview of a definition in a file no editor has open:
+ *   `goToDefinitionAtPosition` asks the model service for it, gets nothing, and the jump itself
+ *   still works through `registerEditorOpener`. Matched by Monaco's frame, so the same message
+ *   from anywhere else is still reported.
+ * Each was ~one log line per hover or keystroke (user log, 2026-11-02).
+ */
+export function monacoNoise(reason: unknown): boolean {
+  if (!(reason instanceof Error)) return false;
+  if (reason.name === "Canceled" && reason.message === "Canceled") return true;
+  return reason.message === "Model not found" && /monaco|_acquire|inMemoryTextModelService/.test(reason.stack ?? "");
+}
+
 let installed = false;
 
 /**
@@ -79,6 +95,10 @@ export function installErrorReporting(): void {
     reportError("error", event.error ?? event.message, (event.error as Error | undefined)?.stack ?? where);
   });
   window.addEventListener("unhandledrejection", (event) => {
+    if (monacoNoise(event.reason)) {
+      event.preventDefault();
+      return;
+    }
     reportError("unhandledrejection", event.reason);
   });
   watchLongTasks();

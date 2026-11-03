@@ -7,7 +7,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   },
 }));
 
-const { describeThrown, newIssueUrl, reportError } = await import("./diagnostics");
+const { describeThrown, monacoNoise, newIssueUrl, reportError } = await import("./diagnostics");
 
 beforeEach(() => {
   sent.length = 0;
@@ -32,5 +32,20 @@ describe("frontend error reporting", () => {
     const url = newIssueUrl("CodeFlow 1.2.3 · macOS 15 (aarch64)");
     expect(url).toContain("/issues/new?body=");
     expect(decodeURIComponent(url.split("body=")[1])).toBe("CodeFlow 1.2.3 · macOS 15 (aarch64)");
+  });
+});
+
+describe("monacoNoise", () => {
+  it("drops Monaco's cancellations and its definition-preview miss, nothing else", () => {
+    const canceled = Object.assign(new Error("Canceled"), { name: "Canceled" });
+    expect(monacoNoise(canceled)).toBe(true);
+    const miss = new Error("Model not found");
+    miss.stack = "Error: Model not found\n    at m9._acquire (http://tauri.localhost/assets/monaco-TiZlJYyL.js:991:6643)";
+    expect(monacoNoise(miss)).toBe(true);
+    const ours = new Error("Model not found");
+    ours.stack = "Error: Model not found\n    at pickModel (http://tauri.localhost/assets/index-abc.js:1:1)";
+    expect(monacoNoise(ours)).toBe(false);
+    expect(monacoNoise(new Error("Canceled"))).toBe(false);
+    expect(monacoNoise("Canceled")).toBe(false);
   });
 });

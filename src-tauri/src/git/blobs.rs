@@ -105,7 +105,7 @@ pub fn file_side(repo_path: &str, file_path: &str, side: &str) -> Result<FileSid
         }
         "INDEX" => {
             let index = repo.index().map_err(|e| e.message().to_string())?;
-            let Some(entry) = index.get_path(rel, 0) else { return Ok(FileSide::default()) };
+            let Some(entry) = super::index_entry(&index, rel) else { return Ok(FileSide::default()) };
             blob_side(&repo, entry.id)
         }
         revision => {

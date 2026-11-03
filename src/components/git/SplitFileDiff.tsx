@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { DiffEditor } from "@monaco-editor/react";
+import { DiffEditor } from "../common/SafeDiffEditor";
 import type { editor as MonacoEditorNS } from "monaco-editor";
 import type { FileDiffInfo } from "../../types/domain";
 import { useThemeStore } from "../../state/themeStore";

@@ -1,7 +1,8 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { addReadAloudAction } from "../../lib/speech/monacoReadAloud";
 import { createPortal } from "react-dom";
-import Editor, { DiffEditor, type Monaco, type OnMount } from "@monaco-editor/react";
+import Editor, { type Monaco, type OnMount } from "@monaco-editor/react";
+import { DiffEditor } from "../common/SafeDiffEditor";
 import type { editor as MonacoEditorNS } from "monaco-editor";
 // This is the one editor in the app that does not spread `OVERFLOW_SAFE_OPTIONS` (see the note at
 // the `fixedOverflowWidgets` line far below), so it is also the one that would otherwise never

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { DiffEditor } from "@monaco-editor/react";
+import { DiffEditor } from "../common/SafeDiffEditor";
 import { GitCompareArrows } from "lucide-react";
 import { ApiModal } from "../api/ApiModal";
 import { Select, type SelectOption } from "../common/Select";

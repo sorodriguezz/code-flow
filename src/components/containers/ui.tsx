@@ -276,15 +276,16 @@ export function FormSection({ title, children, trailing }: { title: ReactNode; c
 
 /** The one line an empty list shows — no box, no heading (the app's empty states are terse). */
 export function EmptyLine({ children }: { children: ReactNode }) {
-  return <p className="px-3 py-3 text-[12px] text-[var(--cf-text-muted)]">{children}</p>;
+  return <p className="self-start px-3 py-3 text-[12px] text-[var(--cf-text-muted)]">{children}</p>;
 }
 
 /** The same line while a list is read for the first time — with the spinner, so a cluster that takes
- *  seconds to answer reads as working, never as empty. */
+ *  seconds to answer reads as working, never as empty. Top left wherever it is put: a tab body is a
+ *  flex row, and stretched in one the line sat in the middle of the page (user, 2026-11-03). */
 export function LoadingLine({ children }: { children?: ReactNode }) {
   const t = useT();
   return (
-    <p className="flex items-center gap-1.5 px-3 py-3 text-[12px] text-[var(--cf-text-muted)]">
+    <p className="flex items-center gap-1.5 self-start px-3 py-3 text-[12px] text-[var(--cf-text-muted)]">
       <Loader2 size={12} className="shrink-0 animate-spin" />
       {children ?? t("containers.m.loading")}
     </p>

@@ -1,0 +1,5 @@
+# LF everywhere, Windows checkouts included. The Windows release is built on a GitHub runner whose
+# git has `core.autocrlf=true`: without this every multi-line string compiled into the app — the
+# shell scripts it feeds to containers, `include_str!` files, bundled JS — shipped with `\r\n`, and
+# `sh` read `then\r` as a command (Contenedores › Archivos listed nothing on Windows).
+* text=auto eol=lf

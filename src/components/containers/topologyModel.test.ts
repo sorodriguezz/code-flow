@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { azureLayer, azureTone, azureTypeLabel, cellText, kubeLayer, layeredLayout, NODE_W } from "./topologyModel";
+import { azureLayer, azureTone, azureTypeLabel, cellText, kubeLayer, layeredLayout, MAX_ROWS, NODE_W } from "./topologyModel";
 
 describe("layeredLayout", () => {
   it("puts layers in columns and bands one under the other", () => {
@@ -13,8 +13,24 @@ describe("layeredLayout", () => {
     );
     expect(positions.get("svc")!.x).toBeGreaterThan(positions.get("ing")!.x + NODE_W - 1);
     expect(bands.map((b) => b.id)).toEqual(["a", "b"]);
-    expect(positions.get("other")!.y).toBeGreaterThan(bands[0].y + bands[0].height);
-    expect(positions.get("other")!.x).toBe(0);
+    const other = positions.get("other")!;
+    const [a] = bands;
+    // Packed beside or under the first band, never inside it.
+    expect(other.x >= a.x + a.width || other.y >= a.y + a.height).toBe(true);
+  });
+
+  it("wraps a tall layer and packs many bands into a wide grid", () => {
+    const nodes = Array.from({ length: 40 }, (_, band) =>
+      Array.from({ length: 25 }, (_, i) => ({ id: `${band}-${i}`, layer: i % 2, band: `g${String(band).padStart(2, "0")}` })),
+    ).flat();
+    const { positions, bands } = layeredLayout(nodes, []);
+    const first = nodes.filter((n) => n.band === "g00").map((n) => positions.get(n.id)!);
+    const rows = new Set(first.filter((p) => p.x === bands[0].x).map((p) => p.y)).size;
+    expect(rows).toBeLessThanOrEqual(MAX_ROWS);
+    const width = Math.max(...bands.map((b) => b.x + b.width));
+    const height = Math.max(...bands.map((b) => b.y + b.height));
+    expect(width / height).toBeGreaterThan(1);
+    for (const b of bands) for (const c of bands) if (b !== c) expect(b.x + b.width <= c.x || c.x + c.width <= b.x || b.y + b.height <= c.y || c.y + c.height <= b.y).toBe(true);
   });
 
   it("orders a column after what it is linked to", () => {

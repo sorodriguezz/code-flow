@@ -1,8 +1,8 @@
 import "@xyflow/react/dist/style.css";
 import "./topology.css";
 
-import { createContext, memo, useContext, useEffect, useMemo } from "react";
-import { Background, BackgroundVariant, Handle, MarkerType, Position, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
+import { createContext, memo, useContext, useEffect, useMemo, useRef } from "react";
+import { Background, BackgroundVariant, Controls, Handle, MiniMap, MarkerType, Position, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type Node, type NodeProps } from "@xyflow/react";
 import { AlertTriangle } from "lucide-react";
 import { StateDot } from "./containerBits";
 import { BAND_HEAD, NODE_H, NODE_W, layeredLayout, type Tone } from "./topologyModel";
@@ -100,6 +100,9 @@ const EDGE_STYLE: Record<string, { stroke: string; dash?: string }> = {
 };
 
 const PAD = 24;
+/** Below this a node's title cannot be read: a graph that only fits smaller opens at this zoom on
+ *  its first band (top left), with the minimap to find the rest. */
+const READABLE_ZOOM = 0.55;
 
 function Canvas({ nodes, edges, bandLabel, selected, onSelect }: TopologyCanvasProps) {
   const flow = useReactFlow();
@@ -117,15 +120,18 @@ function Canvas({ nodes, edges, bandLabel, selected, onSelect }: TopologyCanvasP
     const out: CanvasNode[] = bands.map((band) => ({
       id: `band:${band.id}`,
       type: "band",
-      position: { x: -PAD, y: band.y },
+      position: { x: band.x - PAD, y: band.y },
       data: { label: bandLabel(band.id), width: band.width + PAD * 2, height: band.height + PAD - BAND_HEAD / 2 },
+      // The minimap reads sizes off these objects, and a measured size never lands on them here.
+      initialWidth: band.width + PAD * 2,
+      initialHeight: band.height + PAD - BAND_HEAD / 2,
       selectable: false,
       draggable: false,
       zIndex: 0,
     }));
     for (const node of nodes) {
       const at = positions.get(node.id);
-      if (at) out.push({ id: node.id, type: "item", position: at, data: { node }, zIndex: 10 });
+      if (at) out.push({ id: node.id, type: "item", position: at, data: { node }, zIndex: 10, initialWidth: NODE_W, initialHeight: NODE_H });
     }
     return out;
   }, [nodes, positions, bands, bandLabel]);
@@ -154,12 +160,23 @@ function Canvas({ nodes, edges, bandLabel, selected, onSelect }: TopologyCanvasP
   );
   // A new graph (another namespace or group) is fitted once; a pick or a refresh keeps the view.
   const shape = useMemo(() => nodes.map((n) => n.id).join("|"), [nodes]);
+  const box = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    const frame = requestAnimationFrame(() => void flow.fitView({ padding: 0.15, maxZoom: 1 }));
+    const frame = requestAnimationFrame(() => {
+      const pane = box.current;
+      const width = Math.max(1, ...bands.map((b) => b.x + b.width)) + PAD * 2;
+      const height = Math.max(1, ...bands.map((b) => b.y + b.height)) + PAD * 2;
+      const fits = pane ? Math.min(pane.clientWidth / width, pane.clientHeight / height) * 0.85 : 1;
+      if (!pane || fits >= READABLE_ZOOM) void flow.fitView({ padding: 0.15, maxZoom: 1 });
+      else void flow.setViewport({ x: PAD * 2 * READABLE_ZOOM, y: PAD * READABLE_ZOOM, zoom: READABLE_ZOOM });
+    });
     return () => cancelAnimationFrame(frame);
+    // `bands` follows `shape`: refitting on it alone would undo a pan after every refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shape, flow]);
   return (
     <SpotContext.Provider value={{ selected, linked }}>
+      <div ref={box} className="absolute inset-0">
       <ReactFlow<CanvasNode, Edge>
         className="cf-topo-canvas"
         nodes={canvasNodes}
@@ -170,9 +187,7 @@ function Canvas({ nodes, edges, bandLabel, selected, onSelect }: TopologyCanvasP
         elementsSelectable={false}
         onNodeClick={(_, node) => node.type === "item" && onSelect(node.id === selected ? null : node.id)}
         onPaneClick={() => onSelect(null)}
-        fitView
-        fitViewOptions={{ padding: 0.15, maxZoom: 1 }}
-        minZoom={0.1}
+        minZoom={0.05}
         maxZoom={2}
         zoomOnDoubleClick={false}
         deleteKeyCode={null}
@@ -183,7 +198,10 @@ function Canvas({ nodes, edges, bandLabel, selected, onSelect }: TopologyCanvasP
         proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={20} size={1.2} />
+        <Controls showInteractive={false} position="bottom-left" />
+        {nodes.length > 40 && <MiniMap pannable zoomable position="bottom-right" nodeColor={(n) => (n.type === "band" ? "transparent" : "color-mix(in oklab, var(--cf-text) 40%, transparent)")} nodeStrokeColor={(n) => (n.type === "band" ? "var(--cf-border-strong)" : "transparent")} nodeStrokeWidth={6} />}
       </ReactFlow>
+      </div>
     </SpotContext.Provider>
   );
 }

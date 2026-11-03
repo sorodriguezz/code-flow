@@ -20,26 +20,35 @@ export interface Placed {
 export const NODE_W = 210;
 export const NODE_H = 54;
 const COL_GAP = 90;
+/** Between the sub-columns one layer wraps into — closer than two layers, so they read as one. */
+const WRAP_GAP = 24;
 const ROW_GAP = 14;
 const BAND_GAP = 56;
 /** Room for a band's title above its first row. */
 export const BAND_HEAD = 26;
+/** A layer taller than this wraps into side-by-side sub-columns. */
+export const MAX_ROWS = 10;
+/** The shape bands are packed towards — about a wide screen's, the dock's pane being wider still. */
+const ASPECT = 2;
 
 export interface Band {
   id: string;
+  x: number;
   y: number;
   height: number;
   width: number;
 }
 
 /**
- * Columns by layer, bands one under the other, and inside a column the order that keeps edges short:
- * each node sits at the mean row of what it is linked to in the column before (a barycentre pass,
- * then one back from the right) — enough for graphs of a namespace or a resource group.
+ * Columns by layer, and inside a column the order that keeps edges short: each node sits at the mean
+ * row of what it is linked to in the column before (a barycentre pass, then one back from the right).
+ *
+ * Made for one namespace or resource group and still readable for a whole subscription (user,
+ * 2026-11-03: 834 Azure objects drew as one sliver nobody could read): a layer past `MAX_ROWS` wraps
+ * into sub-columns, and bands are packed in rows towards `ASPECT` instead of one under the other.
  */
 export function layeredLayout(nodes: LayoutInput[], edges: { from: string; to: string }[]): { positions: Map<string, Placed>; bands: Band[] } {
   const positions = new Map<string, Placed>();
-  const bands: Band[] = [];
   const neighbours = new Map<string, string[]>();
   for (const e of edges) {
     neighbours.set(e.from, [...(neighbours.get(e.from) ?? []), e.to]);
@@ -47,9 +56,11 @@ export function layeredLayout(nodes: LayoutInput[], edges: { from: string; to: s
   }
   const bandIds = [...new Set(nodes.map((n) => n.band))].sort((a, b) => a.localeCompare(b));
   const layers = [...new Set(nodes.map((n) => n.layer))].sort((a, b) => a - b);
-  let top = 0;
-  for (const band of bandIds) {
-    const inBand = nodes.filter((n) => n.band === band);
+  const byBand = new Map<string, LayoutInput[]>();
+  for (const n of nodes) byBand.set(n.band, [...(byBand.get(n.band) ?? []), n]);
+  // Each band laid out at the origin first; packing moves it afterwards.
+  const laid = bandIds.map((band) => {
+    const inBand = byBand.get(band) ?? [];
     const columns = layers.map((layer) => inBand.filter((n) => n.layer === layer).map((n) => n.id).sort((a, b) => a.localeCompare(b)));
     const rowOf = new Map<string, number>();
     const settle = (column: string[]) => column.forEach((id, i) => rowOf.set(id, i));
@@ -65,19 +76,41 @@ export function layeredLayout(nodes: LayoutInput[], edges: { from: string; to: s
     };
     for (let i = 1; i < columns.length; i++) columns[i] = order(columns[i]);
     for (let i = columns.length - 2; i >= 0; i--) columns[i] = order(columns[i]);
-    const tallest = Math.max(1, ...columns.map((c) => c.length));
     const used = columns.filter((c) => c.length > 0);
+    const tallest = Math.min(MAX_ROWS, Math.max(1, ...used.map((c) => c.length)));
+    const local = new Map<string, Placed>();
     let x = 0;
-    for (const column of columns) {
-      if (column.length === 0) continue;
-      // A short column is centred against the tallest, so a lone ingress faces its services.
-      const offset = ((tallest - column.length) * (NODE_H + ROW_GAP)) / 2;
-      column.forEach((id, row) => positions.set(id, { x, y: top + BAND_HEAD + offset + row * (NODE_H + ROW_GAP) }));
-      x += NODE_W + COL_GAP;
+    for (const column of used) {
+      const wraps = Math.ceil(column.length / MAX_ROWS);
+      const rows = Math.ceil(column.length / wraps);
+      column.forEach((id, i) => {
+        const sub = Math.floor(i / rows);
+        const row = i % rows;
+        // The last sub-column (or an unwrapped short one) is centred against the tallest, so a lone
+        // ingress faces its services.
+        const inSub = Math.min(rows, column.length - sub * rows);
+        const offset = ((tallest - inSub) * (NODE_H + ROW_GAP)) / 2;
+        local.set(id, { x: x + sub * (NODE_W + WRAP_GAP), y: BAND_HEAD + offset + row * (NODE_H + ROW_GAP) });
+      });
+      x += wraps * NODE_W + (wraps - 1) * WRAP_GAP + COL_GAP;
     }
-    const height = BAND_HEAD + tallest * (NODE_H + ROW_GAP);
-    bands.push({ id: band, y: top, height, width: Math.max(NODE_W, used.length * (NODE_W + COL_GAP) - COL_GAP) });
-    top += height + BAND_GAP;
+    return { id: band, local, width: Math.max(NODE_W, x - COL_GAP), height: BAND_HEAD + tallest * (NODE_H + ROW_GAP) };
+  });
+  // Shelf packing: bands left to right, a new row once the row is as wide as the target.
+  const area = laid.reduce((sum, b) => sum + (b.width + BAND_GAP) * (b.height + BAND_GAP), 0);
+  const target = Math.max(...laid.map((b) => b.width), Math.sqrt(area * ASPECT));
+  const bands: Band[] = [];
+  let [x, y, shelf] = [0, 0, 0];
+  for (const band of laid) {
+    if (x > 0 && x + band.width > target) {
+      x = 0;
+      y += shelf + BAND_GAP;
+      shelf = 0;
+    }
+    for (const [id, at] of band.local) positions.set(id, { x: x + at.x, y: y + at.y });
+    bands.push({ id: band.id, x, y, height: band.height, width: band.width });
+    x += band.width + BAND_GAP * 2;
+    shelf = Math.max(shelf, band.height);
   }
   return { positions, bands };
 }

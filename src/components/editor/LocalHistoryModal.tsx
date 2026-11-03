@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { DiffEditor } from "@monaco-editor/react";
+import { DiffEditor } from "../common/SafeDiffEditor";
 import { History, RotateCcw } from "lucide-react";
 import { ApiModal } from "../api/ApiModal";
 import { Button } from "../common/Button";

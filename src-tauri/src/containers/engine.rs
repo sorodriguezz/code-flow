@@ -92,11 +92,15 @@ impl Target {
 
     /// [`Target::run_owned`] with `input` on the command's standard input — a script for an
     /// `exec -i … sh -s`, which never has to survive a command line that way.
+    ///
+    /// A script reaches the container with `\n` line ends whatever the checkout it was compiled from
+    /// had: a Windows build with `\r\n` in its sources made `sh` read `then\r` (see `.gitattributes`).
     pub async fn run_fed(&self, args: Vec<String>, input: Option<&str>, timeout: Duration) -> Result<cli::Output, String> {
         let engine = self.engine()?;
         let mut full = self.global_args();
         full.extend(args);
-        cli::run(&engine.program(), &full, input, timeout).await
+        let input = input.map(|text| text.replace("\r\n", "\n"));
+        cli::run(&engine.program(), &full, input.as_deref(), timeout).await
     }
 
     /// Where this target's commands go: a socket on this computer (`unix://`, `npipe://`), or another

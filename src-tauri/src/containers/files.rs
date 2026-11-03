@@ -368,6 +368,14 @@ regular file|5120|1759322300|./notes\n";
     }
 
     #[test]
+    fn the_scripts_have_unix_line_ends() {
+        // A Windows checkout without `.gitattributes` compiled these with `\r\n`, and `sh` failed on
+        // `then\r` — every folder listed nothing.
+        assert!(!LIST_SCRIPT.contains('\r'));
+        assert!(!DELETE_SCRIPT.contains('\r'));
+    }
+
+    #[test]
     fn the_scripts_never_hold_the_path() {
         // The path is `$1` and only `$1`: nothing the user picks is ever part of the script's text.
         assert!(LIST_SCRIPT.contains(r#"cd "$1""#) && !LIST_SCRIPT.contains("{"));

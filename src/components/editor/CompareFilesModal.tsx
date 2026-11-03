@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { DiffEditor } from "@monaco-editor/react";
+import { DiffEditor } from "../common/SafeDiffEditor";
 import { ArrowLeftRight, GitCompareArrows } from "lucide-react";
 import { ApiModal } from "../api/ApiModal";
 import { iconButtonClass } from "../common/Button";

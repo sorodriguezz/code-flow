@@ -3,7 +3,7 @@
  * so Monaco loads only when this tool is opened.
  */
 import { useRef } from "react";
-import { DiffEditor, type DiffOnMount } from "@monaco-editor/react";
+import { DiffEditor, type DiffOnMount } from "../common/SafeDiffEditor";
 import "../../lib/monacoSetup";
 import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";

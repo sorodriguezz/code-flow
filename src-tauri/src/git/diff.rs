@@ -531,7 +531,7 @@ pub fn quick_diff_base(path: &str, file_path: &str, staged: bool) -> Result<Opti
         None
     } else {
         let index = repo.index().map_err(|e| e.message().to_string())?;
-        index.get_path(rel, 0).map(|entry| entry.id)
+        super::index_entry(&index, rel).map(|entry| entry.id)
     };
     let blob_id = match blob_id {
         Some(id) => Some(id),

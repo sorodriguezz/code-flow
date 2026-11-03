@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { DiffEditor } from "@monaco-editor/react";
+import { DiffEditor } from "../common/SafeDiffEditor";
 import type { editor as MonacoEditorNS } from "monaco-editor";
 import { ChevronDown, ChevronRight, Files } from "lucide-react";
 import { ApiModal } from "../api/ApiModal";

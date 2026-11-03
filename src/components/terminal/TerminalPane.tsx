@@ -53,6 +53,7 @@ import { TerminalSearch } from "./TerminalSearch";
 import { bufferText } from "./bufferText";
 import { KEPT_LINES } from "../../state/terminalRestore";
 import { useSaving } from "../../state/powerSaveStore";
+import { reportError } from "../../lib/diagnostics";
 
 /** Shorter than one row and there is nothing meaningful to fit to — see `fitAndReport`. */
 const MIN_FIT_PX = 8;
@@ -69,6 +70,36 @@ const WEBGL_RETRIES = 3;
 /** Multiplied by the attempt number: a context lost mid-restart cannot be reacquired in the same
  * frame, so asking immediately only burns the budget. */
 const WEBGL_RETRY_MS = 400;
+
+/**
+ * A GPU renderer that took this long to build is worse than none.
+ *
+ * On some Windows machines (a stalled GPU process, a software-only driver) every WebGL call that
+ * waits for an answer — linking the shaders, the first upload — held the webview's thread for tens
+ * of seconds: switching a container to Registro or Terminal froze the whole window for 14–47 s
+ * (user log, 2026-11-03: long tasks with nothing but a terminal pane being shown). Past this, the
+ * pane drops to the DOM renderer, and so does every pane after it for a day.
+ */
+const WEBGL_SLOW_MS = 800;
+const WEBGL_SLOW_KEY = "cf.terminal.webglSlowUntil";
+const WEBGL_SLOW_FOR_MS = 24 * 60 * 60 * 1000;
+let webglSlow = (() => {
+  try {
+    return Number(localStorage.getItem(WEBGL_SLOW_KEY) ?? 0) > Date.now();
+  } catch {
+    return false;
+  }
+})();
+function markWebglSlow(ms: number): void {
+  if (webglSlow) return;
+  webglSlow = true;
+  try {
+    localStorage.setItem(WEBGL_SLOW_KEY, String(Date.now() + WEBGL_SLOW_FOR_MS));
+  } catch {
+    // No storage: this session alone draws without the GPU.
+  }
+  reportError("slow", `terminal WebGL took ${Math.round(ms)} ms to build — terminals use the DOM renderer for a day`);
+}
 
 /** Where a file reference's look-ups are cached, so hovering the same build log again asks nothing. */
 const pathKindCache = new Map<string, number>();
@@ -1085,7 +1116,7 @@ export function TerminalPane({
     if (!term || !visible) return;
     // Battery saving at Máximo: no GPU context per terminal — the DOM renderer draws instead, and
     // the cleanup of the WebGL one that was running has already handed back to it.
-    if (noGpu) {
+    if (noGpu || webglSlow) {
       setRenderer("dom");
       repaint();
       return;
@@ -1125,7 +1156,19 @@ export function TerminalPane({
             setRenderer("dom");
           }
         });
+        // Timed synchronously: what freezes the window is the build itself (shaders linked, the first
+        // atlas uploaded, each waiting on the GPU process). Frames are not a measure — a window in the
+        // background is given them seconds apart.
+        const started = performance.now();
         term.loadAddon(addon);
+        const took = performance.now() - started;
+        if (took >= WEBGL_SLOW_MS) {
+          markWebglSlow(took);
+          addon.dispose();
+          setRenderer("dom");
+          repaint();
+          return;
+        }
         webgl = addon;
         setRenderer("webgl");
         repaint();

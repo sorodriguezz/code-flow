@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { DiffEditor, type DiffOnMount } from "@monaco-editor/react";
+import { DiffEditor, type DiffOnMount } from "../common/SafeDiffEditor";
 import { FileDiff, FilePlus2 } from "lucide-react";
 import { ApiModal } from "../api/ApiModal";
 import { Button } from "../common/Button";
