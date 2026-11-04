@@ -589,14 +589,23 @@ pub fn get_team(conn: &Connection, id: &str) -> rusqlite::Result<Option<Team>> {
     conn.query_row(&format!("SELECT {TEAM_COLUMNS} FROM agent_teams WHERE id = ?1"), params![id], map_team).optional()
 }
 
+/// What a team needs before it can take a task. Saving does not ask for it, so a blank team can be
+/// built up member by member; launching does.
+pub fn runnable(team: &Team) -> Result<(), String> {
+    if team.members.is_empty() {
+        return Err(format!("«{}» aún no tiene miembros: añádelos en Equipos.", team.name));
+    }
+    if team.lead.is_empty() && team.plan.is_empty() {
+        return Err(format!("«{}» no tiene líder ni plan: elige un líder o escribe un plan en Equipos.", team.name));
+    }
+    Ok(())
+}
+
 /// Saves a team as a whole. Member ids are kept when given (the lead and the plan point at them)
 /// and minted otherwise; a lead or plan step naming a member that is gone is cleared.
 pub fn save_team(conn: &Connection, mut team: Team) -> Result<Team, String> {
     if team.name.trim().is_empty() {
         return Err("El equipo necesita un nombre.".into());
-    }
-    if team.members.is_empty() {
-        return Err("El equipo necesita al menos un miembro.".into());
     }
     if team.members.len() > MAX_MEMBERS {
         return Err(format!("Un equipo tiene como máximo {MAX_MEMBERS} miembros."));
@@ -624,9 +633,6 @@ pub fn save_team(conn: &Connection, mut team: Team) -> Result<Team, String> {
     }
     hierarchy::normalize(&mut team.members, &team.lead)?;
     team.plan.retain(|s| ids.contains(&s.member) && !s.instruction.trim().is_empty());
-    if team.lead.is_empty() && team.plan.is_empty() {
-        return Err("Sin líder, el equipo necesita un plan con al menos un paso.".into());
-    }
     team.policy = team.policy.sane();
     if team.policy.review.enabled && !ids.contains(&team.policy.review.reviewer) {
         team.policy.review.enabled = false;

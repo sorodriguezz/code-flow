@@ -236,17 +236,6 @@ pub fn cancel_run(team_run_id: &str) -> usize {
     turns.iter().filter(|turn| crate::ai_runs::cancel(turn)).count()
 }
 
-/// Stops one item's turn, if it is in flight here.
-pub fn cancel_item(item_id: &str) -> bool {
-    let turn = state().turns.get(item_id).map(|(turn, _)| turn.clone());
-    turn.map(|t| crate::ai_runs::cancel(&t)).unwrap_or(false)
-}
-
-/// How many headless turns the runner has in flight, for the resource meter.
-pub fn in_flight() -> usize {
-    state().turns.len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

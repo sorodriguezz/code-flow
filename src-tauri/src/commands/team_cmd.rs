@@ -304,6 +304,7 @@ pub async fn start_run(
         }
         Ok((tm, agents, projects))
     })?;
+    team::runnable(&tm)?;
 
     // The roster as it is now, so editing an agent mid-run never reroutes work already planned.
     let mut members = Vec::new();
@@ -527,7 +528,7 @@ pub async fn team_claim(db: State<'_, Db>, run_id: String) -> Result<Vec<Dispatc
     claim_run(&db, &run_id, None).await
 }
 
-/// [`claim`] under the run's lock, taking at most `limit` items — what the runner calls with the
+/// [`claim_limited`] under the run's lock, taking at most `limit` items — what the runner calls with the
 /// governor's free slots, so an item is only marked running when it can start.
 pub async fn claim_run(db: &Db, run_id: &str, limit: Option<usize>) -> Result<Vec<Dispatch>, String> {
     let lock = run_lock(run_id);
@@ -540,6 +541,7 @@ struct Picked {
     repo: RunRepo,
 }
 
+#[cfg(test)]
 pub async fn claim(db: &Db, run_id: &str) -> Result<Vec<Dispatch>, String> {
     claim_limited(db, run_id, None).await
 }

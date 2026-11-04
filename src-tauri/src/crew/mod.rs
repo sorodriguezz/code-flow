@@ -461,7 +461,8 @@ pub fn backlog_unlink(conn: &Connection, link_id: &str) -> rusqlite::Result<()> 
     Ok(())
 }
 
-/// The card a piece of work was started from, if any — what a run's view uses to show the story.
+/// The card a piece of work was started from, if any.
+#[cfg(test)]
 pub fn backlog_for_ref(conn: &Connection, kind: &str, ref_id: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row("SELECT item_id FROM agent_backlog_links WHERE kind = ?1 AND ref_id = ?2", params![kind, ref_id], |row| row.get(0))
         .optional()
