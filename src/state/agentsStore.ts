@@ -9,6 +9,7 @@ import {
   listAgentProjects,
   listAgentTasks,
   listWorkspaceAgents,
+  deleteWorkspaceAgent,
   notifyStateChange,
   renameAgentTask,
   sendChatMessage,
@@ -30,7 +31,9 @@ import { deleteWithUndo } from "../lib/undoableDelete";
 import { pushErrorToast, useToastStore } from "./toastStore";
 import { notify } from "./notificationStore";
 import { useWorkspaceStore } from "./workspaceStore";
-import type { AgentProject, AgentTask, AgentTaskStatus, WorkspaceAgent } from "../types/domain";
+import type { AgentDraft, AgentProject, AgentTask, AgentTaskStatus, WorkspaceAgent } from "../types/domain";
+import { reorderWorkspaceAgents, saveWorkspaceAgent } from "../lib/tauri/crewCommands";
+import { listen } from "@tauri-apps/api/event";
 import { registerIslandApp } from "../lib/islandSync";
 
 /** The repository name the backend put after its busy marker, for the "not now" message. */
@@ -185,6 +188,14 @@ interface AgentsState {
 
   setWorkspace: (id: string | null) => Promise<void>;
   reloadRoster: () => Promise<void>;
+  /** Creates (`id: null`) or saves an agent with every field the roster editor has. */
+  saveAgent: (draft: AgentDraft) => Promise<WorkspaceAgent>;
+  /** Deletes an agent. Tasks it ran keep their copy of its name and routing. */
+  removeAgent: (id: string) => Promise<void>;
+  /** A copy of an agent, with everything — effort included — and a numbered name. */
+  duplicateAgent: (id: string) => Promise<WorkspaceAgent | null>;
+  /** Saves the roster's order as the ids are listed. */
+  reorderAgents: (ids: string[]) => Promise<void>;
   /** Re-reads the task list for the workspace already loaded, keeping the selection and every
    *  live turn exactly where they are.
    *
@@ -353,6 +364,42 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     if (!id) return;
     const roster = await listWorkspaceAgents(id).catch(() => [] as WorkspaceAgent[]);
     set((s) => (s.workspaceId === id ? { roster } : s));
+  },
+
+  saveAgent: async (draft) => {
+    const saved = await saveWorkspaceAgent(draft);
+    set((s) => {
+      if (s.workspaceId !== saved.workspace_id) return s;
+      const exists = s.roster.some((agent) => agent.id === saved.id);
+      return { roster: exists ? s.roster.map((agent) => (agent.id === saved.id ? saved : agent)) : [...s.roster, saved] };
+    });
+    return saved;
+  },
+
+  removeAgent: async (id) => {
+    set((s) => ({ roster: s.roster.filter((agent) => agent.id !== id) }));
+    await deleteWorkspaceAgent(id);
+  },
+
+  duplicateAgent: async (id) => {
+    const source = get().roster.find((agent) => agent.id === id);
+    if (!source) return null;
+    const taken = get().roster.map((agent) => agent.name.toLowerCase());
+    let name = `${source.name} 2`;
+    for (let n = 3; taken.includes(name.toLowerCase()); n++) name = `${source.name} ${n}`;
+    return get().saveAgent({ ...draftOf(source), id: null, name });
+  },
+
+  reorderAgents: async (ids) => {
+    const workspaceId = get().workspaceId;
+    if (!workspaceId) return;
+    set((s) => {
+      const byId = new Map(s.roster.map((agent) => [agent.id, agent]));
+      const ordered = ids.map((id) => byId.get(id)).filter((agent): agent is WorkspaceAgent => Boolean(agent));
+      const rest = s.roster.filter((agent) => !ids.includes(agent.id));
+      return { roster: [...ordered, ...rest].map((agent, index) => ({ ...agent, sort_order: index })) };
+    });
+    await reorderWorkspaceAgents(workspaceId, ids);
   },
 
   reloadTasks: async () => {
@@ -1020,3 +1067,39 @@ registerIslandApp(["agents"], {
     if (selected && useAgentsStore.getState().tasks.some((task) => task.id === selected)) useAgentsStore.setState({ selectedId: selected });
   },
 });
+
+
+/** An agent as the editor's draft — every field, so a save never drops one (the old duplicate lost
+ * the effort). */
+export function draftOf(agent: WorkspaceAgent): AgentDraft {
+  return {
+    id: agent.id,
+    workspace_id: agent.workspace_id,
+    name: agent.name,
+    role: agent.role,
+    provider: agent.provider,
+    model: agent.model,
+    prompt: agent.prompt,
+    enabled: agent.enabled,
+    account_id: agent.account_id ?? null,
+    effort: agent.effort ?? "",
+    icon: agent.icon ?? "",
+    color: agent.color ?? "",
+    edits: agent.edits ?? true,
+    repos: agent.repos ?? [],
+    run_in: agent.run_in ?? "headless",
+    max_parallel: agent.max_parallel ?? 1,
+    model_ladder: agent.model_ladder ?? [],
+    template_id: agent.template_id ?? "",
+    template_version: agent.template_version ?? 0,
+    overrides: agent.overrides ?? [],
+    perms: agent.perms ?? [],
+  };
+}
+
+// Another window (an Agents island, a second main window after a restore) saved the roster.
+if (typeof window !== "undefined") {
+  void listen<{ workspaceId: string }>("crew:roster", (event) => {
+    if (event.payload.workspaceId === useAgentsStore.getState().workspaceId) void useAgentsStore.getState().reloadRoster();
+  }).catch(() => undefined);
+}

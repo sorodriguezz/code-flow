@@ -510,6 +510,53 @@ export interface WorkspaceAgent {
   /** How hard it thinks (`low`…`max`), or `""` for the CLI's own default. Copied into every task it
    *  starts. */
   effort?: string;
+  /** The lucide icon it is drawn with (`lib/agents/agentIcons.ts`), `""` for one derived from its id. */
+  icon?: string;
+  /** A palette key (`lib/agents/agentColors.ts`) or `#rrggbb`, `""` for one derived from its id. */
+  color?: string;
+  /** Whether it may edit files. A team member inherits it; a task started from it runs read-only when false. */
+  edits?: boolean;
+  /** Project ids it may work in; empty is every repository of the workspace. */
+  repos?: string[];
+  /** `headless` (turns with no terminal) or `terminal` (the interactive CLI in the bench). */
+  run_in?: "headless" | "terminal";
+  /** How many tasks of a team run it takes at once. */
+  max_parallel?: number;
+  /** Same-provider models to retry on after a failure, cheapest first. */
+  model_ladder?: string[];
+  /** The library template it came from (`builtin:<key>` or a library id), `""` for none. */
+  template_id?: string;
+  /** The template's version when it last took from it. */
+  template_version?: number;
+  /** Fields edited here, which a template sync leaves alone. */
+  overrides?: string[];
+  /** Extra permissions shown on its card: `cmds`, `commit`, `push`. */
+  perms?: string[];
+}
+
+/** Everything the roster editor saves at once — `id: null` creates the agent. */
+export interface AgentDraft {
+  id: string | null;
+  workspace_id: string;
+  name: string;
+  role: string;
+  provider: string;
+  model: string;
+  prompt: string;
+  enabled: boolean;
+  account_id: string | null;
+  effort: string;
+  icon: string;
+  color: string;
+  edits: boolean;
+  repos: string[];
+  run_in: "headless" | "terminal";
+  max_parallel: number;
+  model_ladder: string[];
+  template_id: string;
+  template_version: number;
+  overrides: string[];
+  perms: string[];
 }
 
 /** A folder for agent work. Not a repository: `AgentTask.project_id` is still the git working copy

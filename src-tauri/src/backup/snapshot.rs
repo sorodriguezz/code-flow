@@ -66,6 +66,8 @@ pub const TABLES: &[&str] = &[
     "agent_projects",
     // «Equipo» templates: who is in a team and its rules — configuration, like the roster.
     "agent_teams",
+    // The agent and team templates shared by every workspace (`crew`): configuration too.
+    "agent_library",
     // Authored content: things the user wrote and edited, as opposed to things the app recorded.
     "story_batches",
     "story_drafts",
@@ -73,6 +75,10 @@ pub const TABLES: &[&str] = &[
     "work_item_reviews",
     // Which ticket each branch was started from (`boards::ticket_links`) — what moves it on a PR.
     "ticket_links",
+    // The Agents view's local backlog (`crew`): stories and tasks the user wrote, and what was
+    // started from each.
+    "agent_backlog_items",
+    "agent_backlog_links",
     // The Notes workspace, which is authored content too but gets a switch of its own — see the
     // `notes` group below. Folders before notes: a note points at the folder it is filed in.
     "note_books",
@@ -206,6 +212,8 @@ pub const TABLES: &[&str] = &[
     "agent_team_repos",
     "agent_team_items",
     "agent_team_messages",
+    // The decision layer's log (`crew`, `decide`): which finite choices it made, and how sure.
+    "agent_decisions",
     // The local AI platform: what the user approved as memory (with its history), the document
     // folders they added as knowledge, the evidence kept about AI answers, and the bench's reports
     // with the tool verdicts they gave — a report from the 4090 compared with one from the Mac is
@@ -351,6 +359,7 @@ pub const CORE_TABLES: &[&str] = &[
     "agent_projects",
     // «Equipo» templates: who is in a team and its rules — configuration, like the roster.
     "agent_teams",
+    "agent_library",
     // The Services workspace's definitions. Core rather than an optional group, and beside the
     // agent roster rather than beside the Remote hosts, because of what they *are*: a service is
     // configuration — the command, the folder, the order somebody worked out once — not content
@@ -411,7 +420,7 @@ pub const GROUPS: &[Group] = &[
     },
     Group {
         key: "authored",
-        tables: &["story_batches", "story_drafts", "doc_pages", "work_item_reviews", "ticket_links"],
+        tables: &["story_batches", "story_drafts", "doc_pages", "work_item_reviews", "ticket_links", "agent_backlog_items", "agent_backlog_links"],
     },
     Group {
         // Its own switch rather than riding with `authored`, though notes are authored content by
@@ -499,6 +508,7 @@ pub const GROUPS: &[Group] = &[
             "agent_team_repos",
             "agent_team_items",
             "agent_team_messages",
+            "agent_decisions",
         ],
     },
     Group {

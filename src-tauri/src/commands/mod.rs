@@ -5,6 +5,7 @@ pub mod ai_accounts_cmd;
 pub mod ci_cmd;
 pub mod agents_cmd;
 pub mod team_cmd;
+pub mod crew_cmd;
 pub mod chat_refs_cmd;
 pub mod api_cmd;
 pub mod app_cmd;

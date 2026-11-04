@@ -131,6 +131,79 @@ pub struct WorkspaceAgent {
     /// it starts; the engine drops it for a model that takes no level (`AiEngine::model_supports_effort`).
     #[serde(default)]
     pub effort: String,
+    /// The lucide icon the agent is drawn with, `""` for one derived from its id.
+    #[serde(default)]
+    pub icon: String,
+    /// A palette key (`violet`, `teal`…) or `#rrggbb`, `""` for one derived from its id.
+    #[serde(default)]
+    pub color: String,
+    /// Whether it may edit files. A team member inherits it unless the member overrides it, and a
+    /// task started from a read-only agent runs read-only.
+    #[serde(default = "default_true")]
+    pub edits: bool,
+    /// Project ids it may work in; empty is every repository of the workspace.
+    #[serde(default)]
+    pub repos: Vec<String>,
+    /// `headless` (turns with no terminal) or `terminal` (the interactive CLI in the bench).
+    #[serde(default = "default_run_in")]
+    pub run_in: String,
+    /// How many tasks of a team run it takes at once.
+    #[serde(default = "default_one")]
+    pub max_parallel: i64,
+    /// Same-provider models to retry on after a failure, cheapest first.
+    #[serde(default)]
+    pub model_ladder: Vec<String>,
+    /// The library template it was made from (`builtin:<key>` or a library id), `""` for none.
+    #[serde(default)]
+    pub template_id: String,
+    /// The template's version when this agent last took from it.
+    #[serde(default)]
+    pub template_version: i64,
+    /// Fields the user changed here, which a template sync leaves alone.
+    #[serde(default)]
+    pub overrides: Vec<String>,
+    /// Extra permissions shown on the card: `cmds`, `commit`, `push`.
+    #[serde(default)]
+    pub perms: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_run_in() -> String {
+    "headless".to_string()
+}
+
+fn default_one() -> i64 {
+    1
+}
+
+/// Everything the roster editor saves in one go. `id: None` creates the agent.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AgentDraft {
+    pub id: Option<String>,
+    pub workspace_id: String,
+    pub name: String,
+    pub role: String,
+    pub provider: String,
+    pub model: String,
+    pub prompt: String,
+    pub enabled: bool,
+    pub account_id: Option<String>,
+    pub effort: String,
+    pub icon: String,
+    pub color: String,
+    pub edits: bool,
+    pub repos: Vec<String>,
+    pub run_in: String,
+    pub max_parallel: i64,
+    pub model_ladder: Vec<String>,
+    pub template_id: String,
+    pub template_version: i64,
+    pub overrides: Vec<String>,
+    pub perms: Vec<String>,
 }
 
 /// A folder the user files agent work into. Not a repository: a task still names the `Project` its

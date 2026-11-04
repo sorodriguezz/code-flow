@@ -85,6 +85,7 @@ mod npm;
 mod localai;
 mod local_history;
 mod hybrid;
+mod crew;
 mod team;
 mod mcp_registry;
 mod model_registry;
@@ -1918,6 +1919,19 @@ sharded_invoke_handler! {
         commands::team_cmd::team_control,
         commands::team_cmd::team_item_terminal,
         commands::team_cmd::team_delete_run,
+        commands::crew_cmd::save_workspace_agent,
+        commands::crew_cmd::reorder_workspace_agents,
+        commands::crew_cmd::library_list,
+        commands::crew_cmd::library_save,
+        commands::crew_cmd::library_delete,
+        commands::crew_cmd::backlog_list,
+        commands::crew_cmd::backlog_save,
+        commands::crew_cmd::backlog_move,
+        commands::crew_cmd::backlog_delete,
+        commands::crew_cmd::backlog_link,
+        commands::crew_cmd::backlog_unlink,
+        commands::crew_cmd::backlog_import_tickets,
+        commands::crew_cmd::decisions_for_run,
         commands::chat_refs_cmd::chat_artifacts_list,
         commands::chat_refs_cmd::chat_artifact_versions,
         commands::chat_refs_cmd::chat_artifact_delete,

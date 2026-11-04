@@ -1036,28 +1036,144 @@ pub fn delete_workspace_skill(conn: &Connection, id: &str) -> rusqlite::Result<(
 
 // ---------- workspace SDD/Harness agents ----------
 
+const AGENT_COLUMNS: &str = "id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at, account_id, effort,
+    icon, color, edits, repos, run_in, max_parallel, model_ladder, template_id, template_version, overrides, perms";
+
+fn json_list(raw: String) -> Vec<String> {
+    serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default()
+}
+
+fn map_workspace_agent(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceAgent> {
+    Ok(WorkspaceAgent {
+        id: row.get(0)?,
+        workspace_id: row.get(1)?,
+        name: row.get(2)?,
+        role: row.get(3)?,
+        provider: row.get(4)?,
+        model: row.get(5)?,
+        prompt: row.get(6)?,
+        enabled: row.get(7)?,
+        sort_order: row.get(8)?,
+        created_at: row.get(9)?,
+        account_id: row.get(10)?,
+        effort: row.get(11)?,
+        icon: row.get(12)?,
+        color: row.get(13)?,
+        edits: row.get(14)?,
+        repos: json_list(row.get(15)?),
+        run_in: row.get(16)?,
+        max_parallel: row.get(17)?,
+        model_ladder: json_list(row.get(18)?),
+        template_id: row.get(19)?,
+        template_version: row.get(20)?,
+        overrides: json_list(row.get(21)?),
+        perms: json_list(row.get(22)?),
+    })
+}
+
 pub fn list_workspace_agents(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<WorkspaceAgent>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at, account_id, effort
-         FROM workspace_agents WHERE workspace_id = ?1 ORDER BY sort_order, created_at",
-    )?;
-    let rows = stmt.query_map(params![workspace_id], |row| {
-        Ok(WorkspaceAgent {
-            id: row.get(0)?,
-            workspace_id: row.get(1)?,
-            name: row.get(2)?,
-            role: row.get(3)?,
-            provider: row.get(4)?,
-            model: row.get(5)?,
-            prompt: row.get(6)?,
-            enabled: row.get(7)?,
-            sort_order: row.get(8)?,
-            created_at: row.get(9)?,
-            account_id: row.get(10)?,
-            effort: row.get(11)?,
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {AGENT_COLUMNS} FROM workspace_agents WHERE workspace_id = ?1 ORDER BY sort_order, created_at"
+    ))?;
+    let rows = stmt.query_map(params![workspace_id], map_workspace_agent)?;
     rows.collect()
+}
+
+pub fn get_workspace_agent(conn: &Connection, id: &str) -> rusqlite::Result<Option<WorkspaceAgent>> {
+    conn.query_row(&format!("SELECT {AGENT_COLUMNS} FROM workspace_agents WHERE id = ?1"), params![id], map_workspace_agent)
+        .optional()
+}
+
+/// Saves every field of an agent at once — the roster editor's write. A new agent goes last.
+pub fn save_workspace_agent(conn: &Connection, draft: &crate::db::models::AgentDraft) -> rusqlite::Result<WorkspaceAgent> {
+    let existing = draft.id.as_ref().and_then(|existing_id| {
+        conn.query_row(
+            "SELECT sort_order, created_at FROM workspace_agents WHERE id = ?1",
+            params![existing_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .ok()
+    });
+    let (sort_order, created_at) = match existing {
+        Some(found) => found,
+        None => {
+            let next: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM workspace_agents WHERE workspace_id = ?1",
+                    params![draft.workspace_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            (next, now())
+        }
+    };
+    let effort = draft.effort.trim();
+    let effort = if crate::ai::effort::valid(effort) { effort.to_string() } else { String::new() };
+    let run_in = if draft.run_in == "terminal" { "terminal" } else { "headless" }.to_string();
+    let clean = |list: &[String]| -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for item in list.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if !out.iter().any(|o| o == item) {
+                out.push(item.to_string());
+            }
+        }
+        out
+    };
+    let agent = WorkspaceAgent {
+        id: draft.id.clone().filter(|id| !id.trim().is_empty()).unwrap_or_else(|| Uuid::new_v4().to_string()),
+        workspace_id: draft.workspace_id.clone(),
+        name: draft.name.trim().to_string(),
+        role: draft.role.trim().to_string(),
+        provider: draft.provider.trim().to_string(),
+        model: draft.model.trim().to_string(),
+        prompt: draft.prompt.clone(),
+        enabled: draft.enabled,
+        sort_order,
+        created_at,
+        account_id: draft.account_id.clone().filter(|a| !a.trim().is_empty()),
+        effort,
+        icon: draft.icon.trim().to_string(),
+        color: draft.color.trim().to_string(),
+        edits: draft.edits,
+        repos: clean(&draft.repos),
+        run_in,
+        max_parallel: draft.max_parallel.clamp(1, 8),
+        model_ladder: clean(&draft.model_ladder),
+        template_id: draft.template_id.trim().to_string(),
+        template_version: draft.template_version.max(0),
+        overrides: clean(&draft.overrides),
+        perms: clean(&draft.perms),
+    };
+    let to_json = |list: &Vec<String>| serde_json::to_string(list).unwrap_or_else(|_| "[]".into());
+    conn.execute(
+        "INSERT INTO workspace_agents (id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at,
+            account_id, effort, icon, color, edits, repos, run_in, max_parallel, model_ladder, template_id, template_version, overrides, perms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+         ON CONFLICT(id) DO UPDATE SET name = excluded.name, role = excluded.role, provider = excluded.provider,
+            model = excluded.model, prompt = excluded.prompt, enabled = excluded.enabled, account_id = excluded.account_id,
+            effort = excluded.effort, icon = excluded.icon, color = excluded.color, edits = excluded.edits, repos = excluded.repos,
+            run_in = excluded.run_in, max_parallel = excluded.max_parallel, model_ladder = excluded.model_ladder,
+            template_id = excluded.template_id, template_version = excluded.template_version, overrides = excluded.overrides,
+            perms = excluded.perms",
+        params![
+            agent.id, agent.workspace_id, agent.name, agent.role, agent.provider, agent.model, agent.prompt, agent.enabled,
+            agent.sort_order, agent.created_at, agent.account_id, agent.effort, agent.icon, agent.color, agent.edits,
+            to_json(&agent.repos), agent.run_in, agent.max_parallel, to_json(&agent.model_ladder), agent.template_id,
+            agent.template_version, to_json(&agent.overrides), to_json(&agent.perms),
+        ],
+    )?;
+    Ok(agent)
+}
+
+/// Puts the workspace's agents in the order given; ids not named keep their place after them.
+pub fn reorder_workspace_agents(conn: &Connection, workspace_id: &str, ids: &[String]) -> rusqlite::Result<()> {
+    for (index, id) in ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE workspace_agents SET sort_order = ?3 WHERE id = ?1 AND workspace_id = ?2",
+            params![id, workspace_id, index as i64],
+        )?;
+    }
+    Ok(())
 }
 
 /// Sets an agent's reasoning level — `""` hands it back to the CLI's own default. Its own write
@@ -1104,6 +1220,17 @@ pub fn upsert_workspace_agent(
         created_at,
         account_id: account_id.map(str::to_string).filter(|a| !a.trim().is_empty()),
         effort: String::new(),
+        icon: String::new(),
+        color: String::new(),
+        edits: true,
+        repos: Vec::new(),
+        run_in: "headless".to_string(),
+        max_parallel: 1,
+        model_ladder: Vec::new(),
+        template_id: String::new(),
+        template_version: 0,
+        overrides: Vec::new(),
+        perms: Vec::new(),
     };
     conn.execute(
         "INSERT INTO workspace_agents (id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at, account_id)
@@ -1116,11 +1243,8 @@ pub fn upsert_workspace_agent(
             agent.enabled, agent.sort_order, agent.created_at, agent.account_id,
         ],
     )?;
-    // The level is kept by the conflict clause above; report what the row holds.
-    let effort = conn
-        .query_row("SELECT effort FROM workspace_agents WHERE id = ?1", params![agent.id], |row| row.get(0))
-        .unwrap_or_default();
-    Ok(WorkspaceAgent { effort, ..agent })
+    // The level and the identity are kept by the conflict clause above; report what the row holds.
+    Ok(get_workspace_agent(conn, &agent.id)?.unwrap_or(agent))
 }
 
 pub fn delete_workspace_agent(conn: &Connection, id: &str) -> rusqlite::Result<()> {

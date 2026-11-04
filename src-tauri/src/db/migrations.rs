@@ -2070,8 +2070,11 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_notes_to_chat_messages(conn)?;
     add_usage_to_activity_log(conn)?;
     add_effort_to_agents(conn)?;
+    add_identity_to_agents(conn)?;
     // «Equipo»: teams, their runs, items and channel (`team`).
     crate::team::migrate(conn)?;
+    // The agent library, the local backlog and the decision log of the Agents view (`crew`).
+    crate::crew::migrate(conn)?;
     // Tickets → code (boards::ticket_links): the ticket ↔ branch ↔ pull request record.
     crate::boards::ticket_links::migrate(conn)?;
     // Settings › Estadísticas: per-day usage counters (`usage_stats`).
@@ -2111,6 +2114,35 @@ pub(crate) fn add_effort_to_agents(conn: &Connection) -> rusqlite::Result<()> {
     for table in ["workspace_agents", "agent_tasks"] {
         if table_exists(conn, table)? && !has_column(conn, table, "effort")? {
             conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN effort TEXT NOT NULL DEFAULT '';"))?;
+        }
+    }
+    Ok(())
+}
+
+/// What the roster's cards show and what a team member inherits: the agent's icon and colour, its
+/// scope (whether it edits, which repositories, where it runs, how many at once), the models it
+/// retries on, and which library template it came from. Every default reproduces what an agent was
+/// before these existed — editing, every repository, headless, one at a time.
+pub(crate) fn add_identity_to_agents(conn: &Connection) -> rusqlite::Result<()> {
+    if !table_exists(conn, "workspace_agents")? {
+        return Ok(());
+    }
+    let columns: [(&str, &str); 11] = [
+        ("icon", "TEXT NOT NULL DEFAULT ''"),
+        ("color", "TEXT NOT NULL DEFAULT ''"),
+        ("edits", "INTEGER NOT NULL DEFAULT 1"),
+        ("repos", "TEXT NOT NULL DEFAULT '[]'"),
+        ("run_in", "TEXT NOT NULL DEFAULT 'headless'"),
+        ("max_parallel", "INTEGER NOT NULL DEFAULT 1"),
+        ("model_ladder", "TEXT NOT NULL DEFAULT '[]'"),
+        ("template_id", "TEXT NOT NULL DEFAULT ''"),
+        ("template_version", "INTEGER NOT NULL DEFAULT 0"),
+        ("overrides", "TEXT NOT NULL DEFAULT '[]'"),
+        ("perms", "TEXT NOT NULL DEFAULT '[]'"),
+    ];
+    for (name, definition) in columns {
+        if !has_column(conn, "workspace_agents", name)? {
+            conn.execute_batch(&format!("ALTER TABLE workspace_agents ADD COLUMN {name} {definition};"))?;
         }
     }
     Ok(())
