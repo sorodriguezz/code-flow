@@ -580,6 +580,22 @@ pub fn delete_decisions_for_run(conn: &Connection, run_id: &str) -> rusqlite::Re
     Ok(())
 }
 
+/// Whether a conversation is a solo agent task whose agent may not edit files: its turns then run
+/// in analysis mode, as a read-only team member's do (`team::read_only_conversation`). A team
+/// item's task follows the team's member instead, so team batches are left out here.
+pub fn agent_read_only(conn: &Connection, conversation_id: &str) -> bool {
+    conn.query_row(
+        "SELECT a.edits FROM agent_tasks t JOIN workspace_agents a ON a.id = t.agent_id
+         WHERE t.conversation_id = ?1 AND COALESCE(t.batch_id, '') NOT LIKE 'team:%' LIMIT 1",
+        params![conversation_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .is_some_and(|edits| edits == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,5 +673,39 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].sharp);
         assert_eq!(rows[0].options.len(), 2);
+    }
+
+    #[test]
+    fn an_agent_that_may_not_edit_runs_its_solo_tasks_read_only() {
+        let (conn, ws) = conn();
+        let project = crate::db::queries::create_project(
+            &conn,
+            crate::db::models::NewProject {
+                workspace_id: ws.clone(),
+                name: "repo".into(),
+                local_path: "/tmp/cf-crew-repo".into(),
+                remote_url: None,
+                color: String::new(),
+                icon: String::new(),
+                ado_org: None,
+                ado_project: None,
+                ado_repo_id: None,
+                github_owner: None,
+                github_repo: None,
+                github_host: None,
+                gitlab_project: None,
+                gitlab_host: None,
+            },
+        )
+        .unwrap();
+        let mut draft = crate::db::models::AgentDraft { workspace_id: ws.clone(), name: "Revisor".into(), provider: "claude".into(), model: "sonnet".into(), edits: false, ..Default::default() };
+        let agent = crate::db::queries::save_workspace_agent(&conn, &draft).unwrap();
+        let task = crate::db::queries::create_agent_task(&conn, &ws, &project.id, &agent.id, &agent.name, "claude", "sonnet", "", "g", "t", "", None).unwrap();
+        assert!(agent_read_only(&conn, &task.conversation_id));
+        draft.id = Some(agent.id.clone());
+        draft.edits = true;
+        crate::db::queries::save_workspace_agent(&conn, &draft).unwrap();
+        assert!(!agent_read_only(&conn, &task.conversation_id));
+        assert!(!agent_read_only(&conn, "agent-nobody"));
     }
 }

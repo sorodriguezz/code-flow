@@ -1308,7 +1308,8 @@ pub async fn send_chat_message(
         };
         // A team item that must not write: the lead's turns, investigations, reviews, and any item of
         // a read-only member. See `team::read_only_conversation`.
-        let analysis = analysis || conversation_id.as_deref().is_some_and(|id| crate::team::read_only_conversation(&conn, id));
+        // A solo task of an agent that may not edit, likewise (`crew::agent_read_only`).
+        let analysis = analysis || conversation_id.as_deref().is_some_and(|id| crate::team::read_only_conversation(&conn, id) || crate::crew::agent_read_only(&conn, id));
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         // An active agent runs on its own provider + model — and its own account, when it names
