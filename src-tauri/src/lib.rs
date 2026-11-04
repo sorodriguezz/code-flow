@@ -1921,6 +1921,8 @@ sharded_invoke_handler! {
         commands::team_cmd::team_item_terminal,
         commands::team_cmd::team_delete_run,
         commands::team_cmd::team_pump,
+        commands::team_cmd::team_run_policy,
+        commands::team_cmd::team_run_metrics,
         runner::governor::governor_status,
         runner::governor::governor_set,
         commands::crew_cmd::save_workspace_agent,

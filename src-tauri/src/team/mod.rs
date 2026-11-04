@@ -20,6 +20,8 @@
 //! runs them (headless turn or a CLI in a terminal), then reports each one back to `team_cmd`.
 
 pub mod gitops;
+pub mod hierarchy;
+pub mod metrics;
 pub mod protocol;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -110,6 +112,29 @@ pub struct Policy {
     pub lead_final_check: bool,
     /// Remove the item worktrees once the run is integrated.
     pub cleanup: bool,
+    /// Who may message whom: `open` (anyone, the old behaviour), `tree` (one's manager and direct
+    /// reports) or `tree_siblings` (also those with the same manager). See `hierarchy::may_message`.
+    pub comms: String,
+    /// Notes one item may post; past it they are dropped with a note. `0` is no limit.
+    pub max_notes_per_item: i64,
+    /// A member's question for the user goes to its manager first, climbing the chain of command;
+    /// only the lead asks the user.
+    pub escalate_questions: bool,
+    /// How many planning rounds a sub-lead gets for its branch.
+    pub sub_lead_rounds: i64,
+    /// Budgets for the whole run; `0` is no limit. Spend is what the items' tasks recorded.
+    pub budget_usd: f64,
+    pub budget_tokens: i64,
+    /// Agent-minutes: the sum of the items' running time, not the wall clock.
+    pub budget_minutes: i64,
+    /// When the live view warns, as a percentage of any budget.
+    pub budget_warn_pct: i64,
+    /// Alternating findings and fixes between the same two members before the view raises a
+    /// ping-pong alert.
+    pub ping_pong_laps: i64,
+    /// Let the decision layer (`crate::decide`) settle finite choices — retry or stop, the model to
+    /// start on — before paying a planner turn for them.
+    pub decider: bool,
 }
 
 impl Default for Policy {
@@ -132,6 +157,16 @@ impl Default for Policy {
             lead_rounds: 6,
             lead_final_check: true,
             cleanup: true,
+            comms: "open".into(),
+            max_notes_per_item: 8,
+            escalate_questions: false,
+            sub_lead_rounds: 4,
+            budget_usd: 0.0,
+            budget_tokens: 0,
+            budget_minutes: 0,
+            budget_warn_pct: 80,
+            ping_pong_laps: 3,
+            decider: true,
         }
     }
 }
@@ -151,6 +186,14 @@ impl Policy {
         self.commit = pick(&self.commit, &["item", "squash", "none"], "item");
         self.commit_style = pick(&self.commit_style, &["conventional", "free"], "conventional");
         self.integrate = pick(&self.integrate, &["merge", "branch"], "merge");
+        self.comms = pick(&self.comms, &["open", "tree", "tree_siblings"], "open");
+        self.max_notes_per_item = self.max_notes_per_item.clamp(0, 32);
+        self.sub_lead_rounds = self.sub_lead_rounds.clamp(1, 12);
+        self.budget_usd = if self.budget_usd.is_finite() { self.budget_usd.clamp(0.0, 10_000.0) } else { 0.0 };
+        self.budget_tokens = self.budget_tokens.max(0);
+        self.budget_minutes = self.budget_minutes.clamp(0, 24 * 60);
+        self.budget_warn_pct = self.budget_warn_pct.clamp(10, 100);
+        self.ping_pong_laps = self.ping_pong_laps.clamp(2, 12);
         self.checks.retain(|c| !c.command.trim().is_empty());
         for c in &mut self.checks {
             c.when = pick(&c.when, &["item", "final"], "final");
@@ -187,6 +230,20 @@ pub struct Member {
     pub repos: Vec<String>,
     /// Member that takes an item over once this one has failed it `max_attempts` times; `""` none.
     pub escalate_to: String,
+    /// The member this one answers to; `""` is the lead. See `hierarchy`.
+    pub reports_to: String,
+    /// A sub-lead: plans and delegates inside its own branch (its `subtree`).
+    pub leads: bool,
+    /// A leader (the lead or a sub-lead) that also takes work itself.
+    pub hands_on: bool,
+    /// Members it may message whatever the policy's `comms` says.
+    pub talks_to: Vec<String>,
+    /// Same-provider models to retry on after a failure, cheapest first.
+    pub model_ladder: Vec<String>,
+    /// The «Asesor»: never assigned work, called at three moments with a digest of the run.
+    pub advisor: bool,
+    pub icon: String,
+    pub color: String,
 }
 
 impl Default for Member {
@@ -201,6 +258,14 @@ impl Default for Member {
             run_in: "headless".into(),
             repos: Vec::new(),
             escalate_to: String::new(),
+            reports_to: String::new(),
+            leads: false,
+            hands_on: false,
+            talks_to: Vec::new(),
+            model_ladder: Vec::new(),
+            advisor: false,
+            icon: String::new(),
+            color: String::new(),
         }
     }
 }
@@ -326,14 +391,19 @@ pub struct Item {
     pub updated_at: String,
     pub started_at: String,
     pub finished_at: String,
+    /// The `delegate` item whose sub-lead planned this one, `""` when the lead or a fixed plan did.
+    pub parent: String,
+    /// The model this attempt runs on when it is not the member's own — a step up its ladder.
+    pub model: String,
 }
 
 impl Item {
     pub fn writes(&self) -> bool {
         matches!(self.kind.as_str(), "work" | "integrate")
     }
+    /// A planning turn: the lead's plan, last look and answers, and a sub-lead's `delegate`.
     pub fn is_lead(&self) -> bool {
-        matches!(self.kind.as_str(), "plan" | "final" | "answer")
+        matches!(self.kind.as_str(), "plan" | "final" | "answer" | "delegate")
     }
 }
 
@@ -467,7 +537,18 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             created_at TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS idx_agent_team_messages_run ON agent_team_messages(run_id);",
-    )
+    )?;
+    // Hierarchy (2026-11): the delegate a sub-lead planned an item under, and the model a retry
+    // climbed to. Old rows read as empty: planned by the lead, on the member's own model.
+    for (column, definition) in [("parent", "TEXT NOT NULL DEFAULT ''"), ("model", "TEXT NOT NULL DEFAULT ''")] {
+        let present: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('agent_team_items') WHERE name = ?1")?
+            .exists(params![column])?;
+        if !present {
+            conn.execute_batch(&format!("ALTER TABLE agent_team_items ADD COLUMN {column} {definition};"))?;
+        }
+    }
+    Ok(())
 }
 
 fn json<T: Serialize>(value: &T) -> String {
@@ -540,6 +621,7 @@ pub fn save_team(conn: &Connection, mut team: Team) -> Result<Team, String> {
             member.escalate_to.clear();
         }
     }
+    hierarchy::normalize(&mut team.members, &team.lead)?;
     team.plan.retain(|s| ids.contains(&s.member) && !s.instruction.trim().is_empty());
     if team.lead.is_empty() && team.plan.is_empty() {
         return Err("Sin líder, el equipo necesita un plan con al menos un paso.".into());
@@ -724,7 +806,7 @@ pub fn set_repo_status(conn: &Connection, run_id: &str, project_id: &str, status
 
 const ITEM_COLUMNS: &str = "id, run_id, key, member_id, member_name, project_id, kind, title, instruction, depends_on, status, \
     approved, task_id, worktree_path, branch, commit_sha, merged, output_text, attempts, last_error, feedback, round, lap, \
-    ref_item, run_in, terminal_session, created_at, updated_at, started_at, finished_at";
+    ref_item, run_in, terminal_session, created_at, updated_at, started_at, finished_at, parent, model";
 
 fn map_item(row: &rusqlite::Row) -> rusqlite::Result<Item> {
     Ok(Item {
@@ -758,6 +840,8 @@ fn map_item(row: &rusqlite::Row) -> rusqlite::Result<Item> {
         updated_at: row.get(27)?,
         started_at: row.get(28)?,
         finished_at: row.get(29)?,
+        parent: row.get(30)?,
+        model: row.get(31)?,
     })
 }
 
@@ -775,13 +859,14 @@ pub fn insert_item(conn: &Connection, item: &Item) -> rusqlite::Result<()> {
     conn.execute(
         &format!(
             "INSERT INTO agent_team_items ({ITEM_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-             ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)"
+             ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)"
         ),
         params![
             item.id, item.run_id, item.key, item.member_id, item.member_name, item.project_id, item.kind, item.title,
             item.instruction, json(&item.depends_on), item.status, item.approved, item.task_id, item.worktree_path, item.branch,
             item.commit_sha, item.merged, item.output_text, item.attempts, item.last_error, item.feedback, item.round, item.lap,
-            item.ref_item, item.run_in, item.terminal_session, item.created_at, item.updated_at, item.started_at, item.finished_at
+            item.ref_item, item.run_in, item.terminal_session, item.created_at, item.updated_at, item.started_at, item.finished_at,
+            item.parent, item.model
         ],
     )?;
     Ok(())
@@ -793,12 +878,12 @@ pub fn update_item(conn: &Connection, item: &Item) -> rusqlite::Result<()> {
         "UPDATE agent_team_items SET status = ?2, approved = ?3, task_id = ?4, worktree_path = ?5, branch = ?6, commit_sha = ?7,
             merged = ?8, output_text = ?9, attempts = ?10, last_error = ?11, feedback = ?12, terminal_session = ?13,
             updated_at = ?14, started_at = ?15, finished_at = ?16, depends_on = ?17, instruction = ?18, member_id = ?19,
-            member_name = ?20, run_in = ?21
+            member_name = ?20, run_in = ?21, model = ?22
          WHERE id = ?1",
         params![
             item.id, item.status, item.approved, item.task_id, item.worktree_path, item.branch, item.commit_sha, item.merged,
             item.output_text, item.attempts, item.last_error, item.feedback, item.terminal_session, now(), item.started_at,
-            item.finished_at, json(&item.depends_on), item.instruction, item.member_id, item.member_name, item.run_in
+            item.finished_at, json(&item.depends_on), item.instruction, item.member_id, item.member_name, item.run_in, item.model
         ],
     )?;
     Ok(())
@@ -988,7 +1073,7 @@ pub fn needs_code_approval(run: &Run, item: &Item, items: &[Item]) -> bool {
 
 /// What is still in motion: anything a run has to wait for before it can finish.
 pub fn open_items(items: &[Item]) -> usize {
-    items.iter().filter(|i| matches!(i.status.as_str(), "pending" | "gated" | "running" | "waiting")).count()
+    items.iter().filter(|i| matches!(i.status.as_str(), "pending" | "gated" | "running" | "waiting" | "delegated")).count()
 }
 
 /// The work items that are done but not yet in the integration branch.

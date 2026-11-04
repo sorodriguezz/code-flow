@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::db::{models::AgentTask, queries, Db};
-use crate::team::{self, gitops, protocol, Item, MemberSnap, Policy, Run, RunRepo, RunState};
+use crate::team::{self, gitops, hierarchy, protocol, Item, MemberSnap, Policy, Run, RunRepo, RunState};
 
 static RUN_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = LazyLock::new(Default::default);
 
@@ -110,6 +110,52 @@ fn roster(run: &Run) -> Vec<protocol::RosterEntry> {
 
 fn member<'a>(run: &'a Run, id: &str) -> Option<&'a MemberSnap> {
     run.members.iter().find(|m| m.member.id == id)
+}
+
+fn members_of(run: &Run) -> Vec<team::Member> {
+    run.members.iter().map(|m| m.member.clone()).collect()
+}
+
+/// Who a planner may hand work to: the lead plans for everyone, a sub-lead only for its branch.
+/// A leader is in its own roster only when it is `hands_on`; an advisor is never assignable. A
+/// sub-lead that does not edit is still offered as editing — what it gets is a `delegate`, which it
+/// plans rather than writes.
+fn planner_roster(run: &Run, planner: &str) -> Vec<protocol::RosterEntry> {
+    let members = members_of(run);
+    let scope: Vec<String> = if planner == run.lead || run.lead.is_empty() {
+        members.iter().map(|m| m.id.clone()).collect()
+    } else {
+        hierarchy::subtree(&members, &run.lead, planner)
+    };
+    run.members
+        .iter()
+        .filter(|m| !m.member.advisor)
+        .filter(|m| if m.member.id == planner { m.member.hands_on } else { scope.contains(&m.member.id) })
+        .map(|m| protocol::RosterEntry {
+            id: m.member.id.clone(),
+            name: m.member.name.clone(),
+            role: m.member.role.clone(),
+            edits: m.member.edits || (m.member.leads && !m.member.hands_on && m.member.id != planner),
+            repos: m.member.repos.clone(),
+        })
+        .collect()
+}
+
+/// Whether an item for `member` should be planned by it rather than done: a sub-lead that is not
+/// hands-on, with someone under it.
+fn delegates(run: &Run, member_id: &str, planner: &str) -> bool {
+    if member_id == planner {
+        return false;
+    }
+    let members = members_of(run);
+    member(run, member_id).is_some_and(|m| m.member.leads && !m.member.hands_on) && hierarchy::is_planner(&members, &run.lead, member_id)
+}
+
+/// The manager a member answers to, as a snapshot — `None` for the lead and for a fixed plan.
+fn manager_of<'a>(run: &'a Run, member_id: &str) -> Option<&'a MemberSnap> {
+    let members = members_of(run);
+    let boss = hierarchy::manager(&members, &run.lead, member_id)?.to_string();
+    member(run, &boss)
 }
 
 fn lead_name(run: &Run) -> String {
@@ -350,6 +396,32 @@ fn seed_fixed_plan(conn: &Connection, run: &Run, plan: &[team::PlanStep], repos:
 }
 
 /// A new lead turn, inside the budget. `None` (and the run gated) once the rounds are spent.
+/// A planning turn for any planner: the lead (see [`new_lead_item`]) or a sub-lead, whose rounds are
+/// counted on its own items against `sub_lead_rounds`. `parent` is the delegate it plans under.
+fn new_planner_item(conn: &Connection, run: &Run, planner: &str, kind: &str, instruction: &str, feedback: &str, parent: &str) -> Result<Option<Item>, String> {
+    if planner == run.lead {
+        return new_lead_item(conn, run, kind, instruction, feedback);
+    }
+    let Some(m) = member(run, planner) else { return Ok(None) };
+    let items = team::list_items(conn, &run.id).map_err(e2s)?;
+    let used = items.iter().filter(|i| i.member_id == planner && matches!(i.kind.as_str(), "delegate" | "answer")).count() as i64;
+    if used >= run.policy.sub_lead_rounds {
+        team::post(conn, &run.id, "", ("system", "CodeFlow"), ("lead", &lead_name(run)), "error", &format!("{} agotó sus rondas de planificación.", m.member.name), &[])
+            .map_err(e2s)?;
+        return Ok(None);
+    }
+    let first_repo = team::list_repos(conn, &run.id).map_err(e2s)?.first().map(|r| r.project_id.clone()).unwrap_or_default();
+    let slug = protocol::key_slug(&m.member.name);
+    let key = team::free_key(&items, &format!("{}-{}", if slug.is_empty() { "sub" } else { &slug }, if kind == "answer" { "respuesta" } else { "plan" }));
+    let title = if kind == "answer" { format!("{} responde", m.member.name) } else { format!("{} replanifica", m.member.name) };
+    let mut item = team::new_item(run, &key, Some(m), &first_repo, kind, &title, instruction);
+    item.feedback = feedback.to_string();
+    item.parent = parent.to_string();
+    item.run_in = "headless".into();
+    team::insert_item(conn, &item).map_err(e2s)?;
+    Ok(Some(item))
+}
+
 fn new_lead_item(conn: &Connection, run: &Run, kind: &str, instruction: &str, feedback: &str) -> Result<Option<Item>, String> {
     let current = team::get_run(conn, &run.id).map_err(e2s)?.unwrap_or_else(|| run.clone());
     if current.lead_rounds_used >= current.policy.lead_rounds {
@@ -433,6 +505,16 @@ async fn claim_limited(db: &Db, run_id: &str, limit: Option<usize>) -> Result<Ve
         }
         let items = team::list_items(c, run_id).map_err(e2s)?;
         let repos = team::list_repos(c, run_id).map_err(e2s)?;
+        // Budgets: past any of them nothing new starts; what runs finishes.
+        let spend = team::metrics::spend(c, run_id).map_err(e2s)?;
+        let (usd, tokens) = spend.values().fold((0.0, 0i64), |(u, t), (du, dt)| (u + du, t + dt));
+        let minutes = team::metrics::agent_minutes(&items, chrono::Utc::now());
+        if let Some(note) = team::metrics::over_budget(&run, usd, tokens, minutes) {
+            if team::ready_items(&run, &items).first().is_some() {
+                team::set_run_status(c, run_id, "gated", "budget", &note).map_err(e2s)?;
+            }
+            return Ok((Some(run), Vec::new()));
+        }
         let ready: Vec<Item> = team::ready_items(&run, &items).into_iter().take(limit.unwrap_or(usize::MAX)).cloned().collect();
         let mut picked = Vec::new();
         let mut dispatches = run.dispatches;
@@ -517,7 +599,7 @@ async fn claim_limited(db: &Db, run_id: &str, limit: Option<usize>) -> Result<Ve
             out.push(Dispatch {
                 title: format!("{} · {}", m.member.name, item.title),
                 provider: m.provider.clone(),
-                model: m.model.clone(),
+                model: if item.model.is_empty() { m.model.clone() } else { item.model.clone() },
                 effort: m.effort.clone(),
                 run_in: item.run_in.clone(),
                 cwd,
@@ -548,8 +630,9 @@ fn task_for(conn: &Connection, run: &Run, item: &mut Item, items: &[Item], m: &M
             return Ok(task);
         }
     }
+    // Each planner keeps one conversation of its own: the lead's, and each sub-lead's for its branch.
     let reuse = if item.is_lead() {
-        items.iter().filter(|i| i.is_lead() && !i.task_id.is_empty()).map(|i| i.task_id.clone()).last()
+        items.iter().filter(|i| i.is_lead() && i.member_id == item.member_id && !i.task_id.is_empty()).map(|i| i.task_id.clone()).last()
     } else if item.kind == "review" {
         // The same reviewer looking at the same branch again keeps its conversation: it remembers
         // what it already raised.
@@ -603,14 +686,18 @@ fn compose(run: &Run, repos: &[RunRepo], items: &[Item], messages: &[team::Messa
     let inbox: Vec<&team::Message> = messages
         .iter()
         .filter(|msg| !msg.delivered && msg.from_id != m.member.id)
-        .filter(|msg| msg.to_id == m.member.id || msg.to_id == "all" || (item.is_lead() && msg.to_id == "lead"))
+        .filter(|msg| msg.to_id == m.member.id || msg.to_id == "all" || (item.is_lead() && msg.to_id == "lead" && m.member.id == run.lead))
         .filter(|msg| matches!(msg.kind.as_str(), "note" | "finding" | "decision" | "answer") || msg.from_id == "user")
         .collect();
 
     if item.is_lead() {
+        let scope: Vec<String> = planner_roster(run, &item.member_id).into_iter().map(|r| r.id).collect();
+        if item.member_id != run.lead {
+            out.push_str("Planificas tu propia rama del equipo: reparte solo entre quienes están abajo. Cuando todo lo que delegaste termine, te toca revisar y cerrar.\n\n");
+        }
         out.push_str("## El equipo\n");
         for mm in &run.members {
-            if mm.member.id == run.lead {
+            if !scope.contains(&mm.member.id) {
                 continue;
             }
             let repos_of = if mm.member.repos.is_empty() {
@@ -632,7 +719,11 @@ fn compose(run: &Run, repos: &[RunRepo], items: &[Item], messages: &[team::Messa
         for r in repos {
             out.push_str(&format!("- **{}** — rama destino `{}`, trabajo integrado en `{}` ({})\n", r.name, r.target_branch, r.integration_branch, r.integration_path));
         }
-        let others: Vec<&Item> = items.iter().filter(|i| !i.is_lead()).collect();
+        let others: Vec<&Item> = if item.member_id != run.lead && !run.lead.is_empty() {
+            items.iter().filter(|i| i.parent == item.id || (i.parent.is_empty() && scope.contains(&i.member_id) && !i.is_lead())).filter(|i| i.id != item.id).collect()
+        } else {
+            items.iter().filter(|i| !i.is_lead() || (i.kind == "delegate" && i.member_id != run.lead)).collect()
+        };
         if !others.is_empty() {
             out.push_str("\n## Estado del trabajo\n");
             for i in others {
@@ -780,6 +871,14 @@ async fn on_failure(db: &Db, run: &Run, mut item: Item, reason: &str, kind: &str
     with(db, |c| {
         item.last_error = reason.to_string();
         if item.attempts < run.policy.max_attempts {
+            // A retry climbs the member's model ladder, cheapest first, one step per failure.
+            if let Some(m) = member(run, &item.member_id) {
+                let ladder = &m.member.model_ladder;
+                if !ladder.is_empty() {
+                    let step = ((item.attempts - 1).max(0) as usize).min(ladder.len() - 1);
+                    item.model = ladder[step].clone();
+                }
+            }
             item.status = "pending".into();
             item.feedback = format!("El intento anterior no sirvió: {}\nCorrígelo.", trim_chars(reason, 6000));
             team::update_item(c, &item).map_err(e2s)?;
@@ -941,15 +1040,54 @@ fn post_notes(conn: &Connection, run: &Run, item: &Item, text: &str) -> Result<b
     let roster = roster(run);
     let (notes, errors) = protocol::member_notes(text, &roster);
     let from = (item.member_id.as_str(), item.member_name.as_str());
+    let members = members_of(run);
+    let boss = manager_of(run, &item.member_id).cloned();
     let mut waiting = false;
-    for note in notes {
-        let (to_id, to_name) = match &note.to {
+    let cap = run.policy.max_notes_per_item;
+    for (index, note) in notes.into_iter().enumerate() {
+        if cap > 0 && index as i64 >= cap {
+            team::post(conn, &run.id, &item.id, ("system", "CodeFlow"), from, "error", &format!("se descartaron las notas pasadas las {cap} de esta tarea"), &[]).map_err(e2s)?;
+            break;
+        }
+        let (mut to_id, mut to_name) = match &note.to {
             protocol::Recipient::User => ("user".to_string(), "Tú".to_string()),
-            protocol::Recipient::Lead if !run.lead.is_empty() => ("lead".to_string(), lead_name(run)),
-            protocol::Recipient::Lead => ("user".to_string(), "Tú".to_string()),
+            // «El líder» is whoever this member answers to: its sub-lead, or the lead.
+            protocol::Recipient::Lead => match &boss {
+                Some(b) if b.member.id != run.lead => (b.member.id.clone(), b.member.name.clone()),
+                _ if !run.lead.is_empty() => ("lead".to_string(), lead_name(run)),
+                _ => ("user".to_string(), "Tú".to_string()),
+            },
             protocol::Recipient::All => ("all".to_string(), "Equipo".to_string()),
             protocol::Recipient::Member(id) => (id.clone(), member(run, id).map(|m| m.member.name.clone()).unwrap_or_default()),
         };
+        let mut body = note.text.clone();
+        // A note the hierarchy does not allow goes through the sender's manager, said so.
+        if !hierarchy::may_message(&members, &run.lead, &run.policy.comms, &item.member_id, &to_id) {
+            if let Some(b) = &boss {
+                body = format!("Para {to_name}: {body}");
+                team::post(conn, &run.id, &item.id, ("system", "CodeFlow"), from, "note", &format!("tu nota para {to_name} pasa por {}", b.member.name), &[]).map_err(e2s)?;
+                to_id = if b.member.id == run.lead { "lead".into() } else { b.member.id.clone() };
+                to_name = b.member.name.clone();
+            }
+        }
+        // With questions escalating, the user is asked only by the lead: a member asks up.
+        if note.question && to_id == "user" && run.policy.escalate_questions {
+            if let Some(b) = &boss {
+                to_id = if b.member.id == run.lead { "lead".into() } else { b.member.id.clone() };
+                to_name = b.member.name.clone();
+            }
+        }
+        let note = protocol::Note { text: body, ..note };
+        let to_planner = to_id == "lead" || (to_id != "user" && to_id != "all" && boss.as_ref().is_some_and(|b| b.member.id == to_id));
+        if note.question && to_planner && to_id != "lead" {
+            let asked = team::post(conn, &run.id, &item.id, from, (&to_id, &to_name), "question", &note.text, &note.options).map_err(e2s)?;
+            let instruction = format!("{} te pregunta, desde «{}»: {}\nRespóndele en tu texto (lo recibe tal cual). Si no lo sabes, pregúntale a quien te lidera.", item.member_name, item.title, note.text);
+            if let Some(answer_item) = new_planner_item(conn, run, &to_id, "answer", &instruction, "", "")? {
+                conn.execute("UPDATE agent_team_items SET ref_item = ?2 WHERE id = ?1", rusqlite::params![answer_item.id, asked.id]).map_err(e2s)?;
+                waiting = true;
+            }
+            continue;
+        }
         if note.question && to_id == "user" {
             if run.policy.members_may_ask() {
                 team::post(conn, &run.id, &item.id, from, ("user", "Tú"), "question", &note.text, &note.options).map_err(e2s)?;
@@ -1140,11 +1278,13 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
     with(db, |c| {
         let items = team::list_items(c, &run.id).map_err(e2s)?;
         let repos = team::list_repos(c, &run.id).map_err(e2s)?;
-        let roster: Vec<protocol::RosterEntry> = roster(run).into_iter().filter(|m| m.id != run.lead).collect();
+        let planner = item.member_id.clone();
+        let sub_lead = !run.lead.is_empty() && planner != run.lead;
+        let roster: Vec<protocol::RosterEntry> = planner_roster(run, &planner);
         let repo_entries: Vec<protocol::RepoEntry> = repos.iter().map(|r| protocol::RepoEntry { project_id: r.project_id.clone(), name: r.name.clone() }).collect();
         let keys: Vec<String> = items.iter().map(|i| i.key.clone()).collect();
         let reply = protocol::lead_reply(text, &roster, &repo_entries, &keys);
-        let lead = (run.lead.clone(), lead_name(run));
+        let lead = if sub_lead { (planner.clone(), item.member_name.clone()) } else { (run.lead.clone(), lead_name(run)) };
         let from = (lead.0.as_str(), lead.1.as_str());
 
         // An answer to a member's question: the lead's text is the answer.
@@ -1156,7 +1296,7 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
                     if waiting.status == "waiting" {
                         waiting.status = "pending".into();
                         waiting.attempts = (waiting.attempts - 1).max(0);
-                        waiting.feedback = format!("Preguntaste al líder: {}\nTe responde: {answer}", asked.body);
+                        waiting.feedback = format!("Le preguntaste a {}: {}\nTe responde: {answer}", item.member_name, asked.body);
                         team::update_item(c, &waiting).map_err(e2s)?;
                     }
                 }
@@ -1175,7 +1315,26 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
             "plan" => item.kind == "plan",
             _ => false,
         };
-        if !reply.questions.is_empty() {
+        // A sub-lead asks up its chain of command, never the user directly.
+        if sub_lead && !reply.questions.is_empty() {
+            let boss = manager_of(run, &planner).map(|b| b.member.id.clone()).unwrap_or_else(|| run.lead.clone());
+            let boss_name = member(run, &boss).map(|b| b.member.name.clone()).unwrap_or_else(|| lead_name(run));
+            let mut asked_any = false;
+            for q in &reply.questions {
+                let asked = team::post(c, &run.id, &item.id, from, (&boss, &boss_name), "question", &q.text, &q.options).map_err(e2s)?;
+                let instruction = format!("{} te pregunta, mientras planifica su rama: {}\nRespóndele en tu texto.", item.member_name, q.text);
+                if let Some(answer_item) = new_planner_item(c, run, &boss, "answer", &instruction, "", "")? {
+                    c.execute("UPDATE agent_team_items SET ref_item = ?2 WHERE id = ?1", rusqlite::params![answer_item.id, asked.id]).map_err(e2s)?;
+                    asked_any = true;
+                }
+            }
+            if asked_any {
+                item.status = "waiting".into();
+                team::update_item(c, &item).map_err(e2s)?;
+                return Ok(());
+            }
+        }
+        if !reply.questions.is_empty() && !sub_lead {
             if may_ask {
                 for q in &reply.questions {
                     team::post(c, &run.id, &item.id, from, ("user", "Tú"), "question", &q.text, &q.options).map_err(e2s)?;
@@ -1207,8 +1366,15 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
         let mut fresh = Vec::new();
         for p in &reply.items {
             let m = member(run, &p.member_id);
-            let mut new = team::new_item(run, &p.key, m, &p.project_id, &p.kind, &p.title, &p.instruction);
+            let kind = if delegates(run, &p.member_id, &planner) { "delegate" } else { p.kind.as_str() };
+            let mut new = team::new_item(run, &p.key, m, &p.project_id, kind, &p.title, &p.instruction);
             new.round = item.round;
+            if kind == "delegate" {
+                new.run_in = "headless".into();
+            }
+            if sub_lead {
+                new.parent = item.id.clone();
+            }
             key_to_id.insert(p.key.clone(), new.id.clone());
             fresh.push((new, p.depends_on.clone()));
         }
@@ -1218,10 +1384,12 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
             team::insert_item(c, &new).map_err(e2s)?;
             team::post(c, &run.id, &new.id, from, (&new.member_id, &new.member_name), "plan", &format!("asignó «{}»", new.title), &[]).map_err(e2s)?;
         }
-        if reply.finish {
-            team::set_lead_done(c, &run.id, true).map_err(e2s)?;
-        } else if added > 0 {
-            team::set_lead_done(c, &run.id, false).map_err(e2s)?;
+        if !sub_lead {
+            if reply.finish {
+                team::set_lead_done(c, &run.id, true).map_err(e2s)?;
+            } else if added > 0 {
+                team::set_lead_done(c, &run.id, false).map_err(e2s)?;
+            }
         }
 
         // A plan that decided nothing at all is retried once with that said.
@@ -1236,13 +1404,19 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
             team::update_item(c, &item).map_err(e2s)?;
             return Ok(());
         }
-        item.status = "done".into();
+        // A sub-lead's branch stays open until what it handed out closes (see `advance`).
+        item.status = if item.kind == "delegate" && added > 0 && !reply.finish { "delegated".into() } else { "done".into() };
         item.feedback.clear();
-        item.finished_at = queries::now();
+        if item.status == "done" {
+            item.finished_at = queries::now();
+        }
         team::update_item(c, &item).map_err(e2s)?;
+        if item.kind == "delegate" && item.status == "done" {
+            handoff(c, run, &item)?;
+        }
 
         // The first plan waits for the user when the policy says so.
-        let first_plan = item.kind == "plan" && !items.iter().any(|i| i.kind == "plan" && i.id != item.id && i.status == "done");
+        let first_plan = !sub_lead && item.kind == "plan" && !items.iter().any(|i| i.kind == "plan" && i.id != item.id && i.status == "done");
         if first_plan && run.policy.approve_plan && added > 0 {
             team::set_run_status(c, &run.id, "gated", "plan", "Revisa el plan del líder antes de que el equipo empiece.").map_err(e2s)?;
         }
@@ -1262,7 +1436,28 @@ async fn advance(db: &Db, run_id: &str) -> Result<(), String> {
     if run.status != "running" {
         return Ok(());
     }
-    let moving = items.iter().filter(|i| matches!(i.status.as_str(), "running" | "waiting" | "gated")).count();
+    // A sub-lead's branch whose work has all closed hands its summary up, and stops being open.
+    let closed_branches = with(db, |c| {
+        let mut closed = 0;
+        for mut d in items.iter().filter(|i| i.status == "delegated").cloned() {
+            let children: Vec<&Item> = items.iter().filter(|i| i.parent == d.id).collect();
+            if children.iter().all(|i| matches!(i.status.as_str(), "done" | "skipped" | "cancelled" | "error")) {
+                let lines: Vec<String> = children
+                    .iter()
+                    .map(|i| format!("- `{}` {} · {}: {}", i.key, i.member_name, i.status, first_line(&protocol::prose(&i.output_text), 200)))
+                    .collect();
+                d.output_text = format!("{}\n\nLo que hizo la rama de {}:\n{}", protocol::prose(&d.output_text), d.member_name, lines.join("\n"));
+                d.status = "done".into();
+                d.finished_at = queries::now();
+                team::update_item(c, &d).map_err(e2s)?;
+                handoff(c, &run, &d)?;
+                closed += 1;
+            }
+        }
+        Ok(closed)
+    })?;
+    let items = if closed_branches > 0 { with(db, |c| team::list_items(c, run_id).map_err(e2s))? } else { items };
+    let moving = items.iter().filter(|i| matches!(i.status.as_str(), "running" | "waiting" | "gated" | "delegated")).count();
     if moving > 0 {
         return Ok(());
     }
@@ -1564,6 +1759,27 @@ pub async fn decide(db: &Db, run_id: &str, approve: bool, comment: &str) -> Resu
             }
             return Ok(());
         }
+        if gate == "budget" {
+            if !approve {
+                return team::set_run_status(c, &run_id, "failed", "", "").map_err(e2s);
+            }
+            // Approving is «give it more»: every budget it ran out of grows by half.
+            let mut policy = run.policy.clone();
+            let spend = team::metrics::spend(c, &run_id).map_err(e2s)?;
+            let (usd, tokens) = spend.values().fold((0.0, 0i64), |(u, t), (du, dt)| (u + du, t + dt));
+            let minutes = team::metrics::agent_minutes(&team::list_items(c, &run_id).map_err(e2s)?, chrono::Utc::now());
+            if policy.budget_usd > 0.0 && usd >= policy.budget_usd {
+                policy.budget_usd = (policy.budget_usd * 1.5 * 100.0).round() / 100.0;
+            }
+            if policy.budget_tokens > 0 && tokens >= policy.budget_tokens {
+                policy.budget_tokens = policy.budget_tokens * 3 / 2;
+            }
+            if policy.budget_minutes > 0 && minutes >= policy.budget_minutes as f64 {
+                policy.budget_minutes = policy.budget_minutes * 3 / 2;
+            }
+            set_run_policy(c, &run_id, &policy)?;
+            return team::set_run_status(c, &run_id, "running", "", "").map_err(e2s);
+        }
         if let Some(id) = gate.strip_prefix("stuck:") {
             if !approve {
                 return team::set_run_status(c, &run_id, "failed", "", "").map_err(e2s);
@@ -1648,6 +1864,41 @@ pub async fn team_control(app: AppHandle, db: State<'_, Db>, run_id: String, act
     }
     changed(&app, &run_id);
     Ok(running)
+}
+
+fn set_run_policy(conn: &Connection, run_id: &str, policy: &Policy) -> Result<(), String> {
+    let policy = policy.clone().sane();
+    conn.execute(
+        "UPDATE agent_team_runs SET policy = ?2, updated_at = ?3 WHERE id = ?1",
+        rusqlite::params![run_id, serde_json::to_string(&policy).map_err(e2s)?, queries::now()],
+    )
+    .map_err(e2s)?;
+    Ok(())
+}
+
+/// Edits a running run's own copy of the policy — a budget raised, the parallelism or the
+/// communication rules changed from the live view — without touching the team.
+#[tauri::command]
+pub async fn team_run_policy(app: AppHandle, db: State<'_, Db>, run_id: String, policy: Policy) -> Result<RunState, String> {
+    {
+        let lock = run_lock(&run_id);
+        let _guard = lock.lock().await;
+        with(&db, |c| set_run_policy(c, &run_id, &policy))?;
+    }
+    changed(&app, &run_id);
+    state_of(&db, &run_id)
+}
+
+/// Spend per member, who talks to whom, and the alerts the live view shows.
+#[tauri::command]
+pub fn team_run_metrics(db: State<'_, Db>, run_id: String) -> Result<team::metrics::RunMetrics, String> {
+    with(&db, |c| {
+        let run = team::get_run(c, &run_id).map_err(e2s)?.ok_or("La corrida ya no existe.")?;
+        let items = team::list_items(c, &run_id).map_err(e2s)?;
+        let messages = team::list_messages(c, &run_id).map_err(e2s)?;
+        let spend = team::metrics::spend(c, &run_id).map_err(e2s)?;
+        Ok(team::metrics::compute(&run, &items, &messages, &spend, chrono::Utc::now()))
+    })
 }
 
 /// Records the terminal session an item runs in (so the view can open it).
@@ -1847,6 +2098,141 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(Path::new(&repo).join("a.txt")).unwrap(), "algo\n");
         assert!(!Path::new(&integ).exists(), "worktrees cleaned up");
+    }
+
+    #[tokio::test]
+    async fn a_sub_lead_plans_its_branch_and_hands_the_summary_up() {
+        let (_serial, _dir, db, ws, project, [lead, dev, qa]) = fixture();
+        let member = |id: &str, agent: &str, name: &str, edits: bool, reports_to: &str, leads: bool| team::Member {
+            id: id.into(),
+            agent_id: agent.into(),
+            name: name.into(),
+            edits,
+            reports_to: reports_to.into(),
+            leads,
+            ..Default::default()
+        };
+        let mut policy = Policy::default();
+        policy.approve_plan = false;
+        policy.comms = "tree".into();
+        let tm = with(&db, |c| {
+            team::save_team(
+                c,
+                team::Team {
+                    workspace_id: ws.clone(),
+                    name: "Equipo".into(),
+                    lead: "l".into(),
+                    policy,
+                    members: vec![
+                        member("l", &lead, "Líder", false, "", false),
+                        member("s", &qa, "Sub", false, "l", true),
+                        member("d", &dev, "Dev", true, "s", false),
+                    ],
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+        // A cycle is refused before anything runs.
+        let cyclic = with(&db, |c| {
+            team::save_team(
+                c,
+                team::Team {
+                    workspace_id: ws.clone(),
+                    name: "Ciclo".into(),
+                    lead: "l".into(),
+                    members: vec![member("l", &lead, "Líder", false, "", false), member("a", &dev, "A", true, "b", false), member("b", &qa, "B", true, "a", false)],
+                    ..Default::default()
+                },
+            )
+        });
+        assert!(cyclic.unwrap_err().contains("ciclo"));
+
+        let state = start_run(&db, ws.clone(), tm.id.clone(), "Crea d.txt".into(), None, vec![RepoPick { project_id: project.clone(), target_branch: String::new() }], None, None)
+            .await
+            .unwrap();
+        let run_id = state.run.id.clone();
+
+        // The lead hands the whole branch to the sub-lead: that becomes a delegate, not work.
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d[0].item.kind, "plan");
+        settle_core(&db, &d[0].item.id, "ok", "```equipo\n{\"items\":[{\"id\":\"rama\",\"miembro\":\"Sub\",\"tarea\":\"organiza: crea d.txt\"}]}\n```", "").await.unwrap();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].item.kind, "delegate");
+        assert!(d[0].message.contains("Planificas tu propia rama"));
+        assert!(d[0].message.contains("**Dev**") && !d[0].message.contains("**Líder**"), "a sub-lead sees only its branch");
+
+        // The sub-lead plans for its report; the branch stays open while that runs.
+        let delegate_id = d[0].item.id.clone();
+        let state = settle_core(&db, &delegate_id, "ok", "```equipo\n{\"items\":[{\"id\":\"d\",\"miembro\":\"Dev\",\"tarea\":\"crea d.txt\"}]}\n```", "").await.unwrap();
+        assert_eq!(item_of(&state, "rama").status, "delegated");
+        assert_eq!(item_of(&state, "d").parent, delegate_id);
+
+        // The member reports «to the lead»: with tree comms that is its sub-lead.
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d[0].item.key, "d");
+        std::fs::write(Path::new(&d[0].cwd).join("d.txt"), "d\n").unwrap();
+        let state = settle_core(&db, &d[0].item.id, "ok", "Hecho.\n```equipo\n{\"para\":\"líder\",\"texto\":\"listo d\"}\n```", "").await.unwrap();
+        assert!(state.messages.iter().any(|m| m.kind == "note" && m.to_name == "Sub" && m.body.contains("listo d")));
+        assert!(item_of(&state, "d").merged);
+
+        // With its work closed, the branch closes and hands its summary up.
+        let rama = item_of(&state, "rama");
+        assert_eq!(rama.status, "done", "{rama:?}");
+        assert!(rama.output_text.contains("`d`"));
+
+        // The lead's last look and the merge.
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d[0].item.kind, "final");
+        let state = settle_core(&db, &d[0].item.id, "ok", "```equipo\n{\"terminar\":true}\n```", "").await.unwrap();
+        assert_eq!(state.run.gate, "merge");
+        let state = decide(&db, &run_id, true, "").await.unwrap();
+        assert_eq!(state.run.status, "done", "{:?}", state.run.gate_note);
+    }
+
+    #[tokio::test]
+    async fn a_run_over_its_budget_waits_and_approval_grows_it() {
+        let (_serial, _dir, db, ws, project, [lead, dev, _qa]) = fixture();
+        let mut policy = Policy::default();
+        policy.approve_plan = false;
+        policy.budget_usd = 0.5;
+        let tm = with(&db, |c| {
+            team::save_team(
+                c,
+                team::Team {
+                    workspace_id: ws.clone(),
+                    name: "Equipo".into(),
+                    lead: "l".into(),
+                    policy,
+                    members: vec![
+                        team::Member { id: "l".into(), agent_id: lead.clone(), name: "Líder".into(), edits: false, ..Default::default() },
+                        team::Member { id: "d".into(), agent_id: dev.clone(), name: "Dev".into(), ..Default::default() },
+                    ],
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+        let state = start_run(&db, ws.clone(), tm.id.clone(), "Crea x".into(), None, vec![RepoPick { project_id: project.clone(), target_branch: String::new() }], None, None)
+            .await
+            .unwrap();
+        let run_id = state.run.id.clone();
+        let d = claim(&db, &run_id).await.unwrap();
+        // The plan turn cost more than the budget.
+        with(&db, |c| {
+            c.execute("UPDATE agent_tasks SET cost_usd = 0.75 WHERE id = ?1", rusqlite::params![d[0].item.task_id]).map_err(e2s)?;
+            Ok(())
+        })
+        .unwrap();
+        settle_core(&db, &d[0].item.id, "ok", "```equipo\n{\"items\":[{\"id\":\"x\",\"miembro\":\"Dev\",\"tarea\":\"crea x\"}]}\n```", "").await.unwrap();
+        assert!(claim(&db, &run_id).await.unwrap().is_empty());
+        let state = state_of(&db, &run_id).unwrap();
+        assert_eq!(state.run.gate, "budget");
+        let state = decide(&db, &run_id, true, "").await.unwrap();
+        assert_eq!(state.run.status, "running");
+        assert!((state.run.policy.budget_usd - 0.75).abs() < 1e-9);
+        assert!(!claim(&db, &run_id).await.unwrap().is_empty() || state_of(&db, &run_id).unwrap().run.gate == "budget");
     }
 
     #[tokio::test]

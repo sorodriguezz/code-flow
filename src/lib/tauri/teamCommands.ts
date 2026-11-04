@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Team, TeamDispatch, TeamPolicy, TeamRun, TeamRunState } from "../../types/team";
+import type {
+  TeamRunMetrics, Team, TeamDispatch, TeamPolicy, TeamRun, TeamRunState } from "../../types/team";
 
 export const teamList = (workspaceId: string) => invoke<Team[]>("team_list", { workspaceId });
 export const teamSave = (team: Team) => invoke<Team>("team_save", { team });
@@ -50,3 +51,6 @@ export const teamDecide = (runId: string, approve: boolean, comment?: string) =>
 export const teamControl = (runId: string, action: string) => invoke<string[]>("team_control", { runId, action });
 export const teamItemTerminal = (itemId: string, sessionId: string) => invoke<void>("team_item_terminal", { itemId, sessionId });
 export const teamDeleteRun = (runId: string) => invoke<void>("team_delete_run", { runId });
+
+export const teamRunPolicy = (runId: string, policy: TeamPolicy) => invoke<TeamRunState>("team_run_policy", { runId, policy });
+export const teamRunMetrics = (runId: string) => invoke<TeamRunMetrics>("team_run_metrics", { runId });
