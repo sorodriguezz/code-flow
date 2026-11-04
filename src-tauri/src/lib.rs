@@ -86,6 +86,7 @@ mod localai;
 mod local_history;
 mod hybrid;
 mod crew;
+mod runner;
 mod team;
 mod mcp_registry;
 mod model_registry;
@@ -1919,6 +1920,9 @@ sharded_invoke_handler! {
         commands::team_cmd::team_control,
         commands::team_cmd::team_item_terminal,
         commands::team_cmd::team_delete_run,
+        commands::team_cmd::team_pump,
+        runner::governor::governor_status,
+        runner::governor::governor_set,
         commands::crew_cmd::save_workspace_agent,
         commands::crew_cmd::reorder_workspace_agents,
         commands::crew_cmd::library_list,

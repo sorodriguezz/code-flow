@@ -996,6 +996,19 @@ pub fn unmerged_work(items: &[Item]) -> Vec<&Item> {
     items.iter().filter(|i| i.kind == "work" && i.status == "done" && !i.merged && !i.commit_sha.is_empty()).collect()
 }
 
+/// Whether a conversation belongs to an item of any team run.
+pub fn is_team_conversation(conn: &Connection, conversation_id: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM agent_tasks t JOIN agent_team_items i ON i.task_id = t.id WHERE t.conversation_id = ?1 LIMIT 1",
+        params![conversation_id],
+        |_| Ok(()),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .is_some()
+}
+
 /// Whether a conversation is a team item that must not write (lead turns, investigations, reviews).
 pub fn read_only_conversation(conn: &Connection, conversation_id: &str) -> bool {
     conn.query_row(

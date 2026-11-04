@@ -196,6 +196,9 @@ interface AgentsState {
   duplicateAgent: (id: string) => Promise<WorkspaceAgent | null>;
   /** Saves the roster's order as the ids are listed. */
   reorderAgents: (ids: string[]) => Promise<void>;
+  /** A turn the backend's team runner started (`runId`) or finished (`null`) on a task: shows it
+   *  live, then reads the transcript and the row back when it ends. */
+  markRunnerTurn: (taskId: string, runId: string | null) => void;
   /** Re-reads the task list for the workspace already loaded, keeping the selection and every
    *  live turn exactly where they are.
    *
@@ -388,6 +391,22 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     let name = `${source.name} 2`;
     for (let n = 3; taken.includes(name.toLowerCase()); n++) name = `${source.name} ${n}`;
     return get().saveAgent({ ...draftOf(source), id: null, name });
+  },
+
+  markRunnerTurn: (taskId, runId) => {
+    if (runId) {
+      set((s) => ({
+        live: { ...s.live, [taskId]: { ...(s.live[taskId] ?? EMPTY_LIVE), sending: true, runId, runStartedAt: Date.now() } },
+        tasks: s.tasks.map((task) => (task.id === taskId ? { ...task, status: "running" as const } : task)),
+      }));
+      return;
+    }
+    const wasLoaded = get().live[taskId]?.loaded ?? false;
+    set((s) => ({
+      live: { ...s.live, [taskId]: { ...(s.live[taskId] ?? EMPTY_LIVE), sending: false, runId: null, runStartedAt: null, loaded: false } },
+    }));
+    void get().reloadTasks();
+    if (wasLoaded) void get().ensureLoaded(taskId);
   },
 
   reorderAgents: async (ids) => {

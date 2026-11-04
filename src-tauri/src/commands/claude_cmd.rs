@@ -19,15 +19,15 @@ use crate::git;
 
 #[derive(Serialize)]
 pub struct ChatReply {
-    text: String,
-    session_id: Option<String>,
+    pub(crate) text: String,
+    pub(crate) session_id: Option<String>,
     /// Model that actually answered this turn, when the CLI reported one — shown as-is in the
     /// chat's "who am I talking to" chip. `None` falls back to the configured setting there.
-    model: Option<String>,
+    pub(crate) model: Option<String>,
     /// Provider id that answered this turn (`claude`, `codex`, …). Reported back rather than read
     /// from the setting on the frontend, so the stamp under a reply keeps naming the engine that
     /// actually ran even after the routing is changed.
-    provider: String,
+    pub(crate) provider: String,
     /// Version of the engine CLI, when it could be read.
     engine_version: Option<String>,
     /// When this turn was recorded, RFC 3339. Comes from the persisted row so the timestamp shown
@@ -1443,7 +1443,12 @@ pub async fn send_chat_message(
     // user something back — `ai::chat_turn_rules`.
     if step.is_none() {
         if let Ok(conn) = db.0.lock() {
-            engine_message.push_str(said.say("rules", &ai::chat_turn_rules(&conn)));
+            // A team member's turn speaks the team's own protocol (```equipo): the chat's answer
+            // length and its ```pregunta block would only compete with it and cost tokens. It keeps
+            // the artifact rules — artifacts are how members hand each other documents.
+            let team_turn = conversation_id.as_deref().is_some_and(|id| crate::team::is_team_conversation(&conn, id));
+            let rules = if team_turn { crate::chat_refs::artifacts::ARTIFACT_RULES.to_string() } else { ai::chat_turn_rules(&conn) };
+            engine_message.push_str(said.say("rules", &rules));
         }
         let mentioned = ai::mentioned_paths(&asked, &project.local_path);
         context_sources.extend(crate::context::mention_sources(&mentioned));

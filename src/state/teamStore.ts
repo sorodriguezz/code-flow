@@ -1,14 +1,14 @@
 import { create } from "zustand";
 import { listen } from "@tauri-apps/api/event";
 import { isMainWindow } from "../lib/windowIdentity";
-import { newRunId } from "./aiRunStore";
+import { useAiRunStore } from "./aiRunStore";
 import { useAgentsStore } from "./agentsStore";
 import { useChainStore } from "./chainStore";
 import { pushErrorToast } from "./toastStore";
 import { startAgentCli } from "../lib/agents/startCli";
+import { invoke } from "@tauri-apps/api/core";
 import {
   teamAnswer,
-  teamClaim,
   teamControl,
   teamDecide,
   teamDelete,
@@ -27,13 +27,14 @@ import {
 import type { Team, TeamDispatch, TeamPolicy, TeamRun, TeamRunState } from "../types/team";
 
 /**
- * «Equipo»: the workspace's teams and their runs, and the driver that runs what the backend hands out.
+ * «Equipo»: the workspace's teams and their runs.
  *
- * The backend decides (`team_claim` returns every item that may start now, within the caps); this
- * runs each one — a background turn through `agentsStore.runTurn`, or the member's CLI in a terminal
- * through `startAgentCli` — and reports it back (`team_settle`), which decides what comes next. Only
- * the main window drives, the same rule chains follow: two windows claiming would race for the same
- * items.
+ * The backend decides and now also drives (`src-tauri/src/runner`): every change to a run kicks the
+ * runner, which claims what is ready and runs headless turns itself — so a run moves the same with
+ * the Agents view in the main window, in an island, or with the window in the tray. Every window
+ * only watches (`team:changed`, `runner:turn`) and sends orders. The one thing left to a window is
+ * a member that runs in a terminal: the bench lives in the main window, which opens its CLI when
+ * the runner hands it over (`team:terminal-dispatch`).
  */
 interface TeamState {
   workspaceId: string | null;
@@ -64,10 +65,6 @@ interface TeamState {
   removeRun: (runId: string) => Promise<void>;
 }
 
-/** Runs being claimed right now — one claim per run at a time. */
-const claiming = new Set<string>();
-/** A claim asked for while one was in flight: run it again once it lands. */
-const again = new Set<string>();
 
 export const useTeamStore = create<TeamState>((set, get) => ({
   workspaceId: null,
@@ -144,23 +141,7 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   },
 
   pump: async (runId) => {
-    if (!isMainWindow()) return;
-    if (claiming.has(runId)) {
-      again.add(runId);
-      return;
-    }
-    claiming.add(runId);
-    try {
-      const dispatches = await teamClaim(runId).catch((e: unknown) => {
-        pushErrorToast(String(e));
-        return [] as TeamDispatch[];
-      });
-      for (const dispatch of dispatches) void run(runId, dispatch, get);
-    } finally {
-      claiming.delete(runId);
-      await get().refresh(runId);
-      if (again.delete(runId)) void get().pump(runId);
-    }
+    await invoke("team_pump", { runId }).catch(() => undefined);
   },
 
   answer: async (runId, messageId, answer) => {
@@ -185,6 +166,8 @@ export const useTeamStore = create<TeamState>((set, get) => ({
       pushErrorToast(String(e));
       return [] as string[];
     });
+    // The runner stops the turns it has in flight; a task started from this window by hand is
+    // stopped here too.
     if (action === "abort") for (const taskId of running) void useAgentsStore.getState().stop(taskId);
     await get().refresh(runId);
     if (action !== "abort" && action !== "pause") void get().pump(runId);
@@ -219,60 +202,34 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   },
 }));
 
-/** Runs one dispatched item and reports it back. */
-async function run(runId: string, dispatch: TeamDispatch, get: () => TeamState) {
+/** Opens a terminal member's CLI in the bench — the one part of a run a window has to do. */
+async function runInTerminal(runId: string, dispatch: TeamDispatch, get: () => TeamState) {
   const { item } = dispatch;
-  const settle = async (outcome: "ok" | "error" | "busy" | "cancelled", text?: string, error?: string) => {
-    await teamSettle(item.id, outcome, text, error).catch((e: unknown) => pushErrorToast(String(e)));
+  const settle = async (error: string) => {
+    await teamSettle(item.id, "error", undefined, error).catch((e: unknown) => pushErrorToast(String(e)));
     await get().refresh(runId);
-    void get().pump(runId);
   };
-
-  if (dispatch.runIn === "terminal") {
-    const workspaceId = get().workspaceId;
-    if (!workspaceId) return;
-    try {
-      const started = await startAgentCli({
-        workspaceId,
-        path: dispatch.cwd,
-        provider: dispatch.provider,
-        title: dispatch.title,
-        prompt: dispatch.message,
-        model: dispatch.model,
-        effort: dispatch.effort,
-      });
-      if (started) await teamItemTerminal(item.id, started.sessionId).catch(() => undefined);
-      else await settle("error", undefined, "no se pudo abrir su terminal");
-      await get().refresh(runId);
-    } catch (e) {
-      await settle("error", undefined, String(e));
-    }
+  const workspaceId = get().workspaceId ?? dispatch.task?.workspace_id ?? null;
+  if (!workspaceId) {
+    await settle("no hay un workspace abierto para su terminal");
     return;
   }
-
-  const task = dispatch.task;
-  if (!task) {
-    await settle("error", undefined, "el ítem no tiene tarea");
-    return;
+  try {
+    const started = await startAgentCli({
+      workspaceId,
+      path: dispatch.cwd,
+      provider: dispatch.provider,
+      title: dispatch.title,
+      prompt: dispatch.message,
+      model: dispatch.model,
+      effort: dispatch.effort,
+    });
+    if (started) await teamItemTerminal(item.id, started.sessionId).catch(() => undefined);
+    else await settle("no se pudo abrir su terminal");
+    await get().refresh(runId);
+  } catch (e) {
+    await settle(String(e));
   }
-  const agents = useAgentsStore.getState();
-  if (task.workspace_id === agents.workspaceId) agents.adopt(task);
-  const runIdForTurn = newRunId("agent");
-  await useAgentsStore.getState().runTurn(task.id, dispatch.message, {
-    runId: runIdForTurn,
-    task: task.workspace_id === agents.workspaceId ? undefined : task,
-    about: {
-      kindKey: "team.liveKind",
-      detail: dispatch.title,
-      workspaceId: task.workspace_id,
-      target: { view: "agents", projectId: task.project_id },
-    },
-    onSettle: (outcome) => {
-      if (outcome.kind === "ok") void settle("ok", outcome.text);
-      else if (outcome.kind === "cancelled") void settle("cancelled");
-      else void settle(outcome.busy ? "busy" : "error", undefined, outcome.message);
-    },
-  });
 }
 
 function upsertRun(runs: TeamRun[], run: TeamRun): TeamRun[] {
@@ -285,14 +242,52 @@ function omit<T>(record: Record<string, T>, key: string): Record<string, T> {
   return rest;
 }
 
-// The backend says when a run moved — a terminal member's `cf done`, another window's answer.
+// The backend says when a run moved — the runner, a terminal member's `cf done`, another window.
+// A run this window has not listed yet (started from an island) is fetched rather than ignored.
 void listen<{ runId: string }>("team:changed", (event) => {
   const { runId } = event.payload;
   const store = useTeamStore.getState();
-  if (!store.runs.some((r) => r.id === runId) && store.selectedRunId !== runId) return;
-  void store.refresh(runId).then(() => {
-    if (useTeamStore.getState().states[runId]?.run.status === "running") void useTeamStore.getState().pump(runId);
+  if (!store.workspaceId) return;
+  void store.refresh(runId);
+});
+
+// The runner hands a terminal member to the window that holds the bench.
+if (isMainWindow()) {
+  void listen<{ runId: string; dispatch: TeamDispatch }>("team:terminal-dispatch", (event) => {
+    void runInTerminal(event.payload.runId, event.payload.dispatch, useTeamStore.getState);
   });
+}
+
+/** A headless turn the runner started or finished, so the status bar and the task's transcript
+ * show it live in every window — what `agentsStore.runTurn` did when the window ran it. */
+export interface RunnerTurnEvent {
+  phase: "start" | "end";
+  runId: string;
+  teamRunId: string;
+  itemId: string;
+  taskId: string;
+  workspaceId: string;
+  projectId: string;
+  title: string;
+  ok: boolean;
+  error: string;
+}
+
+void listen<RunnerTurnEvent>("runner:turn", (event) => {
+  const turn = event.payload;
+  const runs = useAiRunStore.getState();
+  if (turn.phase === "start") {
+    runs.register(turn.runId, {
+      kindKey: "team.liveKind",
+      detail: turn.title,
+      workspaceId: turn.workspaceId,
+      target: { view: "agents", projectId: turn.projectId },
+    });
+    useAgentsStore.getState().markRunnerTurn(turn.taskId, turn.runId);
+  } else {
+    runs.finish(turn.runId);
+    useAgentsStore.getState().markRunnerTurn(turn.taskId, null);
+  }
 });
 
 // A task or a chain taking the middle column puts the run away.

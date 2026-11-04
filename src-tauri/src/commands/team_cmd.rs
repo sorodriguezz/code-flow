@@ -51,6 +51,15 @@ fn e2s<E: std::fmt::Display>(e: E) -> String {
 
 fn changed(app: &AppHandle, run_id: &str) {
     let _ = app.emit("team:changed", serde_json::json!({ "runId": run_id }));
+    // Whatever changed may have made something ready; the runner claims it from here, whichever
+    // window — if any — asked for the change.
+    crate::runner::kick(app, run_id);
+}
+
+/// Moves a run from any window: the runner claims what is ready. What `teamStore.pump` calls now.
+#[tauri::command]
+pub fn team_pump(app: AppHandle, run_id: String) {
+    crate::runner::kick(&app, &run_id);
 }
 
 fn state_of(db: &Db, run_id: &str) -> Result<RunState, String> {
@@ -395,9 +404,15 @@ pub struct Dispatch {
 // No `team:changed` here: the caller refreshes itself, and the event is what makes other listeners
 // claim — announcing a claim would have every claim start another.
 pub async fn team_claim(db: State<'_, Db>, run_id: String) -> Result<Vec<Dispatch>, String> {
-    let lock = run_lock(&run_id);
+    claim_run(&db, &run_id, None).await
+}
+
+/// [`claim`] under the run's lock, taking at most `limit` items — what the runner calls with the
+/// governor's free slots, so an item is only marked running when it can start.
+pub async fn claim_run(db: &Db, run_id: &str, limit: Option<usize>) -> Result<Vec<Dispatch>, String> {
+    let lock = run_lock(run_id);
     let _guard = lock.lock().await;
-    claim(&db, &run_id).await
+    claim_limited(db, run_id, limit).await
 }
 
 struct Picked {
@@ -406,6 +421,10 @@ struct Picked {
 }
 
 pub async fn claim(db: &Db, run_id: &str) -> Result<Vec<Dispatch>, String> {
+    claim_limited(db, run_id, None).await
+}
+
+async fn claim_limited(db: &Db, run_id: &str, limit: Option<usize>) -> Result<Vec<Dispatch>, String> {
     // 1. Decide, under the database lock.
     let (run, picked) = with(db, |c| {
         let Some(run) = team::get_run(c, run_id).map_err(e2s)? else { return Ok((None, Vec::new())) };
@@ -414,7 +433,7 @@ pub async fn claim(db: &Db, run_id: &str) -> Result<Vec<Dispatch>, String> {
         }
         let items = team::list_items(c, run_id).map_err(e2s)?;
         let repos = team::list_repos(c, run_id).map_err(e2s)?;
-        let ready: Vec<Item> = team::ready_items(&run, &items).into_iter().cloned().collect();
+        let ready: Vec<Item> = team::ready_items(&run, &items).into_iter().take(limit.unwrap_or(usize::MAX)).cloned().collect();
         let mut picked = Vec::new();
         let mut dispatches = run.dispatches;
         for mut item in ready {
@@ -1601,6 +1620,7 @@ pub async fn team_control(app: AppHandle, db: State<'_, Db>, run_id: String, act
                     team::update_item(c, &i).map_err(e2s)?;
                 }
                 team::set_run_status(c, &run_id, "aborted", "", "").map_err(e2s)?;
+                crate::runner::cancel_run(&run_id);
             }
             other => {
                 if let Some(id) = other.strip_prefix("retry:") {
@@ -1642,6 +1662,7 @@ pub fn team_item_terminal(db: State<'_, Db>, item_id: String, session_id: String
 /// Deletes a run with its tasks, and removes its worktrees where they are clean. The branches stay.
 #[tauri::command]
 pub async fn team_delete_run(db: State<'_, Db>, run_id: String) -> Result<(), String> {
+    crate::runner::cancel_run(&run_id);
     let (repos, items) = with(&db, |c| Ok((team::list_repos(c, &run_id).map_err(e2s)?, team::list_items(c, &run_id).map_err(e2s)?)))?;
     for repo in &repos {
         let mut paths: Vec<String> = items.iter().filter(|i| i.project_id == repo.project_id && i.kind == "work").map(|i| i.worktree_path.clone()).filter(|p| !p.is_empty()).collect();
