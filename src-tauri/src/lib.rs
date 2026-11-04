@@ -86,6 +86,7 @@ mod localai;
 mod local_history;
 mod hybrid;
 mod crew;
+mod decide;
 mod runner;
 mod team;
 mod mcp_registry;
@@ -1923,6 +1924,9 @@ sharded_invoke_handler! {
         commands::team_cmd::team_pump,
         commands::team_cmd::team_run_policy,
         commands::team_cmd::team_run_metrics,
+        decide::decider_config,
+        decide::decider_set,
+        decide::decider_try,
         runner::governor::governor_status,
         runner::governor::governor_set,
         commands::crew_cmd::save_workspace_agent,

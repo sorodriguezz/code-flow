@@ -151,6 +151,54 @@ fn delegates(run: &Run, member_id: &str, planner: &str) -> bool {
     member(run, member_id).is_some_and(|m| m.member.leads && !m.member.hands_on) && hierarchy::is_planner(&members, &run.lead, member_id)
 }
 
+/// The team's advisor, if it has one.
+fn advisor_of(run: &Run) -> Option<&MemberSnap> {
+    run.members.iter().find(|m| m.member.advisor)
+}
+
+/// What the advisor reads instead of the whole transcript: the goal, every item in a line, and the
+/// last messages. A few thousand characters, so calling it costs a fraction of a planner turn.
+fn digest(run: &Run, items: &[Item], messages: &[team::Message], focus: &str) -> String {
+    let mut out = format!("## Objetivo\n{}\n\n## Trabajo\n", run.goal);
+    for i in items.iter().filter(|i| i.kind != "advise") {
+        let detail = match i.status.as_str() {
+            "done" => first_line(&protocol::prose(&i.output_text), 160),
+            "error" => format!("falló: {}", first_line(&i.last_error, 160)),
+            _ => String::new(),
+        };
+        out.push_str(&format!("- `{}` [{}] {} · {} · {}{}\n", i.key, i.status, i.member_name, i.kind, i.title, if detail.is_empty() { String::new() } else { format!(" — {detail}") }));
+    }
+    let recent: Vec<&team::Message> = messages.iter().filter(|m| m.kind != "status").rev().take(10).collect();
+    if !recent.is_empty() {
+        out.push_str("\n## Últimos mensajes\n");
+        for m in recent.into_iter().rev() {
+            out.push_str(&format!("- {} → {}: {}\n", m.from_name, m.to_name, first_line(&m.body, 200)));
+        }
+    }
+    out.push_str(&format!("\n## Qué te piden\n{focus}\nDa como mucho tres consejos accionables, en pocas líneas. No escribas código."));
+    trim_chars(&out, 7_000)
+}
+
+/// Calls the advisor in: an `advise` item, read-only. `about` is what its advice is for — `plan`,
+/// `final` or the id of the item whose error repeats.
+fn new_advice(conn: &Connection, run: &Run, about: &str, focus: &str) -> Result<Option<Item>, String> {
+    let Some(adv) = advisor_of(run) else { return Ok(None) };
+    let items = team::list_items(conn, &run.id).map_err(e2s)?;
+    let messages = team::list_messages(conn, &run.id).map_err(e2s)?;
+    let first_repo = team::list_repos(conn, &run.id).map_err(e2s)?.first().map(|r| r.project_id.clone()).unwrap_or_default();
+    let key = team::free_key(&items, "asesor");
+    let title = match about {
+        "plan" => "El asesor revisa el plan".to_string(),
+        "final" => "El asesor revisa antes de terminar".to_string(),
+        _ => "El asesor mira un error que se repite".to_string(),
+    };
+    let mut item = team::new_item(run, &key, Some(adv), &first_repo, "advise", &title, &digest(run, &items, &messages, focus));
+    item.ref_item = about.to_string();
+    item.run_in = "headless".into();
+    team::insert_item(conn, &item).map_err(e2s)?;
+    Ok(Some(item))
+}
+
 /// The manager a member answers to, as a snapshot — `None` for the lead and for a fixed plan.
 fn manager_of<'a>(run: &'a Run, member_id: &str) -> Option<&'a MemberSnap> {
     let members = members_of(run);
@@ -868,9 +916,63 @@ pub async fn settle_core(db: &Db, item_id: &str, outcome: &str, text: &str, erro
 /// A turn that did not get its job done. Retried while attempts remain (with the reason in front of
 /// it), then handed to the member's escalation, then to the lead, then to the user.
 async fn on_failure(db: &Db, run: &Run, mut item: Item, reason: &str, kind: &str) -> Result<(), String> {
+    let repeated = !item.last_error.is_empty() && first_line(&item.last_error, 200) == first_line(reason, 200);
+    // Before paying for another attempt: is retrying it even the right call? The decision layer
+    // answers when it is sure; when it is not, the policy's own order (retry, then escalate) stands.
+    let escalate_to = member(run, &item.member_id).map(|m| m.member.escalate_to.clone()).filter(|e| !e.is_empty());
+    let mut options: Vec<String> = vec!["reintentar".into()];
+    if escalate_to.is_some() {
+        options.push("escalar".into());
+    }
+    if !run.lead.is_empty() && !item.is_lead() {
+        options.push("replanificar".into());
+    }
+    let verdict = if run.policy.decider && item.attempts < run.policy.max_attempts && options.len() > 1 {
+        let context = format!(
+            "Tarea `{}` de {} ({}): {}\nIntento {} de {}. Tipo de fallo: {kind}.{}\nError:\n{}",
+            item.key,
+            item.member_name,
+            item.kind,
+            item.title,
+            item.attempts,
+            run.policy.max_attempts,
+            if repeated { " El error es el mismo que en el intento anterior." } else { "" },
+            trim_chars(reason, 1500)
+        );
+        Some(
+            crate::decide::decide(
+                db,
+                crate::decide::Decision {
+                    kind: "retry".into(),
+                    question: "¿Qué conviene hacer con esta tarea que falló?".into(),
+                    options,
+                    context,
+                    workspace_id: run.workspace_id.clone(),
+                    run_id: run.id.clone(),
+                    item_id: item.id.clone(),
+                },
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    let sharp_choice = verdict.as_ref().filter(|v| v.sharp).and_then(|v| v.choice.clone());
     with(db, |c| {
+        if let (Some(v), Some(choice)) = (verdict.as_ref(), sharp_choice.as_deref()) {
+            team::post(c, &run.id, &item.id, ("system", "Decisor"), ("all", "Equipo"), "decision", &format!("«{}» falló: {choice} (p = {:.2}, {})", item.title, v.p, v.source), &[]).map_err(e2s)?;
+        }
+        let decided_stop = matches!(sharp_choice.as_deref(), Some("escalar") | Some("replanificar"));
         item.last_error = reason.to_string();
-        if item.attempts < run.policy.max_attempts {
+        if item.attempts < run.policy.max_attempts && !decided_stop {
+            // The same error twice: the advisor looks before the third try, which waits for it.
+            if repeated && item.attempts >= 2 {
+                if let Some(advice) = new_advice(c, run, &item.id, &format!("La tarea `{}` falló dos veces con el mismo error. ¿Qué debería cambiar el próximo intento?", item.key))? {
+                    if !item.depends_on.contains(&advice.id) {
+                        item.depends_on.push(advice.id.clone());
+                    }
+                }
+            }
             // A retry climbs the member's model ladder, cheapest first, one step per failure.
             if let Some(m) = member(run, &item.member_id) {
                 let ladder = &m.member.model_ladder;
@@ -890,8 +992,10 @@ async fn on_failure(db: &Db, run: &Run, mut item: Item, reason: &str, kind: &str
         let who = (item.member_id.as_str(), item.member_name.as_str());
         team::post(c, &run.id, &item.id, who, ("all", "Equipo"), "error", &format!("«{}» falló {} veces: {}", item.title, item.attempts, first_line(reason, 400)), &[])
             .map_err(e2s)?;
-        // Escalation: the same item, from scratch, for the member the policy names.
-        if let Some(next) = member(run, &item.member_id).map(|m| m.member.escalate_to.clone()).filter(|e| !e.is_empty()).and_then(|e| member(run, &e).cloned()) {
+        // Escalation: the same item, from scratch, for the member the policy names — unless the
+        // decision layer said the plan, not the member, is what has to change.
+        let escalation = if sharp_choice.as_deref() == Some("replanificar") { None } else { escalate_to.clone() };
+        if let Some(next) = escalation.and_then(|e| member(run, &e).cloned()) {
             if !item.key.ends_with("-esc") && (next.member.edits || !item.writes()) {
                 let items = team::list_items(c, &run.id).map_err(e2s)?;
                 let mut again = team::new_item(run, &team::free_key(&items, &format!("{}-esc", item.key)), Some(&next), &item.project_id, &item.kind, &item.title, &item.instruction);
@@ -934,6 +1038,9 @@ async fn on_ok(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), Str
         item.status = "waiting".into();
         with(db, |c| team::update_item(c, &item).map_err(e2s))?;
         return Ok(());
+    }
+    if item.kind == "advise" {
+        return with(db, |c| on_advice(c, run, item, text));
     }
     let repo = with(db, |c| team::list_repos(c, &run.id).map_err(e2s))?.into_iter().find(|r| r.project_id == item.project_id);
     match item.kind.as_str() {
@@ -1017,6 +1124,33 @@ async fn on_ok(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), Str
             Ok(())
         }
     }
+}
+
+/// The advisor answered: its advice goes to the lead and to you, and into whatever it was asked
+/// about — the plan's gate, the final look, or the next attempt of a failing item.
+fn on_advice(conn: &Connection, run: &Run, mut item: Item, text: &str) -> Result<(), String> {
+    let advice = protocol::prose(text);
+    item.status = "done".into();
+    item.finished_at = queries::now();
+    team::update_item(conn, &item).map_err(e2s)?;
+    let from = (item.member_id.as_str(), item.member_name.as_str());
+    let lead = if run.lead.is_empty() { ("user".to_string(), "Tú".to_string()) } else { ("lead".to_string(), lead_name(run)) };
+    team::post(conn, &run.id, &item.id, from, (&lead.0, &lead.1), "advice", &trim_chars(&advice, 2000), &[]).map_err(e2s)?;
+    match item.ref_item.as_str() {
+        "plan" => {
+            if run.policy.approve_plan {
+                team::set_run_status(conn, &run.id, "gated", "plan", &format!("Revisa el plan del líder. El asesor dice: {}", first_line(&advice, 300))).map_err(e2s)?;
+            }
+        }
+        "final" => {}
+        target => {
+            if let Some(mut failing) = team::get_item(conn, target).map_err(e2s)? {
+                failing.feedback = format!("{}\n\nEl asesor sugiere:\n{}", failing.feedback, trim_chars(&advice, 2000)).trim().to_string();
+                team::update_item(conn, &failing).map_err(e2s)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn handoff(conn: &Connection, run: &Run, item: &Item) -> Result<(), String> {
@@ -1379,8 +1513,19 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
             fresh.push((new, p.depends_on.clone()));
         }
         let added = fresh.len();
+        // The first plan of the lead is read by the advisor before anything in it starts.
+        let first_plan_now = !sub_lead && item.kind == "plan" && added > 0 && !items.iter().any(|i| i.kind == "plan" && i.id != item.id && i.status == "done");
+        let advice = if first_plan_now {
+            let plan_text: Vec<String> = reply.items.iter().map(|p| format!("- `{}` {} → {}", p.key, p.title, member(run, &p.member_id).map(|m| m.member.name.clone()).unwrap_or_default())).collect();
+            new_advice(c, run, "plan", &format!("El líder propone este plan:\n{}\n¿Falta algo, sobra algo, o hay un riesgo que no vio?", plan_text.join("\n")))?
+        } else {
+            None
+        };
         for (mut new, deps) in fresh {
             new.depends_on = deps.iter().filter_map(|k| key_to_id.get(k).cloned()).collect();
+            if let Some(a) = &advice {
+                new.depends_on.push(a.id.clone());
+            }
             team::insert_item(c, &new).map_err(e2s)?;
             team::post(c, &run.id, &new.id, from, (&new.member_id, &new.member_name), "plan", &format!("asignó «{}»", new.title), &[]).map_err(e2s)?;
         }
@@ -1417,7 +1562,8 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
 
         // The first plan waits for the user when the policy says so.
         let first_plan = !sub_lead && item.kind == "plan" && !items.iter().any(|i| i.kind == "plan" && i.id != item.id && i.status == "done");
-        if first_plan && run.policy.approve_plan && added > 0 {
+        // With an advisor reading the plan, the gate waits for its advice (`on_advice`).
+        if first_plan && run.policy.approve_plan && added > 0 && advice.is_none() {
             team::set_run_status(c, &run.id, "gated", "plan", "Revisa el plan del líder antes de que el equipo empiece.").map_err(e2s)?;
         }
         Ok(())
@@ -1489,7 +1635,14 @@ async fn advance(db: &Db, run_id: &str) -> Result<(), String> {
     // The lead's last look.
     if !run.lead.is_empty() && !run.lead_done && run.policy.lead_final_check {
         let made = with(db, |c| {
-            new_lead_item(c, &run, "final", "Todo lo asignado está hecho. Revisa las entregas: si falta algo, asígnalo; si está completo, responde `\"terminar\": true`.", "")
+            let made = new_lead_item(c, &run, "final", "Todo lo asignado está hecho. Revisa las entregas: si falta algo, asígnalo; si está completo, responde `\"terminar\": true`.", "")?;
+            if let Some(mut final_item) = made.clone() {
+                if let Some(advice) = new_advice(c, &run, "final", "El equipo cree que terminó. ¿Hay algo que se le escapó antes de integrar?")? {
+                    final_item.depends_on.push(advice.id.clone());
+                    team::update_item(c, &final_item).map_err(e2s)?;
+                }
+            }
+            Ok(made)
         })?;
         if made.is_some() {
             return Ok(());
@@ -1928,7 +2081,10 @@ pub async fn team_delete_run(db: State<'_, Db>, run_id: String) -> Result<(), St
         })
         .await;
     }
-    with(&db, |c| team::delete_run(c, &run_id).map_err(e2s))
+    with(&db, |c| {
+        crate::crew::delete_decisions_for_run(c, &run_id).map_err(e2s)?;
+        team::delete_run(c, &run_id).map_err(e2s)
+    })
 }
 
 #[cfg(test)]
@@ -2233,6 +2389,53 @@ mod tests {
         assert_eq!(state.run.status, "running");
         assert!((state.run.policy.budget_usd - 0.75).abs() < 1e-9);
         assert!(!claim(&db, &run_id).await.unwrap().is_empty() || state_of(&db, &run_id).unwrap().run.gate == "budget");
+    }
+
+    #[tokio::test]
+    async fn the_advisor_reads_the_plan_before_it_runs() {
+        let (_serial, _dir, db, ws, project, [lead, dev, qa]) = fixture();
+        with(&db, |c| {
+            queries::set_setting(c, crate::decide::SETTING_KEY, r#"{"engine":"off"}"#).map_err(e2s)?;
+            Ok(())
+        })
+        .unwrap();
+        let tm = with(&db, |c| {
+            team::save_team(
+                c,
+                team::Team {
+                    workspace_id: ws.clone(),
+                    name: "Equipo".into(),
+                    lead: "l".into(),
+                    members: vec![
+                        team::Member { id: "l".into(), agent_id: lead.clone(), name: "Líder".into(), edits: false, ..Default::default() },
+                        team::Member { id: "d".into(), agent_id: dev.clone(), name: "Dev".into(), ..Default::default() },
+                        team::Member { id: "a".into(), agent_id: qa.clone(), name: "Asesor".into(), edits: false, advisor: true, ..Default::default() },
+                    ],
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+        let state = start_run(&db, ws.clone(), tm.id.clone(), "Crea y.txt".into(), None, vec![RepoPick { project_id: project.clone(), target_branch: String::new() }], None, None)
+            .await
+            .unwrap();
+        let run_id = state.run.id.clone();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert!(!d[0].message.contains("**Asesor**"), "the advisor is never offered as a worker");
+        let state = settle_core(&db, &d[0].item.id, "ok", "```equipo\n{\"items\":[{\"id\":\"y\",\"miembro\":\"Dev\",\"tarea\":\"crea y.txt\"}]}\n```", "").await.unwrap();
+        // No gate yet: the advisor reads first, and the work waits for it.
+        assert_eq!(state.run.status, "running");
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].item.kind, "advise");
+        assert!(d[0].message.contains("El líder propone este plan"));
+        let state = settle_core(&db, &d[0].item.id, "ok", "Falta un test para y.txt.", "").await.unwrap();
+        assert_eq!(state.run.gate, "plan");
+        assert!(state.run.gate_note.contains("Falta un test"));
+        assert!(state.messages.iter().any(|m| m.kind == "advice"));
+        decide(&db, &run_id, true, "").await.unwrap();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d[0].item.key, "y");
     }
 
     #[tokio::test]

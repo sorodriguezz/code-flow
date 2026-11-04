@@ -5853,6 +5853,18 @@ pub async fn chat_title(engine: &dyn AiEngine, binary: &str, model: &str, questi
     Ok(run(engine, binary, inv).await?.text)
 }
 
+/// One vote of the decision layer (`crate::decide`) on a cloud model: a finite question, answered
+/// in JSON under `schema`. Text only and read-only — the cheapest call the CLI can make.
+pub async fn decide_vote(engine: &dyn AiEngine, binary: &str, model: &str, system: &str, question: &str, schema: &str) -> Result<String, String> {
+    let mut inv = AiInvocation::new(system, question);
+    inv.model = model;
+    inv.task = task::OTHER;
+    inv.text_only = true;
+    inv.read_only = true;
+    inv.json_schema = Some(schema);
+    Ok(run(engine, binary, inv).await?.text)
+}
+
 /// What «Resumen hablado» is told when `spoken_summary_template` is blank.
 pub const SPOKEN_SUMMARY_PROMPT: &str = "Recibes por la entrada estándar una respuesta escrita por un asistente de IA. \
     Resúmela para decirla en voz alta: quien la oye no está mirando la pantalla.\n\n\
