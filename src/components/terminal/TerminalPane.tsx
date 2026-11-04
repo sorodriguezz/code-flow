@@ -38,6 +38,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushSuccessToast } from "../../state/toastStore";
 import { AiSparkles } from "../common/AiGlyph";
 import { findFileRefs, quotePath, resolveRef } from "./fileLinks";
+import { useRepoSummaryStore } from "../../state/repoSummaryStore";
 import { installShellIntegration, type FinishedCommand, type ShellIntegration } from "./shellIntegration";
 import { formatDuration } from "./shellMarks";
 import { useThemeStore } from "../../state/themeStore";
@@ -697,6 +698,9 @@ export function TerminalPane({
         // gone from the screen by the time anyone right-clicks.
         lastDoneRef.current = done;
         notifyIfUnwatched(done);
+        // A `git commit` / `git push` typed here moves the numbers beside the repository's row in the
+        // projects panel; re-read it now rather than on the panel's next minute.
+        if (cwdRef.current) useRepoSummaryStore.getState().refreshForCwd(cwdRef.current);
       },
       colors: () => {
         const styles = getComputedStyle(document.documentElement);

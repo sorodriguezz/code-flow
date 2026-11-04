@@ -24,6 +24,8 @@ import { CostChip, formatResponseTime, parseStamp, useCopy, useLocale } from "./
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { fenceLabelOf, highlightCodeBlocks, languageOf } from "../../lib/codeHighlight";
 import { splitQuestions } from "../../lib/chatQuestions";
+import { splitArtifacts } from "../../lib/chatArtifacts";
+import { ArtifactCards } from "./ArtifactCards";
 import { QuestionCard } from "./QuestionCard";
 import { ContextBars } from "./ContextBars";
 import { useConversationStore } from "../../state/conversationStore";
@@ -239,9 +241,15 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   const sentFiles = message.role === "user" ? (message.attachments ?? noted?.files ?? []) : [];
   const copyText = noted?.text ?? message.content;
   // The questions a finished answer ends with, drawn as a card under it instead of as code.
-  const asked = useMemo(
-    () => (message.role === "assistant" && !message.isError && !streaming ? splitQuestions(copyText) : null),
+  // Its artifacts first (`lib/chatArtifacts`): drawn as cards, and out of the text before the
+  // questions are looked for, so a block inside one stays the artifact's.
+  const lifted = useMemo(
+    () => (message.role === "assistant" && !message.isError && !streaming ? splitArtifacts(copyText) : null),
     [message.role, message.isError, streaming, copyText],
+  );
+  const asked = useMemo(
+    () => (lifted ? splitQuestions(lifted.text) : null),
+    [lifted],
   );
   const body = streaming ? streamText : (asked?.text ?? copyText);
   // What `/context` printed, drawn as bars under it. Only an answer that says so — a table of tokens
@@ -556,6 +564,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
         )}
       </div>
       {contextBreakdown && <ContextBars breakdown={contextBreakdown} />}
+      {lifted && lifted.artifacts.length > 0 && <ArtifactCards artifacts={lifted.artifacts} projectId={codeTarget?.projectId ?? null} />}
       {asked && asked.questions.length > 0 && <QuestionCard questions={asked.questions} onAnswer={actions?.onAnswer} />}
       {/* The files the turn read or changed — its sources — then the files it wrote. Both are part
           of what this turn said; the row after them is what you *do* about it. */}

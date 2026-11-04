@@ -64,6 +64,8 @@ pub const TABLES: &[&str] = &[
     "workspace_chain_templates",
     "workspace_chain_template_steps",
     "agent_projects",
+    // «Equipo» templates: who is in a team and its rules — configuration, like the roster.
+    "agent_teams",
     // Authored content: things the user wrote and edited, as opposed to things the app recorded.
     "story_batches",
     "story_drafts",
@@ -174,6 +176,8 @@ pub const TABLES: &[&str] = &[
     "conversation_titles",
     // The assistant panel's `/clear`s, beside the titles they are keyed like.
     "conversation_resets",
+    // Which assistant conversation is a subchat of which (`chat_lineage`), beside them too.
+    "chat_lineage",
     // The chat workspace. Conversations before messages: a message points at the thread it is in.
     //
     // Beside `activity_log` rather than with the authored content above, because these rows are the
@@ -183,6 +187,9 @@ pub const TABLES: &[&str] = &[
     "chat_groups",
     "chat_conversations",
     "chat_messages",
+    // The artifacts the chats' answers carried (`chat_refs::artifacts`): after their workspace and
+    // project, and beside the transcripts they were lifted out of.
+    "chat_artifacts",
     "review_runs",
     "agent_tasks",
     "agent_chains",
@@ -194,6 +201,11 @@ pub const TABLES: &[&str] = &[
     // A hybrid run's configuration and its plan, both hanging off the chain they belong to.
     "hybrid_runs",
     "hybrid_items",
+    // A team run and what hangs off it: its repositories, items and channel.
+    "agent_team_runs",
+    "agent_team_repos",
+    "agent_team_items",
+    "agent_team_messages",
     // The local AI platform: what the user approved as memory (with its history), the document
     // folders they added as knowledge, the evidence kept about AI answers, and the bench's reports
     // with the tool verdicts they gave — a report from the 4090 compared with one from the Mac is
@@ -337,6 +349,8 @@ pub const CORE_TABLES: &[&str] = &[
     "workspace_chain_templates",
     "workspace_chain_template_steps",
     "agent_projects",
+    // «Equipo» templates: who is in a team and its rules — configuration, like the roster.
+    "agent_teams",
     // The Services workspace's definitions. Core rather than an optional group, and beside the
     // agent roster rather than beside the Remote hosts, because of what they *are*: a service is
     // configuration — the command, the folder, the order somebody worked out once — not content
@@ -435,6 +449,7 @@ pub const GROUPS: &[Group] = &[
             "activity_log",
             "conversation_titles",
             "conversation_resets",
+            "chat_lineage",
             // The chat workspace's threads and their messages. Here rather than in a switch of
             // their own for the reason the group's name argues: to the person reading the settings
             // panel, "conversations" is one thing, and somebody who chose not to carry the AI
@@ -449,6 +464,7 @@ pub const GROUPS: &[Group] = &[
             "chat_groups",
             "chat_conversations",
             "chat_messages",
+            "chat_artifacts",
             "workspace_activity",
             "job_history",
             "ai_usage",
@@ -479,6 +495,10 @@ pub const GROUPS: &[Group] = &[
             "agent_chain_laps",
             "hybrid_runs",
             "hybrid_items",
+            "agent_team_runs",
+            "agent_team_repos",
+            "agent_team_items",
+            "agent_team_messages",
         ],
     },
     Group {

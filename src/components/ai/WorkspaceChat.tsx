@@ -9,6 +9,7 @@ import { AttachmentBar } from "../chat/AttachmentBar";
 import { AnswerLengthPicker } from "../chat/AnswerLengthPicker";
 import { CavemanChip } from "../chat/CavemanChip";
 import { ChatFindBar, useChatFind } from "../chat/ChatFind";
+import { ChatArtifactsStrip } from "../chat/ArtifactCards";
 import { ContextMeter, type ContextReading } from "../chat/ContextMeter";
 import { SkillChip } from "../chat/ChatComposer";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
@@ -47,6 +48,7 @@ import { useLanguageStore, useT } from "../../state/languageStore";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { EMPTY_WS_CHAT, EMPTY_WS_LIST, pinWsChat, useWorkspaceChatStore, wsChatQueueKey, type WsChatMessage } from "../../state/workspaceChatStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { ChatLineageButtons, SubchatRow } from "./ChatLineage";
 
 const STICK_PX = 48;
 const MAX_COMPOSER_HEIGHT = 180;
@@ -471,6 +473,10 @@ export function WorkspaceChat({
   );
 
   const workspaceName = useWorkspaceStore((s) => s.workspaces.find((w) => w.id === workspaceId)?.name ?? "");
+  const lineage = useMemo(
+    () => ({ surface: "ws" as const, scopeId: workspaceId, workspaceId, conversationId }),
+    [workspaceId, conversationId],
+  );
   /** The workspace's project a turn's repository folder belongs to — «Abrir» switches to it. */
   const projectOfPath = (path: string) => projects.find((p) => samePath(p.local_path, path));
 
@@ -540,7 +546,15 @@ export function WorkspaceChat({
         >
           <SquarePen size={12} />
         </button>
+        <ChatLineageButtons
+          scope={lineage}
+          title={session.title}
+          busy={session.sending || queuedMessages.length > 0}
+          persisted={session.persisted && session.messages.length > 0}
+        />
       </div>
+      <SubchatRow scope={lineage} />
+      <ChatArtifactsStrip workspaceId={workspaceId} conversationId={conversationId} />
       <div ref={scrollRef} onScroll={onScroll} tabIndex={-1} onContextMenu={textMenu.onText} className="cf-paper-scroll relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none">
         {exportMenu && (
           <ContextMenu

@@ -936,6 +936,8 @@ export const upsertWorkspaceAgent = (
   enabled: boolean,
   /** `null` automatic, `"system"`, or an account id. */
   account?: string | null,
+  /** The reasoning level (`low`…`max`, `""` the CLI's default). Absent keeps the agent's own. */
+  effort?: string,
 ) =>
   invoke<WorkspaceAgent>("upsert_workspace_agent", {
     id: id ?? null,
@@ -947,7 +949,17 @@ export const upsertWorkspaceAgent = (
     prompt,
     enabled,
     account: account ?? null,
+    effort: effort ?? null,
   });
+
+/** The `--model` / reasoning arguments for an agent CLI started in a terminal — see
+ *  `terminal_cmd::agent_cli_routing_args`. */
+export const agentCliRoutingArgs = (provider: string, model: string, effort: string) =>
+  invoke<string[]>("agent_cli_routing_args", { provider, model, effort });
+
+/** Whether that terminal session can be given a reasoning level for this model. */
+export const agentCliEffortSupport = (provider: string, model: string) =>
+  invoke<boolean>("agent_cli_effort_support", { provider, model });
 
 export const deleteWorkspaceAgent = (id: string) => invoke<void>("delete_workspace_agent", { id });
 

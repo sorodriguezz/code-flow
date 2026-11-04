@@ -1,8 +1,10 @@
 import { useEffect } from "react";
 import { create } from "zustand";
 import { listPullRequestsPage, repoSummaries, type RepoSummary } from "../lib/tauri/commands";
+import { onRepoFsChanged } from "../lib/tauri/events";
 import type { Project } from "../types/domain";
 import { saving } from "./powerSaveStore";
+import { useRepoStore } from "./repoStore";
 
 /**
  * What the projects panel says about the repositories that are *not* open: the branch, how many
@@ -12,7 +14,22 @@ import { saving } from "./powerSaveStore";
  * name and nothing else. Read when the window comes forward and every minute while it is on
  * screen — local git only. Pull requests are someone else's API with a quota, so they are read at
  * most every five minutes, and only for projects linked to a host.
+ *
+ * The minute is only the floor. A row must not go on saying "41 changed" for a minute after the
+ * commit that cleared them, so a repository is also re-read as soon as something says it moved:
+ * its watcher (`repo:fs-changed`, for any repository a window watches), a command finishing in a
+ * terminal standing in it, and a git action the app ran on it (`REPO_TOUCHED_EVENT`). And the open
+ * repository's live state is copied in as it changes, so the row it leaves behind on a switch shows
+ * what it was a moment ago, not what the last tick saw.
  */
+
+/** Raised (on `window`) with `{ path }` by whatever changed a repository it is not showing — a
+ *  commit or push from a picker on another repository. An event, not a call: `repoStore` must not
+ *  import this store. */
+export const REPO_TOUCHED_EVENT = "cf:repo-touched";
+
+/** How long a burst of "it moved" signals is let settle before the one read it costs. */
+const SOON_MS = 350;
 
 /** How many ticks battery saving folds into one (`powerSaveStore`). */
 const SAVING_STRIDE = 3;
@@ -33,6 +50,10 @@ interface RepoSummaryState {
   byPath: Record<string, RepoSummary>;
   prsByProject: Record<string, OpenPrs>;
   refresh: (paths: string[]) => Promise<void>;
+  /** Re-reads one repository shortly, folding a burst of calls into one read. */
+  refreshSoon: (path: string) => void;
+  /** The repository a folder is in, among those already summarised, re-read shortly. */
+  refreshForCwd: (cwd: string) => void;
   refreshPrs: (projects: Project[]) => Promise<void>;
   /** The pull-request section of this project was looked at: what is open now is no longer new. */
   markPrsSeen: (projectId: string) => void;
@@ -41,6 +62,42 @@ interface RepoSummaryState {
 /** Ids seen per project. Per session: "new since you last looked", not a read receipt. */
 const seen = new Map<string, Set<number>>();
 const latest = new Map<string, number[]>();
+/** Pending `refreshSoon` timers by path. */
+const soon = new Map<string, number>();
+
+/** Separators made one kind and the trailing one dropped, so `C:\\a\\b\\` and `C:/a/b` compare. */
+const normal = (path: string) => path.replace(/\\/g, "/").replace(/\/+$/, "");
+
+/** The deepest of `repos` that `cwd` is inside (or is), or `null`. Pure. */
+export function repoForCwd(repos: string[], cwd: string): string | null {
+  const here = normal(cwd);
+  let best: string | null = null;
+  for (const repo of repos) {
+    const root = normal(repo);
+    if (here !== root && !here.startsWith(`${root}/`)) continue;
+    if (!best || root.length > normal(best).length) best = repo;
+  }
+  return best;
+}
+
+/** The open repository's live state, in the summary's shape. Pure. */
+export function summaryFromLive(
+  path: string,
+  status: NonNullable<ReturnType<typeof useRepoStore.getState>["status"]>,
+  branches: ReturnType<typeof useRepoStore.getState>["branches"],
+): RepoSummary {
+  const head = branches.find((b) => b.is_head && !b.is_remote) ?? null;
+  return {
+    path,
+    branch: status.current_branch,
+    detached: status.is_detached,
+    changed: new Set([...status.staged, ...status.unstaged, ...status.untracked].map((f) => f.path)).size,
+    conflicted: status.conflicted.length,
+    ahead: head ? head.ahead : null,
+    behind: head ? head.behind : null,
+    error: null,
+  };
+}
 
 export function isLinked(project: Project): boolean {
   return Boolean(project.github_repo || project.gitlab_project || project.ado_repo_id || project.bitbucket_repo);
@@ -59,6 +116,24 @@ export const useRepoSummaryStore = create<RepoSummaryState>((set, get) => ({
       for (const summary of summaries) byPath[summary.path] = summary;
       return { byPath };
     });
+  },
+
+  refreshSoon: (path) => {
+    if (!path) return;
+    const pending = soon.get(path);
+    if (pending !== undefined) window.clearTimeout(pending);
+    soon.set(
+      path,
+      window.setTimeout(() => {
+        soon.delete(path);
+        void get().refresh([path]);
+      }, SOON_MS),
+    );
+  },
+
+  refreshForCwd: (cwd) => {
+    const repo = repoForCwd(Object.keys(get().byPath), cwd);
+    if (repo) get().refreshSoon(repo);
   },
 
   refreshPrs: async (projects) => {
@@ -136,10 +211,34 @@ export function useRepoSummaryPolling(projects: Project[], skip: (project: Proje
       if (now - lastPrs > PRS_EVERY_MS / 2) prs();
     };
     window.addEventListener("focus", onFocus);
+
+    // The signals that a repository moved, between ticks (see the store's note).
+    const onTouched = (event: Event) => {
+      const path = (event as CustomEvent<{ path?: string }>).detail?.path;
+      if (path) store.refreshSoon(path);
+    };
+    window.addEventListener(REPO_TOUCHED_EVENT, onTouched);
+    let unlistenFs: (() => void) | null = null;
+    let gone = false;
+    void onRepoFsChanged((e) => store.refreshSoon(e.repo_path))
+      .then((off) => (gone ? off() : (unlistenFs = off)))
+      .catch(() => {});
+    // The open repository, copied in as it changes. Skipped on the switch itself: what lands then is
+    // a snapshot from when that repository was left, and the summary may well be newer.
+    const stopMirror = useRepoStore.subscribe((now, before) => {
+      if (!now.repoPath || !now.status || now.repoPath !== before.repoPath) return;
+      if (now.status === before.status && now.branches === before.branches) return;
+      const mirrored = summaryFromLive(now.repoPath, now.status, now.branches);
+      useRepoSummaryStore.setState((s) => ({ byPath: { ...s.byPath, [mirrored.path]: mirrored } }));
+    });
     return () => {
+      gone = true;
       window.clearInterval(summaryTimer);
       window.clearInterval(prTimer);
       window.removeEventListener("focus", onFocus);
+      window.removeEventListener(REPO_TOUCHED_EVENT, onTouched);
+      unlistenFs?.();
+      stopMirror();
     };
     // `key` stands for the list; `skip` reads stores that change on their own clock.
     // eslint-disable-next-line react-hooks/exhaustive-deps

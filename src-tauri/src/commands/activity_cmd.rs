@@ -67,6 +67,7 @@ pub fn delete_chat_conversation(db: State<'_, Db>, project_id: String, session_i
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::delete_chat_conversation(&conn, &project_id, &session_id).map_err(|e| e.to_string())?;
+        crate::chat_lineage::forget(&conn, &session_id).map_err(|e| e.to_string())?;
     }
     // Its images go with it — best effort, and outside the lock; the startup sweep collects
     // whatever this misses.
@@ -96,6 +97,11 @@ pub fn branch_chat_conversation(
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     let copied = queries::branch_chat_conversation(&tx, &project_id, &session_id, &new_session_id, &through, &title)
         .map_err(|e| e.to_string())?;
+    // A branch is a subchat of what it came from.
+    if copied > 0 {
+        crate::chat_lineage::link(&tx, &new_session_id, "panel", &session_id, "branch", &project_id, None)
+            .map_err(|e| e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(copied)
 }

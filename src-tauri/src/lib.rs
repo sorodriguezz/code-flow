@@ -36,10 +36,12 @@ mod agentstatus;
 mod chain_memory;
 mod custom;
 mod chat_mcp;
+mod chat_refs;
 mod archify_suggest;
 mod codemap;
 mod context;
 mod chat_title;
+mod chat_lineage;
 mod git_exclude;
 mod ci;
 mod boards;
@@ -83,6 +85,7 @@ mod npm;
 mod localai;
 mod local_history;
 mod hybrid;
+mod team;
 mod mcp_registry;
 mod model_registry;
 mod lsp;
@@ -408,6 +411,21 @@ pub fn askpass_helper() -> Option<i32> {
 }
 
 pub fn run() {
+    // Before anything touches `tauri::async_runtime`, which would otherwise build tokio's default
+    // runtime: workers with 2 MB stacks. Every async command and spawned task runs there, and a debug
+    // build — which neither overlaps stack slots nor elides the copies an `async fn` makes moving a
+    // future into a wrapper — overflowed one with a single chat turn (`send_chat_message`). 8 MB, as
+    // the main thread has on macOS and Linux; address space, committed only as it is touched.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("tokio-rt-worker")
+        .thread_stack_size(8 * 1024 * 1024)
+        .build()
+        .expect("tokio runtime");
+    tauri::async_runtime::set(runtime.handle().clone());
+    // Lives as long as the process: Tauri only holds the handle.
+    std::mem::forget(runtime);
+
     // First, before anything that can fail. Everything from here to the window appearing runs with
     // no way to report itself — no console on Windows, no window anywhere — and two of the steps
     // below now move the user's database between directories. See `applog`, which until v1.19 did
@@ -1134,6 +1152,9 @@ sharded_invoke_handler! {
         agentcli::agentcli_endpoint,
         agentcli::agentcli_focus,
         windows::open_satellite,
+        chat_lineage::chat_lineage_list,
+        chat_lineage::chat_lineage_link,
+        chat_lineage::chat_lineage_forget,
         windows::focus_satellite,
         windows::list_satellites,
         windows::restore_satellites,
@@ -1881,6 +1902,29 @@ sharded_invoke_handler! {
         commands::terminal_cmd::terminal_agent_states,
         commands::terminal_cmd::terminal_set_agent,
         commands::terminal_cmd::agent_launch_files,
+        commands::terminal_cmd::agent_cli_routing_args,
+        commands::team_cmd::team_list,
+        commands::team_cmd::team_save,
+        commands::team_cmd::team_delete,
+        commands::team_cmd::team_runs,
+        commands::team_cmd::team_run_state,
+        commands::team_cmd::team_run_meta,
+        commands::team_cmd::team_start,
+        commands::team_cmd::team_claim,
+        commands::team_cmd::team_settle,
+        commands::team_cmd::team_answer,
+        commands::team_cmd::team_note,
+        commands::team_cmd::team_decide,
+        commands::team_cmd::team_control,
+        commands::team_cmd::team_item_terminal,
+        commands::team_cmd::team_delete_run,
+        commands::chat_refs_cmd::chat_artifacts_list,
+        commands::chat_refs_cmd::chat_artifact_versions,
+        commands::chat_refs_cmd::chat_artifact_delete,
+        commands::chat_refs_cmd::chat_refs_list,
+        commands::chat_refs_cmd::chat_delegate_accept,
+        commands::chat_refs_cmd::chat_delegate_settle,
+        commands::terminal_cmd::agent_cli_effort_support,
         commands::terminal_cmd::list_workspace_terminals,
         commands::terminal_cmd::add_workspace_terminal,
         commands::terminal_cmd::resume_workspace_terminal,

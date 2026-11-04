@@ -49,8 +49,12 @@ export const MAIN_LABEL = "main";
  * `codi` is the voice assistant's window (`windows::open_codi`, `window.html?kind=codi&ref=codi`):
  * like `quick`, a satellite only mechanically — its own command builds it, it holds no screen of
  * the app and scopes to nothing. See `components/codi/CodiWindow`.
+ *
+ * `chat` is one assistant conversation torn out of the side panel — see `lib/chatIslands`. Its
+ * `refId` is `"panel:<project id>:<conversation id>"` or `"ws:<workspace id>:<conversation id>"`.
+ * Not counted against the island limit.
  */
-export type SatelliteKind = "app" | "repo" | "quick" | "file" | "codi" | "attention";
+export type SatelliteKind = "app" | "repo" | "quick" | "file" | "codi" | "attention" | "chat";
 
 /**
  * The kinds a window can be *detached into*, which is not all of them.
@@ -111,7 +115,7 @@ export function parseIdentity(label: string, search: string): WindowIdentity {
     // except that it happens on a window that is working perfectly: the webview loads, the label is
     // right, and `SatelliteApp` is handed `satellite: null` and paints a skeleton forever.
     satellite:
-      (kind === "app" || kind === "repo" || kind === "quick" || kind === "file" || kind === "codi" || kind === "attention") && refId
+      (kind === "app" || kind === "repo" || kind === "quick" || kind === "file" || kind === "codi" || kind === "attention" || kind === "chat") && refId
         ? { kind, refId }
         : null,
   };

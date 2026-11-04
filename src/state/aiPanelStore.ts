@@ -4,6 +4,7 @@ import type { PrTarget } from "../lib/prTarget";
 import type { PullRequestSummary } from "../types/domain";
 import { useUiStore } from "./uiStore";
 import { useWorkspaceStore } from "./workspaceStore";
+import { useChatLineageStore } from "./chatLineageStore";
 
 /**
  * What the assistant panel shows, and the one way to change it.
@@ -75,11 +76,17 @@ export type PanelTab =
 /** Something to put on screen. `finding` opens that finding in the document it belongs to. */
 export type PanelTarget =
   | { kind: "inbox"; workspaceId?: string | null }
-  | { kind: "chat"; projectId: string; conversationId?: string | null }
+  | {
+      kind: "chat";
+      projectId: string;
+      conversationId?: string | null;
+      /** A conversation id minted by the caller for a blank chat — «Nuevo subchat» links it first. */
+      fresh?: boolean;
+    }
   | { kind: "pr"; projectId: string; pr: PullRequestSummary; finding?: string | null }
   | { kind: "prLink"; session: LinkPrSession; finding?: string | null }
   | { kind: "analysis"; projectId: string; jobId?: string | null; finding?: string | null }
-  | { kind: "wsChat"; workspaceId: string; conversationId?: string | null; focusChainId?: string | null };
+  | { kind: "wsChat"; workspaceId: string; conversationId?: string | null; focusChainId?: string | null; fresh?: boolean };
 
 export type DocSegment = "findings" | "comments" | "summary";
 
@@ -240,7 +247,7 @@ function schedule(key: string, write: () => Promise<void>): void {
 }
 
 function persistWorkspace(workspaceId: string): void {
-  if (workspaceId === NO_WORKSPACE) return;
+  if (workspaceId === NO_WORKSPACE || persistenceOff) return;
   schedule(settingKey(workspaceId), async () => {
     await useAiPanelStore.getState().load(workspaceId);
     const s = useAiPanelStore.getState();
@@ -261,6 +268,7 @@ function persistWorkspace(workspaceId: string): void {
 }
 
 function persistDrafts(): void {
+  if (persistenceOff) return;
   schedule(DRAFTS_KEY, async () => {
     await loadDrafts();
     const entries = Object.entries(useAiPanelStore.getState().drafts)
@@ -340,6 +348,38 @@ export function isTabVisible(key: string, workspaceId: string | null): boolean {
   return (useAiPanelStore.getState().activeByWorkspace[active] ?? INBOX_KEY) === key;
 }
 
+/**
+ * Where a chat target goes instead of a tab, when it does: the conversation is open in a chat island
+ * (that window comes forward), or this window *is* a chat island and has no panel (the main window
+ * opens it). Registered by `lib/chatIslands`; returns `true` when it took the target.
+ */
+export type ChatPanelTarget = Extract<PanelTarget, { kind: "chat" | "wsChat" }>;
+type OpenInterceptor = (target: ChatPanelTarget, focus: boolean) => boolean;
+let openInterceptor: OpenInterceptor | null = null;
+export function registerOpenInterceptor(next: OpenInterceptor | null): void {
+  openInterceptor = next;
+}
+
+/** A chat island holds one conversation and no panel: nothing of the panel's is written from it —
+ *  the main window's copy is the one on disk. See `lib/chatIslands`. */
+let persistenceOff = false;
+export function disablePanelPersistence(): void {
+  persistenceOff = true;
+}
+
+/** Writes the drafts now rather than in 400 ms — before a chat island boots and reads them. */
+export async function flushDrafts(): Promise<void> {
+  const pending = persistTimers.get(DRAFTS_KEY);
+  if (pending) clearTimeout(pending);
+  persistTimers.delete(DRAFTS_KEY);
+  if (persistenceOff) return;
+  await loadDrafts();
+  const entries = Object.entries(useAiPanelStore.getState().drafts)
+    .filter(([, text]) => text.trim().length > 0)
+    .slice(-MAX_DRAFTS);
+  await setSetting(DRAFTS_KEY, JSON.stringify(Object.fromEntries(entries))).catch(() => {});
+}
+
 export const useAiPanelStore = create<AiPanelState>((set, get) => ({
   tabsByWorkspace: {},
   activeByWorkspace: {},
@@ -351,6 +391,13 @@ export const useAiPanelStore = create<AiPanelState>((set, get) => ({
 
   open: (target, opts = {}) => {
     const focus = opts.focus !== false;
+    if ((target.kind === "chat" || target.kind === "wsChat") && openInterceptor?.(target, focus)) {
+      return target.conversationId
+        ? target.kind === "chat"
+          ? chatTabKey(target.conversationId)
+          : wsChatTabKey(target.conversationId)
+        : "";
+    }
     const workspaceId = workspaceForTarget(target);
     void get().load(workspaceId);
     if (target.kind === "inbox") {
@@ -375,7 +422,7 @@ export const useAiPanelStore = create<AiPanelState>((set, get) => ({
         key: chatTabKey(conversationId),
         projectId: target.projectId,
         conversationId,
-        fresh: target.conversationId ? undefined : true,
+        fresh: target.conversationId && !target.fresh ? undefined : true,
       };
     } else if (target.kind === "pr") {
       tab = { kind: "pr", key: prTabKey(target.projectId, target.pr.id), projectId: target.projectId, prId: target.pr.id, pr: target.pr };
@@ -395,7 +442,7 @@ export const useAiPanelStore = create<AiPanelState>((set, get) => ({
         key: wsChatTabKey(conversationId),
         workspaceId,
         conversationId,
-        fresh: target.conversationId ? undefined : true,
+        fresh: target.conversationId && !target.fresh ? undefined : true,
         focusChainId: target.focusChainId ?? undefined,
       };
     } else {
@@ -461,6 +508,7 @@ export const useAiPanelStore = create<AiPanelState>((set, get) => ({
 
   close: (key, workspaceId) => {
     if (key === INBOX_KEY) return;
+    let closedFresh: string | null = null;
     const ws = workspaceId ?? useWorkspaceStore.getState().activeWorkspaceId ?? NO_WORKSPACE;
     set((s) => {
       const tabs = s.tabsByWorkspace[ws] ?? [];
@@ -471,6 +519,8 @@ export const useAiPanelStore = create<AiPanelState>((set, get) => ({
       // Closing the tab on screen lands on its neighbour, the way a browser does — never on nothing.
       if (active === key) active = next[Math.min(at, next.length - 1)]?.key ?? INBOX_KEY;
       const closed = tabs[at];
+      // A blank subchat closed unwritten leaves no conversation for its link to name.
+      if ((closed.kind === "chat" || closed.kind === "wsChat") && closed.fresh) closedFresh = closed.conversationId;
       return {
         tabsByWorkspace: { ...s.tabsByWorkspace, [ws]: next },
         activeByWorkspace: { ...s.activeByWorkspace, [ws]: active },
@@ -480,6 +530,12 @@ export const useAiPanelStore = create<AiPanelState>((set, get) => ({
         drafts: (closed.kind === "chat" || closed.kind === "wsChat") && closed.fresh ? omit(s.drafts, key) : s.drafts,
       };
     });
+    if (closedFresh) {
+      const id: string = closedFresh;
+      if (useChatLineageStore.getState().byWorkspace[ws]?.some((l) => l.conversationId === id)) {
+        useChatLineageStore.getState().forget(id);
+      }
+    }
     persistWorkspace(ws);
   },
 

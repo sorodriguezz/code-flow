@@ -296,6 +296,23 @@ struct DoneEvent {
 /// `cf done [text]`: the work is finished — the card says so, and the user is told wherever they are.
 pub fn done(request: &Request, app: &AppHandle) -> Reply {
     let text = request.text.trim().to_string();
+    let cwd = request.cwd.trim().to_string();
+    // A team member running in its terminal: `cf done` is how its item ends. Its handoff is its last
+    // answer (when Claude's hooks reported one) with the closing line after it — read before the
+    // card's reply is overwritten with that line.
+    let team_item = crate::ai_usage::with_conn(|conn| crate::team::running_item_at(conn, &cwd)).flatten();
+    if let Some((item_id, _)) = team_item {
+        let reply = crate::agentstatus::states().into_iter().find(|s| s.cwd.trim_end_matches('/') == cwd.trim_end_matches('/')).map(|s| s.reply).unwrap_or_default();
+        let handoff = match (reply.trim().is_empty(), text.is_empty()) {
+            (true, _) => text.clone(),
+            (false, true) => reply,
+            (false, false) => format!("{reply}\n\n{text}"),
+        };
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = crate::commands::team_cmd::settle_from_terminal(&app, &item_id, &handoff).await;
+        });
+    }
     crate::agentstatus::done(&request.session, &text);
     let _ = app.emit("agentcli:done", DoneEvent { text, cwd: request.cwd.trim().to_string() });
     Reply::ok("")

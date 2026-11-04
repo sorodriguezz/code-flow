@@ -37,3 +37,17 @@ describe("insertNoteMention", () => {
     expect(insertNoteMention("[[Pla]]", 0, 5, "Plan")).toEqual({ text: "[[Plan]] ", caret: 9 });
   });
 });
+
+describe("chatCitation", () => {
+  it("cites by title, quoted with spaces, by id when the title repeats", async () => {
+    const { chatCitation } = await import("./MentionMenu");
+    expect(chatCitation("test", "c1", [{ title: "test" }])).toBe("chat:test");
+    expect(chatCitation("mi chat", "c2", [{ title: "mi chat" }])).toBe('chat:"mi chat"');
+    expect(chatCitation("Test", "c3", [{ title: "test" }, { title: "Test" }])).toBe("chat:c3");
+  });
+
+  it("a bare prefix is typed on into", async () => {
+    const { insertMention } = await import("./MentionMenu");
+    expect(insertMention("@ch", 0, 3, "chat:").text).toBe("@chat:");
+  });
+});

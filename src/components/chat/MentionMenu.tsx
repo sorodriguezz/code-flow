@@ -1,8 +1,9 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { Braces, Folder, FolderGit2, GitBranch, GitCompareArrows, StickyNote } from "lucide-react";
+import { Braces, Folder, FolderGit2, GitBranch, GitCompareArrows, Layers, MessagesSquare, StickyNote } from "lucide-react";
 import { FileGlyph } from "../common/FileGlyph";
 import { listRepoFiles } from "../../lib/tauri/commands";
 import { notesLoadTree } from "../../lib/tauri/notesCommands";
+import { chatArtifactsList, chatRefsList } from "../../lib/tauri/chatRefsCommands";
 import { codemapFind, type SymbolHit } from "../../lib/tauri/codemapCommands";
 import { rankPaths } from "../../lib/fuzzyPath";
 import { useLanguageStore, useT } from "../../state/languageStore";
@@ -19,7 +20,9 @@ import { useLanguageStore, useT } from "../../state/languageStore";
  *   (`@api/src/app.ts`) — `ai::workspace_mentioned_paths` resolves them to absolute paths.
  * - **Both** (`workspaceId`): `[[` and part of a title offers the workspace's notes, inserted as
  *   `[[Título]]` — Notas' own link syntax — which `ai::note_mention_note` reads into the turn in
- *   full, under the knowledge rules (never a local-only book for a cloud engine).
+ *   full, under the knowledge rules (never a local-only book for a cloud engine). And the
+ *   workspace's other chats and artifacts: `@chat:<título|id>` (`@chat:"dos palabras"`) and
+ *   `@artefacto:<nombre>`, which `chat_refs::refs::mention_notes` reads into the turn.
  */
 
 /** Rows offered. The list is narrowed by typing, not by scrolling. */
@@ -38,7 +41,7 @@ const cache = new Map<string, { at: number; paths: string[] }>();
 
 /** One row of the menu. `insert` is what goes after the `@`. */
 export interface MentionItem {
-  kind: "path" | "symbol" | "changes" | "branch" | "repo" | "note";
+  kind: "path" | "symbol" | "changes" | "branch" | "repo" | "note" | "chat" | "artifact";
   insert: string;
   /** The bold part of the row and the muted part after it. */
   label: string;
@@ -115,6 +118,45 @@ function useNoteTitles(workspaceId: string | null, enabled: boolean): { title: s
   return titles;
 }
 
+const refCache = new Map<string, { at: number; chats: { title: string; id: string; detail: string }[]; artifacts: { name: string; detail: string }[] }>();
+
+/** The workspace's chats and artifacts, for `@chat:` / `@artefacto:` — read when the menu needs them. */
+function useChatRefs(workspaceId: string | null, enabled: boolean) {
+  const [refs, setRefs] = useState(() => (workspaceId ? (refCache.get(workspaceId) ?? null) : null));
+  useEffect(() => {
+    if (!enabled || !workspaceId) return;
+    const hit = refCache.get(workspaceId);
+    if (hit) setRefs(hit);
+    if (hit && Date.now() - hit.at < FRESH_MS) return;
+    let live = true;
+    void Promise.all([chatRefsList(workspaceId), chatArtifactsList(workspaceId)])
+      .then(([chats, artifacts]) => {
+        const value = {
+          at: Date.now(),
+          chats: chats
+            .filter((c) => c.title.trim())
+            .map((c) => ({ title: c.title.trim(), id: c.id, detail: c.project_name ?? (c.surface === "ws" ? "workspace" : c.surface === "chat" ? "Chat" : "") })),
+          artifacts: artifacts.map((a) => ({ name: a.name, detail: a.title || a.kind })),
+        };
+        refCache.set(workspaceId, value);
+        if (live) setRefs(value);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [workspaceId, enabled]);
+  return refs;
+}
+
+/** How a chat is cited: its title when one word and unique, quoted when it has spaces, its id when
+ *  another chat has the same title. */
+export function chatCitation(title: string, id: string, all: { title: string }[]): string {
+  const same = all.filter((c) => c.title.toLowerCase() === title.toLowerCase()).length;
+  if (same > 1) return `chat:${id}`;
+  return /\s/.test(title) || title.includes('"') ? `chat:"${title.replace(/"/g, "")}"` : `chat:${title}`;
+}
+
 /** Case and accents folded, as the backend matches a cited title. */
 function fold(text: string): string {
   return text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -178,7 +220,8 @@ export function mentionAt(text: string, caret: number): { start: number; query: 
 /** `text` with the mention at `start` (as typed up to `caret`) replaced by `@insert` — and a space,
  *  unless it is a folder or a repository the user goes on typing into — and where the caret goes. */
 export function insertMention(text: string, start: number, caret: number, insert: string): { text: string; caret: number } {
-  const inserted = insert.endsWith("/") ? `@${insert}` : `@${insert} `;
+  // A folder, a repository or a bare `chat:` / `artefacto:` is typed on into; anything else ends there.
+  const inserted = insert.endsWith("/") || insert.endsWith(":") ? `@${insert}` : `@${insert} `;
   const rest = text.slice(caret).replace(/^\S*/, "").replace(/^ /, "");
   return { text: text.slice(0, start) + inserted + rest, caret: start + inserted.length };
 }
@@ -235,6 +278,9 @@ export function useMentions({
   const paths = useRepoPaths(listedRepo, active && !noteMention && (!repos || inRepo !== null));
   const symbols = useSymbols(repoPath, query, active && !noteMention && !repos);
   const notes = useNoteTitles(workspaceId, active && noteMention !== null);
+  const refQuery = query.toLowerCase();
+  const wantsRefs = active && !noteMention && !!workspaceId && (refQuery.startsWith("chat:") || /^(artefacto|artifact):/.test(refQuery) || (refQuery.length >= 2 && ("chat:".startsWith(refQuery) || "artefacto:".startsWith(refQuery) || "artifact:".startsWith(refQuery))));
+  const chatRefs = useChatRefs(workspaceId, wantsRefs);
 
   const items = useMemo<MentionItem[]>(() => {
     if (!active) return [];
@@ -246,13 +292,39 @@ export function useMentions({
         .slice(0, MAX_ROWS)
         .map((note) => ({ kind: "note" as const, insert: note.title, label: note.title, detail: note.book || label }));
     }
+    // `@chat:` and `@artefacto:` — the workspace's other chats and artifacts.
+    const refPrefix = /^(chat|artefacto|artifact):/.exec(query.toLowerCase());
+    if (workspaceId && refPrefix) {
+      const needle = fold(query.slice(refPrefix[0].length).replace(/^"/, "").trim());
+      if (refPrefix[1] === "chat") {
+        const chats = chatRefs?.chats ?? [];
+        return chats
+          .filter((c) => fold(c.title).includes(needle) || c.id.includes(needle))
+          .slice(0, MAX_ROWS)
+          .map((c) => ({ kind: "chat" as const, insert: chatCitation(c.title, c.id, chats), label: c.title, detail: c.detail || t("chat.mentionChat") }));
+      }
+      return (chatRefs?.artifacts ?? [])
+        .filter((a) => a.name.includes(needle) || fold(a.detail).includes(needle))
+        .slice(0, MAX_ROWS)
+        .map((a) => ({ kind: "artifact" as const, insert: `${refPrefix[1]}:${a.name}`, label: a.name, detail: a.detail }));
+    }
+    const refRows: MentionItem[] = [];
+    if (workspaceId && query.length >= 2) {
+      const lower = query.toLowerCase();
+      if ("chat:".startsWith(lower)) refRows.push({ kind: "chat", insert: "chat:", label: "chat:", detail: t("chat.mentionChat") });
+      const word = language === "es" ? "artefacto:" : "artifact:";
+      if (word.startsWith(lower) || "artefacto:".startsWith(lower)) refRows.push({ kind: "artifact", insert: word, label: word, detail: t("chat.mentionArtifact") });
+    }
     if (repos) {
       if (inRepo) return rankPaths(paths, pathQuery, MAX_ROWS).map((path) => pathItem(path, `${mentionName(inRepo.name)}/`));
       const needle = query.toLowerCase();
-      return repos
-        .filter((repo) => mentionName(repo.name).toLowerCase().includes(needle))
-        .slice(0, MAX_ROWS)
-        .map((repo) => ({ kind: "repo" as const, insert: `${mentionName(repo.name)}/`, label: mentionName(repo.name), detail: repo.path }));
+      return [
+        ...refRows,
+        ...repos
+          .filter((repo) => mentionName(repo.name).toLowerCase().includes(needle))
+          .slice(0, MAX_ROWS - refRows.length)
+          .map((repo) => ({ kind: "repo" as const, insert: `${mentionName(repo.name)}/`, label: mentionName(repo.name), detail: repo.path })),
+      ];
     }
     const words = specialWords(language);
     const needle = query.toLowerCase();
@@ -266,9 +338,10 @@ export function useMentions({
       detail: `${hit.path}:${hit.start}`,
       path: hit.path,
     }));
+    special.push(...refRows);
     const rest = MAX_ROWS - special.length - found.length;
     return [...special, ...found, ...rankPaths(paths, query, Math.max(0, rest)).map((path) => pathItem(path))];
-  }, [active, noteMention, notes, repos, inRepo, paths, pathQuery, query, symbols, language, t]);
+  }, [active, noteMention, notes, repos, inRepo, paths, pathQuery, query, symbols, language, t, workspaceId, chatRefs]);
 
   const [index, setIndex] = useState(0);
   useEffect(() => setIndex(0), [mention?.query, mention?.start]);
@@ -341,6 +414,10 @@ function ItemIcon({ item }: { item: MentionItem }) {
       return <FolderGit2 size={12} className={muted} />;
     case "note":
       return <StickyNote size={12} className={muted} />;
+    case "chat":
+      return <MessagesSquare size={12} className={muted} />;
+    case "artifact":
+      return <Layers size={12} className="shrink-0 text-[var(--cf-accent)]" />;
     case "symbol":
       return <Braces size={12} className="shrink-0 text-[var(--cf-accent)]" />;
     case "path":

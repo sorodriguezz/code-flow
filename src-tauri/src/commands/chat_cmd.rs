@@ -1056,6 +1056,7 @@ pub fn chat_delete_conversation(db: State<'_, Db>, conversation_id: String) -> R
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         chat_queries::delete_conversation(&conn, &conversation_id).map_err(|e| e.to_string())?;
+        crate::chat_lineage::forget(&conn, &conversation_id).map_err(|e| e.to_string())?;
     }
     // After the row is gone, not before, and outside the lock: the database is the record of what
     // exists, so a failure to remove the files must not leave a conversation the user asked to
@@ -1215,6 +1216,13 @@ fn branch_conversation(conn: &Connection, conversation_id: &str, at_turn: i64) -
             ..message
         };
         chat_queries::append_message(conn, &copy).map_err(|e| e.to_string())?;
+    }
+
+    // A fork of a workspace chat is its subchat in the assistant (`chat_lineage`). The Chat app's
+    // own threads are told apart by `parent_conversation_id` above and are not nested.
+    if parent.workspace_scope {
+        crate::chat_lineage::link(conn, &fork.id, "ws", &parent.id, "branch", &parent.workspace_id, Some(at_turn))
+            .map_err(|e| e.to_string())?;
     }
 
     chat_queries::get_conversation(conn, &fork.id)
@@ -1934,6 +1942,14 @@ pub async fn chat_send(
             context_sources.extend(sources);
             noted = true;
         }
+        // Other chats and artifacts cited as `@chat:` / `@artefacto:` (`chat_refs::refs`).
+        let cited = crate::chat_refs::refs::mention_notes(&conn, &conversation.workspace_id, &asked, Some(&conversation_id));
+        if !cited.is_empty() {
+            let cited = if cloud { crate::secret_scan::redact(&cited).0 } else { cited };
+            context_sources.push(crate::context::ContextSource::new(crate::context::SourceKind::Mention, "@chat / @artefacto", None));
+            engine_message.push_str(&cited);
+            noted = true;
+        }
     }
     // Who else is working in this conversation's repository right now, if it has one — the same
     // invisible note the repository chat sends (see `ai::parallel_work_note`).
@@ -2098,8 +2114,14 @@ pub async fn chat_send(
     };
     // Kept for the title run below; `app` moves into the run's scope.
     let title_app = app.clone();
+    // Which chat this run is a turn of, for the chat tools it may call (`chat_refs`).
+    let _run_mark = run_id
+        .as_deref()
+        .map(|run| crate::chat_refs::delegate::mark_run(run, &conversation_id, &conversation.workspace_id));
+    // Boxed for the reason the repository chat's is (`send_chat_message`): the wrappers' by-value
+    // moves are stack copies in a debug build.
     let (result, trace) = ai_runs::scoped_with_trace(app, run_id, crate::context::need::within(judgement, async {
-        ai::chat_turn(
+        Box::pin(ai::chat_turn(
             &*config.engine,
             &config.binary,
             &config.model,
@@ -2125,7 +2147,7 @@ pub async fn chat_send(
                 extra_dirs: &ws_extra_dirs,
                 text_only: false,
             },
-        )
+        ))
         .await
     }))
     .await;
@@ -2242,6 +2264,19 @@ pub async fn chat_send(
         };
         match chat_queries::append_message(&conn, &row) {
             Ok(()) => {
+                // The artifacts the answer carries, filed by name (`chat_refs::artifacts`).
+                crate::chat_refs::file_and_announce(
+                    &title_app,
+                    &conn,
+                    &crate::chat_refs::artifacts::Origin {
+                        workspace_id: &conversation.workspace_id,
+                        surface: if conversation.workspace_scope { "ws" } else { "chat" },
+                        conversation_id: &conversation_id,
+                        project_id: conversation.project_id.as_deref(),
+                        message_id: &assistant_message_id,
+                    },
+                    &run.text,
+                );
                 if let Some(checkpoints) = turn_checkpoints.as_deref() {
                     let _ = chat_queries::set_turn_checkpoints(&conn, &assistant_message_id, &conversation_id, checkpoints);
                 }

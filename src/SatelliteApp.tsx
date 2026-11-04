@@ -47,6 +47,8 @@ import { showChatHere } from "./lib/chatBridge";
 import { pushErrorToast } from "./state/toastStore";
 import { SwitcherLock } from "./components/layout/SwitcherLock";
 import { MultiDiffHost } from "./components/git/MultiDiffHost";
+import { parseChatIslandRef } from "./lib/chatIslandSync";
+import { chatTabKey, wsChatTabKey } from "./state/aiPanelStore";
 
 /**
  * The whole of a satellite window.
@@ -94,6 +96,8 @@ const QuickAskWindow = lazy(() =>
 // Its own chunk, and small: the voice assistant's window draws a face, two switches and a log.
 const CodiWindow = lazy(() => import("./components/codi/CodiWindow").then((m) => ({ default: m.CodiWindow })));
 const AttentionWindow = lazy(() => import("./components/layout/AttentionWindow").then((m) => ({ default: m.AttentionWindow })));
+const PanelChat = lazy(() => import("./components/ai/PanelChat").then((m) => ({ default: m.PanelChat })));
+const WorkspaceChat = lazy(() => import("./components/ai/WorkspaceChat").then((m) => ({ default: m.WorkspaceChat })));
 const GraphView = lazy(() => import("./components/git/GraphView").then((m) => ({ default: m.GraphView })));
 const ChangesPanel = lazy(() => import("./components/git/ChangesPanel").then((m) => ({ default: m.ChangesPanel })));
 const EditorView = lazy(() => import("./components/editor/EditorView").then((m) => ({ default: m.EditorView })));
@@ -168,6 +172,12 @@ function useSatelliteBoot(): boolean {
         // rectangle tracking the main window's does.
         startWindowBoundsTracking(),
         useWindowStore.getState().init(),
+        // Chat islands: the panel hides what they hold and takes it back (`lib/chatIslands`).
+        WINDOW.satellite?.kind === "chat"
+          ? import("./lib/chatIslands").then((m) => m.installChatIslands())
+          : Promise.resolve(),
+        // A chat island answers what other chats ask of its conversation (`lib/chatDelegate`).
+        WINDOW.satellite?.kind === "chat" ? import("./lib/chatDelegate").then((m) => m.installChatDelegate()) : Promise.resolve(),
         // Whether the repository's Pipelines tab exists — the main window's rule, read here too.
         useVcsConnectionsStore.getState().refresh(),
         // Lands on the workspace of the window it was opened from — see `workspaceStore`'s
@@ -558,6 +568,76 @@ function FileWindow({ refId }: { refId: string }) {
 }
 
 /**
+ * One assistant conversation in a window of its own — a chat island (`lib/chatIslands`). Its
+ * workspace is the conversation's, derived as a repository window derives its own: a repository chat
+ * goes where its repository is, a workspace chat to its workspace.
+ */
+function ChatWindow({ refId }: { refId: string }) {
+  const ref = parseChatIslandRef(refId);
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const projects = useWorkspaceStore((s) =>
+    s.activeWorkspaceId ? s.projectsByWorkspace[s.activeWorkspaceId] : undefined,
+  );
+  const t = useT();
+  const projectId = ref?.surface === "panel" ? ref.projectId : null;
+  const project = projectId ? (projects?.find((p) => p.id === projectId) ?? null) : null;
+
+  useEffect(() => {
+    if (!ref || !workspaceId) return;
+    if (ref.surface === "ws") {
+      if (ref.workspaceId !== workspaceId) void useWorkspaceStore.getState().followWorkspace(ref.workspaceId);
+      return;
+    }
+    if (!projects || project) return;
+    let cancelled = false;
+    void getProject(ref.projectId)
+      .then((row) => {
+        if (cancelled || !row || row.workspace_id === workspaceId) return;
+        void useWorkspaceStore.getState().followWorkspace(row.workspace_id);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [ref?.surface, ref?.conversationId, workspaceId, projects, project]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // The chat reads its repository from the store, as in the panel. Set, not recorded.
+  useEffect(() => {
+    if (project) useWorkspaceStore.setState({ activeProjectId: project.id });
+  }, [project]);
+
+  if (!ref) {
+    return <EmptyState icon={Unlink} title={t("windows.unknownApp")} subtitle={refId} />;
+  }
+  const ready = ref.surface === "ws" ? workspaceId === ref.workspaceId : project !== null;
+  if (!ready) return <ViewSkeleton />;
+  return (
+    <ErrorBoundary resetKey={refId}>
+      <Suspense fallback={<ViewSkeleton />}>
+        {ref.surface === "panel" ? (
+          <PanelChat
+            tabKey={chatTabKey(ref.conversationId)}
+            projectId={ref.projectId}
+            conversationId={ref.conversationId}
+            fresh={false}
+            active
+          />
+        ) : (
+          <WorkspaceChat
+            tabKey={wsChatTabKey(ref.conversationId)}
+            workspaceId={ref.workspaceId}
+            conversationId={ref.conversationId}
+            fresh={false}
+            focusChainId={null}
+            active
+          />
+        )}
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
+
+/**
  * The quick-ask window: one composer, one answer, and nothing else at all.
  *
  * It is a satellite by construction — a second webview with none of the shell — but it is not a
@@ -666,6 +746,10 @@ export default function SatelliteApp() {
           </div>
         ) : kind === "file" ? (
           <FileWindow refId={spec.refId} />
+        ) : kind === "chat" ? (
+          <div className="cf-sheet flex min-h-0 flex-1 flex-col overflow-hidden">
+            <ChatWindow refId={spec.refId} />
+          </div>
         ) : (
           <RepoWindow projectId={spec.refId} />
         )}

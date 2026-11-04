@@ -76,6 +76,18 @@ fn stop_checks_for_chain(chain_id: &str) {
     }
 }
 
+/// One shell command in `cwd` with the checks' timeout: `(passed, output)`. A command that could not
+/// start is a failure with its reason as the output.
+pub(crate) async fn run_shell_check(command: &str, cwd: &str) -> (bool, String) {
+    let stop = Notify::new();
+    match run_check_process(command, cwd, CHECK_TIMEOUT, &stop).await {
+        CheckEnd::Exited { success, output } => (success, output),
+        CheckEnd::TimedOut { output } => (false, format!("{output}\n(tiempo agotado)")),
+        CheckEnd::Stopped => (false, "detenido".to_string()),
+        CheckEnd::Failed(e) => (false, e),
+    }
+}
+
 /// How a check's process ended.
 #[derive(Debug)]
 pub(crate) enum CheckEnd {
@@ -437,7 +449,10 @@ pub async fn delete_agent_task(db: State<'_, Db>, id: String) -> Result<Option<S
     };
     let mut left = None;
     if let (Some(task), Some(repo)) = (task.as_ref(), repo) {
-        if !task.worktree_path.is_empty() && std::path::Path::new(&task.worktree_path).exists() {
+        // A team item's folder belongs to its run (the integration tree, or a worktree a fix and its
+        // review share): the run removes it when it is integrated or deleted, never one task alone.
+        let team_owned = task.batch_id.starts_with(crate::team::TASK_BATCH_PREFIX);
+        if !team_owned && !task.worktree_path.is_empty() && std::path::Path::new(&task.worktree_path).exists() {
             let target = task.worktree_path.clone();
             let removed = tokio::task::spawn_blocking(move || crate::git::worktree::remove(&repo, &target, false))
                 .await

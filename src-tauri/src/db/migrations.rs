@@ -2069,10 +2069,17 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_source_to_db_history(conn)?;
     add_notes_to_chat_messages(conn)?;
     add_usage_to_activity_log(conn)?;
+    add_effort_to_agents(conn)?;
+    // «Equipo»: teams, their runs, items and channel (`team`).
+    crate::team::migrate(conn)?;
     // Tickets → code (boards::ticket_links): the ticket ↔ branch ↔ pull request record.
     crate::boards::ticket_links::migrate(conn)?;
     // Settings › Estadísticas: per-day usage counters (`usage_stats`).
     crate::usage_stats::migrate(conn)?;
+    // Subchats: which assistant conversation was started under which (`chat_lineage`).
+    crate::chat_lineage::migrate(conn)?;
+    // Chat artifacts, versioned by name per workspace (`chat_refs::artifacts`).
+    crate::chat_refs::migrate(conn)?;
     Ok(())
 }
 
@@ -2093,6 +2100,18 @@ pub(crate) fn add_notes_to_chat_messages(conn: &Connection) -> rusqlite::Result<
 pub(crate) fn add_usage_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "activity_log", "usage")? {
         conn.execute_batch("ALTER TABLE activity_log ADD COLUMN usage TEXT;")?;
+    }
+    Ok(())
+}
+
+/// An agent's reasoning level (`low`…`max`, `''` the CLI's own default), set in the roster's
+/// editor, and the copy each task takes when it is created — the same way it copies the agent's
+/// provider and model, so editing the roster never rewrites a task that already ran.
+pub(crate) fn add_effort_to_agents(conn: &Connection) -> rusqlite::Result<()> {
+    for table in ["workspace_agents", "agent_tasks"] {
+        if table_exists(conn, table)? && !has_column(conn, table, "effort")? {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN effort TEXT NOT NULL DEFAULT '';"))?;
+        }
     }
     Ok(())
 }

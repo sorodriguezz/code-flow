@@ -1,0 +1,1878 @@
+//! Tauri commands for «Equipo» — see `crate::team` for the model and `.claude/plans/agent-team.md`.
+//!
+//! The engine lives here: starting a run (integration worktrees), handing out every ready item
+//! ([`team_claim`]), settling one ([`team_settle`]: notes, checks, commit, review, merge, conflicts),
+//! the lead's rounds, the user's answers and approvals, and landing the work on the target branch.
+//!
+//! # Locks
+//!
+//! Every mutation of one run takes that run's async lock, so two items of a run finishing at the same
+//! moment never merge into its integration branch at once and never both decide the run is over.
+//! The database lock is only ever held for short synchronous stretches — never across a git command,
+//! a check or an await.
+
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+use crate::db::{models::AgentTask, queries, Db};
+use crate::team::{self, gitops, protocol, Item, MemberSnap, Policy, Run, RunRepo, RunState};
+
+static RUN_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = LazyLock::new(Default::default);
+
+fn run_lock(run_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut map = RUN_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    map.entry(run_id.to_string()).or_default().clone()
+}
+
+/// Where a team worktree goes — the user's worktrees folder, or a test's own temporary one.
+#[cfg(test)]
+static WORKTREE_ROOT: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+fn wt_dir(repo_name: &str, folder: &str) -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(root) = WORKTREE_ROOT.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return root.join(repo_name).join(folder);
+    }
+    crate::paths::agent_worktree_dir(repo_name, folder)
+}
+
+fn with<T>(db: &Db, f: impl FnOnce(&Connection) -> Result<T, String>) -> Result<T, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    f(&conn)
+}
+
+fn e2s<E: std::fmt::Display>(e: E) -> String {
+    e.to_string()
+}
+
+fn changed(app: &AppHandle, run_id: &str) {
+    let _ = app.emit("team:changed", serde_json::json!({ "runId": run_id }));
+}
+
+fn state_of(db: &Db, run_id: &str) -> Result<RunState, String> {
+    with(db, |c| team::state(c, run_id).map_err(e2s)?.ok_or_else(|| "La corrida del equipo ya no existe.".to_string()))
+}
+
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    tokio::task::spawn_blocking(f).await.map_err(e2s)
+}
+
+fn slug(text: &str, max: usize) -> String {
+    let s = protocol::key_slug(text);
+    let s: String = s.chars().take(max).collect();
+    let s = s.trim_matches('-').to_string();
+    if s.is_empty() { "equipo".into() } else { s }
+}
+
+fn short(id: &str) -> String {
+    id.chars().filter(|c| c.is_ascii_alphanumeric()).take(6).collect()
+}
+
+fn trim_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max * 2 / 3).collect();
+    let tail: String = text.chars().rev().take(max / 3).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{head}\n[…recortado…]\n{tail}")
+}
+
+fn first_line(text: &str, max: usize) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    trim_chars(line, max)
+}
+
+fn roster(run: &Run) -> Vec<protocol::RosterEntry> {
+    run.members
+        .iter()
+        .map(|m| protocol::RosterEntry {
+            id: m.member.id.clone(),
+            name: m.member.name.clone(),
+            role: m.member.role.clone(),
+            edits: m.member.edits,
+            repos: m.member.repos.clone(),
+        })
+        .collect()
+}
+
+fn member<'a>(run: &'a Run, id: &str) -> Option<&'a MemberSnap> {
+    run.members.iter().find(|m| m.member.id == id)
+}
+
+fn lead_name(run: &Run) -> String {
+    member(run, &run.lead).map(|m| m.member.name.clone()).unwrap_or_else(|| "Líder".into())
+}
+
+// ---------------------------------------------------------------- teams
+
+#[tauri::command]
+pub fn team_list(db: State<'_, Db>, workspace_id: String) -> Result<Vec<team::Team>, String> {
+    with(&db, |c| team::list_teams(c, &workspace_id).map_err(e2s))
+}
+
+#[tauri::command]
+pub fn team_save(db: State<'_, Db>, team: team::Team) -> Result<team::Team, String> {
+    with(&db, |c| team::save_team(c, team))
+}
+
+#[tauri::command]
+pub fn team_delete(db: State<'_, Db>, id: String) -> Result<(), String> {
+    with(&db, |c| team::delete_team(c, &id).map_err(e2s))
+}
+
+#[tauri::command]
+pub fn team_runs(db: State<'_, Db>, workspace_id: String) -> Result<Vec<Run>, String> {
+    with(&db, |c| team::list_runs(c, &workspace_id).map_err(e2s))
+}
+
+#[tauri::command]
+pub fn team_run_state(db: State<'_, Db>, run_id: String) -> Result<RunState, String> {
+    state_of(&db, &run_id)
+}
+
+#[tauri::command]
+pub fn team_run_meta(db: State<'_, Db>, run_id: String, title: Option<String>, pinned: Option<bool>, agent_project_id: Option<String>) -> Result<(), String> {
+    with(&db, |c| team::set_run_meta(c, &run_id, title.as_deref(), pinned, agent_project_id.as_deref()).map_err(e2s))
+}
+
+// ---------------------------------------------------------------- start
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoPick {
+    pub project_id: String,
+    /// `""` is the branch the repository has checked out now.
+    #[serde(default)]
+    pub target_branch: String,
+}
+
+/// Starts a run: copies the roster and the policy, makes one integration worktree per repository
+/// off its target branch, and seeds the graph — the lead's first plan, or the team's fixed plan.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn team_start(
+    app: AppHandle,
+    db: State<'_, Db>,
+    workspace_id: String,
+    team_id: String,
+    goal: String,
+    title: Option<String>,
+    repos: Vec<RepoPick>,
+    policy: Option<Policy>,
+    agent_project_id: Option<String>,
+) -> Result<RunState, String> {
+    let state = start_run(&db, workspace_id, team_id, goal, title, repos, policy, agent_project_id).await?;
+    changed(&app, &state.run.id);
+    Ok(state)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn start_run(
+    db: &Db,
+    workspace_id: String,
+    team_id: String,
+    goal: String,
+    title: Option<String>,
+    repos: Vec<RepoPick>,
+    policy: Option<Policy>,
+    agent_project_id: Option<String>,
+) -> Result<RunState, String> {
+    let goal = goal.trim().to_string();
+    if goal.is_empty() {
+        return Err("Dile al equipo qué tiene que hacer.".into());
+    }
+    if repos.is_empty() {
+        return Err("Elige al menos un repositorio.".into());
+    }
+    if repos.len() > team::MAX_REPOS {
+        return Err(format!("Una tarea de equipo abarca como máximo {} repositorios.", team::MAX_REPOS));
+    }
+    let (tm, agents, projects) = with(&db, |c| {
+        let tm = team::get_team(c, &team_id).map_err(e2s)?.ok_or("El equipo ya no existe.")?;
+        let agents = queries::list_workspace_agents(c, &workspace_id).map_err(e2s)?;
+        let mut projects = Vec::new();
+        for pick in &repos {
+            let p = queries::get_project(c, &pick.project_id).map_err(e2s)?.ok_or("Un repositorio elegido ya no existe.")?;
+            projects.push((p, pick.target_branch.trim().to_string()));
+        }
+        Ok((tm, agents, projects))
+    })?;
+
+    // The roster as it is now, so editing an agent mid-run never reroutes work already planned.
+    let mut members = Vec::new();
+    for m in &tm.members {
+        let Some(agent) = agents.iter().find(|a| a.id == m.agent_id) else {
+            return Err(format!("El agente de «{}» ya no está en el roster.", if m.name.is_empty() { "un miembro" } else { &m.name }));
+        };
+        if agent.provider.trim().is_empty() || agent.model.trim().is_empty() {
+            return Err(format!("«{}» no tiene proveedor y modelo: complétalo en Agentes.", agent.name));
+        }
+        let mut member = m.clone();
+        if member.name.trim().is_empty() {
+            member.name = agent.name.clone();
+        }
+        if member.role.trim().is_empty() {
+            member.role = agent.role.clone();
+        }
+        members.push(MemberSnap {
+            member,
+            provider: agent.provider.clone(),
+            model: agent.model.clone(),
+            effort: agent.effort.clone(),
+            prompt: agent.prompt.clone(),
+            account_id: agent.account_id.clone(),
+        });
+    }
+
+    let run_id = uuid::Uuid::new_v4().to_string();
+    let shown_title = title.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).unwrap_or_else(|| first_line(&goal, 64));
+    let run_slug = format!("{}-{}", slug(&shown_title, 28), short(&run_id));
+    let integration_branch = format!("codeflow/team-{run_slug}");
+
+    // Integration worktrees, outside every lock. One that fails undoes the ones already made.
+    let mut made: Vec<RunRepo> = Vec::new();
+    for (position, (project, target)) in projects.iter().enumerate() {
+        let repo_path = project.local_path.clone();
+        let target = if target.is_empty() {
+            let p = repo_path.clone();
+            blocking(move || gitops::current_branch(&p)).await?.ok_or_else(|| format!("{} no está en ninguna rama: elige la rama destino.", project.name))?
+        } else {
+            target.clone()
+        };
+        let path = wt_dir(&project.name, &format!("team-{run_slug}")).to_string_lossy().into_owned();
+        let (r, p, b, t) = (repo_path.clone(), path.clone(), integration_branch.clone(), target.clone());
+        let result = blocking(move || {
+            if !gitops::branch_exists(&r, &t) {
+                return Err(format!("la rama «{t}» no existe"));
+            }
+            gitops::add_worktree(&r, &p, &b, &t)
+        })
+        .await?;
+        if let Err(e) = result {
+            for done in &made {
+                let (r, p) = (done.local_path.clone(), done.integration_path.clone());
+                let _ = blocking(move || gitops::remove_worktree(&r, &p)).await;
+            }
+            return Err(format!("{}: {e}", project.name));
+        }
+        made.push(RunRepo {
+            run_id: run_id.clone(),
+            project_id: project.id.clone(),
+            name: project.name.clone(),
+            local_path: repo_path,
+            target_branch: target,
+            integration_branch: integration_branch.clone(),
+            integration_path: path,
+            status: "ready".into(),
+            last_error: String::new(),
+            position: position as i64,
+        });
+    }
+
+    let stamp = queries::now();
+    let run = Run {
+        id: run_id.clone(),
+        workspace_id: workspace_id.clone(),
+        team_id: tm.id.clone(),
+        team_name: tm.name.clone(),
+        title: shown_title,
+        goal: goal.clone(),
+        status: "running".into(),
+        lead: tm.lead.clone(),
+        agent_project_id: agent_project_id.unwrap_or_default(),
+        created_at: stamp.clone(),
+        updated_at: stamp,
+        policy: policy.unwrap_or_else(|| tm.policy.clone()).sane(),
+        members,
+        ..Default::default()
+    };
+    with(&db, |c| {
+        let tx = c.unchecked_transaction().map_err(e2s)?;
+        team::insert_run(&tx, &run).map_err(e2s)?;
+        for repo in &made {
+            team::insert_repo(&tx, repo).map_err(e2s)?;
+        }
+        team::post(&tx, &run.id, "", ("user", "Tú"), ("all", "Equipo"), "plan", &goal, &[]).map_err(e2s)?;
+        if run.lead.is_empty() {
+            seed_fixed_plan(&tx, &run, &tm.plan, &made)?;
+        } else {
+            new_lead_item(&tx, &run, "plan", &goal, "")?;
+        }
+        tx.commit().map_err(e2s)
+    })?;
+    state_of(db, &run_id)
+}
+
+/// The team's own plan, expanded: a step on `"*"` becomes one item per repository, and a dependency
+/// on such a step waits for all of them.
+fn seed_fixed_plan(conn: &Connection, run: &Run, plan: &[team::PlanStep], repos: &[RunRepo]) -> Result<(), String> {
+    let mut by_key: HashMap<String, Vec<String>> = HashMap::new();
+    let mut made: Vec<(Item, Vec<String>)> = Vec::new();
+    for (at, step) in plan.iter().enumerate() {
+        let Some(m) = member(run, &step.member) else { continue };
+        let targets: Vec<&RunRepo> = match step.repo.as_str() {
+            "*" => repos.iter().filter(|r| m.member.repos.is_empty() || m.member.repos.contains(&r.project_id)).collect(),
+            "" => repos.first().into_iter().collect(),
+            id => repos.iter().filter(|r| r.project_id == id).collect(),
+        };
+        let base = {
+            let k = protocol::key_slug(&step.key);
+            if k.is_empty() { format!("p{}", at + 1) } else { k }
+        };
+        let kind = if step.kind == "investigate" || !m.member.edits { "investigate" } else { "work" };
+        for repo in targets {
+            let existing: Vec<Item> = made.iter().map(|(i, _)| i.clone()).collect();
+            let key = team::free_key(&existing, &if repos.len() > 1 && step.repo == "*" { format!("{base}-{}", slug(&repo.name, 10)) } else { base.clone() });
+            let title = if step.title.trim().is_empty() { first_line(&step.instruction, 60) } else { step.title.clone() };
+            let item = team::new_item(run, &key, Some(m), &repo.project_id, kind, &title, &step.instruction);
+            by_key.entry(protocol::key_slug(&step.key)).or_default().push(item.id.clone());
+            made.push((item, step.depends_on.iter().map(|d| protocol::key_slug(d)).collect()));
+        }
+    }
+    for (mut item, deps) in made {
+        item.depends_on = deps.iter().flat_map(|d| by_key.get(d).cloned().unwrap_or_default()).filter(|d| d != &item.id).collect();
+        team::insert_item(conn, &item).map_err(e2s)?;
+    }
+    Ok(())
+}
+
+/// A new lead turn, inside the budget. `None` (and the run gated) once the rounds are spent.
+fn new_lead_item(conn: &Connection, run: &Run, kind: &str, instruction: &str, feedback: &str) -> Result<Option<Item>, String> {
+    let current = team::get_run(conn, &run.id).map_err(e2s)?.unwrap_or_else(|| run.clone());
+    if current.lead_rounds_used >= current.policy.lead_rounds {
+        team::set_run_status(conn, &run.id, "gated", "stuck:", "El líder agotó sus rondas. Continúa a mano o aumenta el presupuesto.").map_err(e2s)?;
+        return Ok(None);
+    }
+    let Some(lead) = member(run, &run.lead) else { return Ok(None) };
+    let items = team::list_items(conn, &run.id).map_err(e2s)?;
+    let first_repo = team::list_repos(conn, &run.id).map_err(e2s)?.first().map(|r| r.project_id.clone()).unwrap_or_default();
+    let key = team::free_key(&items, match kind {
+        "final" => "revision-final",
+        "answer" => "respuesta",
+        _ => "plan",
+    });
+    let title = match kind {
+        "final" => "Última revisión del líder".to_string(),
+        "answer" => "El líder responde".to_string(),
+        _ if current.lead_rounds_used == 0 => "Plan".to_string(),
+        _ => "Replanificar".to_string(),
+    };
+    let mut item = team::new_item(run, &key, Some(lead), &first_repo, kind, &title, instruction);
+    item.feedback = feedback.to_string();
+    item.round = current.lead_rounds_used + 1;
+    // The lead is always a background turn: it only plans, and its answer is read by the app.
+    item.run_in = "headless".into();
+    team::insert_item(conn, &item).map_err(e2s)?;
+    team::bump_lead_round(conn, &run.id).map_err(e2s)?;
+    Ok(Some(item))
+}
+
+// ---------------------------------------------------------------- claim
+
+/// One item handed to the frontend to run.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Dispatch {
+    pub item: Item,
+    /// The task it runs as — `None` for an item run in a terminal.
+    pub task: Option<AgentTask>,
+    pub message: String,
+    pub cwd: String,
+    pub run_in: String,
+    pub provider: String,
+    pub model: String,
+    pub effort: String,
+    pub title: String,
+}
+
+/// Marks every item that may start now as running and returns what to run. Items that need the
+/// user's approval first park the run on a gate instead.
+#[tauri::command]
+// No `team:changed` here: the caller refreshes itself, and the event is what makes other listeners
+// claim — announcing a claim would have every claim start another.
+pub async fn team_claim(db: State<'_, Db>, run_id: String) -> Result<Vec<Dispatch>, String> {
+    let lock = run_lock(&run_id);
+    let _guard = lock.lock().await;
+    claim(&db, &run_id).await
+}
+
+struct Picked {
+    item: Item,
+    repo: RunRepo,
+}
+
+pub async fn claim(db: &Db, run_id: &str) -> Result<Vec<Dispatch>, String> {
+    // 1. Decide, under the database lock.
+    let (run, picked) = with(db, |c| {
+        let Some(run) = team::get_run(c, run_id).map_err(e2s)? else { return Ok((None, Vec::new())) };
+        if run.status != "running" {
+            return Ok((Some(run), Vec::new()));
+        }
+        let items = team::list_items(c, run_id).map_err(e2s)?;
+        let repos = team::list_repos(c, run_id).map_err(e2s)?;
+        let ready: Vec<Item> = team::ready_items(&run, &items).into_iter().cloned().collect();
+        let mut picked = Vec::new();
+        let mut dispatches = run.dispatches;
+        for mut item in ready {
+            if team::needs_code_approval(&run, &item, &items) {
+                item.status = "gated".into();
+                team::update_item(c, &item).map_err(e2s)?;
+                team::set_run_status(c, run_id, "gated", &format!("item:{}", item.id), &format!("«{}» quiere empezar a escribir código.", item.title)).map_err(e2s)?;
+                break;
+            }
+            if dispatches >= run.policy.max_dispatches {
+                team::set_run_status(c, run_id, "gated", "stuck:", "Se agotó el presupuesto de ejecuciones de esta tarea.").map_err(e2s)?;
+                break;
+            }
+            let Some(repo) = repos.iter().find(|r| r.project_id == item.project_id).cloned() else {
+                item.status = "error".into();
+                item.last_error = "su repositorio ya no está en la tarea".into();
+                team::update_item(c, &item).map_err(e2s)?;
+                continue;
+            };
+            dispatches += 1;
+            item.status = "running".into();
+            item.attempts += 1;
+            item.started_at = queries::now();
+            team::update_item(c, &item).map_err(e2s)?;
+            picked.push(Picked { item, repo });
+        }
+        c.execute("UPDATE agent_team_runs SET dispatches = ?2, updated_at = ?3 WHERE id = ?1", rusqlite::params![run_id, dispatches, queries::now()])
+            .map_err(e2s)?;
+        Ok((Some(run), picked))
+    })?;
+    let Some(run) = run else { return Ok(Vec::new()) };
+
+    // 2. Worktrees for new work, with no lock held.
+    let mut ready: Vec<Picked> = Vec::new();
+    for mut p in picked {
+        if p.item.kind == "work" && p.item.worktree_path.is_empty() {
+            let run_slug = p.repo.integration_branch.trim_start_matches("codeflow/team-").to_string();
+            let branch = format!("codeflow/team-{run_slug}-{}", p.item.key);
+            let path = wt_dir(&p.repo.name, &format!("team-{run_slug}-{}", p.item.key)).to_string_lossy().into_owned();
+            let (r, t, b, s) = (p.repo.local_path.clone(), path.clone(), branch.clone(), p.repo.integration_branch.clone());
+            match blocking(move || gitops::add_worktree(&r, &t, &b, &s)).await? {
+                Ok(()) => {
+                    p.item.worktree_path = path;
+                    p.item.branch = branch;
+                }
+                Err(e) => {
+                    p.item.status = "pending".into();
+                    p.item.last_error = format!("no se pudo crear su carpeta: {e}");
+                    with(db, |c| team::update_item(c, &p.item).map_err(e2s))?;
+                    continue;
+                }
+            }
+        }
+        ready.push(p);
+    }
+
+    // 3. Tasks and messages, under the lock again.
+    with(db, |c| {
+        let items = team::list_items(c, run_id).map_err(e2s)?;
+        let repos = team::list_repos(c, run_id).map_err(e2s)?;
+        let messages = team::list_messages(c, run_id).map_err(e2s)?;
+        let mut out = Vec::new();
+        for Picked { mut item, repo } in ready {
+            let Some(m) = member(&run, &item.member_id).cloned() else {
+                item.status = "error".into();
+                item.last_error = "su miembro ya no está en el equipo".into();
+                team::update_item(c, &item).map_err(e2s)?;
+                continue;
+            };
+            let cwd = cwd_of(&item, &items, &repo);
+            let (message, delivered) = compose(&run, &repos, &items, &messages, &item, &m, &cwd);
+            team::mark_delivered(c, &delivered).map_err(e2s)?;
+            let task = if item.run_in == "terminal" {
+                None
+            } else {
+                Some(task_for(c, &run, &mut item, &items, &m, &cwd)?)
+            };
+            team::update_item(c, &item).map_err(e2s)?;
+            team::post(c, run_id, &item.id, (&m.member.id, &m.member.name), ("all", "Equipo"), "status", &format!("empezó «{}»", item.title), &[])
+                .map_err(e2s)?;
+            out.push(Dispatch {
+                title: format!("{} · {}", m.member.name, item.title),
+                provider: m.provider.clone(),
+                model: m.model.clone(),
+                effort: m.effort.clone(),
+                run_in: item.run_in.clone(),
+                cwd,
+                message,
+                task,
+                item,
+            });
+        }
+        Ok(out)
+    })
+}
+
+/// Where an item runs: its own worktree for work and conflict resolution, the reviewed work's for a
+/// review, and the repository's integration tree for everything that only reads.
+fn cwd_of(item: &Item, items: &[Item], repo: &RunRepo) -> String {
+    match item.kind.as_str() {
+        "work" | "integrate" if !item.worktree_path.is_empty() => item.worktree_path.clone(),
+        "review" => items.iter().find(|i| i.id == item.ref_item).map(|i| i.worktree_path.clone()).filter(|p| !p.is_empty()).unwrap_or_else(|| repo.integration_path.clone()),
+        _ => repo.integration_path.clone(),
+    }
+}
+
+/// The task an item runs as: the work it continues (a fix after review), the lead's single
+/// conversation, or a new one in the item's folder.
+fn task_for(conn: &Connection, run: &Run, item: &mut Item, items: &[Item], m: &MemberSnap, cwd: &str) -> Result<AgentTask, String> {
+    if !item.task_id.is_empty() {
+        if let Some(task) = queries::get_agent_task(conn, &item.task_id).map_err(e2s)? {
+            return Ok(task);
+        }
+    }
+    let reuse = if item.is_lead() {
+        items.iter().filter(|i| i.is_lead() && !i.task_id.is_empty()).map(|i| i.task_id.clone()).last()
+    } else if item.kind == "review" {
+        // The same reviewer looking at the same branch again keeps its conversation: it remembers
+        // what it already raised.
+        let branch = items.iter().find(|i| i.id == item.ref_item).map(|i| i.branch.clone()).unwrap_or_default();
+        items
+            .iter()
+            .filter(|i| i.kind == "review" && i.member_id == item.member_id && !i.task_id.is_empty())
+            .filter(|i| items.iter().find(|w| w.id == i.ref_item).is_some_and(|w| w.branch == branch))
+            .map(|i| i.task_id.clone())
+            .last()
+    } else {
+        None
+    };
+    if let Some(task_id) = reuse {
+        if let Some(task) = queries::get_agent_task(conn, &task_id).map_err(e2s)? {
+            item.task_id = task.id.clone();
+            return Ok(task);
+        }
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    let task = queries::create_agent_task_with_id(
+        conn,
+        &id,
+        &run.workspace_id,
+        &item.project_id,
+        &m.member.agent_id,
+        &m.member.name,
+        &m.provider,
+        &m.model,
+        &m.prompt,
+        &item.title,
+        &format!("{} · {}", run.title, item.title),
+        &run.agent_project_id,
+        m.account_id.as_deref(),
+        (cwd, if item.kind == "work" { &item.branch } else { "" }),
+        &format!("{}{}", team::TASK_BATCH_PREFIX, run.id),
+    )
+    .map_err(e2s)?;
+    item.task_id = task.id.clone();
+    Ok(task)
+}
+
+/// The message an item starts with.
+fn compose(run: &Run, repos: &[RunRepo], items: &[Item], messages: &[team::Message], item: &Item, m: &MemberSnap, cwd: &str) -> (String, Vec<String>) {
+    let mut out = String::new();
+    let mut delivered = Vec::new();
+    let repo = repos.iter().find(|r| r.project_id == item.project_id);
+    out.push_str(&format!("# Equipo «{}»\n\n## Objetivo del equipo\n{}\n\n", run.team_name, run.goal));
+    out.push_str(&format!("Eres **{}**{}.\n\n", m.member.name, if m.member.role.trim().is_empty() { String::new() } else { format!(" — {}", m.member.role.trim()) }));
+
+    let inbox: Vec<&team::Message> = messages
+        .iter()
+        .filter(|msg| !msg.delivered && msg.from_id != m.member.id)
+        .filter(|msg| msg.to_id == m.member.id || msg.to_id == "all" || (item.is_lead() && msg.to_id == "lead"))
+        .filter(|msg| matches!(msg.kind.as_str(), "note" | "finding" | "decision" | "answer") || msg.from_id == "user")
+        .collect();
+
+    if item.is_lead() {
+        out.push_str("## El equipo\n");
+        for mm in &run.members {
+            if mm.member.id == run.lead {
+                continue;
+            }
+            let repos_of = if mm.member.repos.is_empty() {
+                "todos los repositorios".to_string()
+            } else {
+                repos.iter().filter(|r| mm.member.repos.contains(&r.project_id)).map(|r| r.name.clone()).collect::<Vec<_>>().join(", ")
+            };
+            out.push_str(&format!(
+                "- **{}** — {} · {} · {}{} · {}\n",
+                mm.member.name,
+                if mm.member.role.trim().is_empty() { "sin rol descrito" } else { mm.member.role.trim() },
+                if mm.member.edits { "escribe código" } else { "solo lectura" },
+                mm.model,
+                if mm.effort.is_empty() { String::new() } else { format!(" ({})", mm.effort) },
+                repos_of
+            ));
+        }
+        out.push_str("\n## Repositorios\n");
+        for r in repos {
+            out.push_str(&format!("- **{}** — rama destino `{}`, trabajo integrado en `{}` ({})\n", r.name, r.target_branch, r.integration_branch, r.integration_path));
+        }
+        let others: Vec<&Item> = items.iter().filter(|i| !i.is_lead()).collect();
+        if !others.is_empty() {
+            out.push_str("\n## Estado del trabajo\n");
+            for i in others {
+                let note = match i.status.as_str() {
+                    "done" => format!(" — {}", first_line(&protocol::prose(&i.output_text), 300)),
+                    "error" => format!(" — falló: {}", first_line(&i.last_error, 300)),
+                    _ => String::new(),
+                };
+                out.push_str(&format!("- `{}` [{}] {} · {} · {}{}\n", i.key, i.status, i.member_name, i.kind, i.title, note));
+            }
+        }
+        out.push_str(&format!("\n## Ahora\n{}\n", item.instruction));
+    } else {
+        if let Some(r) = repo {
+            out.push_str(&format!("## Dónde trabajas\nRepositorio **{}**, carpeta `{cwd}`", r.name));
+            if !item.branch.is_empty() {
+                out.push_str(&format!(", rama `{}` (sale de `{}`)", item.branch, r.integration_branch));
+            }
+            out.push_str(".\nNo cambies de rama ni hagas checkout, rebase, reset ni stash.");
+            if item.writes() {
+                out.push_str(" No hagas commit: el equipo guarda tu trabajo al terminar.");
+            } else {
+                out.push_str(" Esta tarea es de solo lectura.");
+            }
+            let others: Vec<&RunRepo> = repos.iter().filter(|x| x.project_id != r.project_id).collect();
+            if !others.is_empty() {
+                out.push_str("\nLos otros repositorios de esta tarea, para leer: ");
+                out.push_str(&others.iter().map(|x| format!("{} (`{}`)", x.name, x.integration_path)).collect::<Vec<_>>().join(", "));
+            }
+            out.push_str("\n\n");
+        }
+        match item.kind.as_str() {
+            "review" => {
+                let target = items.iter().find(|i| i.id == item.ref_item);
+                let exigence = crate::chain_review::Exigence::parse(&run.policy.review.exigence);
+                if let (Some(t), Some(r)) = (target, repo) {
+                    out.push_str(&format!(
+                        "## Tu tarea\nRevisa el trabajo de **{}** en «{}»: {}\nLos cambios son `git diff {}...{}` en esta carpeta.\n\n",
+                        t.member_name, t.title, t.instruction, r.integration_branch, t.branch
+                    ));
+                }
+                out.push_str(&crate::chain_review::instruction(exigence));
+                out.push_str("\n\n");
+            }
+            "integrate" => {
+                out.push_str(&format!("## Tu tarea\n{}\n\n", item.instruction));
+            }
+            _ => out.push_str(&format!("## Tu tarea\n{}\n\n", item.instruction)),
+        }
+        let deps: Vec<&Item> = item.depends_on.iter().filter_map(|d| items.iter().find(|i| i.id == *d)).collect();
+        if !deps.is_empty() {
+            out.push_str("## Lo que te entregan\n");
+            for d in deps {
+                out.push_str(&format!("### `{}` — {}: {}\n{}\n\n", d.key, d.member_name, d.title, trim_chars(&protocol::prose(&d.output_text), team::HANDOFF_PER_DEP)));
+            }
+        }
+    }
+    if !inbox.is_empty() {
+        out.push_str("## Mensajes para ti\n");
+        for msg in &inbox {
+            out.push_str(&format!("- **{}**: {}\n", msg.from_name, msg.body));
+            delivered.push(msg.id.clone());
+        }
+        out.push('\n');
+    }
+    if !item.feedback.trim().is_empty() {
+        out.push_str(&format!("## Antes de seguir\n{}\n\n", item.feedback.trim()));
+    }
+    if item.is_lead() {
+        let may_ask = match run.policy.questions.as_str() {
+            "allow" => true,
+            "plan" => item.kind == "plan",
+            _ => false,
+        };
+        out.push_str(&protocol::lead_protocol(may_ask));
+    } else {
+        out.push_str(&protocol::member_protocol(run.policy.members_may_ask()));
+    }
+    (out, delivered)
+}
+
+// ---------------------------------------------------------------- settle
+
+/// One item's turn is over. `outcome` is `ok`, `error`, `busy` (it never ran) or `cancelled`.
+#[tauri::command]
+pub async fn team_settle(app: AppHandle, db: State<'_, Db>, item_id: String, outcome: String, text: Option<String>, error: Option<String>) -> Result<RunState, String> {
+    settle_item(&app, &db, &item_id, &outcome, text.as_deref().unwrap_or_default(), error.as_deref().unwrap_or_default()).await
+}
+
+/// [`team_settle`] for callers without a `State` — `cf done` from a member's terminal.
+pub async fn settle_from_terminal(app: &AppHandle, item_id: &str, text: &str) -> Result<(), String> {
+    let db = app.state::<Db>();
+    settle_item(app, db.inner(), item_id, "ok", text, "").await.map(|_| ())
+}
+
+pub async fn settle_item(app: &AppHandle, db: &Db, item_id: &str, outcome: &str, text: &str, error: &str) -> Result<RunState, String> {
+    let state = settle_core(db, item_id, outcome, text, error).await?;
+    changed(app, &state.run.id);
+    Ok(state)
+}
+
+pub async fn settle_core(db: &Db, item_id: &str, outcome: &str, text: &str, error: &str) -> Result<RunState, String> {
+    let item = with(db, |c| team::get_item(c, item_id).map_err(e2s)?.ok_or_else(|| "El ítem ya no existe.".to_string()))?;
+    let run_id = item.run_id.clone();
+    let lock = run_lock(&run_id);
+    let _guard = lock.lock().await;
+    let (run, mut item) = with(db, |c| {
+        let run = team::get_run(c, &run_id).map_err(e2s)?.ok_or("La corrida ya no existe.")?;
+        let item = team::get_item(c, item_id).map_err(e2s)?.ok_or("El ítem ya no existe.")?;
+        Ok((run, item))
+    })?;
+    if item.status != "running" {
+        return state_of(db, &run_id);
+    }
+    item.terminal_session.clear();
+    match outcome {
+        "busy" => {
+            item.status = "pending".into();
+            item.attempts = (item.attempts - 1).max(0);
+            with(db, |c| team::update_item(c, &item).map_err(e2s))?;
+        }
+        "cancelled" => {
+            item.status = "pending".into();
+            item.attempts = (item.attempts - 1).max(0);
+            item.last_error = "team.stopped".into();
+            with(db, |c| {
+                team::update_item(c, &item).map_err(e2s)?;
+                if team::get_run(c, &run_id).map_err(e2s)?.is_some_and(|r| r.status == "running") {
+                    team::set_run_status(c, &run_id, "paused", "", "").map_err(e2s)?;
+                    team::set_run_reason(c, &run_id, "team.stopped").map_err(e2s)?;
+                }
+                Ok(())
+            })?;
+        }
+        "ok" => on_ok(db, &run, item, text).await?,
+        _ => on_failure(db, &run, item, if error.is_empty() { "falló sin decir por qué" } else { error }, "error").await?,
+    }
+    advance(db, &run_id).await?;
+    state_of(db, &run_id)
+}
+
+/// A turn that did not get its job done. Retried while attempts remain (with the reason in front of
+/// it), then handed to the member's escalation, then to the lead, then to the user.
+async fn on_failure(db: &Db, run: &Run, mut item: Item, reason: &str, kind: &str) -> Result<(), String> {
+    with(db, |c| {
+        item.last_error = reason.to_string();
+        if item.attempts < run.policy.max_attempts {
+            item.status = "pending".into();
+            item.feedback = format!("El intento anterior no sirvió: {}\nCorrígelo.", trim_chars(reason, 6000));
+            team::update_item(c, &item).map_err(e2s)?;
+            return Ok(());
+        }
+        item.status = "error".into();
+        item.finished_at = queries::now();
+        team::update_item(c, &item).map_err(e2s)?;
+        let who = (item.member_id.as_str(), item.member_name.as_str());
+        team::post(c, &run.id, &item.id, who, ("all", "Equipo"), "error", &format!("«{}» falló {} veces: {}", item.title, item.attempts, first_line(reason, 400)), &[])
+            .map_err(e2s)?;
+        // Escalation: the same item, from scratch, for the member the policy names.
+        if let Some(next) = member(run, &item.member_id).map(|m| m.member.escalate_to.clone()).filter(|e| !e.is_empty()).and_then(|e| member(run, &e).cloned()) {
+            if !item.key.ends_with("-esc") && (next.member.edits || !item.writes()) {
+                let items = team::list_items(c, &run.id).map_err(e2s)?;
+                let mut again = team::new_item(run, &team::free_key(&items, &format!("{}-esc", item.key)), Some(&next), &item.project_id, &item.kind, &item.title, &item.instruction);
+                again.depends_on = item.depends_on.clone();
+                again.ref_item = item.ref_item.clone();
+                again.feedback = format!("{} no pudo con esto ({}). Te toca a ti.", item.member_name, first_line(reason, 400));
+                team::insert_item(c, &again).map_err(e2s)?;
+                // Whatever waited on the failed item waits on its replacement.
+                for mut dependent in items.into_iter().filter(|i| i.depends_on.contains(&item.id)) {
+                    dependent.depends_on = dependent.depends_on.iter().map(|d| if d == &item.id { again.id.clone() } else { d.clone() }).collect();
+                    team::update_item(c, &dependent).map_err(e2s)?;
+                }
+                team::post(c, &run.id, &again.id, ("system", "CodeFlow"), (&next.member.id, &next.member.name), "decision", &format!("«{}» pasa a {}", item.title, next.member.name), &[])
+                    .map_err(e2s)?;
+                return Ok(());
+            }
+        }
+        if !item.is_lead() && !run.lead.is_empty() {
+            let instruction = format!(
+                "La tarea `{}` ({}, {}) falló {} veces ({kind}): {}\nDecide: reasígnala, divídela, cancela lo que dependía de ella o termina.",
+                item.key, item.member_name, item.title, item.attempts, trim_chars(reason, 3000)
+            );
+            if new_lead_item(c, run, "plan", &instruction, "")?.is_some() {
+                return Ok(());
+            }
+            return Ok(());
+        }
+        team::set_run_status(c, &run.id, "gated", &format!("stuck:{}", item.id), &format!("«{}» falló: {}", item.title, first_line(reason, 300))).map_err(e2s)
+    })
+}
+
+async fn on_ok(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String> {
+    item.output_text = text.to_string();
+    if item.is_lead() {
+        return on_lead(db, run, item, text);
+    }
+    // Notes first: whatever the member asked or told, it said it.
+    let waiting = with(db, |c| post_notes(c, run, &item, text))?;
+    if waiting {
+        item.status = "waiting".into();
+        with(db, |c| team::update_item(c, &item).map_err(e2s))?;
+        return Ok(());
+    }
+    let repo = with(db, |c| team::list_repos(c, &run.id).map_err(e2s))?.into_iter().find(|r| r.project_id == item.project_id);
+    match item.kind.as_str() {
+        "review" => on_review(db, run, item, text).await,
+        "integrate" => {
+            let files: Vec<String> = item.feedback.lines().filter_map(|l| l.strip_prefix("- ")).map(str::to_string).collect();
+            let path = item.worktree_path.clone();
+            let message = format!("Merge: integrar «{}»", item.title);
+            match blocking(move || gitops::finish_resolution(&path, &files, &message)).await? {
+                Err(e) => on_failure(db, run, item, &e, "conflicto").await,
+                Ok(_) => {
+                    item.status = "done".into();
+                    item.finished_at = queries::now();
+                    with(db, |c| {
+                        team::update_item(c, &item).map_err(e2s)?;
+                        team::post(c, &run.id, &item.id, (&item.member_id, &item.member_name), ("all", "Equipo"), "merge", "resolvió los conflictos", &[]).map_err(e2s)?;
+                        Ok(())
+                    })?;
+                    if let Some(target) = with(db, |c| team::get_item(c, &item.ref_item).map_err(e2s))? {
+                        integrate(db, run, target).await?;
+                    }
+                    Ok(())
+                }
+            }
+        }
+        "work" => {
+            // Checks the policy runs after each piece of work, in its own folder.
+            let checks: Vec<String> = run
+                .policy
+                .checks
+                .iter()
+                .filter(|c| c.when == "item" && (c.repo == "*" || c.repo == item.project_id))
+                .map(|c| c.command.clone())
+                .collect();
+            for command in checks {
+                let (passed, output) = crate::commands::agents_cmd::run_shell_check(&command, &item.worktree_path).await;
+                if !passed {
+                    return on_failure(db, run, item, &format!("`{command}` falló:\n{}", trim_chars(&output, 6000)), "check").await;
+                }
+            }
+            let path = item.worktree_path.clone();
+            let message = gitops::commit_message(&run.policy.commit_style, &item.key, &item.title);
+            let sha = match blocking(move || gitops::commit_all(&path, &message)).await? {
+                Ok(sha) => sha,
+                Err(e) => return on_failure(db, run, item, &e, "commit").await,
+            };
+            // A fix commits on the same branch as the work it fixes; what is reviewed and merged is
+            // the branch, so the original's sha follows.
+            if let Some(sha) = &sha {
+                item.commit_sha = sha.clone();
+            } else if !item.ref_item.is_empty() {
+                if let Some(original) = with(db, |c| team::get_item(c, &item.ref_item).map_err(e2s))? {
+                    item.commit_sha = original.commit_sha.clone();
+                }
+            }
+            item.status = "done".into();
+            item.feedback.clear();
+            item.finished_at = queries::now();
+            with(db, |c| {
+                team::update_item(c, &item).map_err(e2s)?;
+                handoff(c, run, &item)
+            })?;
+            if item.commit_sha.is_empty() {
+                return Ok(());
+            }
+            if needs_review(run, &item) {
+                with(db, |c| new_review(c, run, &item))?;
+                return Ok(());
+            }
+            integrate(db, run, item).await
+        }
+        _ => {
+            item.status = "done".into();
+            item.feedback.clear();
+            item.finished_at = queries::now();
+            with(db, |c| {
+                team::update_item(c, &item).map_err(e2s)?;
+                handoff(c, run, &item)
+            })?;
+            let _ = repo;
+            Ok(())
+        }
+    }
+}
+
+fn handoff(conn: &Connection, run: &Run, item: &Item) -> Result<(), String> {
+    let summary = first_line(&protocol::prose(&item.output_text), 400);
+    let dependents: Vec<Item> = team::list_items(conn, &run.id).map_err(e2s)?.into_iter().filter(|i| i.depends_on.contains(&item.id)).collect();
+    if dependents.is_empty() {
+        team::post(conn, &run.id, &item.id, (&item.member_id, &item.member_name), ("all", "Equipo"), "handoff", &format!("terminó «{}»: {summary}", item.title), &[])
+            .map_err(e2s)?;
+    } else {
+        for d in dependents {
+            team::post(conn, &run.id, &item.id, (&item.member_id, &item.member_name), (&d.member_id, &d.member_name), "handoff", &format!("«{}» listo para «{}»: {summary}", item.title, d.title), &[])
+                .map_err(e2s)?;
+        }
+    }
+    Ok(())
+}
+
+/// The notes in a member's answer, posted. `true` when one of them is a question that has to be
+/// answered before the member can go on.
+fn post_notes(conn: &Connection, run: &Run, item: &Item, text: &str) -> Result<bool, String> {
+    let roster = roster(run);
+    let (notes, errors) = protocol::member_notes(text, &roster);
+    let from = (item.member_id.as_str(), item.member_name.as_str());
+    let mut waiting = false;
+    for note in notes {
+        let (to_id, to_name) = match &note.to {
+            protocol::Recipient::User => ("user".to_string(), "Tú".to_string()),
+            protocol::Recipient::Lead if !run.lead.is_empty() => ("lead".to_string(), lead_name(run)),
+            protocol::Recipient::Lead => ("user".to_string(), "Tú".to_string()),
+            protocol::Recipient::All => ("all".to_string(), "Equipo".to_string()),
+            protocol::Recipient::Member(id) => (id.clone(), member(run, id).map(|m| m.member.name.clone()).unwrap_or_default()),
+        };
+        if note.question && to_id == "user" {
+            if run.policy.members_may_ask() {
+                team::post(conn, &run.id, &item.id, from, ("user", "Tú"), "question", &note.text, &note.options).map_err(e2s)?;
+                waiting = true;
+            } else {
+                team::post(conn, &run.id, &item.id, from, ("user", "Tú"), "note", &format!("(no puede preguntar, decidió solo) {}", note.text), &[]).map_err(e2s)?;
+            }
+        } else if note.question && to_id == "lead" {
+            let asked = team::post(conn, &run.id, &item.id, from, ("lead", &to_name), "question", &note.text, &note.options).map_err(e2s)?;
+            let instruction = format!("{} pregunta, desde «{}»: {}\nRespóndele en tu texto (lo recibe tal cual).", item.member_name, item.title, note.text);
+            if let Some(mut lead_item) = new_lead_item(conn, run, "answer", &instruction, "")? {
+                lead_item.ref_item = asked.id.clone();
+                conn.execute("UPDATE agent_team_items SET ref_item = ?2 WHERE id = ?1", rusqlite::params![lead_item.id, asked.id]).map_err(e2s)?;
+                waiting = true;
+            }
+        } else {
+            team::post(conn, &run.id, &item.id, from, (&to_id, &to_name), if note.question { "question" } else { "note" }, &note.text, &note.options).map_err(e2s)?;
+        }
+    }
+    for e in errors {
+        team::post(conn, &run.id, &item.id, ("system", "CodeFlow"), from, "error", &format!("una nota no se pudo leer: {e}"), &[]).map_err(e2s)?;
+    }
+    Ok(waiting)
+}
+
+fn needs_review(run: &Run, item: &Item) -> bool {
+    let review = &run.policy.review;
+    review.enabled
+        && !review.reviewer.is_empty()
+        && review.reviewer != item.member_id
+        && member(run, &review.reviewer).is_some()
+        && (review.of.is_empty() || review.of.contains(&item.member_id))
+}
+
+fn new_review(conn: &Connection, run: &Run, work: &Item) -> Result<(), String> {
+    let Some(reviewer) = member(run, &run.policy.review.reviewer) else { return Ok(()) };
+    let items = team::list_items(conn, &run.id).map_err(e2s)?;
+    let lap = items.iter().filter(|i| i.kind == "review" && items.iter().any(|w| w.id == i.ref_item && w.branch == work.branch)).count() as i64 + 1;
+    let mut review = team::new_item(run, &team::free_key(&items, &format!("{}-rev", work.key)), Some(reviewer), &work.project_id, "review", &format!("Revisar «{}»", work.title), &work.instruction);
+    review.ref_item = work.id.clone();
+    review.lap = lap;
+    review.run_in = "headless".into();
+    team::insert_item(conn, &review).map_err(e2s)?;
+    team::post(conn, &run.id, &review.id, (&work.member_id, &work.member_name), (&reviewer.member.id, &reviewer.member.name), "handoff", &format!("«{}» listo para revisar (vuelta {lap})", work.title), &[])
+        .map_err(e2s)?;
+    Ok(())
+}
+
+async fn on_review(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String> {
+    let Some(review) = crate::chain_review::parse(text) else {
+        return on_failure(db, run, item, "la revisión no tiene una línea `VERDICT: OK | FIX`", "revisión").await;
+    };
+    let target = with(db, |c| team::get_item(c, &item.ref_item).map_err(e2s))?;
+    let Some(target) = target else {
+        item.status = "done".into();
+        with(db, |c| team::update_item(c, &item).map_err(e2s))?;
+        return Ok(());
+    };
+    let roots = vec![target.worktree_path.clone()];
+    let grounded = crate::chain_review::ground(review.findings.clone(), &roots, &|p: &std::path::Path| p.exists());
+    let blocking_findings = crate::chain_review::blocking(&grounded, crate::chain_review::Exigence::parse(&run.policy.review.exigence));
+    item.status = "done".into();
+    item.finished_at = queries::now();
+    with(db, |c| team::update_item(c, &item).map_err(e2s))?;
+    let from = (item.member_id.clone(), item.member_name.clone());
+    if blocking_findings.is_empty() {
+        with(db, |c| {
+            team::post(c, &run.id, &item.id, (&from.0, &from.1), (&target.member_id, &target.member_name), "finding", &format!("aprobó «{}»", target.title), &[])
+                .map(|_| ())
+                .map_err(e2s)
+        })?;
+        return integrate(db, run, target).await;
+    }
+    let listing = blocking_findings
+        .iter()
+        .map(|f| format!("[{:?}] {}{} — {}", f.severity, f.file, f.line.map(|l| format!(":{l}")).unwrap_or_default(), f.problem).to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\n");
+    with(db, |c| {
+        team::post(c, &run.id, &item.id, (&from.0, &from.1), (&target.member_id, &target.member_name), "finding", &format!("devuelve «{}»:\n{listing}", target.title), &[])
+            .map_err(e2s)?;
+        if item.lap >= run.policy.review.laps {
+            return team::set_run_status(
+                c,
+                &run.id,
+                "gated",
+                &format!("review:{}", target.id),
+                &format!("«{}» sigue sin aprobarse tras {} vueltas. Aprueba para integrarlo igual, o rechaza para descartarlo.", target.title, item.lap),
+            )
+            .map_err(e2s);
+        }
+        // The fix continues the same task in the same worktree: the author remembers what it did.
+        let items = team::list_items(c, &run.id).map_err(e2s)?;
+        let author = member(run, &target.member_id).cloned();
+        let mut fix = team::new_item(run, &team::free_key(&items, &format!("{}-fix", target.key)), author.as_ref(), &target.project_id, "work", &format!("Corregir «{}»", target.title), &target.instruction);
+        fix.ref_item = target.id.clone();
+        fix.task_id = target.task_id.clone();
+        fix.worktree_path = target.worktree_path.clone();
+        fix.branch = target.branch.clone();
+        fix.run_in = target.run_in.clone();
+        fix.approved = true;
+        fix.lap = item.lap;
+        fix.feedback = crate::chain_review::note_for_worker(&blocking_findings, &[], item.lap);
+        team::insert_item(c, &fix).map_err(e2s)?;
+        // Whatever waits on the original keeps waiting: it is merged when the fix is approved.
+        Ok(())
+    })
+}
+
+/// Merges a work item's branch into its repository's integration branch, or routes the conflict.
+async fn integrate(db: &Db, run: &Run, work: Item) -> Result<(), String> {
+    let Some(repo) = with(db, |c| team::list_repos(c, &run.id).map_err(e2s))?.into_iter().find(|r| r.project_id == work.project_id) else {
+        return Ok(());
+    };
+    let (integ, branch) = (repo.integration_path.clone(), work.branch.clone());
+    let message = format!("Merge «{}» ({})", work.title, work.member_name);
+    let merged = blocking(move || {
+        let _git = crate::git::write_lock();
+        gitops::merge_into_integration(&integ, &branch, &message)
+    })
+    .await?;
+    match merged {
+        Ok(gitops::Merge::Done(_)) | Ok(gitops::Merge::Nothing) => with(db, |c| {
+            // Every done item on this branch (the work and its fixes) is in now.
+            c.execute("UPDATE agent_team_items SET merged = 1 WHERE run_id = ?1 AND branch = ?2 AND status = 'done'", rusqlite::params![run.id, work.branch])
+                .map_err(e2s)?;
+            team::post(c, &run.id, &work.id, ("system", "CodeFlow"), ("all", "Equipo"), "merge", &format!("«{}» integrado en {}", work.title, repo.integration_branch), &[])
+                .map_err(e2s)?;
+            Ok(())
+        }),
+        Ok(gitops::Merge::Conflict(files)) => route_conflict(db, run, &repo, work, files).await,
+        Err(e) => with(db, |c| {
+            team::set_run_status(c, &run.id, "gated", &format!("stuck:{}", work.id), &format!("No se pudo integrar «{}»: {e}", work.title)).map_err(e2s)
+        }),
+    }
+}
+
+async fn route_conflict(db: &Db, run: &Run, repo: &RunRepo, work: Item, files: Vec<String>) -> Result<(), String> {
+    let resolver = match run.policy.conflicts.as_str() {
+        "user" => None,
+        "author" | "" => member(run, &work.member_id).cloned(),
+        id => member(run, id).cloned().or_else(|| member(run, &work.member_id).cloned()),
+    }
+    .filter(|m| m.member.edits);
+    let Some(resolver) = resolver else {
+        return with(db, |c| {
+            team::set_run_status(c, &run.id, "gated", &format!("stuck:{}", work.id), &format!("«{}» choca con el trabajo ya integrado en: {}. Resuélvelo en {} y aprueba.", work.title, files.join(", "), work.worktree_path))
+                .map_err(e2s)
+        });
+    };
+    let (path, integ_branch) = (work.worktree_path.clone(), repo.integration_branch.clone());
+    let conflicts = blocking(move || gitops::bring_conflicts_into(&path, &integ_branch)).await??;
+    if conflicts.is_empty() {
+        // It merged cleanly the other way round: try again.
+        return Box::pin(integrate(db, run, work)).await;
+    }
+    with(db, |c| {
+        let items = team::list_items(c, &run.id).map_err(e2s)?;
+        let mut fix = team::new_item(
+            run,
+            &team::free_key(&items, &format!("{}-merge", work.key)),
+            Some(&resolver),
+            &work.project_id,
+            "integrate",
+            &format!("Resolver conflictos de «{}»", work.title),
+            &format!(
+                "Al integrar «{}» de {} con lo que el equipo ya integró, chocan estos archivos. El merge está a medias en esta carpeta: resuelve cada conflicto conservando lo que quiere cada lado, quita todas las marcas y deja que el equipo cierre el merge (no hagas commit).",
+                work.title, work.member_name
+            ),
+        );
+        fix.ref_item = work.id.clone();
+        fix.worktree_path = work.worktree_path.clone();
+        fix.branch = work.branch.clone();
+        fix.approved = true;
+        if resolver.member.id == work.member_id {
+            fix.task_id = work.task_id.clone();
+        }
+        fix.feedback = conflicts.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
+        team::insert_item(c, &fix).map_err(e2s)?;
+        team::post(c, &run.id, &fix.id, ("system", "CodeFlow"), (&resolver.member.id, &resolver.member.name), "merge", &format!("conflicto al integrar «{}»: {}", work.title, conflicts.join(", ")), &[])
+            .map_err(e2s)?;
+        Ok(())
+    })
+}
+
+/// A lead's turn: its plan, its questions, its decisions.
+fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String> {
+    with(db, |c| {
+        let items = team::list_items(c, &run.id).map_err(e2s)?;
+        let repos = team::list_repos(c, &run.id).map_err(e2s)?;
+        let roster: Vec<protocol::RosterEntry> = roster(run).into_iter().filter(|m| m.id != run.lead).collect();
+        let repo_entries: Vec<protocol::RepoEntry> = repos.iter().map(|r| protocol::RepoEntry { project_id: r.project_id.clone(), name: r.name.clone() }).collect();
+        let keys: Vec<String> = items.iter().map(|i| i.key.clone()).collect();
+        let reply = protocol::lead_reply(text, &roster, &repo_entries, &keys);
+        let lead = (run.lead.clone(), lead_name(run));
+        let from = (lead.0.as_str(), lead.1.as_str());
+
+        // An answer to a member's question: the lead's text is the answer.
+        if item.kind == "answer" {
+            if let Some(asked) = team::get_message(c, &item.ref_item).map_err(e2s)? {
+                let answer = if reply.message.is_empty() { protocol::prose(text) } else { reply.message.clone() };
+                team::answer_message(c, &asked.id, &answer).map_err(e2s)?;
+                if let Some(mut waiting) = team::get_item(c, &asked.item_id).map_err(e2s)? {
+                    if waiting.status == "waiting" {
+                        waiting.status = "pending".into();
+                        waiting.attempts = (waiting.attempts - 1).max(0);
+                        waiting.feedback = format!("Preguntaste al líder: {}\nTe responde: {answer}", asked.body);
+                        team::update_item(c, &waiting).map_err(e2s)?;
+                    }
+                }
+            }
+        } else if !reply.message.is_empty() {
+            team::post(c, &run.id, &item.id, from, ("all", "Equipo"), "decision", &reply.message, &[]).map_err(e2s)?;
+        }
+        if !reply.rejected.is_empty() {
+            team::post(c, &run.id, &item.id, ("system", "CodeFlow"), ("lead", &lead.1), "error", &format!("se descartó parte del plan:\n- {}", reply.rejected.join("\n- ")), &[])
+                .map_err(e2s)?;
+        }
+
+        // Questions for the user stop the lead until they are answered.
+        let may_ask = match run.policy.questions.as_str() {
+            "allow" => true,
+            "plan" => item.kind == "plan",
+            _ => false,
+        };
+        if !reply.questions.is_empty() {
+            if may_ask {
+                for q in &reply.questions {
+                    team::post(c, &run.id, &item.id, from, ("user", "Tú"), "question", &q.text, &q.options).map_err(e2s)?;
+                }
+                item.status = "waiting".into();
+                team::update_item(c, &item).map_err(e2s)?;
+                return Ok(());
+            }
+            if reply.items.is_empty() && !reply.finish && item.attempts < run.policy.max_attempts {
+                item.status = "pending".into();
+                item.feedback = "No puedes preguntarle al usuario. Decide con lo que hay, anota lo que supones y planifica.".into();
+                team::update_item(c, &item).map_err(e2s)?;
+                return Ok(());
+            }
+        }
+
+        // Cancellations: only what has not started.
+        for key in &reply.cancel {
+            let slug = protocol::key_slug(key);
+            for mut i in items.iter().filter(|i| i.key == slug && matches!(i.status.as_str(), "pending" | "gated")).cloned() {
+                i.status = "skipped".into();
+                team::update_item(c, &i).map_err(e2s)?;
+                team::post(c, &run.id, &i.id, from, (&i.member_id, &i.member_name), "decision", &format!("canceló «{}»", i.title), &[]).map_err(e2s)?;
+            }
+        }
+
+        // New items, their dependencies resolved from keys to ids (this plan's and the run's).
+        let mut key_to_id: HashMap<String, String> = items.iter().map(|i| (i.key.clone(), i.id.clone())).collect();
+        let mut fresh = Vec::new();
+        for p in &reply.items {
+            let m = member(run, &p.member_id);
+            let mut new = team::new_item(run, &p.key, m, &p.project_id, &p.kind, &p.title, &p.instruction);
+            new.round = item.round;
+            key_to_id.insert(p.key.clone(), new.id.clone());
+            fresh.push((new, p.depends_on.clone()));
+        }
+        let added = fresh.len();
+        for (mut new, deps) in fresh {
+            new.depends_on = deps.iter().filter_map(|k| key_to_id.get(k).cloned()).collect();
+            team::insert_item(c, &new).map_err(e2s)?;
+            team::post(c, &run.id, &new.id, from, (&new.member_id, &new.member_name), "plan", &format!("asignó «{}»", new.title), &[]).map_err(e2s)?;
+        }
+        if reply.finish {
+            team::set_lead_done(c, &run.id, true).map_err(e2s)?;
+        } else if added > 0 {
+            team::set_lead_done(c, &run.id, false).map_err(e2s)?;
+        }
+
+        // A plan that decided nothing at all is retried once with that said.
+        let open = team::open_items(&team::list_items(c, &run.id).map_err(e2s)?.into_iter().filter(|i| i.id != item.id).collect::<Vec<_>>());
+        if added == 0 && !reply.finish && open == 0 && item.kind != "answer" && item.attempts < run.policy.max_attempts {
+            item.status = "pending".into();
+            item.feedback = if reply.rejected.is_empty() {
+                "No asignaste ninguna tarea ni terminaste. Responde con el bloque ```equipo``` que se te pidió.".into()
+            } else {
+                format!("Nada de tu plan se pudo usar:\n- {}\nCorrígelo.", reply.rejected.join("\n- "))
+            };
+            team::update_item(c, &item).map_err(e2s)?;
+            return Ok(());
+        }
+        item.status = "done".into();
+        item.feedback.clear();
+        item.finished_at = queries::now();
+        team::update_item(c, &item).map_err(e2s)?;
+
+        // The first plan waits for the user when the policy says so.
+        let first_plan = item.kind == "plan" && !items.iter().any(|i| i.kind == "plan" && i.id != item.id && i.status == "done");
+        if first_plan && run.policy.approve_plan && added > 0 {
+            team::set_run_status(c, &run.id, "gated", "plan", "Revisa el plan del líder antes de que el equipo empiece.").map_err(e2s)?;
+        }
+        Ok(())
+    })
+}
+
+// ---------------------------------------------------------------- advance & finish
+
+/// After any change: if nothing is moving any more, decide what happens next — a blocked graph goes
+/// back to the lead (or to the user), and a finished one is checked and landed.
+async fn advance(db: &Db, run_id: &str) -> Result<(), String> {
+    let (run, items, repos) = with(db, |c| {
+        let run = team::get_run(c, run_id).map_err(e2s)?.ok_or("La corrida ya no existe.")?;
+        Ok((run, team::list_items(c, run_id).map_err(e2s)?, team::list_repos(c, run_id).map_err(e2s)?))
+    })?;
+    if run.status != "running" {
+        return Ok(());
+    }
+    let moving = items.iter().filter(|i| matches!(i.status.as_str(), "running" | "waiting" | "gated")).count();
+    if moving > 0 {
+        return Ok(());
+    }
+    let pending: Vec<&Item> = items.iter().filter(|i| i.status == "pending").collect();
+    if !pending.is_empty() {
+        if !team::ready_items(&run, &items).is_empty() {
+            return Ok(());
+        }
+        // Blocked: everything left waits on something that failed or was skipped.
+        let blocked = pending.iter().map(|i| format!("`{}` {}", i.key, i.title)).collect::<Vec<_>>().join(", ");
+        return with(db, |c| {
+            if !run.lead.is_empty() {
+                let instruction = format!("El trabajo está bloqueado: estas tareas esperan a otras que fallaron o se cancelaron: {blocked}. Reasigna, cancela o termina.");
+                if new_lead_item(c, &run, "plan", &instruction, "")?.is_some() {
+                    return Ok(());
+                }
+                return Ok(());
+            }
+            team::set_run_status(c, run_id, "gated", "stuck:", &format!("Hay tareas bloqueadas: {blocked}.")).map_err(e2s)
+        });
+    }
+    let unmerged: Vec<Item> = team::unmerged_work(&items).into_iter().cloned().collect();
+    if !unmerged.is_empty() {
+        for work in unmerged {
+            integrate(db, &run, work).await?;
+        }
+        return Box::pin(advance(db, run_id)).await;
+    }
+    // The lead's last look.
+    if !run.lead.is_empty() && !run.lead_done && run.policy.lead_final_check {
+        let made = with(db, |c| {
+            new_lead_item(c, &run, "final", "Todo lo asignado está hecho. Revisa las entregas: si falta algo, asígnalo; si está completo, responde `\"terminar\": true`.", "")
+        })?;
+        if made.is_some() {
+            return Ok(());
+        }
+        return Ok(());
+    }
+    // Final checks, in each integration tree.
+    for repo in repos.iter().filter(|r| r.status == "ready") {
+        for check in run.policy.checks.iter().filter(|c| c.when == "final" && (c.repo == "*" || c.repo == repo.project_id)) {
+            let (passed, output) = crate::commands::agents_cmd::run_shell_check(&check.command, &repo.integration_path).await;
+            with(db, |c| {
+                team::post(c, run_id, "", ("system", "CodeFlow"), ("all", "Equipo"), if passed { "status" } else { "error" }, &format!("{} · `{}` {}", repo.name, check.command, if passed { "pasó" } else { "falló" }), &[])
+                    .map(|_| ())
+                    .map_err(e2s)
+            })?;
+            if !passed {
+                return with(db, |c| {
+                    if !run.lead.is_empty() {
+                        team::set_lead_done(c, run_id, false).map_err(e2s)?;
+                        let instruction = format!("En {} la verificación `{}` falló con todo integrado:\n{}\nAsigna quién lo arregla.", repo.name, check.command, trim_chars(&output, 6000));
+                        if new_lead_item(c, &run, "plan", &instruction, "")?.is_some() {
+                            return Ok(());
+                        }
+                        return Ok(());
+                    }
+                    team::set_run_status(c, run_id, "gated", "stuck:", &format!("`{}` falló en {}:\n{}", check.command, repo.name, trim_chars(&output, 2000))).map_err(e2s)
+                });
+            }
+        }
+    }
+    if run.policy.integrate == "branch" {
+        return with(db, |c| {
+            for r in &repos {
+                team::set_repo_status(c, run_id, &r.project_id, "left", "").map_err(e2s)?;
+            }
+            let names = repos.iter().map(|r| format!("{} → `{}`", r.name, r.integration_branch)).collect::<Vec<_>>().join(", ");
+            team::post(c, run_id, "", ("system", "CodeFlow"), ("user", "Tú"), "merge", &format!("Trabajo listo en: {names}"), &[]).map_err(e2s)?;
+            team::set_run_status(c, run_id, "done", "", "").map_err(e2s)
+        });
+    }
+    if run.policy.approve_merge {
+        let names = repos.iter().map(|r| format!("{} → {}", r.name, r.target_branch)).collect::<Vec<_>>().join(", ");
+        return with(db, |c| team::set_run_status(c, run_id, "gated", "merge", &format!("Todo está hecho. ¿Integrar en {names}?")).map_err(e2s));
+    }
+    land_all(db, &run).await
+}
+
+/// Lands every ready repository on its target branch, by the policy.
+async fn land_all(db: &Db, run: &Run) -> Result<(), String> {
+    let repos = with(db, |c| team::list_repos(c, &run.id).map_err(e2s))?;
+    for repo in repos.iter().filter(|r| r.status == "ready") {
+        let (r, t, p, b, mode, push) = (
+            repo.local_path.clone(),
+            repo.target_branch.clone(),
+            repo.integration_path.clone(),
+            repo.integration_branch.clone(),
+            run.policy.commit.clone(),
+            run.policy.push,
+        );
+        let message = gitops::commit_message(&run.policy.commit_style, "", &run.title);
+        let landed = blocking(move || {
+            let _git = crate::git::write_lock();
+            gitops::land(&r, &t, &p, &b, &mode, &message, push)
+        })
+        .await?;
+        match landed {
+            Ok(gitops::Landed::Done(summary)) => with(db, |c| {
+                team::set_repo_status(c, &run.id, &repo.project_id, "merged", "").map_err(e2s)?;
+                team::post(c, &run.id, "", ("system", "CodeFlow"), ("user", "Tú"), "merge", &format!("{}: {summary}", repo.name), &[]).map(|_| ()).map_err(e2s)
+            })?,
+            Ok(gitops::Landed::Conflict(files)) => {
+                // The target moved and conflicts with the team's work: a member resolves it in the
+                // integration tree, then the landing runs again.
+                let resolver = match run.policy.conflicts.as_str() {
+                    "user" | "author" | "" => None,
+                    id => member(run, id).cloned(),
+                }
+                .or_else(|| run.members.iter().find(|m| m.member.edits && m.member.id != run.lead).cloned());
+                return with(db, |c| match resolver.filter(|_| run.policy.conflicts != "user") {
+                    Some(resolver) => {
+                        let items = team::list_items(c, &run.id).map_err(e2s)?;
+                        let mut fix = team::new_item(
+                            run,
+                            &team::free_key(&items, "merge-destino"),
+                            Some(&resolver),
+                            &repo.project_id,
+                            "integrate",
+                            &format!("Resolver conflictos con {}", repo.target_branch),
+                            &format!("{} cambió mientras el equipo trabajaba y choca con el trabajo integrado. El merge está a medias en esta carpeta: resuelve los conflictos conservando ambos lados y quita las marcas (no hagas commit).", repo.target_branch),
+                        );
+                        fix.worktree_path = repo.integration_path.clone();
+                        fix.approved = true;
+                        fix.feedback = files.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
+                        team::insert_item(c, &fix).map_err(e2s)?;
+                        Ok(())
+                    }
+                    None => team::set_run_status(c, &run.id, "gated", "stuck:", &format!("{} choca con {} en: {}. Resuélvelo en {} y aprueba.", repo.target_branch, repo.integration_branch, files.join(", "), repo.integration_path))
+                        .map_err(e2s),
+                });
+            }
+            Err(e) => {
+                return with(db, |c| {
+                    team::set_repo_status(c, &run.id, &repo.project_id, "failed", &e).map_err(e2s)?;
+                    team::set_run_status(c, &run.id, "gated", "merge", &format!("{}: no se pudo integrar — {e}", repo.name)).map_err(e2s)
+                });
+            }
+        }
+    }
+    // Everything landed: tidy up.
+    if run.policy.cleanup {
+        let items = with(db, |c| team::list_items(c, &run.id).map_err(e2s))?;
+        for repo in &repos {
+            let paths: Vec<String> = items
+                .iter()
+                .filter(|i| i.project_id == repo.project_id && i.kind == "work" && !i.worktree_path.is_empty())
+                .map(|i| i.worktree_path.clone())
+                .chain(std::iter::once(repo.integration_path.clone()))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let r = repo.local_path.clone();
+            let _ = blocking(move || {
+                for p in paths {
+                    gitops::remove_worktree(&r, &p);
+                }
+            })
+            .await;
+        }
+    }
+    with(db, |c| team::set_run_status(c, &run.id, "done", "", "").map_err(e2s))
+}
+
+// ---------------------------------------------------------------- the user
+
+/// Answers a question a member or the lead asked the user. Once every question an item asked is
+/// answered, it goes on with the answers in front of it.
+#[tauri::command]
+pub async fn team_answer(app: AppHandle, db: State<'_, Db>, message_id: String, answer: String) -> Result<RunState, String> {
+    let state = answer_question(&db, &message_id, &answer).await?;
+    changed(&app, &state.run.id);
+    Ok(state)
+}
+
+pub async fn answer_question(db: &Db, message_id: &str, answer: &str) -> Result<RunState, String> {
+    let message_id = message_id.to_string();
+    let answer = answer.to_string();
+    let message = with(db, |c| team::get_message(c, &message_id).map_err(e2s)?.ok_or_else(|| "La pregunta ya no existe.".to_string()))?;
+    let lock = run_lock(&message.run_id);
+    let _guard = lock.lock().await;
+    with(db, |c| {
+        team::answer_message(c, &message_id, answer.trim()).map_err(e2s)?;
+        let messages = team::list_messages(c, &message.run_id).map_err(e2s)?;
+        let asked: Vec<&team::Message> = messages.iter().filter(|m| m.item_id == message.item_id && m.kind == "question" && m.to_id == "user").collect();
+        if asked.iter().all(|m| !m.answer.is_empty() || m.id == message_id) {
+            if let Some(mut item) = team::get_item(c, &message.item_id).map_err(e2s)? {
+                if item.status == "waiting" {
+                    let answers = asked
+                        .iter()
+                        .map(|m| format!("- {} → {}", m.body, if m.id == message_id { answer.trim().to_string() } else { m.answer.clone() }))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    item.status = "pending".into();
+                    item.attempts = (item.attempts - 1).max(0);
+                    item.feedback = format!("El usuario respondió:\n{answers}");
+                    team::update_item(c, &item).map_err(e2s)?;
+                }
+            }
+        }
+        Ok(())
+    })?;
+    advance(db, &message.run_id).await?;
+    state_of(db, &message.run_id)
+}
+
+/// A note from the user to a member, the lead or everyone — delivered with their next item.
+#[tauri::command]
+pub fn team_note(app: AppHandle, db: State<'_, Db>, run_id: String, to_id: String, body: String) -> Result<RunState, String> {
+    if body.trim().is_empty() {
+        return state_of(&db, &run_id);
+    }
+    with(&db, |c| {
+        let run = team::get_run(c, &run_id).map_err(e2s)?.ok_or("La corrida ya no existe.")?;
+        let to_name = match to_id.as_str() {
+            "all" => "Equipo".to_string(),
+            "lead" => lead_name(&run),
+            id => member(&run, id).map(|m| m.member.name.clone()).unwrap_or_else(|| "Equipo".into()),
+        };
+        team::post(c, &run_id, "", ("user", "Tú"), (&to_id, &to_name), "note", body.trim(), &[]).map_err(e2s)?;
+        Ok(())
+    })?;
+    changed(&app, &run_id);
+    state_of(&db, &run_id)
+}
+
+/// Answers whatever a gated run waits for. `approve` false is "no": the plan goes back to the lead
+/// (with `comment`), an item is skipped, the merge is left for later, a stuck run fails.
+#[tauri::command]
+pub async fn team_decide(app: AppHandle, db: State<'_, Db>, run_id: String, approve: bool, comment: Option<String>) -> Result<RunState, String> {
+    let state = decide(&db, &run_id, approve, comment.as_deref().unwrap_or_default()).await?;
+    changed(&app, &run_id);
+    Ok(state)
+}
+
+pub async fn decide(db: &Db, run_id: &str, approve: bool, comment: &str) -> Result<RunState, String> {
+    let run_id = run_id.to_string();
+    let lock = run_lock(&run_id);
+    let _guard = lock.lock().await;
+    let comment = comment.trim().to_string();
+    let run = with(db, |c| team::get_run(c, &run_id).map_err(e2s)?.ok_or_else(|| "La corrida ya no existe.".to_string()))?;
+    if run.status != "gated" {
+        return state_of(db, &run_id);
+    }
+    if !comment.is_empty() {
+        with(db, |c| team::post(c, &run_id, "", ("user", "Tú"), ("all", "Equipo"), "note", &comment, &[]).map(|_| ()).map_err(e2s))?;
+    }
+    let gate = run.gate.clone();
+    let mut land = false;
+    with(db, |c| {
+        if gate == "plan" {
+            if approve {
+                return team::set_run_status(c, &run_id, "running", "", "").map_err(e2s);
+            }
+            let items = team::list_items(c, &run_id).map_err(e2s)?;
+            for mut i in items.into_iter().filter(|i| i.status == "pending" && !i.is_lead()) {
+                i.status = "skipped".into();
+                team::update_item(c, &i).map_err(e2s)?;
+            }
+            team::set_run_status(c, &run_id, "running", "", "").map_err(e2s)?;
+            let instruction = format!("El usuario rechazó el plan{}. Propón otro.", if comment.is_empty() { String::new() } else { format!(": «{comment}»") });
+            new_lead_item(c, &run, "plan", &instruction, "")?;
+            return Ok(());
+        }
+        if let Some(id) = gate.strip_prefix("item:") {
+            if let Some(mut item) = team::get_item(c, id).map_err(e2s)? {
+                if approve {
+                    item.status = "pending".into();
+                    item.approved = true;
+                } else {
+                    item.status = "skipped".into();
+                }
+                team::update_item(c, &item).map_err(e2s)?;
+            }
+            return team::set_run_status(c, &run_id, "running", "", "").map_err(e2s);
+        }
+        if gate == "merge" {
+            if approve {
+                land = true;
+                return team::set_run_status(c, &run_id, "running", "", "").map_err(e2s);
+            }
+            let repos = team::list_repos(c, &run_id).map_err(e2s)?;
+            for r in repos.iter().filter(|r| r.status == "ready" || r.status == "failed") {
+                team::set_repo_status(c, &run_id, &r.project_id, "left", "").map_err(e2s)?;
+            }
+            team::post(c, &run_id, "", ("system", "CodeFlow"), ("user", "Tú"), "merge", "No se integró: el trabajo queda en las ramas del equipo.", &[]).map_err(e2s)?;
+            return team::set_run_status(c, &run_id, "done", "", "").map_err(e2s);
+        }
+        if let Some(id) = gate.strip_prefix("review:") {
+            if approve {
+                // Integrate anyway: the advance below merges every unmerged done work item.
+                team::set_run_status(c, &run_id, "running", "", "").map_err(e2s)?;
+            } else {
+                if let Some(mut item) = team::get_item(c, id).map_err(e2s)? {
+                    item.status = "skipped".into();
+                    team::update_item(c, &item).map_err(e2s)?;
+                }
+                team::set_run_status(c, &run_id, "running", "", "").map_err(e2s)?;
+            }
+            return Ok(());
+        }
+        if let Some(id) = gate.strip_prefix("stuck:") {
+            if !approve {
+                return team::set_run_status(c, &run_id, "failed", "", "").map_err(e2s);
+            }
+            if let Some(mut item) = team::get_item(c, id).map_err(e2s)? {
+                if matches!(item.status.as_str(), "error" | "done") {
+                    if item.status == "error" {
+                        item.status = "pending".into();
+                        item.attempts = 0;
+                        if !comment.is_empty() {
+                            item.feedback = format!("El usuario dice: {comment}");
+                        }
+                        team::update_item(c, &item).map_err(e2s)?;
+                    }
+                }
+            }
+            // More budget when that is what stopped it.
+            c.execute(
+                "UPDATE agent_team_runs SET dispatches = MIN(dispatches, 0), lead_rounds_used = MIN(lead_rounds_used, 0) WHERE id = ?1 AND (gate_note LIKE '%presupuesto%' OR gate_note LIKE '%rondas%')",
+                rusqlite::params![run_id],
+            )
+            .map_err(e2s)?;
+            return team::set_run_status(c, &run_id, "running", "", "").map_err(e2s);
+        }
+        team::set_run_status(c, &run_id, "running", "", "").map_err(e2s)
+    })?;
+    if land {
+        let run = with(db, |c| team::get_run(c, &run_id).map_err(e2s)?.ok_or_else(|| "La corrida ya no existe.".to_string()))?;
+        land_all(db, &run).await?;
+    } else {
+        advance(db, &run_id).await?;
+    }
+    state_of(db, &run_id)
+}
+
+/// `pause`, `resume`, `abort`, or per item `retry:<id>` / `skip:<id>`. Returns the tasks that were
+/// running, so the caller can stop their turns on `abort`.
+#[tauri::command]
+pub async fn team_control(app: AppHandle, db: State<'_, Db>, run_id: String, action: String) -> Result<Vec<String>, String> {
+    let lock = run_lock(&run_id);
+    let _guard = lock.lock().await;
+    let running = with(&db, |c| {
+        let items = team::list_items(c, &run_id).map_err(e2s)?;
+        let running: Vec<String> = items.iter().filter(|i| i.status == "running" && !i.task_id.is_empty()).map(|i| i.task_id.clone()).collect();
+        match action.as_str() {
+            "pause" => team::set_run_status(c, &run_id, "paused", "", "").map_err(e2s)?,
+            "resume" => {
+                team::set_run_reason(c, &run_id, "").map_err(e2s)?;
+                team::set_run_status(c, &run_id, "running", "", "").map_err(e2s)?
+            }
+            "abort" => {
+                for mut i in items.into_iter().filter(|i| matches!(i.status.as_str(), "pending" | "gated" | "running" | "waiting")) {
+                    i.status = "cancelled".into();
+                    team::update_item(c, &i).map_err(e2s)?;
+                }
+                team::set_run_status(c, &run_id, "aborted", "", "").map_err(e2s)?;
+            }
+            other => {
+                if let Some(id) = other.strip_prefix("retry:") {
+                    if let Some(mut i) = team::get_item(c, id).map_err(e2s)? {
+                        if matches!(i.status.as_str(), "error" | "cancelled" | "skipped") {
+                            i.status = "pending".into();
+                            i.attempts = 0;
+                            team::update_item(c, &i).map_err(e2s)?;
+                        }
+                    }
+                } else if let Some(id) = other.strip_prefix("skip:") {
+                    if let Some(mut i) = team::get_item(c, id).map_err(e2s)? {
+                        if matches!(i.status.as_str(), "pending" | "gated" | "error" | "waiting") {
+                            i.status = "skipped".into();
+                            team::update_item(c, &i).map_err(e2s)?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(running)
+    })?;
+    if action != "abort" && action != "pause" {
+        advance(&db, &run_id).await?;
+    }
+    changed(&app, &run_id);
+    Ok(running)
+}
+
+/// Records the terminal session an item runs in (so the view can open it).
+#[tauri::command]
+pub fn team_item_terminal(db: State<'_, Db>, item_id: String, session_id: String) -> Result<(), String> {
+    with(&db, |c| {
+        c.execute("UPDATE agent_team_items SET terminal_session = ?2 WHERE id = ?1", rusqlite::params![item_id, session_id]).map_err(e2s)?;
+        Ok(())
+    })
+}
+
+/// Deletes a run with its tasks, and removes its worktrees where they are clean. The branches stay.
+#[tauri::command]
+pub async fn team_delete_run(db: State<'_, Db>, run_id: String) -> Result<(), String> {
+    let (repos, items) = with(&db, |c| Ok((team::list_repos(c, &run_id).map_err(e2s)?, team::list_items(c, &run_id).map_err(e2s)?)))?;
+    for repo in &repos {
+        let mut paths: Vec<String> = items.iter().filter(|i| i.project_id == repo.project_id && i.kind == "work").map(|i| i.worktree_path.clone()).filter(|p| !p.is_empty()).collect();
+        paths.sort();
+        paths.dedup();
+        paths.push(repo.integration_path.clone());
+        let r = repo.local_path.clone();
+        let _ = blocking(move || {
+            for p in paths {
+                gitops::remove_worktree(&r, &p);
+            }
+        })
+        .await;
+    }
+    with(&db, |c| team::delete_run(c, &run_id).map_err(e2s))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn sh(dir: &str, args: &[&str]) {
+        let out = crate::git::cli::run_in(dir, args, &[]).unwrap();
+        assert!(out.success, "git {args:?}: {}", out.detail());
+    }
+
+    struct Dir(std::path::PathBuf);
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The worktree root is process-wide: tests that set it take turns.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn fixture() -> (std::sync::MutexGuard<'static, ()>, Dir, Db, String, String, [String; 3]) {
+        let serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = Dir(std::env::temp_dir().join(format!("cf-teamrun-{}", uuid::Uuid::new_v4())));
+        let repo = dir.0.join("repo").to_string_lossy().into_owned();
+        std::fs::create_dir_all(&repo).unwrap();
+        sh(&repo, &["init", "-q", "-b", "main"]);
+        sh(&repo, &["config", "user.email", "t@example.com"]);
+        sh(&repo, &["config", "user.name", "T"]);
+        std::fs::write(Path::new(&repo).join("README.md"), "hola\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "init"]);
+        *WORKTREE_ROOT.lock().unwrap() = Some(dir.0.join("worktrees"));
+
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let ws = queries::create_workspace(&conn, "ws", "folder", "#fff").unwrap();
+        let project: crate::db::models::NewProject = serde_json::from_value(serde_json::json!({
+            "workspace_id": ws.id, "name": "web", "local_path": repo, "remote_url": null, "color": "#fff", "icon": "folder"
+        }))
+        .unwrap();
+        let project = queries::create_project(&conn, project).unwrap();
+        let lead = queries::upsert_workspace_agent(&conn, None, &ws.id, "Líder", "lidera", "claude", "sonnet", "", true, None).unwrap();
+        let dev = queries::upsert_workspace_agent(&conn, None, &ws.id, "Dev", "programa", "claude", "sonnet", "", true, None).unwrap();
+        let qa = queries::upsert_workspace_agent(&conn, None, &ws.id, "QA", "revisa", "claude", "haiku", "", true, None).unwrap();
+        let ids = [lead.id, dev.id, qa.id];
+        (serial, dir, Db::new(conn), ws.id, project.id, ids)
+    }
+
+    fn item_of<'a>(state: &'a RunState, key: &str) -> &'a Item {
+        state.items.iter().find(|i| i.key == key).unwrap_or_else(|| panic!("no item {key}: {:?}", state.items.iter().map(|i| &i.key).collect::<Vec<_>>()))
+    }
+
+    #[tokio::test]
+    async fn a_led_team_plans_works_in_parallel_reviews_and_lands_on_main() {
+        let (_serial, _dir, db, ws, project, [lead, dev, qa]) = fixture();
+        let member = |id: &str, agent: &str, name: &str, edits: bool| team::Member {
+            id: id.into(),
+            agent_id: agent.into(),
+            name: name.into(),
+            edits,
+            max_parallel: 2,
+            ..Default::default()
+        };
+        let mut policy = Policy::default();
+        policy.review = team::ReviewPolicy { enabled: true, reviewer: "q".into(), ..Default::default() };
+        let tm = with(&db, |c| {
+            team::save_team(
+                c,
+                team::Team {
+                    workspace_id: ws.clone(),
+                    name: "Equipo".into(),
+                    lead: "l".into(),
+                    policy,
+                    members: vec![member("l", &lead, "Líder", false), member("d", &dev, "Dev", true), member("q", &qa, "QA", false)],
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+
+        let state = start_run(&db, ws.clone(), tm.id.clone(), "Crea a, b y c".into(), None, vec![RepoPick { project_id: project.clone(), target_branch: String::new() }], None, None)
+            .await
+            .unwrap();
+        assert_eq!(state.repos[0].target_branch, "main");
+        let integ = state.repos[0].integration_path.clone();
+        assert!(Path::new(&integ).join("README.md").exists());
+
+        // The lead plans: a and b in parallel, c after both.
+        let run_id = state.run.id.clone();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].item.kind, "plan");
+        assert_eq!(d[0].cwd, integ);
+        assert!(d[0].message.contains("**Dev**"));
+        let plan = "Reparto.\n```equipo\n{\"mensaje\":\"a y b a la vez\",\"items\":[\
+            {\"id\":\"a\",\"miembro\":\"dev\",\"tarea\":\"crea a.txt\"},\
+            {\"id\":\"b\",\"miembro\":\"Dev\",\"tarea\":\"crea b.txt\"},\
+            {\"id\":\"c\",\"miembro\":\"dev\",\"tarea\":\"crea c.txt\",\"depende_de\":[\"a\",\"b\"]}]}\n```";
+        let state = settle_core(&db, &d[0].item.id, "ok", plan, "").await.unwrap();
+        assert_eq!(state.run.status, "gated");
+        assert_eq!(state.run.gate, "plan");
+        assert!(claim(&db, &run_id).await.unwrap().is_empty(), "nothing starts before the plan is approved");
+        decide(&db, &run_id, true, "").await.unwrap();
+
+        // a and b at once, each in its own worktree.
+        let d = claim(&db, &run_id).await.unwrap();
+        let keys: Vec<&str> = d.iter().map(|x| x.item.key.as_str()).collect();
+        assert_eq!(keys, vec!["a", "b"]);
+        assert_ne!(d[0].cwd, d[1].cwd);
+        for x in &d {
+            std::fs::write(Path::new(&x.cwd).join(format!("{}.txt", x.item.key)), "x\n").unwrap();
+        }
+        settle_core(&db, &d[0].item.id, "ok", "Hecho a.\n```equipo\n{\"para\":\"qa\",\"texto\":\"mira a.txt\"}\n```", "").await.unwrap();
+        let state = settle_core(&db, &d[1].item.id, "ok", "Hecho b.", "").await.unwrap();
+        assert!(!item_of(&state, "a").commit_sha.is_empty());
+        assert!(state.messages.iter().any(|m| m.kind == "note" && m.to_name == "QA"));
+
+        // QA reviews both, read only; one is sent back once.
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d.len(), 2);
+        assert!(d.iter().all(|x| x.item.kind == "review"));
+        assert!(d.iter().any(|x| x.message.contains("mira a.txt")), "the note reaches the reviewer");
+        let rev_a = d.iter().find(|x| x.item.key == "a-rev").unwrap();
+        let rev_b = d.iter().find(|x| x.item.key == "b-rev").unwrap();
+        settle_core(&db, &rev_a.item.id, "ok", "VERDICT: FIX\nFINDINGS:\n- [must] a.txt:1 — vacío — escribe algo", "").await.unwrap();
+        let state = settle_core(&db, &rev_b.item.id, "ok", "VERDICT: OK", "").await.unwrap();
+        assert!(item_of(&state, "b").merged);
+        assert!(!item_of(&state, "a").merged);
+
+        // The fix continues a's task in a's worktree, then passes review.
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].item.key, "a-fix");
+        assert_eq!(d[0].cwd, item_of(&state, "a").worktree_path);
+        assert_eq!(d[0].task.as_ref().map(|t| t.id.clone()), Some(item_of(&state, "a").task_id.clone()));
+        std::fs::write(Path::new(&d[0].cwd).join("a.txt"), "algo\n").unwrap();
+        settle_core(&db, &d[0].item.id, "ok", "Arreglado.", "").await.unwrap();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d[0].item.kind, "review");
+        let state = settle_core(&db, &d[0].item.id, "ok", "VERDICT: OK", "").await.unwrap();
+        assert!(item_of(&state, "a").merged);
+
+        // c starts from the integrated work.
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].item.key, "c");
+        assert!(Path::new(&d[0].cwd).join("a.txt").exists() && Path::new(&d[0].cwd).join("b.txt").exists());
+        assert!(d[0].message.contains("Hecho a."), "c receives both handoffs");
+        std::fs::write(Path::new(&d[0].cwd).join("c.txt"), "c\n").unwrap();
+        settle_core(&db, &d[0].item.id, "ok", "Hecho c.", "").await.unwrap();
+        let d = claim(&db, &run_id).await.unwrap();
+        settle_core(&db, &d[0].item.id, "ok", "VERDICT: OK", "").await.unwrap();
+
+        // The lead's last look, then the merge gate.
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d[0].item.kind, "final");
+        let state = settle_core(&db, &d[0].item.id, "ok", "Completo.\n```equipo\n{\"terminar\":true}\n```", "").await.unwrap();
+        assert_eq!(state.run.gate, "merge");
+        let repo = state.repos[0].local_path.clone();
+        assert!(!Path::new(&repo).join("a.txt").exists());
+        let state = decide(&db, &run_id, true, "").await.unwrap();
+        assert_eq!(state.run.status, "done", "{:?}", state.run.gate_note);
+        for f in ["a.txt", "b.txt", "c.txt"] {
+            assert!(Path::new(&repo).join(f).exists(), "{f} landed on main");
+        }
+        assert_eq!(std::fs::read_to_string(Path::new(&repo).join("a.txt")).unwrap(), "algo\n");
+        assert!(!Path::new(&integ).exists(), "worktrees cleaned up");
+    }
+
+    #[tokio::test]
+    async fn questions_wait_for_the_user_and_failures_escalate() {
+        let (_serial, _dir, db, ws, project, [lead, dev, qa]) = fixture();
+        let tm = with(&db, |c| {
+            team::save_team(
+                c,
+                team::Team {
+                    workspace_id: ws.clone(),
+                    name: "Fijo".into(),
+                    lead: String::new(),
+                    policy: Policy { approve_merge: false, commit: "squash".into(), max_attempts: 1, ..Default::default() },
+                    plan: vec![team::PlanStep { key: "uno".into(), member: "d".into(), instruction: "haz uno".into(), ..Default::default() }],
+                    members: vec![
+                        team::Member { id: "d".into(), agent_id: dev.clone(), name: "Dev".into(), escalate_to: "s".into(), ..Default::default() },
+                        team::Member { id: "s".into(), agent_id: lead.clone(), name: "Senior".into(), ..Default::default() },
+                        team::Member { id: "q".into(), agent_id: qa.clone(), name: "QA".into(), ..Default::default() },
+                    ],
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+        let state = start_run(&db, ws, tm.id, "una cosa".into(), None, vec![RepoPick { project_id: project, target_branch: "main".into() }], None, None).await.unwrap();
+        let run_id = state.run.id.clone();
+        let d = claim(&db, &run_id).await.unwrap();
+        // A question to the user parks the item.
+        let state = settle_core(&db, &d[0].item.id, "ok", "```equipo\n{\"para\":\"usuario\",\"tipo\":\"pregunta\",\"texto\":\"¿rojo o azul?\",\"opciones\":[\"rojo\",\"azul\"]}\n```", "").await.unwrap();
+        assert_eq!(item_of(&state, "uno").status, "waiting");
+        let q = state.messages.iter().find(|m| m.kind == "question").unwrap().id.clone();
+        answer_question(&db, &q, "azul").await.unwrap();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert!(d[0].message.contains("¿rojo o azul? → azul"));
+        // It fails (one attempt) and goes to the senior.
+        let state = settle_core(&db, &d[0].item.id, "error", "", "se rompió").await.unwrap();
+        assert_eq!(item_of(&state, "uno").status, "error");
+        let esc = item_of(&state, "uno-esc");
+        assert_eq!(esc.member_name, "Senior");
+        let d = claim(&db, &run_id).await.unwrap();
+        std::fs::write(Path::new(&d[0].cwd).join("uno.txt"), "1\n").unwrap();
+        let state = settle_core(&db, &d[0].item.id, "ok", "listo", "").await.unwrap();
+        // No lead, no merge approval: it lands as one squashed commit.
+        assert_eq!(state.run.status, "done", "{}", state.run.gate_note);
+        let repo = &state.repos[0].local_path;
+        assert!(Path::new(repo).join("uno.txt").exists());
+        let log = crate::git::cli::run_in(repo, &["log", "--oneline"], &[]).unwrap().stdout;
+        assert_eq!(log.lines().count(), 2, "{log}");
+    }
+}

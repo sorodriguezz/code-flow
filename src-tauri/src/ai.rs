@@ -726,6 +726,7 @@ pub fn chat_turn_rules(conn: &rusqlite::Connection) -> String {
     let mode = crate::db::queries::get_setting(conn, ANSWER_LENGTH_KEY).ok().flatten().unwrap_or_default();
     let mut rules = answer_length_rules(&mode).unwrap_or_default().to_string();
     rules.push_str(QUESTION_RULES);
+    rules.push_str(crate::chat_refs::artifacts::ARTIFACT_RULES);
     rules
 }
 
@@ -3162,7 +3163,17 @@ async fn spawn_once(
         }
     }
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // A team member's background turn reaches the app through `cf` like a terminal does: `cf ask`
+    // before anything destructive, `cf notify`, the vault verbs. Only inside a running team's folders.
+    let team_cf = inv.cwd.map(crate::team::cf_env_for).unwrap_or_default();
+    let mut dirs = dirs;
+    if let Some(dir) = team_cf.cf_dir.clone() {
+        dirs.push(dir);
+    }
     apply_path(&mut cmd, &dirs);
+    for (key, value) in &team_cf.vars {
+        cmd.env(key, value);
+    }
     // The account, after the path and for the same reason: every engine's command passes through
     // here, so an engine bound to an account cannot be started as anyone else. See `ai_accounts`.
     if let Some(account) = engine.account() {

@@ -55,7 +55,12 @@ export function catalogueFor(identity: WindowIdentity): CodiAction[] {
   }
   const spec = identity.satellite;
   if (!spec || spec.kind === "quick" || spec.kind === "codi" || spec.kind === "attention") return [];
-  const common = [...uiActions(), ...islandSatelliteActions(), ...textSatelliteActions(spec.kind, spec.refId)];
+  // A chat island holds a conversation, not text Codi could read or write into.
+  const common = [
+    ...uiActions(),
+    ...islandSatelliteActions(),
+    ...(spec.kind === "chat" ? [] : textSatelliteActions(spec.kind, spec.refId)),
+  ];
   if (spec.kind === "app") {
     return [...common, ...workspaceActions(), ...appActionsFor(spec.refId)];
   }

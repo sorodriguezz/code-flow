@@ -1038,7 +1038,7 @@ pub fn delete_workspace_skill(conn: &Connection, id: &str) -> rusqlite::Result<(
 
 pub fn list_workspace_agents(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<WorkspaceAgent>> {
     let mut stmt = conn.prepare(
-        "SELECT id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at, account_id
+        "SELECT id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at, account_id, effort
          FROM workspace_agents WHERE workspace_id = ?1 ORDER BY sort_order, created_at",
     )?;
     let rows = stmt.query_map(params![workspace_id], |row| {
@@ -1054,9 +1054,19 @@ pub fn list_workspace_agents(conn: &Connection, workspace_id: &str) -> rusqlite:
             sort_order: row.get(8)?,
             created_at: row.get(9)?,
             account_id: row.get(10)?,
+            effort: row.get(11)?,
         })
     })?;
     rows.collect()
+}
+
+/// Sets an agent's reasoning level — `""` hands it back to the CLI's own default. Its own write
+/// rather than another argument of [`upsert_workspace_agent`], whose many callers have no level.
+pub fn set_workspace_agent_effort(conn: &Connection, id: &str, effort: &str) -> rusqlite::Result<()> {
+    let effort = effort.trim();
+    let effort = if crate::ai::effort::valid(effort) { effort } else { "" };
+    conn.execute("UPDATE workspace_agents SET effort = ?2 WHERE id = ?1", params![id, effort])?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1093,6 +1103,7 @@ pub fn upsert_workspace_agent(
         sort_order,
         created_at,
         account_id: account_id.map(str::to_string).filter(|a| !a.trim().is_empty()),
+        effort: String::new(),
     };
     conn.execute(
         "INSERT INTO workspace_agents (id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at, account_id)
@@ -1105,7 +1116,11 @@ pub fn upsert_workspace_agent(
             agent.enabled, agent.sort_order, agent.created_at, agent.account_id,
         ],
     )?;
-    Ok(agent)
+    // The level is kept by the conflict clause above; report what the row holds.
+    let effort = conn
+        .query_row("SELECT effort FROM workspace_agents WHERE id = ?1", params![agent.id], |row| row.get(0))
+        .unwrap_or_default();
+    Ok(WorkspaceAgent { effort, ..agent })
 }
 
 pub fn delete_workspace_agent(conn: &Connection, id: &str) -> rusqlite::Result<()> {
@@ -1293,7 +1308,7 @@ pub const AGENT_CONVERSATION_PREFIX: &str = "agent-";
 const AGENT_TASK_COLUMNS: &str = "id, workspace_id, project_id, agent_id, agent_name, provider, model, prompt, \
      goal, title, conversation_id, status, turns, last_error, created_at, updated_at, \
      agent_project_id, pinned, account_id, worktree_path, worktree_branch, priority, due_date, labels, archived, \
-     input_tokens, output_tokens, cost_usd, costed_turns, batch_id";
+     input_tokens, output_tokens, cost_usd, costed_turns, batch_id, effort";
 
 fn map_agent_task(row: &rusqlite::Row) -> rusqlite::Result<AgentTask> {
     Ok(AgentTask {
@@ -1327,6 +1342,7 @@ fn map_agent_task(row: &rusqlite::Row) -> rusqlite::Result<AgentTask> {
         cost_usd: row.get(27)?,
         costed_turns: row.get(28)?,
         batch_id: row.get(29)?,
+        effort: row.get(30)?,
     })
 }
 
@@ -1439,12 +1455,18 @@ pub fn create_agent_task_with_id(
         cost_usd: 0.0,
         costed_turns: 0,
         batch_id: batch_id.to_string(),
+        // Read off the roster row rather than passed in: every way a task is made (the console, a
+        // chain step, the story realizer, `cf`) goes through here with the agent's id already.
+        effort: conn
+            .query_row("SELECT effort FROM workspace_agents WHERE id = ?1", params![agent_id], |row| row.get(0))
+            .optional()?
+            .unwrap_or_default(),
     };
     conn.execute(
         "INSERT INTO agent_tasks (id, workspace_id, project_id, agent_id, agent_name, provider, model, prompt,
             goal, title, conversation_id, status, turns, last_error, created_at, updated_at, agent_project_id,
-            account_id, worktree_path, worktree_branch, batch_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+            account_id, worktree_path, worktree_branch, batch_id, effort)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             task.id,
             task.workspace_id,
@@ -1467,6 +1489,7 @@ pub fn create_agent_task_with_id(
             task.worktree_path,
             task.worktree_branch,
             task.batch_id,
+            task.effort,
         ],
     )?;
     Ok(task)

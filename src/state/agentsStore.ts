@@ -653,7 +653,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       // The agent's account preference, copied onto the task with its provider and model. Null is
       // automatic — the task's workspace default, then the provider's.
       account: task.account_id ?? null,
-    })
+    }, undefined, undefined, undefined, task.effort || null)
       .then((reply) => {
         // The live log is already in memory and formatted; attaching it to the message is what
         // keeps "what did it actually do?" answerable after the run ends. A copy, never the

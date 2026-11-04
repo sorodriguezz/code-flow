@@ -1306,6 +1306,9 @@ pub async fn send_chat_message(
                 }),
             _ => false,
         };
+        // A team item that must not write: the lead's turns, investigations, reviews, and any item of
+        // a read-only member. See `team::read_only_conversation`.
+        let analysis = analysis || conversation_id.as_deref().is_some_and(|id| crate::team::read_only_conversation(&conn, id));
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         // An active agent runs on its own provider + model — and its own account, when it names
@@ -1466,6 +1469,17 @@ pub async fn send_chat_message(
             context_sources.push(crate::context::ContextSource::new(crate::context::SourceKind::Diff, "diff", None));
         }
         engine_message.push_str(&diffs);
+        // Other chats and artifacts cited as `@chat:` / `@artefacto:` (`chat_refs::refs`).
+        let cited = db
+            .0
+            .lock()
+            .map(|conn| crate::chat_refs::refs::mention_notes(&conn, &workspace_id, &asked, conversation_id.as_deref()))
+            .unwrap_or_default();
+        let cited = scrub(cited);
+        if !cited.is_empty() {
+            context_sources.push(crate::context::ContextSource::new(crate::context::SourceKind::Mention, "@chat / @artefacto", None));
+            engine_message.push_str(&cited);
+        }
         let (editor_note, editor_sources) = crate::context::editor_note(&editor, std::path::Path::new(&project.local_path));
         let editor_note = scrub(editor_note);
         engine_message.push_str(said.say("editor", &editor_note));
@@ -1474,7 +1488,7 @@ pub async fn send_chat_message(
         // a general question goes with the standing rules alone, and the model keeps its tools. Not
         // judged for a command to the CLI, which is sent as typed.
         let selected = editor.selection.as_ref().is_some_and(|selection| !selection.text.trim().is_empty());
-        let pointed = !mentioned.is_empty() || noted || !diffs.is_empty() || selected || !attachments.is_empty();
+        let pointed = !mentioned.is_empty() || noted || !diffs.is_empty() || !cited.is_empty() || selected || !attachments.is_empty();
         turn = if super::chat_cmd::is_cli_command(&asked) {
             None
         } else {
@@ -1623,8 +1637,15 @@ pub async fn send_chat_message(
     // Kept for the title run below; `app` moves into the run's scope.
     let title_app = app.clone();
     let unsaved = crate::context::unsaved_in(&editor, std::path::Path::new(&project.local_path));
+    // Which chat this run is a turn of, for the chat tools it may call (`chat_refs`).
+    let _run_mark = run_id
+        .as_deref()
+        .zip(conversation_id.as_deref())
+        .map(|(run, conversation)| crate::chat_refs::delegate::mark_run(run, conversation, &workspace_id));
+    // The engine's future is boxed: three wrappers move what they are handed by value, and in a debug
+    // build each move is a copy on the stack — the unboxed turn overflowed a tokio worker's 2 MB.
     let (result, trace) = ai_runs::scoped_with_trace(app, run_id, crate::context::with_unsaved(unsaved, crate::context::need::within(turn, async {
-        ai::chat_with_repo(
+        Box::pin(ai::chat_with_repo(
             &*config.engine,
             &config.binary,
             &config.model,
@@ -1647,7 +1668,7 @@ pub async fn send_chat_message(
             }),
             &extra_dirs,
             effort.as_deref().map(str::trim).filter(|e| ai::effort::valid(e)),
-        )
+        ))
         .await
     })))
     .await;
@@ -1791,6 +1812,19 @@ pub async fn send_chat_message(
             if let Some(usage) = run.usage.as_ref().filter(|usage| !usage.is_empty()) {
                 let _ = queries::set_activity_usage(&conn, &entry.id, &serde_json::to_string(usage).unwrap_or_default());
             }
+            // The artifacts the answer carries, filed by name (`chat_refs::artifacts`).
+            crate::chat_refs::file_and_announce(
+                &title_app,
+                &conn,
+                &crate::chat_refs::artifacts::Origin {
+                    workspace_id: &workspace_id,
+                    surface: "panel",
+                    conversation_id: &conversation_id,
+                    project_id: Some(&project_id),
+                    message_id: &entry.id,
+                },
+                &run.text,
+            );
             entry.created_at
         })
         // The reply is already in hand; a failed *write* shouldn't cost the user their answer, so

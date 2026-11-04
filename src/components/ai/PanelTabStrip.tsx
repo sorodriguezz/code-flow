@@ -1,6 +1,17 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import {
   ChevronDown,
+  CornerDownRight,
   FolderGit2,
   Clock,
   GitPullRequest,
@@ -35,6 +46,11 @@ import { useChatHistoryStore } from "../../state/activityStore";
 import { usePrStore } from "../../state/prStore";
 import { usePrWatchStore, EMPTY_TRACKED } from "../../state/prWatchStore";
 import { INBOX_KEY, NO_WORKSPACE, useAiPanelStore, type PanelTab } from "../../state/aiPanelStore";
+import { EMPTY_LINKS, nestByLineage, parentMap, useChatLineageStore } from "../../state/chatLineageStore";
+import type { ChatLink } from "../../lib/tauri/chatLineage";
+import { chatTabBusy, chatTabDetachable, openChatIsland } from "../../lib/chatIslands";
+import { TEAR_THRESHOLD_PX, outsideViewport } from "../../lib/chatIslandSync";
+import { pushErrorToast } from "../../state/toastStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
@@ -80,6 +96,9 @@ export function PanelTabStrip({
    *  strip's own: a second strip on screen sharing it would send the bar flying from one to the
    *  other. */
   const instance = useId();
+  // A subchat's tab follows its parent's, marked as one (`chatLineageStore`).
+  const links = useChatLineageStore((s) => s.byWorkspace[workspaceId] ?? EMPTY_LINKS);
+  const nested = useMemo(() => nestTabs(tabs, links), [tabs, links]);
   const markId = `cf-assistant-tab-mark-${instance}`;
 
   // Names first, every time what the strip holds or its width changes; icons only if the names do
@@ -123,8 +142,16 @@ export function PanelTabStrip({
         className="relative flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
       >
         <InboxTab workspaceId={workspaceId} active={activeKey === INBOX_KEY} compact={compact && activeKey !== INBOX_KEY} markId={markId} />
-        {tabs.map((tab) => (
-          <TabButton key={tab.key} tab={tab} workspaceId={workspaceId} active={tab.key === activeKey} compact={compact && tab.key !== activeKey} markId={markId} />
+        {nested.map(({ item: tab, depth }) => (
+          <TabButton
+            key={tab.key}
+            tab={tab}
+            workspaceId={workspaceId}
+            active={tab.key === activeKey}
+            compact={compact && tab.key !== activeKey}
+            markId={markId}
+            depth={depth}
+          />
         ))}
       </div>
       <NewMenu workspaceId={workspaceId} onOpenCheckpoints={onOpenCheckpoints} />
@@ -211,6 +238,8 @@ function TabShell({
   label,
   dot,
   trailing,
+  onPointerDown,
+  tearing,
 }: {
   active: boolean;
   /** The strip's `layoutId` for the active tab's marker — see `PanelTabStrip`. */
@@ -222,6 +251,10 @@ function TabShell({
   label: string | null;
   dot?: "unread" | "error" | null;
   trailing?: ReactNode;
+  /** A chat tab's tear-out gesture — see `useTearOut`. */
+  onPointerDown?: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  /** Being dragged, and past the window's edge: letting go opens the island. */
+  tearing?: "drag" | "out" | null;
 }) {
   const t = useT();
   return (
@@ -232,6 +265,7 @@ function TabShell({
         aria-selected={active}
         aria-label={title}
         onClick={onSelect}
+        onPointerDown={onPointerDown}
         onAuxClick={(e: ReactMouseEvent) => {
           // Middle click closes, the way it does in every tabbed thing.
           if (e.button === 1 && onClose) {
@@ -250,6 +284,8 @@ function TabShell({
           }
         }}
         className={`group relative flex h-[30px] max-w-[190px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md px-2.5 text-[12px] font-medium transition-colors duration-100 ${
+          tearing === "out" ? "opacity-50 outline-dashed outline-1 outline-[var(--cf-accent)]" : tearing === "drag" ? "opacity-70" : ""
+        } ${
           active
             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
             : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
@@ -300,7 +336,30 @@ function TabShell({
   );
 }
 
-function TabButton({ tab, workspaceId, active, compact, markId }: { tab: PanelTab; workspaceId: string; active: boolean; compact: boolean; markId: string }) {
+/** The strip's order: each subchat's tab right after its parent's (and its parent's earlier
+ *  subchats), everything else as it was opened. Pure. */
+export function nestTabs(tabs: readonly PanelTab[], links: readonly ChatLink[]) {
+  const parents = parentMap(links);
+  return nestByLineage(tabs, (tab) => (tab.kind === "chat" || tab.kind === "wsChat" ? tab.conversationId : tab.key), parents);
+}
+
+function TabButton({
+  tab,
+  workspaceId,
+  active,
+  compact,
+  markId,
+  depth = 0,
+}: {
+  tab: PanelTab;
+  workspaceId: string;
+  active: boolean;
+  compact: boolean;
+  markId: string;
+  /** How far under another conversation's tab this one hangs — a subchat's is marked. */
+  depth?: number;
+}) {
+  const t = useT();
   const focus = useAiPanelStore((s) => s.focus);
   const close = useAiPanelStore((s) => s.close);
   const mark = useAiPanelStore((s) => s.unread[tab.key] ?? null);
@@ -326,7 +385,7 @@ function TabButton({ tab, workspaceId, active, compact, markId }: { tab: PanelTa
             ? Link2
             : ShieldCheck;
   // The orb is the tab's icon while a model works on what it shows — the one tab that carries it.
-  const icon =
+  const glyph =
     status === "running" ? (
       <ThinkingOrb size="sm" />
     ) : status === "queued" ? (
@@ -334,7 +393,17 @@ function TabButton({ tab, workspaceId, active, compact, markId }: { tab: PanelTa
     ) : (
       <Icon size={14} className="shrink-0" />
     );
+  const icon =
+    depth > 0 ? (
+      <span className="flex items-center gap-0.5" aria-label={t("assistant.subchat")}>
+        <CornerDownRight size={11} className="shrink-0 text-[var(--cf-text-faint)]" />
+        {glyph}
+      </span>
+    ) : (
+      glyph
+    );
   const short = tab.kind === "pr" ? `#${tab.prId}` : tab.kind === "prLink" ? `#${tab.session.pr.id}` : null;
+  const tear = useTearOut(tab, base);
   const label = compact ? null : active ? title : (short ?? base);
   return (
     <TabShell
@@ -346,8 +415,72 @@ function TabButton({ tab, workspaceId, active, compact, markId }: { tab: PanelTa
       icon={icon}
       label={label}
       dot={mark && status === "idle" ? (mark.status === "error" ? "error" : "unread") : null}
+      onPointerDown={tear.onPointerDown}
+      tearing={tear.state}
     />
   );
+}
+
+/**
+ * A chat tab dragged out past the window's edge opens as a chat island where it was let go — the
+ * editor's file-tab gesture (`EditorTabs`), with the button's rule (`chatTabDetachable`). Pointer
+ * events, so `screenX/Y` are logical screen px as `open_satellite` wants them (the physical-px trap
+ * is the OS drag-drop event's, not these). The click a drag ends with is swallowed.
+ */
+function useTearOut(tab: PanelTab, title: string): {
+  onPointerDown?: (e: ReactPointerEvent<HTMLDivElement>) => void;
+  state: "drag" | "out" | null;
+} {
+  const t = useT();
+  const [state, setState] = useState<"drag" | "out" | null>(null);
+  if (tab.kind !== "chat" && tab.kind !== "wsChat") return { state: null };
+  const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const from = { x: e.clientX, y: e.clientY };
+    const element = e.currentTarget;
+    const pointerId = e.pointerId;
+    let started = false;
+    const onMove = (ev: PointerEvent) => {
+      if (!started) {
+        if (Math.hypot(ev.clientX - from.x, ev.clientY - from.y) < TEAR_THRESHOLD_PX) return;
+        started = true;
+        try {
+          // So the release out there still arrives here.
+          element.setPointerCapture(pointerId);
+        } catch {
+          // The window listeners carry the gesture regardless.
+        }
+        document.body.style.cursor = "grabbing";
+      }
+      setState(outsideViewport(ev.clientX, ev.clientY, window.innerWidth, window.innerHeight) ? "out" : "drag");
+    };
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      if (!started) return;
+      document.body.style.cursor = "";
+      setState(null);
+      // The click that follows the release is not a selection.
+      const swallow = (click: MouseEvent) => {
+        click.stopPropagation();
+        click.preventDefault();
+      };
+      window.addEventListener("click", swallow, { capture: true, once: true });
+      setTimeout(() => window.removeEventListener("click", swallow, { capture: true }), 0);
+      const out = ev.type === "pointerup" && outsideViewport(ev.clientX, ev.clientY, window.innerWidth, window.innerHeight);
+      if (!out) return;
+      if (!chatTabDetachable(tab)) {
+        pushErrorToast(chatTabBusy(tab) ? t("assistant.islandBusy") : t("assistant.islandNotYet"));
+        return;
+      }
+      void openChatIsland(tab, title || t("assistant.newChat"), { x: ev.screenX, y: ev.screenY });
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  };
+  return { onPointerDown, state };
 }
 
 /** What a tab is called — the same words its document or conversation uses. */

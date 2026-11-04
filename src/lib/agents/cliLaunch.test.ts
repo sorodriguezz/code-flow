@@ -88,3 +88,17 @@ describe("hasCli", () => {
     expect(hasCli("codeflow")).toBe(false);
   });
 });
+
+describe("cliLine routing", () => {
+  it("puts the model and the level right after the binary, quoted where they need it", () => {
+    expect(cliLine("claude", "claude", { sessionId: null }, "posix", { routing: ["--model", "opus", "--effort", "high"] })).toBe(
+      "claude --model opus --effort high",
+    );
+    expect(
+      cliLine("codex", "codex", { sessionId: null }, "posix", { routing: ["--model", "gpt-5.5", "-c", "model_reasoning_effort=high"] }),
+    ).toBe("codex --model gpt-5.5 -c model_reasoning_effort=high");
+    expect(cliLine("opencode", "opencode", { sessionId: null }, "posix", { routing: ["--model", "my provider/x"] })).toBe(
+      "opencode --model 'my provider/x'",
+    );
+  });
+});

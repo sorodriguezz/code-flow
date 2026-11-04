@@ -289,6 +289,7 @@ fn write_stamp(conn: &Connection, stamp: i64) -> rusqlite::Result<()> {
 /// that owns them. See `queries::recover_after_restart`.
 pub fn finish(conn: Connection) -> rusqlite::Result<Db> {
     queries::recover_after_restart(&conn)?;
+    crate::team::recover_after_restart(&conn)?;
     Ok(Db::new(conn))
 }
 

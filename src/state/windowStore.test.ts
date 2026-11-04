@@ -23,7 +23,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
 
 const { countedSatellites, useWindowStore } = await import("./windowStore");
 
-const sat = (label: string, kind: "app" | "repo" | "quick", ref_id: string) => ({ label, kind, ref_id, title: "" });
+const sat = (label: string, kind: "app" | "repo" | "quick" | "chat", ref_id: string) => ({ label, kind, ref_id, title: "" });
 
 beforeEach(() => {
   opened.length = 0;
@@ -40,6 +40,17 @@ describe("the satellite limit", () => {
     expect(await useWindowStore.getState().detach("app", "agents", "Agents")).toBe(true);
     expect(opened).toEqual(["agents"]);
     expect(toasts).toEqual([]);
+  });
+
+  it("does not count chat islands, and never refuses one for the limit", async () => {
+    useWindowStore.setState({
+      satellites: [sat("sat-app-notes", "app", "notes"), sat("sat-chat-1", "chat", "panel:p1:conv-a")],
+      limit: 1,
+    });
+    expect(countedSatellites(useWindowStore.getState().satellites)).toBe(1);
+    expect(await useWindowStore.getState().detach("chat", "ws:w1:b", "Chat")).toBe(true);
+    expect(opened).toEqual(["ws:w1:b"]);
+    expect(await useWindowStore.getState().detach("app", "agents", "Agents")).toBe(false);
   });
 
   it("still refuses once the real windows reach it", async () => {

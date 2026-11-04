@@ -28,6 +28,9 @@ import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useT } from "../../state/languageStore";
 import type { AgentProject, WorkspaceAgent } from "../../types/domain";
+import { useTeamStore } from "../../state/teamStore";
+import { TeamRunDetail } from "./team/TeamRunDetail";
+import { TeamDialogs } from "./team/TeamDialogs";
 
 const LIST_MIN = 240;
 /** Wider than the other rails in the app: this one nests a folder, a chain inside it and that
@@ -91,6 +94,7 @@ export function AgentsView() {
   const selectedTemplateId = useChainStore((s) => s.selectedTemplateId);
   /** A ticket from the tree's «Tickets» section — last in line: selecting one clears the others. */
   const selectedTicket = useTicketStore((s) => s.selectedUid);
+  const selectedRunId = useTeamStore((s) => s.selectedRunId);
   /**
    * Whether the bench has been on screen at least once this session.
    *
@@ -118,6 +122,7 @@ export function AgentsView() {
     // whether or not this view has ever been mounted — this call only covers the very first mount,
     // where the subscription has had no change to react to yet.
     void useChainStore.getState().setWorkspace(workspaceId);
+    void useTeamStore.getState().load(workspaceId);
     // The bench is read here rather than when its panel opens, and that is what makes the tree's
     // section honest: after a restart the terminals exist in the database with no shell behind
     // them, and a list that only loaded when somebody opened the panel would show nothing until
@@ -248,7 +253,9 @@ export function AgentsView() {
             )}
             {!benchOpen &&
               layout === "tasks" &&
-              (selectedTemplateId ? (
+              (selectedRunId ? (
+                <TeamRunDetail key={selectedRunId} runId={selectedRunId} />
+              ) : selectedTemplateId ? (
                 <TemplateDetail key={selectedTemplateId} templateId={selectedTemplateId} onUse={openTemplate} />
               ) : selectedChainId ? (
                 <ChainDetail key={selectedChainId} chainId={selectedChainId} />
@@ -281,6 +288,7 @@ export function AgentsView() {
         </div>
       </div>
 
+      <TeamDialogs />
       {editing !== null && (
         <AgentEditorModal
           workspaceId={workspaceId}

@@ -53,6 +53,9 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import { agentName } from "./agentName";
 import { PriorityFlag, planningMenuItems, planningMeta } from "./taskPlanning";
 import { TicketsSection } from "./tickets/TicketsSection";
+import { TeamRunsSection } from "./team/TeamRunsSection";
+import { useTeamStore } from "../../state/teamStore";
+import { isTeamTask } from "../../types/team";
 
 const GROUPINGS: { id: TaskGrouping; labelKey: TranslationKey }[] = [
   { id: "tree", labelKey: "agents.groupTree" },
@@ -103,6 +106,8 @@ export function AgentTaskList({
   const t = useT();
   const tasks = useAgentsStore((s) => s.tasks);
   const roster = useAgentsStore((s) => s.roster);
+  const agentProjects = useAgentsStore((s) => s.projects);
+  const teamCount = useTeamStore((s) => s.teams.length + s.runs.length);
   const live = useAgentsStore((s) => s.live);
   const loading = useAgentsStore((s) => s.loading);
   const groupBy = useAgentsStore((s) => s.groupBy);
@@ -151,7 +156,8 @@ export function AgentTaskList({
   // Archived tasks leave every grouping; the toggle at the foot lists them instead of the rest.
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    const kept = tasks.filter((task) => !!task.archived === showArchived);
+    // A team item's task is drawn inside its run, not as loose work of its own.
+    const kept = tasks.filter((task) => !!task.archived === showArchived && !isTeamTask(task));
     if (!needle) return kept;
     return kept.filter(
       (task) =>
@@ -245,7 +251,12 @@ export function AgentTaskList({
   // A workspace with a chain and no standalone task is not empty: the chain's own steps are tasks,
   // and the tree has plenty to draw. Asking `tasks` alone put the "nothing here yet" call to action
   // over a list that was about to fill in.
-  const nothingYet = tasks.length === 0 && chains.length === 0;
+  // Folders count too where the tree draws them: a project made before its first task is exactly
+  // what «Nuevo proyecto» is for, and the empty state used to hide it until a task existed.
+  const nothingYet =
+    tasks.filter((task) => !isTeamTask(task)).length === 0 &&
+    chains.length === 0 &&
+    !(treeRail && (agentProjects.length > 0 || teamCount > 0));
 
   return (
     <div data-tour="agents-tree" style={{ width }} className={`${explorerClass} h-full overflow-hidden`}>
@@ -479,6 +490,7 @@ export function AgentTaskList({
         )}
         {/* The tree's last section: the tickets assigned to you, where most tasks start from
             (user, 2026-10-23). Drawn even before there is any task. */}
+        {!loading && treeRail && !showArchived && <TeamRunsSection query={query} />}
         {!loading && treeRail && !showArchived && <TicketsSection query={query} />}
       </div>
 
@@ -609,6 +621,7 @@ function NewSplitButton({
           y={at.bottom}
           anchor={{ top: at.top, bottom: at.bottom, left: at.left, right: at.right, align: "start" }}
           items={[
+            { label: t("team.newRun"), icon: Users, onClick: () => useTeamStore.setState({ dialog: { kind: "run" } }) },
             { label: t("agents.newChain"), icon: Link2, onClick: onNewChain },
             { label: t("agents.newStory"), icon: AiWand, onClick: onNewStory },
             // A folder is not work for an agent, so it sits under a hairline of its own.

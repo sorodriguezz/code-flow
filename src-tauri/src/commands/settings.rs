@@ -689,9 +689,11 @@ pub fn upsert_workspace_agent(
     prompt: String,
     enabled: bool,
     account: Option<String>,
+    // The agent's reasoning level (`low`…`max`, `""` the CLI's default). Absent leaves it as it was.
+    effort: Option<String>,
 ) -> Result<WorkspaceAgent, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::upsert_workspace_agent(
+    let agent = queries::upsert_workspace_agent(
         &conn,
         id,
         &workspace_id,
@@ -703,7 +705,15 @@ pub fn upsert_workspace_agent(
         enabled,
         account.as_deref(),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    match effort {
+        Some(effort) => {
+            queries::set_workspace_agent_effort(&conn, &agent.id, &effort).map_err(|e| e.to_string())?;
+            let effort = effort.trim();
+            Ok(WorkspaceAgent { effort: if crate::ai::effort::valid(effort) { effort.to_string() } else { String::new() }, ..agent })
+        }
+        None => Ok(agent),
+    }
 }
 
 #[tauri::command]

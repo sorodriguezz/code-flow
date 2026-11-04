@@ -7,6 +7,8 @@ export interface SatelliteInfo {
   label: string;
   kind: SatelliteKind;
   ref_id: string;
+  /** What the OS calls the window. */
+  title?: string;
 }
 
 /**

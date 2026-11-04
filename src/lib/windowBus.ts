@@ -1,4 +1,5 @@
 import { emit, emitTo, listen } from "@tauri-apps/api/event";
+import type { PanelTarget } from "../state/aiPanelStore";
 import { WINDOW } from "./windowIdentity";
 // Type-only: this module must stay a leaf, or the store that imports it to broadcast would import
 // it back through this line.
@@ -206,7 +207,12 @@ export type WindowMessage =
    * `sources` are absolute paths; the receiver copies them into the folder under that point.
    * Addressed: only the window the pointer was over may act on it.
    */
-  | { kind: "explorer-drop"; to: string; x: number; y: number; sources: string[] };
+  | { kind: "explorer-drop"; to: string; x: number; y: number; sources: string[] }
+  /**
+   * Something a chat island wants on screen in the assistant panel — a fork, a subchat, a chat it
+   * links to. An island has no panel of its own, so the main window opens it (`lib/chatIslands`).
+   */
+  | { kind: "panel-open"; to: string; target: PanelTarget };
 
 interface Frame {
   from: string;

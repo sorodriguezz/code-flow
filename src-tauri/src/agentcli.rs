@@ -53,7 +53,7 @@
 mod automation;
 mod infra;
 mod knowhow;
-mod place;
+pub(crate) mod place;
 mod vault;
 mod work;
 

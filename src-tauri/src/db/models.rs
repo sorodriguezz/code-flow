@@ -127,6 +127,10 @@ pub struct WorkspaceAgent {
     /// starts, like the provider and model. See `crate::ai_accounts`.
     #[serde(default)]
     pub account_id: Option<String>,
+    /// How hard it thinks (`low`…`max`), or `""` for the CLI's own default. Copied into every task
+    /// it starts; the engine drops it for a model that takes no level (`AiEngine::model_supports_effort`).
+    #[serde(default)]
+    pub effort: String,
 }
 
 /// A folder the user files agent work into. Not a repository: a task still names the `Project` its
@@ -247,6 +251,9 @@ pub struct AgentTask {
     /// How many of its turns reported a price.
     #[serde(default)]
     pub costed_turns: i64,
+    /// The agent's reasoning level when this task was created — see [`WorkspaceAgent::effort`].
+    #[serde(default)]
+    pub effort: String,
 }
 
 /// One run of "read this documentation, write the backlog": where the requirements came from,

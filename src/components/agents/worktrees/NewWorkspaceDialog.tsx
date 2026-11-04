@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { FolderGit2, MessagesSquare } from "lucide-react";
 import { ApiModal, Field, GhostButton, PrimaryButton } from "../../api/ApiModal";
 import { ProviderGlyph } from "../../ai/ProviderGlyph";
@@ -15,9 +15,15 @@ import { CLI_PROVIDERS } from "../../../lib/agents/cliLaunch";
 import { startAgentCli } from "../../../lib/agents/startCli";
 import { taskTitleFrom } from "../../../state/agentsStore";
 import type { RepoRef } from "../../../lib/agents/worktreeRows";
+import { agentCliEffortSupport } from "../../../lib/tauri/commands";
+import { useAiModelsStore } from "../../../state/aiModelsStore";
+import { CUSTOM_MODEL, ModelField, customModelPlaceholder, modelOptionsFor } from "../../settings/modelPicker";
+import { EffortSelect, useEffortSupport } from "../EffortField";
 
-/** The agent the dialog starts with: the one the user picked last time, kept for the session. */
+/** The agent the dialog starts with: the one the user picked last time, kept for the session — and,
+ *  per agent, the model and level it was last started on. */
 let lastProvider = "claude";
+const lastRouting: Record<string, { model: { choice: string; custom: string }; effort: string }> = {};
 
 /**
  * «Nuevo espacio»: a working copy of its own and an agent at work in it, in one step — what Orca's
@@ -51,6 +57,22 @@ export function NewWorkspaceDialog({
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
   const [provider, setProvider] = useState(lastProvider);
+  const [model, setModel] = useState(lastRouting[lastProvider]?.model ?? { choice: "", custom: "" });
+  const [effort, setEffort] = useState(lastRouting[lastProvider]?.effort ?? "");
+  const modelsByProvider = useAiModelsStore((s) => s.byProvider);
+  const ensureModels = useAiModelsStore((s) => s.ensure);
+  useEffect(() => {
+    void ensureModels([provider]);
+  }, [provider, ensureModels]);
+  const options = useMemo(() => modelOptionsFor(provider, modelsByProvider[provider]), [provider, modelsByProvider]);
+  const resolvedModel = model.choice === CUSTOM_MODEL ? model.custom.trim() : model.choice;
+  const effortSupported = useEffortSupport(provider, resolvedModel, agentCliEffortSupport);
+  const pickProvider = (id: string) => {
+    setProvider(id);
+    // A model id means nothing to another CLI: each agent comes back to what it last ran on.
+    setModel(lastRouting[id]?.model ?? { choice: "", custom: "" });
+    setEffort(lastRouting[id]?.effort ?? "");
+  };
   const [ownWorktree, setOwnWorktree] = useState(true);
   const [busy, setBusy] = useState(false);
   const repo = repos.find((candidate) => candidate.id === projectId) ?? null;
@@ -59,6 +81,7 @@ export function NewWorkspaceDialog({
     if (!repo || !workspaceId || busy) return;
     setBusy(true);
     lastProvider = provider;
+    lastRouting[provider] = { model, effort };
     try {
       // The name the card shows: what the user typed, else the start of what they asked for, else the
       // agent's — always one, since a name is what puts a space on the rail before its agent speaks.
@@ -77,6 +100,8 @@ export function NewWorkspaceDialog({
         provider,
         title: shown === label ? label : `${label} · ${shown}`,
         prompt,
+        model: resolvedModel,
+        effort: effortSupported ? effort : "",
       });
       onCreated(path, started?.sessionId ?? null);
       onClose();
@@ -134,7 +159,7 @@ export function NewWorkspaceDialog({
               <button
                 key={id}
                 type="button"
-                onClick={() => setProvider(id)}
+                onClick={() => pickProvider(id)}
                 aria-pressed={provider === id}
                 className={`flex h-8 items-center gap-1.5 rounded-md border px-2 text-[12px] transition-colors ${
                   provider === id
@@ -147,6 +172,27 @@ export function NewWorkspaceDialog({
               </button>
             ))}
           </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="space-y-1">
+            <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("agents.model")}</span>
+            <ModelField
+              size="field"
+              options={options}
+              choice={model.choice}
+              custom={model.custom}
+              defaultLabel={t("settings.modelDefault")}
+              customPlaceholder={customModelPlaceholder(provider, t("settings.sddAgentModelPlaceholder"))}
+              onChoice={(choice) => setModel((current) => ({ ...current, choice }))}
+              onCustom={(custom) => setModel((current) => ({ ...current, custom }))}
+            />
+          </div>
+          {effortSupported && (
+            <div className="space-y-1">
+              <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("chat.effortTitle")}</span>
+              <EffortSelect value={effort} onChange={setEffort} />
+            </div>
+          )}
         </div>
         <label className="block space-y-1">
           <span className="text-[12px] font-medium text-[var(--cf-text-muted)]">{t("wt.newSpacePrompt")}</span>

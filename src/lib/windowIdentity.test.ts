@@ -55,6 +55,12 @@ describe("window identity", () => {
    * a skeleton under a global hotkey, forever. Nothing failed loudly: the webview loaded, the label
    * was right, and every check but this one passed.
    */
+  it("reads a chat island", () => {
+    const identity = parseIdentity("sat-chat-0123456789abcdef", "?kind=chat&ref=panel%3Ap1%3Aconv-a");
+    expect(identity.main).toBe(false);
+    expect(identity.satellite).toEqual({ kind: "chat", refId: "panel:p1:conv-a" });
+  });
+
   it("reads the quick-ask window", () => {
     const identity = parseIdentity("sat-quick-ask", "?kind=quick&ref=ask");
     expect(identity.main).toBe(false);

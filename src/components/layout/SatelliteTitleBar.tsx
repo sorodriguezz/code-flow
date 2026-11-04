@@ -14,6 +14,7 @@ import {
   KeyRound,
   Layers,
   Lock,
+  MessageSquare,
   MessagesSquare,
   Minus,
   MonitorSmartphone,
@@ -35,6 +36,8 @@ import { returnThisIsland } from "../../lib/islandReturn";
 import { WINDOW } from "../../lib/windowIdentity";
 import { GLOBAL_APP_REFS } from "../../lib/satelliteGlobalApps";
 import { parseFileIslandRef, useFileIslandStore } from "../../lib/editorIslands";
+import { parseChatIslandRef } from "../../lib/chatIslandSync";
+import { useWindowStore } from "../../state/windowStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { FileGlyph } from "../common/FileGlyph";
 import { useRepoStore } from "../../state/repoStore";
@@ -197,7 +200,10 @@ export function SatelliteTitleBar() {
    *  app's is a translated label, looked up from the same key the rail uses. */
   const name =
     spec?.kind === "repo" ? (project?.name ?? t("windows.repoElsewhereShort")) : t(app.labelKey);
-  const floating = spec?.kind === "file";
+  // A chat island is a reference window too: it can be kept on top.
+  const floating = spec?.kind === "file" || spec?.kind === "chat";
+  const returnLabel =
+    spec?.kind === "chat" ? t("windows.returnChat") : floating ? t("windows.returnFile") : t("windows.reattach");
 
   /** Sends this window's contents back to the main window — see `returnThisIsland`, which «Codi»'s
    *  `island.return` runs too, so both ways back hand a floating editor's buffer over first. */
@@ -230,6 +236,8 @@ export function SatelliteTitleBar() {
 
       {spec?.kind === "file" ? (
         <FileCrumb refId={spec.refId} />
+      ) : spec?.kind === "chat" ? (
+        <ChatCrumb refId={spec.refId} />
       ) : spec?.kind === "repo" ? (
         // The repository crumb the main window's title row draws: its monogram and its name.
         // `min-w-0` so it gives when the bar runs out of room — a repository window also carries
@@ -293,12 +301,12 @@ export function SatelliteTitleBar() {
 
       <Tooltip
         side="bottom"
-        label={floating ? t("windows.returnFile") : t("windows.reattach")}
-        description={floating ? t("windows.returnFileHint") : t("windows.reattachHint")}
+        label={returnLabel}
+        description={spec?.kind === "chat" ? t("windows.returnChatHint") : floating ? t("windows.returnFileHint") : t("windows.reattachHint")}
       >
         <button
           onClick={reattach}
-          aria-label={floating ? t("windows.returnFile") : t("windows.reattach")}
+          aria-label={returnLabel}
           className={iconButtonClass({ size: "sm" })}
         >
           <CornerUpLeft size={15} />
@@ -408,6 +416,33 @@ function FileCrumb({ refId }: { refId: string }) {
       </span>
       <span className="min-w-0 shrink-0 truncate font-semibold text-[var(--cf-text)]">{name}</span>
       {dirty && <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--cf-accent-fill)]" />}
+      {where && <span className="min-w-0 truncate text-[12px] text-[var(--cf-text-faint)]">{where}</span>}
+    </span>
+  );
+}
+
+/**
+ * A chat island's name: the conversation's title as it was when the window opened (what the OS
+ * calls the window too), and whether it is a repository's or the workspace's.
+ */
+function ChatCrumb({ refId }: { refId: string }) {
+  const t = useT();
+  const ref = parseChatIslandRef(refId);
+  const title = useWindowStore((s) => s.satellites.find((w) => w.label === WINDOW.label)?.title ?? "");
+  const where = useWorkspaceStore((s) => {
+    if (!ref) return null;
+    if (ref.surface === "ws") return s.workspaces.find((w) => w.id === ref.workspaceId)?.name ?? null;
+    for (const list of Object.values(s.projectsByWorkspace)) {
+      const found = list.find((p) => p.id === ref.projectId);
+      if (found) return found.name;
+    }
+    return null;
+  });
+  const Icon = ref?.surface === "ws" ? Layers : MessageSquare;
+  return (
+    <span data-tauri-drag-region="deep" className="flex h-7 min-w-0 items-center gap-2 pl-1 pr-1" title={title}>
+      <Icon size={15} className="shrink-0 text-[var(--cf-accent)]" />
+      <span className="min-w-0 shrink-0 truncate font-semibold text-[var(--cf-text)]">{title || t("assistant.newChat")}</span>
       {where && <span className="min-w-0 truncate text-[12px] text-[var(--cf-text-faint)]">{where}</span>}
     </span>
   );

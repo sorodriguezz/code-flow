@@ -25,6 +25,7 @@ import { useIsQueued, repoHolder } from "../../lib/repoQueue";
 import { resolveAccount } from "../../lib/aiAccounts";
 import { ChatMessageBubble, dayDivider, type ChatBubbleActions, type CodeBlockTarget } from "../chat/ChatMessageBubble";
 import { ChatFindBar, useChatFind } from "../chat/ChatFind";
+import { ChatArtifactsStrip } from "../chat/ArtifactCards";
 import { ContextMeter, type ContextReading } from "../chat/ContextMeter";
 import { insertCodeAtCaret, useApplyCodeStore } from "../../lib/codeToEditor";
 import { estimateTokens } from "../../lib/contextWindow";
@@ -35,6 +36,8 @@ import { exportMenuItems, exportRepoConversation } from "../chat/exportChat";
 import { ContextMenu } from "../common/ContextMenu";
 import { AiRunLog } from "./AiRunLog";
 import { ChatModelPicker } from "./ChatModelPicker";
+import { ChatLineageButtons, SubchatRow } from "./ChatLineage";
+import { useChatLineageStore } from "../../state/chatLineageStore";
 import { AnswerLengthPicker } from "../chat/AnswerLengthPicker";
 import { EffortPicker } from "../chat/EffortPicker";
 import { useEffortSupported } from "../../lib/useEffortSupport";
@@ -472,6 +475,10 @@ export function PanelChat({
   };
 
   const repoName = project?.name ?? "";
+  const lineage = useMemo(
+    () => ({ surface: "panel" as const, scopeId: projectId, workspaceId: workspaceId ?? null, conversationId }),
+    [projectId, workspaceId, conversationId],
+  );
   const lastUser = session.messages.map((m) => m.role).lastIndexOf("user");
 
   // ── Turn actions ──────────────────────────────────────────────────────────────────────────
@@ -490,6 +497,8 @@ export function PanelChat({
     try {
       const copied = await branchChatConversation(projectId, conversationId, fresh, createdAt, t("assistant.branchTitle", { title }));
       if (copied === 0) return;
+      // The fork is a subchat of this one (the backend linked it).
+      if (workspaceId) await useChatLineageStore.getState().load(workspaceId, { force: true });
       await openChat(projectId, fresh);
     } catch (e) {
       pushErrorToast(t("assistant.branchFailed", { error: String(e) }));
@@ -690,7 +699,15 @@ export function PanelChat({
             <MessageSquareShare size={12} />
           </button>
         )}
+        <ChatLineageButtons
+          scope={lineage}
+          title={session.title}
+          busy={session.sending || queuedMessages.length > 0}
+          persisted={session.persisted && session.messages.length > 0}
+        />
       </div>
+      <SubchatRow scope={lineage} />
+      <ChatArtifactsStrip workspaceId={workspaceId ?? null} conversationId={conversationId} projectId={projectId} />
       <div
         ref={scrollRef}
         onScroll={onScroll}

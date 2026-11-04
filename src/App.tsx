@@ -44,6 +44,7 @@ import { pipelinesAvailable, useVcsConnectionsStore } from "./state/vcsConnectio
 import { useWorkspaceStore } from "./state/workspaceStore";
 import { useMissingProjectsStore, useProjectNotARepo } from "./state/missingProjectsStore";
 import { useWindowStore } from "./state/windowStore";
+import { installChatIslands } from "./lib/chatIslands";
 import { useLocalAiStore } from "./state/localAiStore";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { restoreSatellites } from "./lib/tauri/windows";
@@ -736,6 +737,10 @@ export default function App() {
         // window opens reads as a glitch. Only ever non-empty after a reload of the main window
         // with satellites still up.
         useWindowStore.getState().init(),
+        // Chat islands: the panel hides what they hold and takes it back (`lib/chatIslands`).
+        Promise.resolve(installChatIslands()),
+        // One chat asking another to continue (`lib/chatDelegate`): main holds every chat no island does.
+        import("./lib/chatDelegate").then((m) => m.installChatDelegate()),
       ]);
       useAccentStore.getState().apply(useThemeStore.getState().resolved);
       // Reads whether the guided tour has already been run, and — if it hasn't — arms the

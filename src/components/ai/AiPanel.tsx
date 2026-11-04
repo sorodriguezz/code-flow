@@ -7,6 +7,8 @@ import { PanelChat } from "./PanelChat";
 import { PanelTabStrip } from "./PanelTabStrip";
 import { PrDocument } from "./PrDocument";
 import { WorkspaceChat } from "./WorkspaceChat";
+import { useHeldChatTabKeys } from "../../lib/chatIslands";
+import { useChatLineageStore } from "../../state/chatLineageStore";
 import { useChatStore } from "../../state/chatStore";
 import { EMPTY_TABS, INBOX_KEY, NO_WORKSPACE, useAiPanelStore, type PanelTab } from "../../state/aiPanelStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -60,8 +62,16 @@ function useMaxPanelWidth(): number {
  */
 export function AiPanel() {
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId) ?? NO_WORKSPACE;
-  const tabs = useAiPanelStore((s) => s.tabsByWorkspace[workspaceId] ?? EMPTY_TABS);
-  const activeKey = useAiPanelStore((s) => s.activeByWorkspace[workspaceId] ?? INBOX_KEY);
+  const allTabs = useAiPanelStore((s) => s.tabsByWorkspace[workspaceId] ?? EMPTY_TABS);
+  const storedActive = useAiPanelStore((s) => s.activeByWorkspace[workspaceId] ?? INBOX_KEY);
+  // A conversation in a chat island is there, not here: its tab is not drawn while the island is
+  // open, and comes back when it closes (`lib/chatIslands`).
+  const held = useHeldChatTabKeys();
+  const tabs = useMemo(() => (held.size === 0 ? allTabs : allTabs.filter((tab) => !held.has(tab.key))), [allTabs, held]);
+  const activeKey = held.has(storedActive) ? INBOX_KEY : storedActive;
+  useEffect(() => {
+    if (workspaceId !== NO_WORKSPACE) void useChatLineageStore.getState().load(workspaceId);
+  }, [workspaceId]);
   const tabsByWorkspace = useAiPanelStore((s) => s.tabsByWorkspace);
   const wide = useAiPanelStore((s) => s.wide);
   const load = useAiPanelStore((s) => s.load);

@@ -1486,6 +1486,9 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       // The lists on screen are the active repository's; re-reading them for a commit made
       // elsewhere would answer for the wrong one.
       if (get().repoPath === repoPath) await get().refreshAll();
+      // Another repository's row in the projects panel (`repoSummaryStore`) — told by event, since
+      // that store reads this one.
+      else window.dispatchEvent(new CustomEvent("cf:repo-touched", { detail: { path: repoPath } }));
       return true;
     } catch (e) {
       const text = describeError(e);

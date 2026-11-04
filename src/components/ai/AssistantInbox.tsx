@@ -1,6 +1,9 @@
+import { WorkspaceArtifacts } from "../chat/ArtifactCards";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
+  ChevronDown,
+  ChevronRight,
   Clock,
   GitPullRequest,
   Globe,
@@ -51,6 +54,7 @@ import { ChatModelPicker } from "./ChatModelPicker";
 import { EMPTY_JOBS, useJobsStore, type Job } from "../../state/jobsStore";
 import { EMPTY_CONVERSATIONS, useChatHistoryStore } from "../../state/activityStore";
 import { useWorkspaceChatStore } from "../../state/workspaceChatStore";
+import { EMPTY_LINKS, nestByLineage, parentMap, useChatLineageStore } from "../../state/chatLineageStore";
 import type { ChatConversation } from "../../lib/tauri/chatCommands";
 import { liveSessionsOf, useChatStore, type ChatSession } from "../../state/chatStore";
 import { EMPTY_TRACKED, usePrWatchStore } from "../../state/prWatchStore";
@@ -320,6 +324,11 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
         </div>
       )}
 
+      {/* The workspace's artifacts (`chat_refs::artifacts`), folded — absent while there are none. */}
+      <div className="shrink-0 px-2">
+        <WorkspaceArtifacts workspaceId={workspaceId} />
+      </div>
+
       {!empty && (
         <section className="flex min-h-0 flex-1 flex-col">
           <div className="shrink-0 px-2">
@@ -380,7 +389,7 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
                 <button onClick={() => setSearchRetry((n) => n + 1)} className="shrink-0 text-[var(--cf-accent)]">{t("turnReview.retry")}</button>
               </div>
             )}
-            <RecentList entries={recent} showRepo={showRepo} projectName={projectName} snippets={query.trim() ? matches : undefined} />
+            <RecentList entries={recent} showRepo={showRepo} projectName={projectName} snippets={query.trim() ? matches : undefined} workspaceId={workspaceId} />
             {recent.length === 0 && !searching && !searchError && (
               <p className="px-1 py-3 text-center text-[12px] text-[var(--cf-text-faint)]">{t("ai.noMatches")}</p>
             )}
@@ -608,26 +617,76 @@ function RecentList({
   showRepo,
   projectName,
   snippets,
+  workspaceId,
 }: {
   entries: ActivityEntry[];
   showRepo: boolean;
   projectName: (id: string) => string;
   snippets?: Map<string, string | null>;
+  workspaceId: string;
 }) {
   const t = useT();
   // The app's language, not the OS's — a Spanish UI prints Spanish dates.
   const locale = useLanguageStore((s) => s.language) === "es" ? "es-ES" : "en-US";
+  // Subchats under their chat (`chatLineageStore`), foldable. A subchat whose parent is not in the
+  // list (deleted, or out of the filter) stands on its own.
+  const links = useChatLineageStore((s) => s.byWorkspace[workspaceId] ?? EMPTY_LINKS);
+  useEffect(() => {
+    void useChatLineageStore.getState().load(workspaceId);
+  }, [workspaceId]);
+  const [folded, setFolded] = useState<Set<string>>(() => new Set());
+  const nested = useMemo(
+    () => nestByLineage(entries, (entry) => (entry.type === "chat" ? entry.conv.session_id : `job:${entryKey(entry)}`), parentMap(links)),
+    [entries, links],
+  );
+  const counts = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const link of links) out.set(link.parentId, (out.get(link.parentId) ?? 0) + 1);
+    return out;
+  }, [links]);
   let lastDay = "";
+  let hiddenBelow = -1;
   return (
     <div className="space-y-0.5">
-      {entries.map((entry) => {
-        const day = dayLabel(entryTimestamp(entry), t, locale);
+      {nested.map(({ item: entry, depth, hasChildren }) => {
+        // Inside a folded parent: not drawn.
+        if (hiddenBelow >= 0 && depth > hiddenBelow) return null;
+        hiddenBelow = -1;
+        const id = entry.type === "chat" ? entry.conv.session_id : "";
+        const isFolded = hasChildren && folded.has(id);
+        if (isFolded) hiddenBelow = depth;
+        // A subchat sits under its parent, wherever its own day falls.
+        const day = depth === 0 ? dayLabel(entryTimestamp(entry), t, locale) : lastDay;
         const header = day !== lastDay ? day : null;
         lastDay = day;
         return (
           <div key={entryKey(entry)}>
             {header && <p className="px-1.5 pb-1 pt-2 text-[11px] font-semibold text-[var(--cf-text-faint)]">{header}</p>}
-            <RecentRow entry={entry} repo={showRepo ? projectOf(entry, projectName) : null} snippet={snippets?.get(entryKey(entry)) ?? undefined} />
+            <div
+              className={depth > 0 ? "border-l border-[var(--cf-border)]" : undefined}
+              style={depth > 0 ? { marginLeft: 6 + (depth - 1) * 12, paddingLeft: 4 } : undefined}
+            >
+              <RecentRow
+                entry={entry}
+                repo={showRepo ? projectOf(entry, projectName) : null}
+                snippet={snippets?.get(entryKey(entry)) ?? undefined}
+                subchats={
+                  hasChildren
+                    ? {
+                        count: counts.get(id) ?? 0,
+                        open: !isFolded,
+                        toggle: () =>
+                          setFolded((was) => {
+                            const next = new Set(was);
+                            if (next.has(id)) next.delete(id);
+                            else next.add(id);
+                            return next;
+                          }),
+                      }
+                    : undefined
+                }
+              />
+            </div>
           </div>
         );
       })}
@@ -644,7 +703,18 @@ function projectOf(entry: ActivityEntry, projectName: (id: string) => string): s
 }
 
 /** One row of history. Rename and delete happen here — no modal between the list and the action. */
-function RecentRow({ entry, repo, snippet }: { entry: ActivityEntry; repo: string | null; snippet?: string }) {
+function RecentRow({
+  entry,
+  repo,
+  snippet,
+  subchats,
+}: {
+  entry: ActivityEntry;
+  repo: string | null;
+  snippet?: string;
+  /** The row's subchats, when it has any: how many, and the fold. */
+  subchats?: { count: number; open: boolean; toggle: () => void };
+}) {
   const t = useT();
   const [mode, setMode] = useState<"idle" | "renaming" | "deleting">("idle");
   const [value, setValue] = useState("");
@@ -676,7 +746,9 @@ function RecentRow({ entry, repo, snippet }: { entry: ActivityEntry; repo: strin
     if (entry.type === "chat") {
       if (isWorkspaceChat(entry)) {
         // Its own store owns the row, the tab and the transcript.
-        await useWorkspaceChatStore.getState().remove(entry.conv.session_id);
+        if (await useWorkspaceChatStore.getState().remove(entry.conv.session_id)) {
+          useChatLineageStore.getState().dropLocal(entry.conv.session_id);
+        }
         return;
       }
       // Both halves at once: the persisted list and this session's memory — and the tab, since a
@@ -684,6 +756,8 @@ function RecentRow({ entry, repo, snippet }: { entry: ActivityEntry; repo: strin
       useChatStore.getState().discard(entry.conv.session_id);
       useAiPanelStore.getState().close(chatTabKey(entry.conv.session_id));
       await useChatHistoryStore.getState().remove(bucket, entry.conv.session_id);
+      // The backend moved its subchats up a level; so does the copy here.
+      useChatLineageStore.getState().dropLocal(entry.conv.session_id);
       return;
     }
     // A job row owns every run of that activity — they all go, not just the newest.
@@ -743,6 +817,18 @@ function RecentRow({ entry, repo, snippet }: { entry: ActivityEntry; repo: strin
         </span>
         <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-faint)] group-hover:hidden">{time}</span>
       </button>
+      {subchats && (
+        <button
+          onClick={subchats.toggle}
+          aria-expanded={subchats.open}
+          title={subchats.open ? t("assistant.subchatsHide") : t("assistant.subchatsShow")}
+          aria-label={subchats.open ? t("assistant.subchatsHide") : t("assistant.subchatsShow")}
+          className="inline-flex h-[22px] shrink-0 items-center gap-0.5 rounded-md px-1 text-[11px] tabular-nums text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        >
+          {subchats.open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          {subchats.count}
+        </button>
+      )}
       <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
         <button
           onClick={() => {

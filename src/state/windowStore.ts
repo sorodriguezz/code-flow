@@ -11,6 +11,7 @@ import { pushErrorToast } from "./toastStore";
 import { translate } from "./languageStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { islandOpened, islandReturned } from "../lib/islandSync";
+import { chatIslandOpened, chatIslandReturned } from "../lib/chatIslandSync";
 
 /**
  * Which apps and repositories are open in windows of their own.
@@ -80,7 +81,9 @@ export const DEFAULT_SATELLITE_LIMIT = 4;
  */
 export function countedSatellites(satellites: readonly SatelliteInfo[]): number {
   // Codi's window neither: one window of its own, summoned by its button, never a detached app.
-  return satellites.filter((s) => s.kind !== "quick" && s.kind !== "codi").length;
+  // Nor chat islands: several conversations side by side is what they are for, and the user asked
+  // that they not spend the islands the limit allows (`windows.rs` gives them a backstop of their own).
+  return satellites.filter((s) => s.kind !== "quick" && s.kind !== "codi" && s.kind !== "chat").length;
 }
 
 let nextReturnId = 0;
@@ -138,6 +141,13 @@ export const useWindowStore = create<WindowState>((set, get) => ({
       for (const s of before) {
         if (s.kind === "app" && !event.payload.some((now) => now.label === s.label)) islandReturned(s.ref_id);
       }
+      // A chat island's conversation comes back into its tab, read again from disk.
+      for (const s of event.payload) {
+        if (s.kind === "chat" && !before.some((was) => was.label === s.label)) chatIslandOpened(s.ref_id);
+      }
+      for (const s of before) {
+        if (s.kind === "chat" && !event.payload.some((now) => now.label === s.label)) chatIslandReturned(s.ref_id);
+      }
       const back = before.filter(
         (s): s is SatelliteInfo & { kind: DetachableKind } =>
           (s.kind === "app" || s.kind === "repo") && !event.payload.some((now) => now.label === s.label),
@@ -160,7 +170,7 @@ export const useWindowStore = create<WindowState>((set, get) => ({
     const { satellites, limit } = get();
     const already = satellites.some((s) => s.kind === kind && s.ref_id === refId);
     // Focusing what is already open is never refused, however full the desk is — it opens nothing.
-    if (!already && countedSatellites(satellites) >= limit) {
+    if (!already && kind !== "chat" && countedSatellites(satellites) >= limit) {
       pushErrorToast(translate("windows.limitReached", { limit: String(limit) }));
       return false;
     }

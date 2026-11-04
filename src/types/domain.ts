@@ -507,6 +507,9 @@ export interface WorkspaceAgent {
    * `"system"` the CLI's own login, else an account id. Copied into the tasks and chain steps it
    * starts. See `lib/aiAccounts.ts`. */
   account_id?: string | null;
+  /** How hard it thinks (`low`…`max`), or `""` for the CLI's own default. Copied into every task it
+   *  starts. */
+  effort?: string;
 }
 
 /** A folder for agent work. Not a repository: `AgentTask.project_id` is still the git working copy
@@ -566,6 +569,8 @@ export interface AgentTask {
   updated_at: string;
   /** The agent's account preference, copied at creation — see `WorkspaceAgent.account_id`. */
   account_id?: string | null;
+  /** The agent's reasoning level, copied at creation — see `WorkspaceAgent.effort`. */
+  effort?: string;
   /** The task's own linked worktree, or `""` when its turns run in the repository's working copy. */
   worktree_path?: string;
   /** The branch that worktree has checked out. */

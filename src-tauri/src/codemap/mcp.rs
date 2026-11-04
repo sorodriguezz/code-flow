@@ -66,11 +66,33 @@ struct Access {
     /// A workspace chat limited to some of its repositories: the project ids it left out, which
     /// `search_knowledge` does not search. Empty for every other run.
     excluded_projects: Vec<String>,
+    /// The AI run the token was granted inside, when there was one — how the chat tools
+    /// (`crate::chat_refs`) know which chat is asking.
+    run: Option<String>,
 }
 
 impl Access {
     fn new(root: &str, acts: bool, token: &str) -> Self {
-        Access { root: root.to_string(), acts, session: format!("mcp:{}", &token[..token.len().min(16)]), workspace: false, grounding: false, codi: false, excluded_projects: Vec::new() }
+        Access {
+            root: root.to_string(),
+            acts,
+            session: format!("mcp:{}", &token[..token.len().min(16)]),
+            workspace: false,
+            grounding: false,
+            codi: false,
+            excluded_projects: Vec::new(),
+            run: crate::ai_runs::current().map(|ctx| ctx.run_id),
+        }
+    }
+
+    /// Who is calling a chat tool: the chat whose turn this run is, else the workspace of the folder.
+    fn chat_caller(&self) -> crate::chat_refs::Caller {
+        let marked = self.run.as_deref().and_then(crate::chat_refs::delegate::conversation_of_run);
+        let workspace_id = marked.as_ref().map(|(_, ws)| ws.clone()).or_else(|| {
+            let app = crate::ai_usage::app()?;
+            crate::agentcli::place::of(app, &self.root, &self.session).workspace_id
+        });
+        crate::chat_refs::Caller { workspace_id, conversation_id: marked.map(|(conv, _)| conv), acts: self.acts }
     }
 }
 
@@ -1384,6 +1406,12 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
             // The context reader likewise, only where a context waits to be read — and never for a
             // run that judges material, which is handed every context whole.
             let tools = if !access.grounding && contexts_waiting(&access.root).await > 0 { with_context_reader(tools) } else { tools };
+            // The other chats of the workspace and their artifacts (`crate::chat_refs`) — never for a
+            // run that judges someone else's material.
+            let mut tools = tools;
+            if !access.grounding {
+                tools.extend(crate::chat_refs::tools(access.acts));
+            }
             result_reply(id, json!({"tools": tools}))
         }
         "tools/call" => {
@@ -1391,6 +1419,17 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
             let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
             if access.codi && !CODI_TOOLS.contains(&name) {
                 return Some(text_result(id, format!("{name} is not available to Codi: it drives the interface with ui_state, ui_actions and ui_act"), true));
+            }
+            if crate::chat_refs::is_tool(name) {
+                if access.grounding {
+                    return Some(text_result(id, format!("{name} is not available to this run"), true));
+                }
+                let caller = access.chat_caller();
+                return Some(match crate::chat_refs::call(&caller, name, &args).await {
+                    Some(Ok(text)) => text_result(id, text, false),
+                    Some(Err(error)) => text_result(id, error, true),
+                    None => text_result(id, format!("unknown tool {name}"), true),
+                });
             }
             let about_a_reference = REFERENCE_TOOLS.contains(&name) || (MAP_TOOLS.contains(&name) && args.get("repo").and_then(Value::as_str).is_some_and(|r| !r.trim().is_empty()));
             if access.workspace && !WORKSPACE_TOOLS.contains(&name) && !DB_TOOLS.contains(&name) && !about_a_reference {
@@ -1537,8 +1576,13 @@ mod tests {
 
         let (_, reply) = post(&headers, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
         // Kubernetes, Azure and the engines are there too where their CLIs are: not counted here.
-        let own: Vec<String> = tool_names(&reply).into_iter().filter(|n| !INFRA_TOOLS.contains(&n.as_str())).collect();
+        // The other chats and their artifacts (`chat_refs`) ride every token but a grounding one.
+        let own: Vec<String> = tool_names(&reply)
+            .into_iter()
+            .filter(|n| !INFRA_TOOLS.contains(&n.as_str()) && !crate::chat_refs::is_tool(n))
+            .collect();
         assert_eq!(own, vec!["search_knowledge", "recall", "read_note"]);
+        assert!(tool_names(&reply).iter().any(|n| n == "chat_read") && !tool_names(&reply).iter().any(|n| n == "chat_send"));
         assert!(reply["result"]["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
 
         for name in ["find_symbol", "service_logs", "open_in_editor"] {
@@ -1591,10 +1635,10 @@ mod tests {
 
         let (status, reply) = post(&headers, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
         assert_eq!(status, StatusCode::OK);
-        // The seven map, knowledge and note queries and the app's four read tools — no actions for
-        // this token.
+        // The seven map, knowledge and note queries, the app's four read tools and the four chat
+        // reads — no actions for this token.
         let counted = reply["result"]["tools"].as_array().unwrap().iter().filter(|t| !INFRA_TOOLS.contains(&t["name"].as_str().unwrap_or_default())).count();
-        assert_eq!(counted, 11);
+        assert_eq!(counted, 15);
 
         let (_, reply) = post(
             &headers,

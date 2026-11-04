@@ -232,6 +232,44 @@ services the app runs, the output of other terminals, opening a file for the use
 for cheap work, and saved database connections, API requests and keyring entries the app uses for you without \
 showing you their secrets.";
 
+/// The CLIs whose *interactive* session takes the same reasoning flag as their headless run, read
+/// off each one's `--help` (2026-11-03): `claude --effort`, `codex -c model_reasoning_effort=…`,
+/// `agy --effort`, `grok --reasoning-effort`. opencode's `--variant` and cline's `--thinking` are
+/// flags of their one-shot commands and were not confirmed on their TUIs, so the launcher offers
+/// them a model but no level rather than a flag that could refuse the session.
+const INTERACTIVE_EFFORT: [&str; 4] = ["claude", "codex", "gemini", "grok"];
+
+/// The arguments that point an agent CLI started in a terminal at `model` and `effort` — the
+/// «Worktrees» rail's «Nuevo agente». Empty pieces add nothing, leaving the CLI on its own default.
+///
+/// The level goes through the engine's own mapping (`AiEngine::effort_args_for`), so a terminal and
+/// a headless run saturate the same way (agy's variants, Codex's catalog) and a model that takes no
+/// level is never handed one. Codex's override drops its TOML quotes: a value that is not TOML is
+/// read as a plain string, and quotes are what PowerShell mangles on the way to a program.
+#[tauri::command]
+pub fn agent_cli_routing_args(provider: String, model: String, effort: String) -> Vec<String> {
+    let model = model.trim();
+    let effort = effort.trim();
+    let mut args = Vec::new();
+    if !model.is_empty() {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    if crate::ai::effort::valid(effort) && INTERACTIVE_EFFORT.contains(&provider.as_str()) {
+        let engine = crate::ai::engine_for(&provider);
+        if engine.model_supports_effort(model) {
+            args.extend(engine.effort_args_for(effort, model).into_iter().map(|arg| arg.replace('"', "")));
+        }
+    }
+    args
+}
+
+/// Whether [`agent_cli_routing_args`] can give `provider`'s terminal session a reasoning level.
+#[tauri::command]
+pub fn agent_cli_effort_support(provider: String, model: String) -> bool {
+    INTERACTIVE_EFFORT.contains(&provider.as_str()) && crate::ai::engine_for(&provider).model_supports_effort(model.trim())
+}
+
 /// Where a launch reads its extras from — see [`agent_launch_files`].
 #[derive(serde::Serialize)]
 pub struct AgentLaunchFiles {

@@ -64,6 +64,7 @@ import { confirmAction } from "./confirmStore";
 import type { EditingTurn } from "./chatStore";
 import { learnedKey } from "../lib/memoryToast";
 import { leavesContextAsIs } from "../lib/contextWindow";
+import { useChatLineageStore } from "./chatLineageStore";
 
 /**
  * The assistant panel's **workspace chats** — one conversation that talks to every repository of a
@@ -603,6 +604,8 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       try {
         const fork = await chatBranchConversation(conversationId, atTurn);
         await get().loadList(session.workspaceId);
+        // The fork is a subchat of this one (the backend linked it).
+        await useChatLineageStore.getState().load(session.workspaceId, { force: true });
         useAiPanelStore
           .getState()
           .open({

@@ -1,4 +1,4 @@
-import { agentLaunchFiles, getSetting, listShellProfiles, terminalSetAgent, writeTerminal } from "../tauri/commands";
+import { agentCliRoutingArgs, agentLaunchFiles, getSetting, listShellProfiles, terminalSetAgent, writeTerminal } from "../tauri/commands";
 import { AI_PROVIDERS } from "../aiProviders";
 import { currentPlatform } from "../platform";
 import { useBenchStore } from "../../state/benchStore";
@@ -28,6 +28,10 @@ export async function startAgentCli(options: {
   /** The tab's name. */
   title: string;
   prompt?: string;
+  /** The model to start on, or `""`/absent for the CLI's own. */
+  model?: string;
+  /** The reasoning level (`low`…`max`), or `""`/absent for the CLI's own. */
+  effort?: string;
   resume?: { sessionId: string | null; accountId?: string | null };
 }): Promise<{ terminalId: string; sessionId: string } | null> {
   const { workspaceId, path, provider, title } = options;
@@ -36,6 +40,10 @@ export async function startAgentCli(options: {
   const binary = stored || AI_PROVIDERS.find((candidate) => candidate.id === provider)?.defaultBinary || provider;
   // Missing files cost the card its prompt and reply, and the agent its note on `cf` — not the launch.
   const files = await agentLaunchFiles().catch(() => ({ settings: "", note_file: "", note: "" }));
+  const routing =
+    options.model || options.effort
+      ? await agentCliRoutingArgs(provider, options.model ?? "", options.effort ?? "").catch(() => [])
+      : [];
   const asked = options.prompt?.trim() ?? "";
   // No flag adds to these CLIs' own instructions, so the note rides at the head of the first prompt.
   const prompt = asked && files.note && !noteInLine(provider) ? `${files.note}\n\n${asked}` : asked;
@@ -44,6 +52,7 @@ export async function startAgentCli(options: {
     noteFile: files.note_file,
     note: files.note,
     prompt,
+    routing,
   });
 
   const bench = useBenchStore.getState();

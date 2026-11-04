@@ -95,6 +95,32 @@ describe("open", () => {
     expect(panel.useAiPanelStore.getState().tabsByWorkspace["ws-1"]).toHaveLength(2);
   });
 
+  it("opens a blank chat on an id the caller minted (a subchat)", async () => {
+    const { panel } = await boot();
+    const key = panel.useAiPanelStore.getState().open({ kind: "chat", projectId: "p-1", conversationId: "conv-sub", fresh: true });
+    const tab = panel.useAiPanelStore.getState().tabsByWorkspace["ws-1"][0];
+    expect(key).toBe("chat:conv-sub");
+    expect(tab.kind === "chat" && tab.fresh).toBe(true);
+  });
+
+  it("hands a chat to the interceptor (a chat island) instead of opening a tab", async () => {
+    const { panel } = await boot();
+    const taken: string[] = [];
+    panel.registerOpenInterceptor((target) => {
+      if (target.conversationId === "held") {
+        taken.push(target.conversationId);
+        return true;
+      }
+      return false;
+    });
+    panel.useAiPanelStore.getState().open({ kind: "chat", projectId: "p-1", conversationId: "held" });
+    expect(taken).toEqual(["held"]);
+    expect(panel.useAiPanelStore.getState().tabsByWorkspace["ws-1"] ?? []).toHaveLength(0);
+    panel.useAiPanelStore.getState().open({ kind: "chat", projectId: "p-1", conversationId: "other" });
+    expect(panel.useAiPanelStore.getState().tabsByWorkspace["ws-1"]).toHaveLength(1);
+    panel.registerOpenInterceptor(null);
+  });
+
   it("files a tab under its own project's workspace, not the one on screen", async () => {
     const { panel } = await boot();
     const key = panel.useAiPanelStore.getState().open({ kind: "analysis", projectId: "p-2" });

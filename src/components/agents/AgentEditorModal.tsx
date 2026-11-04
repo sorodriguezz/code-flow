@@ -16,6 +16,8 @@ import { SYSTEM_ACCOUNT, resolveAccount, validPreference } from "../../lib/aiAcc
 import { useT } from "../../state/languageStore";
 import type { WorkspaceAgent } from "../../types/domain";
 import { fieldClass } from "../common/recipes";
+import { chatModelEffortSupport } from "../../lib/tauri/chatCommands";
+import { EffortSelect, useEffortSupport } from "./EffortField";
 
 /**
  * Create or edit one agent.
@@ -48,6 +50,7 @@ export function AgentEditorModal({
   const [provider, setProvider] = useState(agent?.provider ?? "");
   const [prompt, setPrompt] = useState(agent?.prompt ?? "");
   const [enabled, setEnabled] = useState(agent?.enabled ?? true);
+  const [effort, setEffort] = useState(agent?.effort ?? "");
   const [saving, setSaving] = useState(false);
   /** `""` automatic, `"system"`, or an account id — copied onto every task this agent starts. */
   const [account, setAccount] = useState(agent?.account_id ?? "");
@@ -100,6 +103,9 @@ export function AgentEditorModal({
 
   const resolvedModel = model.choice === CUSTOM_MODEL ? model.custom.trim() : model.choice;
   const incomplete = provider.trim() === "" || resolvedModel === "";
+  // Asked per pair, as the chat's dial is: a model that takes no level (or an engine with no flag)
+  // gets no field — and nothing is saved for it, since the engine would drop it anyway.
+  const effortSupported = useEffortSupport(provider, resolvedModel, chatModelEffortSupport);
 
   const save = async () => {
     setSaving(true);
@@ -115,6 +121,7 @@ export function AgentEditorModal({
         prompt,
         enabled,
         validPreference(allAccounts, provider, account) || null,
+        effortSupported === false ? "" : effort,
       );
       await useAgentsStore.getState().reloadRoster();
       onClose();
@@ -209,6 +216,12 @@ export function AgentEditorModal({
             />
           </Field>
         </div>
+
+        {effortSupported && (
+          <Field label={t("chat.effortTitle")}>
+            <EffortSelect value={effort} onChange={setEffort} />
+          </Field>
+        )}
 
         {providerAccounts.length > 0 && (
           <Field label={t("accounts.pickerLabel")}>

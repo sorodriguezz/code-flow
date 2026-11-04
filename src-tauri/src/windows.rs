@@ -85,13 +85,28 @@ pub enum SatelliteKind {
     /// agent is not blocked until somebody finds the main window. One window, not counted against the
     /// ceilings (like `Quick` and `Codi`), and put away with the desk.
     Attention,
+    /// One assistant conversation torn out of the side panel — a repository chat or a workspace
+    /// chat. `ref_id` is `"panel:<project id>:<conversation id>"` or `"ws:<workspace id>:<conversation
+    /// id>"`. Part of the desk (put away and restored with it) but **not counted against the user's
+    /// island limit** — the user asked for several chats open at once without spending islands on
+    /// them — so it has a backstop of its own, [`MAX_CHAT_SATELLITES`].
+    Chat,
 }
+
+/// The chat islands' own backstop: they do not count against [`MAX_SATELLITES`] (see
+/// [`SatelliteKind::Chat`]), so without this a bug could open them without end.
+const MAX_CHAT_SATELLITES: usize = 12;
 
 impl SatelliteKind {
     /// Whether it counts as part of the desk — the screens the person arranged — rather than a
     /// summoned utility. The ask box, Codi and this one outlive the desk and are never counted.
     fn is_utility(self) -> bool {
         matches!(self, SatelliteKind::Quick | SatelliteKind::Codi | SatelliteKind::Attention)
+    }
+
+    /// Whether it spends one of the islands the ceilings allow: everything on the desk but chats.
+    fn counts_against_ceiling(self) -> bool {
+        !self.is_utility() && self != SatelliteKind::Chat
     }
 
     fn slug(self) -> &'static str {
@@ -102,6 +117,7 @@ impl SatelliteKind {
             SatelliteKind::File => "file",
             SatelliteKind::Codi => "codi",
             SatelliteKind::Attention => "attention",
+            SatelliteKind::Chat => "chat",
         }
     }
 }
@@ -180,7 +196,12 @@ impl SatelliteRegistry {
     /// The satellites that count against the ceilings — every one but the ask box. See
     /// [`SatelliteKind::Quick`].
     fn counted(held: &HashMap<String, SatelliteInfo>) -> usize {
-        held.values().filter(|info| !info.kind.is_utility()).count()
+        held.values().filter(|info| info.kind.counts_against_ceiling()).count()
+    }
+
+    /// The chat islands open — what [`MAX_CHAT_SATELLITES`] is measured against.
+    fn chats(held: &HashMap<String, SatelliteInfo>) -> usize {
+        held.values().filter(|info| info.kind == SatelliteKind::Chat).count()
     }
 
     /// Parks the desk and says what to do with each window: the half of [`close_all`] that needs no
@@ -232,7 +253,7 @@ fn label_for(kind: SatelliteKind, ref_id: &str) -> String {
     // `src/a-b.ts` and `src/a_b.ts` fold to the same label, and the second window would "already
     // exist" — the first one would come forward instead. So a file's label is a digest of its id
     // rather than a spelling of it. Stable across runs (no random seed), which the restore needs.
-    if kind == SatelliteKind::File {
+    if kind == SatelliteKind::File || kind == SatelliteKind::Chat {
         return format!("{LABEL_PREFIX}{}-{:016x}", kind.slug(), fnv1a64(ref_id));
     }
     let safe: String = ref_id
@@ -328,7 +349,11 @@ pub async fn open_satellite(
     let registry = app.state::<SatelliteRegistry>();
     {
         let held = registry.open.lock().map_err(|e| e.to_string())?;
-        if SatelliteRegistry::counted(&held) >= MAX_SATELLITES {
+        if kind == SatelliteKind::Chat {
+            if SatelliteRegistry::chats(&held) >= MAX_CHAT_SATELLITES {
+                return Err(format!("too many chat windows are open (limit {MAX_CHAT_SATELLITES})"));
+            }
+        } else if SatelliteRegistry::counted(&held) >= MAX_SATELLITES {
             return Err(format!("too many windows are open (limit {MAX_SATELLITES})"));
         }
     }
@@ -356,6 +381,8 @@ pub async fn open_satellite(
     // window you keep beside your work, and may be made much smaller than a screen would tolerate.
     let ((width, height), (min_width, min_height)) = match kind {
         SatelliteKind::File => ((820.0, 600.0), (360.0, 240.0)),
+        // A conversation is a column, not a screen.
+        SatelliteKind::Chat => ((560.0, 760.0), (340.0, 320.0)),
         _ => ((1100.0, 760.0), (560.0, 420.0)),
     };
     // Where the tab was dropped, when it was dropped; cascaded off the main window otherwise rather
@@ -1335,6 +1362,33 @@ mod tests {
         }
         assert_eq!(SatelliteKind::Attention.slug(), "attention");
         assert_eq!(label_for(SatelliteKind::Attention, ATTENTION_REF_ID), "sat-attention-attention");
+    }
+
+    /// A chat island is part of the desk (put away and restored with it) but spends no island of the
+    /// ceilings; it has its own backstop.
+    #[test]
+    fn chat_islands_are_desk_but_not_counted() {
+        assert!(!SatelliteKind::Chat.is_utility());
+        assert!(!SatelliteKind::Chat.counts_against_ceiling());
+        assert!(SatelliteKind::App.counts_against_ceiling());
+        let mut held = HashMap::new();
+        for (label, kind, ref_id) in [
+            ("sat-app-notes", SatelliteKind::App, "notes"),
+            ("sat-chat-1", SatelliteKind::Chat, "panel:p1:conv-a"),
+            ("sat-chat-2", SatelliteKind::Chat, "ws:w1:b"),
+        ] {
+            held.insert(label.to_string(), info(label, kind, ref_id));
+        }
+        assert_eq!(SatelliteRegistry::counted(&held), 1);
+        assert_eq!(SatelliteRegistry::chats(&held), 2);
+        // Digested like a file's: the ids carry `:` and would fold together otherwise.
+        let a = label_for(SatelliteKind::Chat, "panel:p1:conv-a");
+        assert!(a.starts_with("sat-chat-"));
+        assert_ne!(a, label_for(SatelliteKind::Chat, "panel:p1_conv-a"));
+        let registry = SatelliteRegistry::default();
+        *registry.open.lock().unwrap() = held;
+        let plan = registry.put_away();
+        assert!(plan.close.contains(&"sat-chat-1".to_string()), "put away with the desk");
     }
 
     const NOTES: (&str, SatelliteKind, &str) = ("sat-app-notes", SatelliteKind::App, "notes");

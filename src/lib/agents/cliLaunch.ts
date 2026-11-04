@@ -55,6 +55,8 @@ export function cliLine(
     note?: string;
     /** The first thing to ask, when the CLI takes it on its command line (see `promptInLine`). */
     prompt?: string;
+    /** `--model` and the reasoning flag, as `agent_cli_routing_args` spells them for this CLI. */
+    routing?: readonly string[];
   } = {},
 ): string {
   // Git Bash on Windows quotes as any POSIX shell: single quotes keep a `C:\…` path whole.
@@ -63,6 +65,7 @@ export function cliLine(
   // PowerShell runs a quoted string only through the call operator.
   const head = shell === "powershell" && quoted !== binary ? `& ${quoted}` : quoted;
   const parts = [head];
+  for (const arg of extra.routing ?? []) parts.push(quotePath(arg, windows));
   if (provider === "claude" && extra.settings) parts.push(`--settings ${quotePath(extra.settings, windows)}`);
   if (provider === "claude" && extra.noteFile) parts.push(`--append-system-prompt-file ${quotePath(extra.noteFile, windows)}`);
   // A `-c` value that is not TOML is taken as a plain string — which the note, with no quotes in it,
