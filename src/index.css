@@ -331,6 +331,14 @@ textarea,
   user-select: text;
 }
 
+/* …and so does anything shown as preformatted text: a code view, a log, an error, a pasted
+   diff. It is there to be read and quoted, and the whole-block Copy button is not a substitute —
+   the artifact viewer's code tab had only that, so lifting one line meant copying the document. */
+pre {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
 /* Scrollbars: a hairline to read, a full-width target to grab.
 
    The two are different jobs and used to be settled with one number. A bar wide enough to catch

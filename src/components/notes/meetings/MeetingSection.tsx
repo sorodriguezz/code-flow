@@ -511,7 +511,7 @@ function MeetingPanel({
   const collapsed = useMeetingsStore((s) => !!s.collapsed[noteId]);
   const voicesInstalled = useMeetingsStore((s) => s.status?.voicesInstalled ?? false);
   const [tab, setTab] = useState<"transcript" | "ai">("transcript");
-  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[]; searchable?: boolean } | null>(null);
   const [position, setPosition] = useState(0);
   const [renaming, setRenaming] = useState<string | null>(null);
   const player = useRef<PlayerHandle>(null);
@@ -605,6 +605,7 @@ function MeetingPanel({
         label: t("meetings.mergeInto"),
         icon: Users,
         onClick: () => {},
+        searchPlaceholder: others.length > 6 ? t("meetings.searchPerson") : undefined,
         children: others.map((other) => ({
           label: speakerName(other.key, speakers, meeting.kind),
           onClick: () => void meetingsMergeSpeakers(meeting.id, key, other.key).then(reload).catch((e) => pushErrorToast(String(e))),
@@ -624,6 +625,7 @@ function MeetingPanel({
     items.push({
       label: t("meetings.newPerson"),
       icon: UserPlus,
+      pinned: true,
       separated: items.length > 0,
       onClick: () =>
         void meetingsAddSpeaker(meeting.id)
@@ -631,7 +633,7 @@ function MeetingPanel({
           .then(reload)
           .catch((e) => pushErrorToast(String(e))),
     });
-    setMenu({ x, y, items });
+    setMenu({ x, y, items, searchable: items.length > 7 });
   };
 
   /** The transcript as a file the user names — what was said, by whom and when. */
@@ -884,7 +886,15 @@ function MeetingPanel({
           )}
         </div>
       )}
-      {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menu.items}
+          searchPlaceholder={menu.searchable ? t("meetings.searchPerson") : undefined}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }

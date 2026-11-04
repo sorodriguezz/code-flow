@@ -13414,6 +13414,7 @@ export const es = {
   "meetings.voiceSaved": "Voz «{name}» guardada: se reconocerá en las próximas reuniones",
   "meetings.knownVoice": "Reconocida por una voz guardada",
   "meetings.mergeInto": "Es la misma persona que",
+  "meetings.searchPerson": "Buscar persona…",
   "meetings.newPerson": "Nueva persona",
   "meetings.play": "Reproducir",
   "meetings.pausePlayback": "Pausar",

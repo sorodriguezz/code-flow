@@ -13573,6 +13573,7 @@ const en = {
   "meetings.voiceSaved": "Voice «{name}» saved — it will be recognised in the next meetings",
   "meetings.knownVoice": "Recognised from a saved voice",
   "meetings.mergeInto": "Same person as",
+  "meetings.searchPerson": "Search person…",
   "meetings.newPerson": "New person",
   "meetings.play": "Play",
   "meetings.pausePlayback": "Pause",

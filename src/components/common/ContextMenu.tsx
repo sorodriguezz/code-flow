@@ -14,7 +14,7 @@
 
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { ChevronRight, Loader2, type LucideIcon } from "lucide-react";
+import { ChevronRight, Loader2, Search, type LucideIcon } from "lucide-react";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import { scrollMoves } from "../../lib/scrollMoves";
 
@@ -57,6 +57,70 @@ export interface MenuItem {
   swatch?: string;
   /** Marks the swatch currently in use. */
   checked?: boolean;
+  /**
+   * On an entry with `children`: its list gets a search box and a height cap. For a list that grows
+   * with the data — the people of a transcript, the projects of a workspace — where scanning forty
+   * rows by eye is the cost the box removes. Its value is the box's placeholder.
+   */
+  searchPlaceholder?: string;
+  /** Stays in the list while a search filters the rest: the "new …" entry at the foot of a list of
+   *  existing ones, which a typed name must not hide. */
+  pinned?: boolean;
+}
+
+/** Lower-cased and accent-stripped, so "ale" finds "Alé" and "persona 1" finds "Persona 1". */
+function fold(text: string): string {
+  return text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+/** What a search leaves of a list: entries whose label holds every typed word, plus the pinned ones. */
+function filterItems(items: MenuItem[], query: string): MenuItem[] {
+  const words = fold(query).split(/\s+/).filter(Boolean);
+  if (words.length === 0) return items;
+  return items.filter((item) => {
+    if (item.pinned) return true;
+    const label = fold(item.label);
+    return words.every((word) => label.includes(word));
+  });
+}
+
+/** The box over a long list. Autofocused so typing starts at once; Enter takes the first match. */
+function MenuSearch({
+  value,
+  onChange,
+  placeholder,
+  onEnter,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  onEnter: () => void;
+}) {
+  return (
+    <div className="mb-1 flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-[5px]">
+      <Search size={12} className="shrink-0 text-[var(--cf-text-faint)]" />
+      <input
+        autoFocus
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            onEnter();
+          }
+        }}
+        placeholder={placeholder}
+        aria-label={placeholder}
+        spellCheck={false}
+        className="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-faint)]"
+      />
+    </div>
+  );
+}
+
+/** Shown when a search matches nothing but the pinned entries. */
+function NoMatches() {
+  return <p className="px-2.5 py-1.5 text-[13px] text-[var(--cf-text-muted)]">—</p>;
 }
 
 /** A floating menu at a point, portalled so no scroll container can clip it. Positioned after
@@ -74,12 +138,15 @@ export function ContextMenu({
   y,
   items,
   heading,
+  searchPlaceholder,
   anchor,
   onClose,
 }: {
   x: number;
   y: number;
   items: MenuItem[];
+  /** Puts a search box over the list and caps its height, scrolling the rest. */
+  searchPlaceholder?: string;
   /** A question or label over the set. A menu of alternatives ("which engine?") needs one; a menu
    * of actions on the thing you right-clicked does not. */
   heading?: string;
@@ -118,6 +185,8 @@ export function ContextMenu({
   /** The row the open submenu belongs to. The list lines up with *it*, not with the top of the
    *  menu — see `Submenu`. Attached only to the open one, so there is never a stale node here. */
   const subItemRef = useRef<HTMLButtonElement>(null);
+  const [query, setQuery] = useState("");
+  const shown = searchPlaceholder ? filterItems(items, query) : items;
 
   // The item count is in the deps because a menu can be *replaced* in place: a two-entry menu whose
   // item opens a six-entry one keeps the same x and y, so measuring only on those would leave the
@@ -154,6 +223,7 @@ export function ContextMenu({
     x,
     y,
     items.length,
+    shown.length,
     heading,
     anchor?.top,
     anchor?.bottom,
@@ -232,7 +302,24 @@ export function ContextMenu({
           {heading}
         </p>
       )}
-      {items.map((item, i) => (
+      {searchPlaceholder && (
+        <MenuSearch
+          value={query}
+          onChange={(value) => {
+            setQuery(value);
+            setSubmenu(null);
+          }}
+          placeholder={searchPlaceholder}
+          onEnter={() => {
+            const first = shown.find((item) => !item.disabled && !item.children);
+            if (!first) return;
+            onClose();
+            first.onClick();
+          }}
+        />
+      )}
+      <div className={searchPlaceholder ? "max-h-[min(300px,50vh)] overflow-y-auto overscroll-contain" : undefined}>
+      {shown.map((item, i) => (
         <Fragment key={`${item.label}-${i}`}>
           {item.separated && i > 0 && <div className="my-1 h-px bg-[var(--cf-border)]" />}
           <button
@@ -277,10 +364,19 @@ export function ContextMenu({
             )}
           </button>
           {item.children && submenu === i && (
-            <Submenu items={item.children} parent={ref} row={subItemRef} boxRef={subRef} onPick={onClose} />
+            <Submenu
+              items={item.children}
+              searchPlaceholder={item.searchPlaceholder}
+              parent={ref}
+              row={subItemRef}
+              boxRef={subRef}
+              onPick={onClose}
+            />
           )}
         </Fragment>
       ))}
+      {searchPlaceholder && shown.length === 0 && <NoMatches />}
+      </div>
     </div>,
     document.body,
   );
@@ -307,12 +403,14 @@ export function ContextMenu({
  */
 function Submenu({
   items,
+  searchPlaceholder,
   parent,
   row,
   boxRef,
   onPick,
 }: {
   items: MenuItem[];
+  searchPlaceholder?: string;
   parent: React.RefObject<HTMLDivElement | null>;
   /** The entry this list hangs off, which is what it lines up with vertically. */
   row: React.RefObject<HTMLButtonElement | null>;
@@ -323,6 +421,8 @@ function Submenu({
   onPick: () => void;
 }) {
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const [query, setQuery] = useState("");
+  const shown = searchPlaceholder ? filterItems(items, query) : items;
 
   useLayoutEffect(() => {
     const box = boxRef.current;
@@ -347,7 +447,7 @@ function Submenu({
       left: Math.max(4, left),
       top: Math.max(4, Math.min(top, window.innerHeight - height - 4)),
     });
-  }, [parent, row, boxRef, items.length]);
+  }, [parent, row, boxRef, items.length, shown.length]);
 
   return createPortal(
     <div
@@ -365,8 +465,24 @@ function Submenu({
       }}
       // `overscroll-contain`: the end of a long list is not a reason to start scrolling the page
       // under it.
-      className="z-[10000] max-h-[60vh] min-w-[160px] overflow-y-auto overscroll-contain rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[5px] shadow-[var(--cf-shadow)]"
+      className={`z-[10000] min-w-[160px] rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-[5px] shadow-[var(--cf-shadow)] ${
+        searchPlaceholder ? "" : "max-h-[60vh] overflow-y-auto overscroll-contain"
+      }`}
     >
+      {searchPlaceholder && (
+        <MenuSearch
+          value={query}
+          onChange={setQuery}
+          placeholder={searchPlaceholder}
+          onEnter={() => {
+            const first = shown.find((item) => !item.disabled);
+            if (!first) return;
+            onPick();
+            first.onClick();
+          }}
+        />
+      )}
+      <div className={searchPlaceholder ? "max-h-[min(300px,50vh)] overflow-y-auto overscroll-contain" : undefined}>
       {items.length > 0 && items.every((item) => item.swatch) ? (
         <div className="grid grid-cols-6 gap-1.5 p-1">
           {items.map((item, i) => (
@@ -390,8 +506,10 @@ function Submenu({
         // A verb with nothing to apply it to still has to say so: an empty box that opens and
         // shows nothing reads as a bug rather than as an answer.
         <p className="px-2.5 py-1.5 text-[13px] text-[var(--cf-text-muted)]">—</p>
+      ) : shown.length === 0 ? (
+        <NoMatches />
       ) : (
-        items.map((item, i) => (
+        shown.map((item, i) => (
           <button
             key={`${item.label}-${i}`}
             role="menuitem"
@@ -410,6 +528,7 @@ function Submenu({
           </button>
         ))
       )}
+      </div>
     </div>,
     document.body,
   );

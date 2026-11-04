@@ -51,7 +51,7 @@ function MermaidView({ source }: { source: string }) {
     };
   }, [source, dark]);
   if (failed) return <p className="text-[12px] text-[var(--cf-danger)]">{t("chat.diagramFailed")}</p>;
-  return svg ? <div className="cf-chat-diagram flex justify-center" dangerouslySetInnerHTML={{ __html: svg }} /> : <p className="text-[12px] text-[var(--cf-text-muted)]">…</p>;
+  return svg ? <div className="cf-chat-diagram flex select-text justify-center" dangerouslySetInnerHTML={{ __html: svg }} /> : <p className="text-[12px] text-[var(--cf-text-muted)]">…</p>;
 }
 
 function Preview({ kind, content, scripts }: { kind: ArtifactKind; content: string; scripts: boolean }) {
@@ -74,7 +74,7 @@ function Preview({ kind, content, scripts }: { kind: ArtifactKind; content: stri
 
 function Code({ content }: { content: string }) {
   return (
-    <pre className="overflow-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-sunken,var(--cf-surface))] p-3 font-mono text-[12px] leading-relaxed text-[var(--cf-text)]">
+    <pre className="select-text overflow-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-sunken,var(--cf-surface))] p-3 font-mono text-[12px] leading-relaxed text-[var(--cf-text)]">
       {content}
     </pre>
   );
