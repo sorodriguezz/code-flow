@@ -2,7 +2,6 @@
  * The twelve colours an agent can wear. Stored as a key, never a hex, so every one has a light and
  * a dark value (`--cf-agent-<key>` in `index.css`) and a theme switch recolours the whole roster.
  */
-import type { TranslationKey } from "../i18n/translations";
 import { hashOf } from "./agentIcons";
 
 export const AGENT_COLORS = [
@@ -22,9 +21,21 @@ export const AGENT_COLORS = [
 
 export type AgentColor = (typeof AGENT_COLORS)[number];
 
-export function colorNameKey(color: AgentColor): TranslationKey {
-  return `crew.color.${color}` as TranslationKey;
-}
+/** How each colour reads, for the picker's tooltips. */
+export const COLOR_NAMES: Record<AgentColor, [string, string]> = {
+  indigo: ["Índigo", "Indigo"],
+  blue: ["Azul", "Blue"],
+  cyan: ["Cian", "Cyan"],
+  teal: ["Verde azulado", "Teal"],
+  green: ["Verde", "Green"],
+  lime: ["Lima", "Lime"],
+  amber: ["Ámbar", "Amber"],
+  orange: ["Naranja", "Orange"],
+  rose: ["Rosa", "Rose"],
+  magenta: ["Magenta", "Magenta"],
+  purple: ["Morado", "Purple"],
+  slate: ["Pizarra", "Slate"],
+};
 
 /** The CSS value for an agent's colour: the chosen key, a custom hex, or one picked from its id. */
 export function agentColorVar(color: string | undefined, seed: string): string {

@@ -183,9 +183,36 @@
   --cf-toast-warning: var(--cf-warning);
   --cf-toast-info: var(--cf-accent);
   --cf-sheet-radius: 10px;
+  /* The twelve colours an agent can wear (`lib/agents/agentColors.ts`). Fixed hues rather than
+     accent-derived ones: they sit side by side in the dock and the org chart, so what they must be
+     is distinct from each other — the 700 shades here, which carry white icons and read as text. */
+  --cf-agent-indigo: #4f46e5;
+  --cf-agent-blue: #2563d9;
+  --cf-agent-cyan: #0e7490;
+  --cf-agent-teal: #0f766e;
+  --cf-agent-green: #15803d;
+  --cf-agent-lime: #4d7c0f;
+  --cf-agent-amber: #b45309;
+  --cf-agent-orange: #c2410c;
+  --cf-agent-rose: #e11d48;
+  --cf-agent-magenta: #c026d3;
+  --cf-agent-purple: #9333ea;
+  --cf-agent-slate: #475569;
 }
 
 :root[data-theme="dark"] {
+  --cf-agent-indigo: #818cf8;
+  --cf-agent-blue: #60a5fa;
+  --cf-agent-cyan: #22d3ee;
+  --cf-agent-teal: #2dd4bf;
+  --cf-agent-green: #4ade80;
+  --cf-agent-lime: #a3e635;
+  --cf-agent-amber: #fbbf24;
+  --cf-agent-orange: #fb923c;
+  --cf-agent-rose: #fb7185;
+  --cf-agent-magenta: #e879f9;
+  --cf-agent-purple: #c084fc;
+  --cf-agent-slate: #94a3b8;
   --cf-bg: #0b0c11;
   --cf-surface: #121319;
   --cf-surface-raised: #191a23;
@@ -248,6 +275,18 @@
    what a window shows for the frame or two before that — the same palette as the explicit block. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
+    --cf-agent-indigo: #818cf8;
+    --cf-agent-blue: #60a5fa;
+    --cf-agent-cyan: #22d3ee;
+    --cf-agent-teal: #2dd4bf;
+    --cf-agent-green: #4ade80;
+    --cf-agent-lime: #a3e635;
+    --cf-agent-amber: #fbbf24;
+    --cf-agent-orange: #fb923c;
+    --cf-agent-rose: #fb7185;
+    --cf-agent-magenta: #e879f9;
+    --cf-agent-purple: #c084fc;
+    --cf-agent-slate: #94a3b8;
     --cf-bg: #0b0c11;
     --cf-surface: #121319;
     --cf-surface-raised: #191a23;
@@ -5335,3 +5374,74 @@ svg.\-rotate-180 {
 :root[data-density="compact"] .cf-d-rail-mark { left: var(--cf-d-rail-mark); }
 :root[data-density="compact"] .cf-d-pad-row { padding-block: var(--cf-d-pad-row); }
 :root[data-density="compact"] .cf-d-pad-tight { padding-block: var(--cf-d-pad-tight); }
+
+/* ── Agents view (`components/crew`) ─────────────────────────────────────────────────────────────
+   «Working» is drawn by turning a gradient inside a fixed border, never by rotating the element:
+   a rotating rounded rectangle reads as a skewed slash (the user's report, 2026-11-04). */
+@property --cf-crew-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+@keyframes cf-crew-sweep {
+  to {
+    --cf-crew-angle: 360deg;
+  }
+}
+@keyframes cf-crew-halo {
+  0%, 100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--cf-crew-c, var(--cf-accent)) 0%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in oklab, var(--cf-crew-c, var(--cf-accent)) 26%, transparent);
+  }
+}
+@keyframes cf-crew-breathe {
+  50% {
+    transform: scale(1.05);
+  }
+}
+@keyframes cf-crew-dash {
+  to {
+    stroke-dashoffset: -22;
+  }
+}
+@keyframes cf-crew-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.86);
+  }
+}
+/* The element brings its own positioning (relative or absolute): forcing one here would beat the
+   layout utilities, which live in a layer. */
+.cf-crew-working::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  padding: 2px;
+  background: conic-gradient(from var(--cf-crew-angle), transparent 0 62%, var(--cf-crew-c, var(--cf-accent)) 82%, transparent 96%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: cf-crew-sweep 2.2s linear infinite;
+  pointer-events: none;
+}
+.cf-crew-waiting {
+  animation: cf-crew-halo 1.6s ease-in-out infinite;
+}
+.cf-crew-breathe {
+  animation: cf-crew-breathe 1.8s ease-in-out infinite;
+}
+.cf-crew-flow {
+  stroke-dasharray: 5 6;
+  animation: cf-crew-dash 1.2s linear infinite;
+}
+.cf-crew-pop {
+  animation: cf-crew-pop 0.45s cubic-bezier(0.2, 0.9, 0.25, 1.15) backwards;
+}
+:root[data-motion="off"] .cf-crew-working::after {
+  animation: none;
+  background: var(--cf-crew-c, var(--cf-accent));
+  opacity: 0.55;
+}
