@@ -11,7 +11,7 @@ import { useBacklogStore } from "../../../state/backlogStore";
 import { ProviderGlyph } from "../../ai/ProviderGlyph";
 import { AgentTaskDetail } from "../../agents/AgentTaskDetail";
 import { AgentAvatar } from "../kit/Avatar";
-import { Btn, Chip, Drawer, Empty, Seg } from "../kit/ui";
+import { SelectBox, Btn, Chip, Drawer, Empty, Seg } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
 import { Channel } from "./Channel";
 import { ITEM_KIND, ITEM_STATUS } from "./look";
@@ -65,8 +65,8 @@ export function MemberChat({ runId, memberId }: { runId: string; memberId: strin
               <span>· {state.run.title || state.run.goal}</span>
             </span>
           </div>
-          {card && <Btn small icon={Kanban} onClick={() => crew.open({ kind: "card", id: card.id })}><span className="max-w-[150px] truncate">{card.title}</span></Btn>}
-          <button type="button" aria-label={l("Cerrar", "Close")} onClick={crew.close} className="grid h-[30px] w-[30px] place-items-center rounded-[8px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
+          {card && <Btn small icon={Kanban} title={l("Abre la tarjeta del tablero de este miembro", "Opens this member's board card")} onClick={() => crew.open({ kind: "card", id: card.id })}><span className="max-w-[150px] truncate">{card.title}</span></Btn>}
+          <button type="button" title={l("Cierra este chat", "Closes this chat")} aria-label={l("Cerrar", "Close")} onClick={crew.close} className="grid h-[30px] w-[30px] place-items-center rounded-[8px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -82,11 +82,11 @@ export function MemberChat({ runId, memberId }: { runId: string; memberId: strin
             ]}
           />
           {tab === "chat" && conversations.length > 1 && (
-            <select value={shown ?? ""} onChange={(e) => setTaskId(e.target.value)} className="h-[28px] max-w-[260px] rounded-[8px] border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2 text-[12px]">
+            <SelectBox value={shown ?? ""} onChange={(v) => setTaskId(v)} title={l("Cambia la conversación que ves", "Switch the conversation you see")} className="w-[240px] shrink-0" compact>
               {conversations.map((c) => (
                 <option key={c.taskId} value={c.taskId}>{c.live ? "● " : ""}{c.title}</option>
               ))}
-            </select>
+            </SelectBox>
           )}
         </div>
       </header>
@@ -107,6 +107,7 @@ export function MemberChat({ runId, memberId }: { runId: string; memberId: strin
                 <button
                   key={i.id}
                   type="button"
+                  title={l("Abre la conversación de esta tarea", "Opens this task's conversation")}
                   onClick={() => {
                     if (i.task_id) {
                       setTaskId(i.task_id);
@@ -118,7 +119,7 @@ export function MemberChat({ runId, memberId }: { runId: string; memberId: strin
                   <span className="font-mono text-[11px] text-[var(--cf-text-faint)]">{i.key}</span>
                   <span className="min-w-0 flex-1 truncate text-[12.5px]">{i.title}</span>
                   <span className="text-[11px] text-[var(--cf-text-muted)]">{l(kes, ken)}</span>
-                  <Chip tone={tone}>{l(es, en)}</Chip>
+                  <Chip tone={tone} title={l("Estado de la tarea", "Task status")}>{l(es, en)}</Chip>
                 </button>
               );
             })}

@@ -17,7 +17,7 @@ import type { WorkspaceAgent } from "../../../types/domain";
 import type { LibraryItem } from "../../../types/crew";
 import { AgentAvatar, TeamAvatar } from "../kit/Avatar";
 import { useDragSource, useDropTarget } from "../kit/drag";
-import { Btn, Chip, Empty, Label, Modal, Seg, SPRING, field } from "../kit/ui";
+import { Btn, Chip, Empty, IconBtn, Label, Modal, Seg, SPRING, field } from "../kit/ui";
 import { money, useAgentStates, useCrewStore, useL } from "../state";
 
 function useLibrary() {
@@ -69,8 +69,8 @@ function SyncDialog({ agent, template, onClose }: { agent: WorkspaceAgent; templ
       footer={
         <>
           <span className="flex-1" />
-          <Btn kind="ghost" onClick={onClose}>{l("Ahora no", "Not now")}</Btn>
-          <Btn kind="primary" icon={RefreshCw} onClick={() => void apply()}>{take.size ? l(`Aplicar ${take.size}`, `Apply ${take.size}`) : l("Solo marcar al día", "Just mark up to date")}</Btn>
+          <Btn kind="ghost" title={l("Cierra sin cambiar el agente", "Closes without changing the agent")} onClick={onClose}>{l("Ahora no", "Not now")}</Btn>
+          <Btn kind="primary" icon={RefreshCw} title={l("Pasa al agente los cambios marcados de la plantilla", "Copies the ticked template changes into the agent")} onClick={() => void apply()}>{take.size ? l(`Aplicar ${take.size}`, `Apply ${take.size}`) : l("Solo marcar al día", "Just mark up to date")}</Btn>
         </>
       }
     >
@@ -84,7 +84,7 @@ function SyncDialog({ agent, template, onClose }: { agent: WorkspaceAgent; templ
               <input type="checkbox" checked={on} onChange={() => setTake((s) => { const n = new Set(s); if (n.has(c.field)) n.delete(c.field); else n.add(c.field); return n; })} className="mt-1 accent-[var(--cf-accent)]" />
               <span className="min-w-0 flex-1">
                 <b className="text-[12.5px]">{l(es, en)}</b>
-                {c.overridden && <Chip tone="warn" className="ml-2">{l("editado a mano", "edited by hand")}</Chip>}
+                {c.overridden && <Chip tone="warn" className="ml-2" title={l("Cambiaste este campo en el agente: la plantilla no lo pisa salvo que lo marques", "You changed this field on the agent: the template won't overwrite it unless ticked")}>{l("editado a mano", "edited by hand")}</Chip>}
                 <span className="mt-0.5 block text-[11.5px] text-[var(--cf-text-muted)]">
                   <s>{show(c.from)}</s> → <b className="text-[var(--cf-text)]">{show(c.to)}</b>
                 </span>
@@ -168,18 +168,18 @@ function AgentCard({ agent, index, onSync }: { agent: WorkspaceAgent; index: num
         drop.over ? "border-[var(--cf-accent)]" : focused ? "border-[var(--cf-accent)] shadow-[0_0_0_4px_var(--cf-accent-soft)]" : "border-[var(--cf-border)]"
       }`}
     >
-      <div {...drag} className="flex cursor-grab touch-none flex-col items-center gap-2 px-4 pb-3 pt-5 text-center active:cursor-grabbing" style={{ background: `linear-gradient(180deg, color-mix(in oklab, var(--cf-agent-${agent.color || "indigo"}) 10%, transparent), transparent 70%)` }}>
+      <div {...drag} title={l("Arrastra para reordenar el dock", "Drag to reorder the dock")} className="flex cursor-grab touch-none flex-col items-center gap-2 px-4 pb-3 pt-5 text-center active:cursor-grabbing">
         <AgentAvatar agent={agent} size={64} state={state} />
         <div className="min-w-0 max-w-full">
           <b className="block truncate text-[14px]">{agent.name}</b>
           <span className="line-clamp-2 block min-h-[32px] text-[12px] text-[var(--cf-text-muted)]">{agent.role || l("Sin papel", "No role")}</span>
         </div>
         <div className="flex flex-wrap justify-center gap-1">
-          <Chip><ProviderGlyph providerId={agent.provider} size={11} />{agent.model || "—"}</Chip>
-          {agent.effort && <Chip tone="violet">{agent.effort}</Chip>}
-          {agent.edits === false && <Chip icon={Eye}>{l("lee", "reads")}</Chip>}
-          {agent.run_in === "terminal" && <Chip icon={SquareTerminal}>term</Chip>}
-          {(agent.repos?.length ?? 0) > 0 && <Chip icon={FolderGit2}>{agent.repos?.length}</Chip>}
+          <Chip title={l("Modelo", "Model")}><ProviderGlyph providerId={agent.provider} size={11} />{agent.model || "—"}</Chip>
+          {agent.effort && <Chip tone="violet" title={l("Esfuerzo de razonamiento", "Reasoning effort")}>{agent.effort}</Chip>}
+          {agent.edits === false && <Chip icon={Eye} title={l("Solo lee: no edita archivos", "Read-only: never edits files")}>{l("lee", "reads")}</Chip>}
+          {agent.run_in === "terminal" && <Chip icon={SquareTerminal} title={l("Trabaja en una terminal visible", "Works in a visible terminal")}>term</Chip>}
+          {(agent.repos?.length ?? 0) > 0 && <Chip icon={FolderGit2} title={l(`Limitado a ${agent.repos?.length} repositorios`, `Limited to ${agent.repos?.length} repositories`)}>{agent.repos?.length}</Chip>}
         </div>
       </div>
       <div className="mt-auto flex items-center gap-2 border-t border-[var(--cf-border)] px-3 py-2 text-[11.5px] text-[var(--cf-text-muted)]">
@@ -188,7 +188,7 @@ function AgentCard({ agent, index, onSync }: { agent: WorkspaceAgent; index: num
         {inTeams.length > 0 && <span className="inline-flex items-center gap-0.5">· <Users className="h-3 w-3" />{inTeams.length}</span>}
         <span className="flex-1" />
         {outdated && template && (
-          <button type="button" onClick={() => onSync(template)} className="inline-flex items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_14%,var(--cf-surface))] px-2 py-0.5 font-semibold text-[var(--cf-warning)]">
+          <button type="button" title={l("La plantilla tiene una versión nueva: revisa qué cambió", "The template has a new version: review what changed")} onClick={() => onSync(template)} className="inline-flex items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_14%,var(--cf-surface))] px-2 py-0.5 font-semibold text-[var(--cf-warning)]">
             <RefreshCw className="h-3 w-3" />
             v{template.version}
           </button>
@@ -196,21 +196,13 @@ function AgentCard({ agent, index, onSync }: { agent: WorkspaceAgent; index: num
       </div>
       {/* The actions slide up on hover or focus: nothing turns, nothing spins. */}
       <div className="pointer-events-none absolute inset-x-2 bottom-2 flex translate-y-3 items-center justify-center gap-1 rounded-[12px] border border-[var(--cf-border)] bg-[var(--cf-surface)] p-1 opacity-0 shadow-[var(--cf-shadow)] transition-[opacity,transform] duration-150 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100">
-        <Btn small kind="primary" icon={WandSparkles} onClick={() => crew.open({ kind: "launch", assignee: { kind: "agent", id: agent.id } })}>{l("Tarea", "Task")}</Btn>
+        <Btn small kind="primary" icon={WandSparkles} title={l("Dale una tarea a este agente", "Hand this agent a task")} onClick={() => crew.open({ kind: "launch", assignee: { kind: "agent", id: agent.id } })}>{l("Tarea", "Task")}</Btn>
         <IconBtn title={l("Editar", "Edit")} onClick={() => crew.open({ kind: "wizard", agentId: agent.id })} icon={Pencil} />
         <IconBtn title={l("Duplicar", "Duplicate")} onClick={() => void useAgentsStore.getState().duplicateAgent(agent.id)} icon={Copy} />
         <IconBtn title={l("Guardar como plantilla", "Save as template")} onClick={() => void saveAsTemplate()} icon={BookMarked} />
         <IconBtn title={l("Borrar", "Delete")} onClick={() => void remove()} icon={Trash2} danger />
       </div>
     </motion.div>
-  );
-}
-
-function IconBtn({ title, onClick, icon: Icon, danger }: { title: string; onClick: () => void; icon: typeof Pencil; danger?: boolean }) {
-  return (
-    <button type="button" title={title} aria-label={title} onClick={onClick} className={`grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] ${danger ? "hover:text-[var(--cf-danger)]" : "hover:text-[var(--cf-text)]"}`}>
-      <Icon className="h-3.5 w-3.5" />
-    </button>
   );
 }
 
@@ -236,8 +228,8 @@ function TemplateEditor({ item, onClose }: { item: LibraryItem; onClose: () => v
       footer={
         <>
           <span className="flex-1" />
-          <Btn kind="ghost" onClick={onClose}>{l("Cancelar", "Cancel")}</Btn>
-          <Btn kind="primary" icon={Save} onClick={() => void save()}>{l("Guardar", "Save")}</Btn>
+          <Btn kind="ghost" title={l("Cierra sin guardar los cambios", "Closes without saving changes")} onClick={onClose}>{l("Cancelar", "Cancel")}</Btn>
+          <Btn kind="primary" icon={Save} title={l("Guarda la plantilla en tu biblioteca", "Saves the template to your library")} onClick={() => void save()}>{l("Guardar", "Save")}</Btn>
         </>
       }
     >
@@ -278,15 +270,15 @@ function LibraryTab() {
             <b className="block truncate text-[13px]">{t.name}</b>
             <span className="flex items-center gap-1.5 text-[11px] text-[var(--cf-text-faint)]">
               {team ? l(`${team.slots.length} puestos`, `${team.slots.length} seats`) : (t.body as AgentTemplateBody).model}
-              {edited && <Chip tone="info">{l("editada", "edited")}</Chip>}
-              {own && <Chip tone="accent">{l("tuya", "yours")}</Chip>}
+              {edited && <Chip tone="info" title={l("Es tu versión de una plantilla integrada", "Your own version of a built-in template")}>{l("editada", "edited")}</Chip>}
+              {own && <Chip tone="accent" title={l("Plantilla creada por ti", "A template you created")}>{l("tuya", "yours")}</Chip>}
             </span>
           </span>
         </div>
         <p className="m-0 line-clamp-2 min-h-[34px] text-[12px] text-[var(--cf-text-muted)]">{t.description}</p>
         <div className="flex items-center gap-1">
-          <Btn small kind="primary" icon={Plus} onClick={() => crew.open(team ? { kind: "teamTemplates" } : { kind: "wizard", templateId: t.id })}>{l("Usar aquí", "Use here")}</Btn>
-          {used > 0 && <span className="text-[11px] text-[var(--cf-text-faint)]">{l(`${used} en uso`, `${used} in use`)}</span>}
+          <Btn small kind="primary" icon={Plus} title={team ? l("Crea un equipo en este workspace desde la plantilla", "Creates a team in this workspace from the template") : l("Crea un agente en este workspace desde la plantilla", "Creates an agent in this workspace from the template")} onClick={() => crew.open(team ? { kind: "teamTemplates" } : { kind: "wizard", templateId: t.id })}>{l("Usar aquí", "Use here")}</Btn>
+          {used > 0 && <span title={l("Agentes de este workspace creados con esta plantilla", "Agents in this workspace made from this template")} className="text-[11px] text-[var(--cf-text-faint)]">{l(`${used} en uso`, `${used} in use`)}</span>}
           <span className="flex-1" />
           {!team && <IconBtn title={l("Editar", "Edit")} onClick={() => setEditing(t)} icon={Pencil} />}
           {edited && (
@@ -354,7 +346,7 @@ export function RosterSpace() {
           </label>
         )}
         <span className="flex-1" />
-        <Btn small kind="primary" icon={Plus} onClick={() => crew.open({ kind: "wizard" })}>{l("Nuevo agente", "New agent")}</Btn>
+        <Btn small kind="primary" icon={Plus} title={l("Crea un agente en blanco o desde una plantilla", "Creates an agent, blank or from a template")} onClick={() => crew.open({ kind: "wizard" })}>{l("Nuevo agente", "New agent")}</Btn>
       </div>
       <AnimatePresence mode="wait" initial={false}>
         <motion.div key={tab} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.12 }} className="flex min-h-0 flex-1 flex-col">
@@ -363,8 +355,8 @@ export function RosterSpace() {
           ) : roster.length === 0 ? (
             <Empty icon={Bot} title={l("Todavía no hay agentes", "No agents yet")} hint={l("Empieza por una plantilla (Tech lead, Backend, QA, Asesor…) y ajústala, o créalo en blanco.", "Start from a template (Tech lead, Backend, QA, Advisor…) and tweak it, or build one from scratch.")}>
               <div className="mt-2 flex gap-2">
-                <Btn kind="primary" icon={Plus} onClick={() => crew.open({ kind: "wizard" })}>{l("Crear agente", "Create agent")}</Btn>
-                <Btn icon={LayoutTemplate} onClick={() => setTab("library")}>{l("Ver plantillas", "See templates")}</Btn>
+                <Btn kind="primary" icon={Plus} title={l("Abre el asistente para crear tu primer agente", "Opens the wizard to create your first agent")} onClick={() => crew.open({ kind: "wizard" })}>{l("Crear agente", "Create agent")}</Btn>
+                <Btn icon={LayoutTemplate} title={l("Mira las plantillas de agentes y equipos", "Browse the agent and team templates")} onClick={() => setTab("library")}>{l("Ver plantillas", "See templates")}</Btn>
               </div>
             </Empty>
           ) : (
@@ -376,8 +368,8 @@ export function RosterSpace() {
                 <motion.button
                   type="button"
                   layout
-                  whileHover={{ y: -3 }}
                   transition={SPRING}
+                  title={l("Crea un agente nuevo", "Create a new agent")}
                   onClick={() => crew.open({ kind: "wizard" })}
                   className="flex min-h-[220px] flex-col items-center justify-center gap-2 rounded-[16px] border-2 border-dashed border-[var(--cf-border-strong)] text-[12.5px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]"
                 >

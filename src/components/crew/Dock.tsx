@@ -4,7 +4,6 @@ import { useTeamStore } from "../../state/teamStore";
 import { useSlots } from "./kit/slots";
 import { AgentAvatar, TeamAvatar } from "./kit/Avatar";
 import { useDragSource } from "./kit/drag";
-import { SPRING } from "./kit/ui";
 import { money, useAgentStates, useCrewStore, useL } from "./state";
 import type { WorkspaceAgent } from "../../types/domain";
 import type { Team } from "../../types/team";
@@ -30,15 +29,13 @@ function AgentTile({ agent, state }: { agent: WorkspaceAgent; state: string }) {
     <motion.button
       type="button"
       {...drag}
-      whileHover={{ y: -3, scale: 1.06 }}
-      transition={SPRING}
       onClick={() => {
         crew.set({ focus: agent.id });
         crew.setSpace("agentes");
       }}
-      title={`${agent.name} · ${agent.model}${agent.effort ? ` · ${agent.effort}` : ""} · ${l(es, en)}`}
+      title={`${agent.name} · ${agent.model}${agent.effort ? ` · ${agent.effort}` : ""} · ${l(es, en)} · ${l("clic para abrir, arrastra a una tarjeta", "click to open, drag onto a card")}`}
       aria-label={agent.name}
-      className="relative shrink-0 cursor-grab touch-none rounded-[13px] active:cursor-grabbing"
+      className="relative shrink-0 cursor-grab touch-none rounded-[13px] transition-shadow hover:shadow-[0_0_0_2px_var(--cf-accent-line)] active:cursor-grabbing"
     >
       <AgentAvatar agent={agent} size={40} state={state as "idle"} />
       <span
@@ -50,6 +47,7 @@ function AgentTile({ agent, state }: { agent: WorkspaceAgent; state: string }) {
 }
 
 function TeamTile({ team }: { team: Team }) {
+  const l = useL();
   const crew = useCrewStore();
   const drag = useDragSource({ kind: "team", id: team.id }, () => (
     <span className="flex items-center gap-2 rounded-[12px] border border-[var(--cf-accent)] bg-[var(--cf-surface)] py-1 pl-1 pr-3 text-[12.5px] font-medium">
@@ -61,15 +59,13 @@ function TeamTile({ team }: { team: Team }) {
     <motion.button
       type="button"
       {...drag}
-      whileHover={{ y: -3, scale: 1.06 }}
-      transition={SPRING}
       onClick={() => {
         crew.set({ selectedTeamId: team.id, selectedMemberId: null });
         crew.setSpace("equipos");
       }}
-      title={`${team.name} · ${team.members.length}`}
+      title={`${team.name} · ${team.members.length} ${l("miembros", "members")} · ${l("clic para abrir, arrastra a una tarjeta", "click to open, drag onto a card")}`}
       aria-label={team.name}
-      className="shrink-0 cursor-grab touch-none active:cursor-grabbing"
+      className="shrink-0 cursor-grab touch-none rounded-[13px] transition-shadow hover:shadow-[0_0_0_2px_var(--cf-accent-line)] active:cursor-grabbing"
     >
       <TeamAvatar size={42} />
     </motion.button>
@@ -105,7 +101,7 @@ export function Dock() {
           <AgentTile key={a.id} agent={a} state={states.get(a.id) ?? "idle"} />
         ))}
         {agents.length === 0 && (
-          <button type="button" onClick={() => crew.open({ kind: "wizard" })} className="rounded-[10px] border border-dashed border-[var(--cf-border-strong)] px-3 py-2 text-[12px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]">
+          <button type="button" onClick={() => crew.open({ kind: "wizard" })} title={l("Abre el asistente para crear un agente", "Opens the wizard to create an agent")} className="rounded-[10px] border border-dashed border-[var(--cf-border-strong)] px-3 py-2 text-[12px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]">
             {l("Crea tu primer agente", "Create your first agent")}
           </button>
         )}

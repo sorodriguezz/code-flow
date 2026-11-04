@@ -186,11 +186,11 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
         <>
           <span className="text-[12px] text-[var(--cf-text-faint)]">{who ? "" : l("Elige a alguien, o suelta un agente del dock sobre una tarjeta.", "Pick someone, or drop an agent from the dock on a card.")}</span>
           <span className="flex-1" />
-          <Btn kind="ghost" onClick={close}>{l("Cancelar", "Cancel")}</Btn>
-          <Btn onClick={() => void onAssign()} disabled={!who || busy || (!card && !goal.trim())}>
+          <Btn kind="ghost" onClick={close} title={l("Cierra sin crear nada", "Closes without creating anything")}>{l("Cancelar", "Cancel")}</Btn>
+          <Btn onClick={() => void onAssign()} title={card ? l("Deja la tarjeta asignada sin empezar", "Assigns the card without starting it") : l("Guarda la tarea para lanzarla después", "Saves the task to launch later")} disabled={!who || busy || (!card && !goal.trim())}>
             {card ? l("Solo asignar", "Just assign") : l("Guardar en el backlog", "Save to the backlog")}
           </Btn>
-          <Btn kind="primary" icon={Play} onClick={() => void onLaunch()} disabled={!who || busy || !effectiveGoal || !modeOk(mode)}>
+          <Btn kind="primary" icon={Play} onClick={() => void onLaunch()} title={l("Crea la tarea y la empieza ya", "Creates the task and starts it now")} disabled={!who || busy || !effectiveGoal || !modeOk(mode)}>
             {l("Lanzar ahora", "Launch now")}
           </Btn>
         </>
@@ -199,20 +199,20 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
       {!card && (
         <div className="flex flex-col gap-1.5">
           <Label>{l("Objetivo", "Goal")}</Label>
-          <textarea autoFocus value={goal} onChange={(e) => setGoal(e.target.value)} rows={3} className={`${field} h-auto py-2`} placeholder={l("Ej.: agregar recordatorio de cita 24 h antes por correo", "E.g.: email an appointment reminder 24 h before")} />
+          <textarea title={l("Lo que quieres lograr, con tus palabras", "What you want done, in your own words")} autoFocus value={goal} onChange={(e) => setGoal(e.target.value)} rows={3} className={`${field} h-auto py-2`} placeholder={l("Ej.: agregar recordatorio de cita 24 h antes por correo", "E.g.: email an appointment reminder 24 h before")} />
         </div>
       )}
       <div className="flex flex-col gap-1.5">
         <Label>{l("Quién", "Who")}</Label>
         <div className="flex flex-wrap gap-2">
           {runnable.map((a) => (
-            <Pick key={a.id} on={who?.kind === "agent" && who.id === a.id} onClick={() => { setWho({ kind: "agent", id: a.id }); if (mode === "team") setMode("solo"); }}>
+            <Pick key={a.id} title={l(`${a.name} hace la tarea`, `${a.name} does the task`)} on={who?.kind === "agent" && who.id === a.id} onClick={() => { setWho({ kind: "agent", id: a.id }); if (mode === "team") setMode("solo"); }}>
               <AgentAvatar agent={a} size={24} />
               <span>{a.name}</span>
             </Pick>
           ))}
           {teams.map((t) => (
-            <Pick key={t.id} on={who?.kind === "team" && who.id === t.id} onClick={() => { setWho({ kind: "team", id: t.id }); setMode("team"); }}>
+            <Pick key={t.id} title={l(`El equipo ${t.name} la planifica y reparte`, `Team ${t.name} plans and splits it`)} on={who?.kind === "team" && who.id === t.id} onClick={() => { setWho({ kind: "team", id: t.id }); setMode("team"); }}>
               <TeamAvatar size={24} />
               <span>{t.name}</span>
             </Pick>
@@ -231,9 +231,9 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
               <motion.button
                 key={m.id}
                 type="button"
-                whileHover={ok ? { y: -2 } : undefined}
                 transition={SPRING}
                 disabled={!ok}
+                title={desc}
                 onClick={() => setMode(m.id)}
                 className={`flex flex-col gap-1.5 rounded-[12px] border p-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
                   on ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_15%,transparent)]" : "border-[var(--cf-border)] bg-[var(--cf-surface)] hover:border-[var(--cf-border-strong)]"
@@ -257,7 +257,7 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
             <Label>{l("Compiten además", "Also racing")}</Label>
             <div className="flex flex-wrap gap-2">
               {runnable.filter((a) => a.id !== who?.id && (a.edits ?? true)).map((a) => (
-                <Pick key={a.id} on={racers.includes(a.id)} onClick={() => setRacers((r) => (r.includes(a.id) ? r.filter((x) => x !== a.id) : [...r, a.id].slice(0, 4)))}>
+                <Pick key={a.id} title={l(`${a.name} compite con el mismo objetivo`, `${a.name} races on the same goal`)} on={racers.includes(a.id)} onClick={() => setRacers((r) => (r.includes(a.id) ? r.filter((x) => x !== a.id) : [...r, a.id].slice(0, 4)))}>
                   <AgentAvatar agent={a} size={22} />
                   <span>{a.name}</span>
                 </Pick>
@@ -270,14 +270,14 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
             {flows.length === 0 ? (
               <span className="text-[12px] text-[var(--cf-text-muted)]">{l("No hay flujos guardados. Diséñalos en «Equipos › Flujo fijo».", "No saved flows. Design them in «Teams › Fixed flow».")}</span>
             ) : (
-              flows.map((f) => <ToggleChip key={f.id} on={(flowId || flows[0]?.id) === f.id} onClick={() => setFlowId(f.id)} icon={Waypoints}>{f.name} · {f.steps.length}</ToggleChip>)
+              flows.map((f) => <ToggleChip key={f.id} on={(flowId || flows[0]?.id) === f.id} onClick={() => setFlowId(f.id)} icon={Waypoints} title={l(`Flujo de ${f.steps.length} pasos`, `Flow with ${f.steps.length} steps`)}>{f.name} · {f.steps.length}</ToggleChip>)
             )}
           </div>
         )}
         {mode === "team" && (
           <div className="flex flex-wrap items-center gap-2">
             <Label>{l("Permisos para esta corrida", "Permissions for this run")}</Label>
-            {PRESETS.map((p) => <ToggleChip key={p.id} on={preset === p.id} onClick={() => setPreset(preset === p.id ? undefined : p.id)}>{l(p.es, p.en)}</ToggleChip>)}
+            {PRESETS.map((p) => <ToggleChip key={p.id} on={preset === p.id} onClick={() => setPreset(preset === p.id ? undefined : p.id)} title={p.id === "autonomous" ? l("El equipo actúa sin pedirte permiso", "The team acts without asking you") : p.id === "supervised" ? l("Te pide permiso solo para lo delicado", "Asks you only for risky steps") : l("Te pide permiso en cada paso", "Asks you at every step")}>{l(p.es, p.en)}</ToggleChip>)}
           </div>
         )}
       </div>
@@ -285,7 +285,7 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
         <Label>{l("Repositorios", "Repositories")}</Label>
         <div className="flex flex-wrap gap-1.5">
           {projects.map((p) => (
-            <ToggleChip key={p.id} on={repos.includes(p.id)} dot={repoColorVar(p.id)} icon={FolderGit2} onClick={() => setRepos((r) => (r.includes(p.id) ? r.filter((x) => x !== p.id) : [...r, p.id]))}>
+            <ToggleChip key={p.id} on={repos.includes(p.id)} dot={repoColorVar(p.id)} icon={FolderGit2} title={l("Incluir este repositorio en la tarea", "Include this repository in the task")} onClick={() => setRepos((r) => (r.includes(p.id) ? r.filter((x) => x !== p.id) : [...r, p.id]))}>
               {p.name}
             </ToggleChip>
           ))}
@@ -297,7 +297,7 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
             <Label>{l("Rama destino", "Target branch")}</Label>
             <div className="relative">
               <GitBranch className="absolute left-2.5 top-2 h-4 w-4 text-[var(--cf-text-faint)]" />
-              <input value={branch} onChange={(e) => setBranch(e.target.value)} className={`${field} pl-8`} placeholder={l("la que esté activa (main, develop…)", "the checked-out one (main, develop…)")} />
+              <input title={l("Rama a la que el equipo entrega su trabajo", "Branch the team delivers its work to")} value={branch} onChange={(e) => setBranch(e.target.value)} className={`${field} pl-8`} placeholder={l("la que esté activa (main, develop…)", "the checked-out one (main, develop…)")} />
             </div>
           </div>
         )}
@@ -311,11 +311,11 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
   );
 }
 
-function Pick({ on, onClick, children }: { on: boolean; onClick: () => void; children: React.ReactNode }) {
+function Pick({ on, onClick, children, title }: { on: boolean; onClick: () => void; children: React.ReactNode; title?: string }) {
   return (
     <motion.button
       type="button"
-      whileTap={{ scale: 0.96 }}
+      title={title}
       onClick={onClick}
       aria-pressed={on}
       className={`flex items-center gap-2 rounded-[10px] border py-1 pl-1 pr-2.5 text-[12.5px] font-medium transition-colors ${

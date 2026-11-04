@@ -17,7 +17,7 @@ import { defaultPolicy, emptyTeam, type TeamMember } from "../../../types/team";
 import type { LibraryItem } from "../../../types/crew";
 import type { WorkspaceAgent } from "../../../types/domain";
 import { AgentAvatar, TeamAvatar } from "../kit/Avatar";
-import { Btn, Modal, SPRING, field } from "../kit/ui";
+import { SelectBox, Btn, Label, Modal, SPRING, field } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
 import { memberFromAgent } from "./teamDraft";
 
@@ -34,23 +34,24 @@ function Seat({ slot, template, pick, onPick, depth }: { slot: TeamSlot; templat
   const chosen = roster.find((a) => a.id === pick);
   const look = chosen ?? (template ? { id: template.id, icon: template.icon, color: template.color } : { id: slot.slot });
   return (
-    <motion.div layout transition={SPRING} className="flex items-center gap-2.5 rounded-[11px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2.5 py-2" style={{ marginLeft: depth * 22 }}>
+    <motion.div layout transition={SPRING} className="relative flex items-center gap-3 rounded-lg border border-[var(--cf-border)] px-3 py-2" style={{ marginLeft: depth * 24 }}>
+      {depth > 0 && <span aria-hidden className="absolute -left-[13px] top-1/2 h-px w-3 bg-[var(--cf-border-strong)]" />}
       <AgentAvatar agent={look} size={34} />
       <span className="min-w-0 flex-1">
-        <b className="flex items-center gap-1.5 text-[12.5px]">
+        <b className="flex items-center gap-1.5 truncate text-[12.5px]">
           {slot.name}
-          {depth === 0 && !slot.advisor && <Crown className="h-3.5 w-3.5 text-[var(--cf-warning)]" />}
-          {slot.leads && <Star className="h-3.5 w-3.5 text-[var(--cf-accent)]" />}
-          {slot.advisor && <Lightbulb className="h-3.5 w-3.5 text-[var(--cf-violet)]" />}
+          {depth === 0 && !slot.advisor && <span title={l("Líder del equipo: planifica y reparte", "Team lead: plans and hands out work")}><Crown className="h-3.5 w-3.5 text-[var(--cf-warning)]" /></span>}
+          {slot.leads && <span title={l("Sub-líder: reparte el trabajo de su rama", "Sub-lead: hands out its branch's work")}><Star className="h-3.5 w-3.5 text-[var(--cf-accent)]" /></span>}
+          {slot.advisor && <span title={l("Asesor: mira desde arriba y aconseja, no escribe código", "Advisor: watches and advises, never writes code")}><Lightbulb className="h-3.5 w-3.5 text-[var(--cf-violet)]" /></span>}
         </b>
         <span className="block truncate text-[11.5px] text-[var(--cf-text-muted)]">{slot.role}</span>
       </span>
-      <select value={pick} onChange={(e) => onPick(e.target.value)} className={`${field} h-[30px] w-[190px]`}>
+      <SelectBox value={pick} onChange={(v) => onPick(v)} className="w-[220px] shrink-0" title={l("Quién ocupa este puesto: uno de tus agentes o uno nuevo de la plantilla", "Who takes this seat: one of your agents or a new one from the template")}>
         <option value="new">{l(`Nuevo: ${template?.name ?? slot.agent_template}`, `New: ${template?.name ?? slot.agent_template}`)}</option>
         {roster.map((a) => (
           <option key={a.id} value={a.id}>{a.name}</option>
         ))}
-      </select>
+      </SelectBox>
     </motion.div>
   );
 }
@@ -167,9 +168,9 @@ export function TeamTemplatesDialog() {
       footer={
         chosen ? (
           <>
-            <Btn kind="ghost" icon={ArrowLeft} onClick={() => setChosen(null)}>{l("Otras plantillas", "Other templates")}</Btn>
+            <Btn kind="ghost" icon={ArrowLeft} title={l("Vuelve a la lista de plantillas", "Back to the template list")} onClick={() => setChosen(null)}>{l("Otras plantillas", "Other templates")}</Btn>
             <span className="flex-1 text-[12px] text-[var(--cf-text-faint)]">{creating ? l(`Se crearán ${creating} agentes nuevos.`, `${creating} new agents will be created.`) : l("Usa solo agentes que ya tienes.", "Uses only agents you already have.")}</span>
-            <Btn kind="primary" icon={Sparkles} disabled={busy} onClick={() => void create()}>{busy ? l("Creando…", "Creating…") : l("Crear equipo", "Create team")}</Btn>
+            <Btn kind="primary" icon={Sparkles} disabled={busy} title={l("Crea los agentes que falten y el equipo con su jerarquía", "Creates the missing agents and the team with its hierarchy")} onClick={() => void create()}>{busy ? l("Creando…", "Creating…") : l("Crear equipo", "Create team")}</Btn>
           </>
         ) : undefined
       }
@@ -185,9 +186,9 @@ export function TeamTemplatesDialog() {
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ ...SPRING, delay: i * 0.04 }}
-                whileHover={{ y: -3 }}
                 onClick={() => choose(t)}
-                className="flex flex-col gap-2.5 rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3.5 text-left hover:border-[var(--cf-accent-line)] hover:shadow-[var(--cf-shadow)]"
+                title={l(`Armar «${t.name}»: eliges quién ocupa cada puesto`, `Build «${t.name}»: you choose who takes each seat`)}
+                className="flex flex-col gap-2.5 rounded-lg border border-[var(--cf-border)] p-3.5 text-left transition-colors hover:border-[var(--cf-accent-line)] hover:bg-[var(--cf-hover)]"
               >
                 <span className="flex items-center gap-2.5">
                   <TeamAvatar size={34} />
@@ -206,8 +207,12 @@ export function TeamTemplatesDialog() {
         </div>
       ) : (
         <div className="flex flex-col gap-3">
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder={l("Nombre del equipo", "Team name")} className={field} />
           <div className="flex flex-col gap-1.5">
+            <Label>{l("Nombre", "Name")}</Label>
+            <input value={name} onChange={(e) => setName(e.target.value)} placeholder={l("Nombre del equipo", "Team name")} className={field} />
+          </div>
+          <Label>{l("Puestos", "Seats")}</Label>
+          <div className="-mt-1.5 flex flex-col gap-1.5">
             {body?.slots.map((slot) => (
               <Seat key={slot.slot} slot={slot} template={templateFor(slot.agent_template, all)} pick={picks[slot.slot] ?? "new"} onPick={(p) => setPicks((s) => ({ ...s, [slot.slot]: p }))} depth={depthOf(slot, body.slots)} />
             ))}

@@ -9,7 +9,7 @@ import { useAgentsStore } from "../../../state/agentsStore";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
 import type { Team, TeamCheck, TeamPlanStep } from "../../../types/team";
 import { AgentAvatar } from "../kit/Avatar";
-import { Btn, Chip, Empty, Label, Seg, SPRING, ToggleChip, field } from "../kit/ui";
+import { SelectBox, Btn, Chip, Empty, Label, Seg, SPRING, ToggleChip, field } from "../kit/ui";
 import { useL } from "../state";
 
 type Update = (fn: (team: Team) => Team, now?: boolean) => void;
@@ -65,34 +65,34 @@ function StepEditor({ team, step, update, onClose }: { team: Team; step: TeamPla
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2">
         <b className="flex-1 text-[13.5px]">{l("Paso", "Step")} <span className="font-mono text-[12px] text-[var(--cf-text-faint)]">{step.key}</span></b>
-        <button type="button" onClick={onClose} className="text-[12px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">{l("Listo", "Done")}</button>
+        <button type="button" onClick={onClose} title={l("Cierra el editor del paso; los cambios ya están guardados", "Closes the step editor; changes are already saved")} className="text-[12px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]">{l("Listo", "Done")}</button>
       </div>
-      <input value={step.title} onChange={(e) => set({ title: e.target.value })} placeholder={l("Título", "Title")} className={field} />
-      <textarea value={step.instruction} onChange={(e) => set({ instruction: e.target.value })} rows={5} placeholder={l("Qué debe hacer, con qué criterio de hecho", "What to do, and what done means")} className={`${field} h-auto resize-y py-2`} />
-      <Seg size="sm" value={step.kind} onChange={(kind) => set({ kind }, true)} options={[{ value: "work", label: l("Trabajo", "Work"), icon: Hammer }, { value: "investigate", label: l("Investigar", "Investigate"), icon: Search }]} />
+      <input value={step.title} onChange={(e) => set({ title: e.target.value })} title={l("Nombre corto con el que se ve el paso en el flujo", "Short name the step shows in the flow")} placeholder={l("Título", "Title")} className={field} />
+      <textarea value={step.instruction} onChange={(e) => set({ instruction: e.target.value })} title={l("Lo que recibe el miembro: qué hacer y cuándo se da por hecho", "What the member receives: what to do and when it counts as done")} rows={5} placeholder={l("Qué debe hacer, con qué criterio de hecho", "What to do, and what done means")} className={`${field} h-auto resize-y py-2`} />
+      <Seg size="sm" value={step.kind} onChange={(kind) => set({ kind }, true)} options={[{ value: "work", label: l("Trabajo", "Work"), icon: Hammer, title: l("El miembro escribe código y cambia archivos", "The member writes code and changes files") }, { value: "investigate", label: l("Investigar", "Investigate"), icon: Search, title: l("El miembro solo lee y analiza, sin modificar nada", "The member only reads and analyses, changing nothing") }]} />
       <div className="flex flex-col gap-1.5">
         <Label>{l("Lo hace", "Done by")}</Label>
-        <select value={step.member} onChange={(e) => set({ member: e.target.value }, true)} className={field}>
+        <SelectBox value={step.member} onChange={(v) => set({ member: v }, true)} className="w-full" title={l("Miembro del equipo que ejecuta este paso", "Team member who carries out this step")}>
           {team.members.filter((m) => !m.advisor).map((m) => (
             <option key={m.id} value={m.id}>{m.name}</option>
           ))}
-        </select>
+        </SelectBox>
       </div>
       <div className="flex flex-col gap-1.5">
         <Label>{l("En el repositorio", "In the repository")}</Label>
-        <select value={step.repo} onChange={(e) => set({ repo: e.target.value }, true)} className={field}>
+        <SelectBox value={step.repo} onChange={(v) => set({ repo: v }, true)} className="w-full" title={l("Repositorio donde trabaja este paso", "Repository this step works in")}>
           <option value="">{l("El primero de la tarea", "The task's first")}</option>
           <option value="*">{l("Todos los de la tarea", "All of the task's")}</option>
           {projects.map((p) => (
             <option key={p.id} value={p.id}>{p.name}</option>
           ))}
-        </select>
+        </SelectBox>
       </div>
       <div className="flex flex-col gap-1.5">
         <Label>{l("Espera a", "Waits for")}</Label>
         <div className="flex flex-wrap gap-1.5">
           {team.plan.filter((s) => s.key !== step.key && !blocked.has(s.key)).map((s) => (
-            <ToggleChip key={s.key} on={step.depends_on.includes(s.key)} onClick={() => set({ depends_on: step.depends_on.includes(s.key) ? step.depends_on.filter((k) => k !== s.key) : [...step.depends_on, s.key] }, true)}>
+            <ToggleChip key={s.key} title={step.depends_on.includes(s.key) ? l("Deja de esperar a este paso", "Stop waiting for this step") : l("Este paso no empieza hasta que termine aquel", "This step won't start until that one finishes")} on={step.depends_on.includes(s.key)} onClick={() => set({ depends_on: step.depends_on.includes(s.key) ? step.depends_on.filter((k) => k !== s.key) : [...step.depends_on, s.key] }, true)}>
               {s.title || s.key}
             </ToggleChip>
           ))}
@@ -103,6 +103,7 @@ function StepEditor({ team, step, update, onClose }: { team: Team; step: TeamPla
           kind="danger"
           small
           icon={Trash2}
+          title={l("Borra el paso y lo quita de las esperas de los demás", "Deletes the step and removes it from other steps' waits")}
           onClick={() => {
             update((t) => ({ ...t, plan: t.plan.filter((s) => s.key !== step.key).map((s) => ({ ...s, depends_on: s.depends_on.filter((k) => k !== step.key) })) }), true);
             onClose();
@@ -142,7 +143,7 @@ export function FlowTab({ team, update }: { team: Team; update: Update }) {
       <div className="relative min-h-0 flex-1 overflow-auto bg-[radial-gradient(circle,var(--cf-border)_1px,transparent_1px)] [background-size:22px_22px] p-6">
         {team.plan.length === 0 ? (
           <Empty icon={Workflow} title={l("Sin flujo fijo", "No fixed flow")} hint={team.lead ? l("Con líder, el plan lo arma él en cada corrida. Un flujo fijo le da un punto de partida.", "With a lead, it plans each run. A fixed flow gives it a starting point.") : l("Sin líder, el equipo sigue estos pasos en orden.", "Without a lead, the team follows these steps in order.")}>
-            <Btn kind="primary" icon={Plus} onClick={add} disabled={workers.length === 0}>{l("Primer paso", "First step")}</Btn>
+            <Btn kind="primary" icon={Plus} onClick={add} title={l("Crea el primer paso del flujo fijo", "Creates the first step of the fixed flow")} disabled={workers.length === 0}>{l("Primer paso", "First step")}</Btn>
             {workers.length === 0 && <span className="text-[12px] text-[var(--cf-text-muted)]">{l("Antes, suma miembros en el organigrama.", "First, add members in the org chart.")}</span>}
           </Empty>
         ) : (
@@ -178,6 +179,7 @@ export function FlowTab({ team, update }: { team: Team; update: Update }) {
                   animate={{ x: p.col * (W + GX), y: p.row * (H + GY) }}
                   transition={SPRING}
                   onClick={() => setEditing(s.key)}
+                  title={l(`${s.title || s.key} · ${member?.name ?? "—"}: clic para editar el paso`, `${s.title || s.key} · ${member?.name ?? "—"}: click to edit the step`)}
                   style={{ width: W, height: H }}
                   className={`absolute left-0 top-0 flex items-center gap-2.5 rounded-[13px] border bg-[var(--cf-surface-raised)] px-2.5 text-left ${editing === s.key ? "border-[var(--cf-accent)] shadow-[0_0_0_2px_var(--cf-accent-soft)]" : "border-[var(--cf-border)] hover:border-[var(--cf-border-strong)]"}`}
                 >
@@ -192,7 +194,7 @@ export function FlowTab({ team, update }: { team: Team; update: Update }) {
                 </motion.button>
               );
             })}
-            <button type="button" onClick={add} className="absolute flex items-center gap-1.5 rounded-full border border-dashed border-[var(--cf-border-strong)] bg-[var(--cf-surface)] px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]" style={{ left: 0, top: rows * (H + GY) + 4 }}>
+            <button type="button" onClick={add} title={l("Añade un paso al final del flujo", "Adds a step at the end of the flow")} className="absolute flex items-center gap-1.5 rounded-full border border-dashed border-[var(--cf-border-strong)] bg-[var(--cf-surface)] px-3 py-1.5 text-[12px] text-[var(--cf-text-muted)] hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)]" style={{ left: 0, top: rows * (H + GY) + 4 }}>
               <Plus className="h-3.5 w-3.5" />
               {l("Paso", "Step")}
             </button>
@@ -227,10 +229,10 @@ export function ChecksTab({ team, update }: { team: Team; update: Update }) {
         <div className="flex flex-col gap-1.5">
           {checks.map((c, i) => (
             <motion.div key={i} layout className="flex items-center gap-2 rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2.5 py-2">
-              <Chip tone={c.when === "final" ? "violet" : "info"}>{c.when === "final" ? l("Al final", "At the end") : l("Por tarea", "Per task")}</Chip>
-              <code className="min-w-0 flex-1 truncate font-mono text-[12px]">{c.command}</code>
-              <span className="text-[11.5px] text-[var(--cf-text-muted)]">{c.repo === "*" ? l("todos", "all") : projects.find((p) => p.id === c.repo)?.name ?? c.repo}</span>
-              <button type="button" aria-label={l("Quitar", "Remove")} onClick={() => set(checks.filter((_, j) => j !== i))} className="grid h-6 w-6 place-items-center rounded-[6px] text-[var(--cf-text-faint)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]">
+              <Chip tone={c.when === "final" ? "violet" : "info"} title={c.when === "final" ? l("Corre sobre la rama integrada al terminar la corrida", "Runs on the integrated branch when the run ends") : l("Corre en el worktree del miembro antes de dar la tarea por hecha", "Runs in the member's worktree before the task counts as done")}>{c.when === "final" ? l("Al final", "At the end") : l("Por tarea", "Per task")}</Chip>
+              <code title={c.command} className="min-w-0 flex-1 truncate font-mono text-[12px]">{c.command}</code>
+              <span title={l("Repositorio donde corre el comando", "Repository the command runs in")} className="text-[11.5px] text-[var(--cf-text-muted)]">{c.repo === "*" ? l("todos", "all") : projects.find((p) => p.id === c.repo)?.name ?? c.repo}</span>
+              <button type="button" aria-label={l("Quitar", "Remove")} title={l("Quita este check; ya no se exigirá", "Removes this check; it will no longer be required")} onClick={() => set(checks.filter((_, j) => j !== i))} className="grid h-6 w-6 place-items-center rounded-[6px] text-[var(--cf-text-faint)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]">
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
             </motion.div>
@@ -238,18 +240,19 @@ export function ChecksTab({ team, update }: { team: Team; update: Update }) {
           {checks.length === 0 && <span className="text-[12.5px] text-[var(--cf-text-muted)]">{l("Sin checks: el equipo confía en sus propias pruebas.", "No checks: the team trusts its own tests.")}</span>}
         </div>
         <div className="flex flex-wrap items-center gap-2 rounded-[11px] border border-dashed border-[var(--cf-border-strong)] p-2.5">
-          <input value={draft.command} onChange={(e) => setDraft({ ...draft, command: e.target.value })} placeholder="pnpm test" className={`${field} min-w-[200px] flex-1 font-mono`} />
-          <select value={draft.repo} onChange={(e) => setDraft({ ...draft, repo: e.target.value })} className={`${field} w-[150px]`}>
+          <input value={draft.command} onChange={(e) => setDraft({ ...draft, command: e.target.value })} title={l("Comando que debe terminar sin error (código de salida 0)", "Command that must finish without error (exit code 0)")} placeholder="pnpm test" className={`${field} min-w-[200px] flex-1 font-mono`} />
+          <SelectBox value={draft.repo} onChange={(v) => setDraft({ ...draft, repo: v })} className="w-[150px] shrink-0" title={l("En qué repositorio corre el check", "Which repository the check runs in")}>
             <option value="*">{l("Todos los repos", "Every repo")}</option>
             {projects.map((p) => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
-          </select>
-          <Seg size="sm" value={draft.when} onChange={(when) => setDraft({ ...draft, when })} options={[{ value: "item", label: l("Por tarea", "Per task") }, { value: "final", label: l("Al final", "At the end") }]} />
+          </SelectBox>
+          <Seg size="sm" value={draft.when} onChange={(when) => setDraft({ ...draft, when })} options={[{ value: "item", label: l("Por tarea", "Per task"), title: l("Tras cada tarea, antes de darla por hecha", "After each task, before it counts as done") }, { value: "final", label: l("Al final", "At the end"), title: l("Una vez, sobre la rama integrada al cerrar la corrida", "Once, on the integrated branch when the run closes") }]} />
           <Btn
             kind="primary"
             small
             icon={Plus}
+            title={l("Añade el check a la lista", "Adds the check to the list")}
             disabled={!draft.command.trim()}
             onClick={() => {
               set([...checks, { ...draft, command: draft.command.trim() }]);

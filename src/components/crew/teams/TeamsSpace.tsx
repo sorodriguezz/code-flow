@@ -32,7 +32,7 @@ function PaletteAgent({ agent, inTeam }: { agent: WorkspaceAgent; inTeam: number
     </span>
   ));
   return (
-    <motion.div {...drag} layout whileHover={{ x: 2 }} transition={SPRING} className="flex cursor-grab touch-none items-center gap-2 rounded-[10px] border border-transparent px-1.5 py-1 hover:border-[var(--cf-border)] hover:bg-[var(--cf-surface)] active:cursor-grabbing">
+    <motion.div {...drag} layout transition={SPRING} title={l("Arrastra al organigrama para añadirlo al equipo", "Drag onto the chart to add it to the team")} className="flex cursor-grab touch-none items-center gap-2 rounded-[10px] border border-transparent px-1.5 py-1 hover:border-[var(--cf-border)] hover:bg-[var(--cf-surface)] active:cursor-grabbing">
       <AgentAvatar agent={agent} size={30} />
       <span className="min-w-0 flex-1">
         <b className="block truncate text-[12.5px]">{agent.name}</b>
@@ -44,6 +44,7 @@ function PaletteAgent({ agent, inTeam }: { agent: WorkspaceAgent; inTeam: number
 }
 
 function PaletteTemplate({ item }: { item: LibraryItem }) {
+  const l = useL();
   const drag = useDragSource({ kind: "template", id: item.id }, () => (
     <span className="flex items-center gap-2 rounded-[12px] border border-dashed border-[var(--cf-accent)] bg-[var(--cf-surface)] py-1 pl-1 pr-3 text-[12.5px] font-medium">
       <AgentAvatar agent={{ id: item.id, icon: item.icon, color: item.color }} size={26} />
@@ -51,7 +52,7 @@ function PaletteTemplate({ item }: { item: LibraryItem }) {
     </span>
   ));
   return (
-    <motion.div {...drag} whileHover={{ x: 2 }} transition={SPRING} title={item.description} className="flex cursor-grab touch-none items-center gap-2 rounded-[10px] border border-dashed border-transparent px-1.5 py-1 hover:border-[var(--cf-border-strong)] hover:bg-[var(--cf-surface)] active:cursor-grabbing">
+    <motion.div {...drag} transition={SPRING} title={item.description || l("Arrastra al organigrama para crear un agente con esta plantilla", "Drag onto the chart to create an agent from this template")} className="flex cursor-grab touch-none items-center gap-2 rounded-[10px] border border-dashed border-transparent px-1.5 py-1 hover:border-[var(--cf-border-strong)] hover:bg-[var(--cf-surface)] active:cursor-grabbing">
       <AgentAvatar agent={{ id: item.id, icon: item.icon, color: item.color }} size={26} />
       <span className="min-w-0 flex-1 truncate text-[12px]">{item.name}</span>
     </motion.div>
@@ -136,7 +137,7 @@ function TeamEditor({ teamId }: { teamId: string }) {
             {team.members.some((m) => m.leads) ? l(" · con sub-líderes", " · with sub-leads") : ""}
             {team.members.some((m) => m.advisor) ? l(" · con asesor", " · with advisor") : ""}
           </span>
-          <Btn small kind="primary" icon={WandSparkles} disabled={team.members.length === 0} onClick={() => crew.open({ kind: "launch", assignee: { kind: "team", id: team.id } })}>
+          <Btn small kind="primary" icon={WandSparkles} disabled={team.members.length === 0} title={team.members.length === 0 ? l("Añade miembros al equipo primero", "Add members to the team first") : l("Asigna una tarea al equipo entero", "Assigns a task to the whole team")} onClick={() => crew.open({ kind: "launch", assignee: { kind: "team", id: team.id } })}>
             {l("Darle una tarea", "Hand it a task")}
           </Btn>
         </div>
@@ -197,8 +198,8 @@ export function TeamsSpace() {
     return (
       <Empty icon={Network} title={l("Arma tu primer equipo", "Build your first team")} hint={l("Un líder que planifica y reparte, sub-líderes con su rama, y un asesor que mira desde arriba. Empieza en blanco o desde una plantilla.", "A lead that plans and hands out work, sub-leads with their branch, and an advisor looking from above. Start blank or from a template.")}>
         <div className="mt-2 flex gap-2">
-          <Btn kind="primary" icon={LayoutTemplate} onClick={() => crew.open({ kind: "teamTemplates" })}>{l("Desde plantilla", "From a template")}</Btn>
-          <Btn icon={Plus} onClick={() => void create()}>{l("En blanco", "Blank")}</Btn>
+          <Btn kind="primary" icon={LayoutTemplate} title={l("Elige un equipo ya armado y ajústalo", "Pick a ready-made team and tweak it")} onClick={() => crew.open({ kind: "teamTemplates" })}>{l("Desde plantilla", "From a template")}</Btn>
+          <Btn icon={Plus} title={l("Crea un equipo vacío y arma el organigrama tú", "Creates an empty team; build the chart yourself")} onClick={() => void create()}>{l("En blanco", "Blank")}</Btn>
         </div>
       </Empty>
     );
@@ -214,6 +215,7 @@ export function TeamsSpace() {
               <button
                 key={t.id}
                 type="button"
+                title={l("Abre este equipo", "Opens this team")}
                 onClick={() => crew.set({ selectedTeamId: t.id, selectedMemberId: null })}
                 className={`relative flex h-[32px] shrink-0 items-center gap-2 rounded-full border pl-1 pr-3 text-[12.5px] font-medium transition-colors ${on ? "border-[var(--cf-accent-line)] text-[var(--cf-text)]" : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-border-strong)]"}`}
               >
@@ -225,14 +227,14 @@ export function TeamsSpace() {
             );
           })}
         </div>
-        <Btn small icon={Plus} onClick={() => void create()}>{l("Nuevo", "New")}</Btn>
-        <Btn small icon={LayoutTemplate} onClick={() => crew.open({ kind: "teamTemplates" })}>{l("Plantillas", "Templates")}</Btn>
+        <Btn small icon={Plus} title={l("Crea un equipo en blanco", "Creates a blank team")} onClick={() => void create()}>{l("Nuevo", "New")}</Btn>
+        <Btn small icon={LayoutTemplate} title={l("Crea un equipo desde una plantilla", "Creates a team from a template")} onClick={() => crew.open({ kind: "teamTemplates" })}>{l("Plantillas", "Templates")}</Btn>
         {selected && (
           <>
-            <button type="button" title={l("Duplicar", "Duplicate")} onClick={() => void duplicate(selected)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
+            <button type="button" title={l("Crea una copia de este equipo", "Makes a copy of this team")} onClick={() => void duplicate(selected)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
               <Copy className="h-3.5 w-3.5" />
             </button>
-            <button type="button" title={l("Borrar equipo", "Delete team")} onClick={() => void remove(selected)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]">
+            <button type="button" title={l("Borra este equipo; sus corridas pasadas se conservan", "Deletes this team; its past runs are kept")} onClick={() => void remove(selected)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]">
               <Trash2 className="h-3.5 w-3.5" />
             </button>
           </>

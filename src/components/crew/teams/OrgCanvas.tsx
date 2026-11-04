@@ -125,6 +125,7 @@ function Node({
         {...drop.props}
         onClick={() => onSelect(member.id)}
         aria-pressed={selected}
+        title={`${member.name || agent?.name || "—"}${member.role || agent?.role ? ` · ${member.role || agent?.role}` : ""} — ${l("clic para ver su ficha; arrástralo para moverlo con su rama", "click to open its details; drag to move it with its branch")}`}
         className={`group relative flex h-full w-full cursor-grab touch-none items-center gap-2.5 rounded-[14px] border bg-[var(--cf-surface-raised)] px-2.5 text-left shadow-[0_1px_2px_rgba(0,0,0,0.05)] transition-[border-color,box-shadow] active:cursor-grabbing ${
           blocked
             ? "border-[var(--cf-danger)] shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-danger)_18%,transparent)]"
@@ -142,11 +143,11 @@ function Node({
           <b className="block truncate text-[12.5px]">{member.name || agent?.name || "—"}</b>
           <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">{member.role || agent?.role || agent?.model || ""}</span>
           <span className="mt-0.5 flex items-center gap-1 text-[var(--cf-text-faint)]">
-            {!member.edits && <span title={l("Solo lectura", "Read only")}><Eye className="h-3 w-3" /></span>}
-            {member.run_in === "terminal" && <span title={l("En una terminal", "In a terminal")}><SquareTerminal className="h-3 w-3" /></span>}
-            {member.hands_on && <span title={l("También trabaja", "Also works")}><Wrench className="h-3 w-3" /></span>}
-            {member.max_parallel > 1 && <span className="text-[10px] font-semibold tabular-nums">×{member.max_parallel}</span>}
-            {agent?.model && <span className="truncate font-mono text-[10px]">{agent.model}</span>}
+            {!member.edits && <span title={l("Solo lectura: no modifica archivos", "Read only: does not change files")}><Eye className="h-3 w-3" /></span>}
+            {member.run_in === "terminal" && <span title={l("Corre en una terminal visible", "Runs in a visible terminal")}><SquareTerminal className="h-3 w-3" /></span>}
+            {member.hands_on && <span title={l("Además de coordinar, también hace tareas", "Besides coordinating, it also does tasks")}><Wrench className="h-3 w-3" /></span>}
+            {member.max_parallel > 1 && <span title={l(`Hasta ${member.max_parallel} tareas a la vez`, `Up to ${member.max_parallel} tasks at once`)} className="text-[10px] font-semibold tabular-nums">×{member.max_parallel}</span>}
+            {agent?.model && <span title={l("Modelo que usa", "Model it uses")} className="truncate font-mono text-[10px]">{agent.model}</span>}
           </span>
         </span>
         {isLead && (
@@ -315,13 +316,13 @@ export function OrgCanvas({ team, update, selected, onSelect }: { team: Team; up
         )}
       </div>
       <div className="absolute right-3 top-3 z-10 flex items-center gap-0.5 rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-surface)] p-0.5 shadow-[var(--cf-shadow)]">
-        <button type="button" aria-label="−" onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.1).toFixed(2)))} className="grid h-7 w-7 place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
+        <button type="button" aria-label="−" title={l("Alejar", "Zoom out")} onClick={() => setZoom((z) => Math.max(0.5, +(z - 0.1).toFixed(2)))} className="grid h-7 w-7 place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
           <Minus className="h-3.5 w-3.5" />
         </button>
         <button type="button" onClick={() => setZoom(1)} title={l("Tamaño real", "Actual size")} className="h-7 min-w-[44px] rounded-[7px] px-1 text-[11.5px] tabular-nums text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
           {Math.round(zoom * 100)}%
         </button>
-        <button type="button" aria-label="+" onClick={() => setZoom((z) => Math.min(1.4, +(z + 0.1).toFixed(2)))} className="grid h-7 w-7 place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
+        <button type="button" aria-label="+" title={l("Acercar", "Zoom in")} onClick={() => setZoom((z) => Math.min(1.4, +(z + 0.1).toFixed(2)))} className="grid h-7 w-7 place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
           <Plus className="h-3.5 w-3.5" />
         </button>
         <button

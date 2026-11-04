@@ -49,7 +49,7 @@ export function Lanes({ state, onOpenItem }: { state: TeamRunState; onOpenItem: 
                 const lv = i.task_id ? live[i.task_id] : undefined;
                 return (
                   <div key={i.id} className="flex flex-col gap-1.5 rounded-[10px] border border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)] p-2">
-                    <button type="button" onClick={() => onOpenItem(i.id)} className="truncate text-left text-[12px] font-semibold hover:underline">{i.title}</button>
+                    <button type="button" title={l("Abre el detalle de esta tarea", "Opens this task's details")} onClick={() => onOpenItem(i.id)} className="truncate text-left text-[12px] font-semibold hover:underline">{i.title}</button>
                     {i.status === "waiting" ? (
                       <span className="text-[11.5px] text-[var(--cf-warning)]">{l("Hizo una pregunta: mírala en el canal.", "It asked a question: see the channel.")}</span>
                     ) : lv?.sending && lv.runId ? (
@@ -64,10 +64,10 @@ export function Lanes({ state, onOpenItem }: { state: TeamRunState; onOpenItem: 
                 <div className="flex flex-col gap-1">
                   <span className="text-[10.5px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">{l("Le espera", "Up next")}</span>
                   {queued.map((i) => (
-                    <button key={i.id} type="button" onClick={() => onOpenItem(i.id)} className="flex items-center gap-1.5 rounded-[8px] px-1.5 py-1 text-left text-[12px] hover:bg-[var(--cf-hover)]">
+                    <button key={i.id} type="button" title={l("Abre el detalle de esta tarea", "Opens this task's details")} onClick={() => onOpenItem(i.id)} className="flex items-center gap-1.5 rounded-[8px] px-1.5 py-1 text-left text-[12px] hover:bg-[var(--cf-hover)]">
                       <Hourglass className="h-3 w-3 shrink-0 text-[var(--cf-text-faint)]" />
                       <span className="min-w-0 flex-1 truncate">{i.title}</span>
-                      {i.status === "gated" && <Chip tone="warn">{l("tu OK", "your OK")}</Chip>}
+                      {i.status === "gated" && <Chip tone="warn" title={l("La tarea espera tu aprobación para seguir", "The task waits for your approval to go on")}>{l("tu OK", "your OK")}</Chip>}
                     </button>
                   ))}
                 </div>
@@ -79,10 +79,10 @@ export function Lanes({ state, onOpenItem }: { state: TeamRunState; onOpenItem: 
                     const [es, en, tone] = ITEM_STATUS[i.status];
                     const [kes, ken] = ITEM_KIND[i.kind];
                     return (
-                      <button key={i.id} type="button" onClick={() => onOpenItem(i.id)} className="flex items-center gap-1.5 rounded-[8px] px-1.5 py-1 text-left text-[12px] hover:bg-[var(--cf-hover)]">
+                      <button key={i.id} type="button" title={l("Abre el detalle de esta tarea", "Opens this task's details")} onClick={() => onOpenItem(i.id)} className="flex items-center gap-1.5 rounded-[8px] px-1.5 py-1 text-left text-[12px] hover:bg-[var(--cf-hover)]">
                         <span className="min-w-0 flex-1 truncate">{i.title}</span>
                         <span className="text-[10.5px] text-[var(--cf-text-faint)]">{l(kes, ken)}</span>
-                        <Chip tone={tone}>{l(es, en)}</Chip>
+                        <Chip tone={tone} title={l("Estado de la tarea", "Task status")}>{l(es, en)}</Chip>
                       </button>
                     );
                   })}

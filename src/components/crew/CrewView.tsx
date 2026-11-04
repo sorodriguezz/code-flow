@@ -27,7 +27,8 @@ import { EmptyState } from "../common/EmptyState";
 import { runIsLive } from "../../types/team";
 import { TerminalBench } from "../agents/TerminalBench";
 import { DragLayer } from "./kit/drag";
-import { Seg, SOFT } from "./kit/ui";
+import { CrewHost, Seg, SOFT } from "./kit/ui";
+import { buttonClass } from "../common/Button";
 import { Dock } from "./Dock";
 import { LaunchDialog } from "./LaunchDialog";
 import { ChainEditorPane, ChainPane, RacePane, StoryPane, TaskPane } from "./Panes";
@@ -45,6 +46,7 @@ import { useCrewStore, useL, type Space } from "./state";
 
 export function CrewView() {
   const l = useL();
+  const [host, setHost] = useState<HTMLDivElement | null>(null);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const activeView = useUiStore((s) => s.activeView);
   const space = useCrewStore((s) => s.space);
@@ -153,7 +155,8 @@ export function CrewView() {
   ];
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
+    <CrewHost.Provider value={host}>
+    <div ref={setHost} className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
       <div className="flex shrink-0 items-center gap-3 border-b border-[var(--cf-border)] px-3.5 py-2.5">
         <Seg value={space} onChange={setSpace} options={spaces} className="min-w-0 shrink" />
         <span className="flex-1" />
@@ -179,11 +182,11 @@ export function CrewView() {
           type="button"
           data-tour="agents-tree-actions"
           onClick={() => open({ kind: "launch" })}
-          className="flex h-[34px] shrink-0 items-center gap-2 rounded-[10px] bg-[var(--cf-accent)] pl-3 pr-2 text-[12.5px] font-semibold text-[var(--cf-on-accent)] shadow-[0_6px_18px_-8px_color-mix(in_oklab,var(--cf-accent)_80%,transparent)] transition-transform hover:-translate-y-px"
+          title={`${l("Dale una tarea", "Hand out a task")} (⌘K)`}
+          className={buttonClass({ variant: "primary", size: "lg" })}
         >
-          <WandSparkles className="h-4 w-4" />
+          <WandSparkles className="h-3.5 w-3.5" />
           <span className="hidden sm:inline">{l("Dale una tarea", "Hand out a task")}</span>
-          <kbd className="hidden rounded-[5px] bg-[color-mix(in_oklab,var(--cf-on-accent)_22%,transparent)] px-1.5 font-mono text-[10.5px] sm:inline">⌘K</kbd>
         </button>
       </div>
 
@@ -220,5 +223,6 @@ export function CrewView() {
       {overlay?.kind === "chainEditor" && <ChainEditorPane templateId={overlay.templateId} />}
       {overlay?.kind === "story" && <StoryPane />}
     </div>
+    </CrewHost.Provider>
   );
 }

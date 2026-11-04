@@ -82,6 +82,7 @@ export function WorkGraph({ state, selected, onSelect }: { state: TeamRunState; 
                 <motion.button
                   key={item.id}
                   type="button"
+                  title={l("Selecciona la tarea para ver su detalle", "Select the task to see its details")}
                   initial={{ opacity: 0, scale: 0.85, x, y }}
                   animate={{ opacity: dim ? 0.5 : 1, scale: 1, x, y }}
                   exit={{ opacity: 0, scale: 0.9 }}

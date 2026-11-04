@@ -2,35 +2,41 @@
  * The Agents view's own controls. Small on purpose: tokens from `index.css`, motion through
  * framer-motion so `MotionLevel` can turn it off.
  */
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { Children, createContext, Fragment, isValidElement, useContext, useEffect, useId, useRef, type ReactElement, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { ChevronRight, Minus, Plus, X, type LucideIcon } from "lucide-react";
+import { buttonClass, iconButtonClass } from "../../common/Button";
+import { ActivePill } from "../../common/ActivePill";
+import { chipClass, fieldClass, segItemClass, segTrackClass, type ChipTone } from "../../common/recipes";
+import { Select, type SelectOption } from "../../common/Select";
+
+/** The Agents view's own box. A drawer opens inside it, so the app rail, the AI panels and the
+ * rest of the window stay where they are — the same way every other app's side panel does. */
+export const CrewHost = createContext<HTMLElement | null>(null);
 
 export const SPRING = { type: "spring", stiffness: 420, damping: 34 } as const;
 export const SOFT = { type: "spring", stiffness: 260, damping: 30 } as const;
 
 export type Tone = "neutral" | "accent" | "ok" | "warn" | "bad" | "info" | "violet";
 
-const TONES: Record<Tone, string> = {
-  neutral: "bg-[var(--cf-sunken)] text-[var(--cf-text-muted)] border-[var(--cf-border)]",
-  accent: "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)] border-[var(--cf-accent-line)]",
-  ok: "bg-[color-mix(in_oklab,var(--cf-success)_12%,var(--cf-surface))] text-[var(--cf-success)] border-[color-mix(in_oklab,var(--cf-success)_30%,var(--cf-surface))]",
-  warn: "bg-[color-mix(in_oklab,var(--cf-warning)_12%,var(--cf-surface))] text-[var(--cf-warning)] border-[color-mix(in_oklab,var(--cf-warning)_30%,var(--cf-surface))]",
-  bad: "bg-[color-mix(in_oklab,var(--cf-danger)_10%,var(--cf-surface))] text-[var(--cf-danger)] border-[color-mix(in_oklab,var(--cf-danger)_30%,var(--cf-surface))]",
-  info: "bg-[color-mix(in_oklab,var(--cf-blue)_11%,var(--cf-surface))] text-[var(--cf-blue)] border-[color-mix(in_oklab,var(--cf-blue)_28%,var(--cf-surface))]",
-  violet: "bg-[color-mix(in_oklab,var(--cf-violet)_11%,var(--cf-surface))] text-[var(--cf-violet)] border-[color-mix(in_oklab,var(--cf-violet)_28%,var(--cf-surface))]",
-};
+// The app's chip (`chipClass`); violet is this view's extra tone, for reasoning effort.
+const VIOLET = "bg-[color-mix(in_oklab,var(--cf-violet)_13%,transparent)] text-[var(--cf-violet)]";
+
+function chip(tone: Tone, className = ""): string {
+  return tone === "violet" ? chipClass("neutral", `${className} !shadow-none ${VIOLET}`) : chipClass(tone as ChipTone, className);
+}
 
 export function Chip({ tone = "neutral", icon: Icon, children, title, className = "" }: { tone?: Tone; icon?: LucideIcon; children: ReactNode; title?: string; className?: string }) {
   return (
-    <span title={title} className={`inline-flex h-[22px] shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-[11.5px] font-medium ${TONES[tone]} ${className}`}>
+    <span title={title} className={chip(tone, className)}>
       {Icon && <Icon className="h-3 w-3" />}
       {children}
     </span>
   );
 }
 
+/** A chip that toggles: repositories, models, filters. Off it is a quiet outline; on, the accent. */
 export function ToggleChip({ on, onClick, icon: Icon, children, title, dot }: { on: boolean; onClick: () => void; icon?: LucideIcon; children: ReactNode; title?: string; dot?: string }) {
   return (
     <button
@@ -38,8 +44,10 @@ export function ToggleChip({ on, onClick, icon: Icon, children, title, dot }: { 
       title={title}
       aria-pressed={on}
       onClick={onClick}
-      className={`inline-flex h-[26px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 text-[12px] font-medium transition-colors ${
-        on ? TONES.accent : "border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)] hover:border-[var(--cf-border-strong)] hover:text-[var(--cf-text)]"
+      className={`inline-flex h-6 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2 text-[12px] font-medium transition-colors duration-100 ${
+        on
+          ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)] shadow-[inset_0_0_0_1px_var(--cf-accent-line)]"
+          : "text-[var(--cf-text-muted)] shadow-[inset_0_0_0_1px_var(--cf-border)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       }`}
     >
       {dot && <span className="h-[7px] w-[7px] rounded-[2px]" style={{ background: dot }} />}
@@ -49,7 +57,8 @@ export function ToggleChip({ on, onClick, icon: Icon, children, title, dot }: { 
   );
 }
 
-/** Tabs with a pill that slides to the chosen one. */
+/** Tabs with a pill that slides to the chosen one — the app's segmented recipe, with room for a
+ * badge. */
 export function Seg<T extends string>({
   value,
   options,
@@ -65,7 +74,7 @@ export function Seg<T extends string>({
 }) {
   const id = useId();
   return (
-    <div role="tablist" className={`relative flex min-w-0 gap-0.5 overflow-x-auto rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-sunken)] p-[3px] [scrollbar-width:none] ${className}`}>
+    <div role="tablist" className={segTrackClass({ className: `min-w-0 overflow-x-auto [scrollbar-width:none] ${className}` })}>
       {options.map((option) => {
         const on = option.value === value;
         const Icon = option.icon;
@@ -77,20 +86,14 @@ export function Seg<T extends string>({
             aria-selected={on}
             title={option.title}
             onClick={() => onChange(option.value)}
-            className={`relative flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-[7px] px-2.5 font-medium transition-colors ${
-              size === "sm" ? "h-[24px] text-[12px]" : "h-[28px] text-[12.5px]"
-            } ${on ? "text-[var(--cf-text)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"}`}
+            className={segItemClass(on, { size, className: "shrink-0" })}
           >
-            {on && (
-              <motion.span
-                layoutId={`seg-${id}`}
-                transition={SPRING}
-                className="absolute inset-0 rounded-[7px] bg-[var(--cf-surface)] shadow-[0_0_0_1px_var(--cf-border),0_1px_2px_rgba(0,0,0,0.06)]"
-              />
-            )}
-            {Icon && <Icon className={`relative h-3.5 w-3.5 ${on ? "text-[var(--cf-accent)]" : ""}`} />}
-            <span className="relative">{option.label}</span>
-            {option.badge != null && <span className="relative">{option.badge}</span>}
+            {on && <ActivePill layoutId={`seg-${id}`} variant="raised" />}
+            <span className="relative inline-flex items-center gap-1.5">
+              {Icon && <Icon size={size === "sm" ? 12 : 13} className="shrink-0" />}
+              {option.label}
+              {option.badge != null && option.badge}
+            </span>
           </button>
         );
       })}
@@ -98,10 +101,11 @@ export function Seg<T extends string>({
   );
 }
 
-export function Switch({ checked, onChange, label, hint, disabled }: { checked: boolean; onChange: (value: boolean) => void; label?: ReactNode; hint?: ReactNode; disabled?: boolean }) {
+export function Switch({ checked, onChange, label, hint, disabled, title }: { checked: boolean; onChange: (value: boolean) => void; label?: ReactNode; hint?: ReactNode; disabled?: boolean; title?: string }) {
   return (
     <button
       type="button"
+      title={title}
       role="switch"
       aria-checked={checked}
       disabled={disabled}
@@ -128,12 +132,12 @@ export function Switch({ checked, onChange, label, hint, disabled }: { checked: 
 
 export function Stepper({ value, min, max, onChange, label }: { value: number; min: number; max: number; onChange: (value: number) => void; label: string }) {
   return (
-    <span className="inline-flex items-center overflow-hidden rounded-[8px] border border-[var(--cf-border-strong)]" aria-label={label}>
-      <button type="button" aria-label="−" disabled={value <= min} onClick={() => onChange(Math.max(min, value - 1))} className="grid h-[26px] w-[26px] place-items-center text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] disabled:opacity-40">
+    <span className="inline-flex items-center overflow-hidden rounded-md shadow-[inset_0_0_0_1px_var(--cf-border-strong)]" aria-label={label} title={label}>
+      <button type="button" aria-label="−" title={`${label}: −1`} disabled={value <= min} onClick={() => onChange(Math.max(min, value - 1))} className="grid h-[26px] w-[26px] place-items-center text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] disabled:opacity-40">
         <Minus className="h-3.5 w-3.5" />
       </button>
       <b className="min-w-[30px] text-center text-[12.5px] tabular-nums">{value}</b>
-      <button type="button" aria-label="+" disabled={value >= max} onClick={() => onChange(Math.min(max, value + 1))} className="grid h-[26px] w-[26px] place-items-center text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] disabled:opacity-40">
+      <button type="button" aria-label="+" title={`${label}: +1`} disabled={value >= max} onClick={() => onChange(Math.min(max, value + 1))} className="grid h-[26px] w-[26px] place-items-center text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] disabled:opacity-40">
         <Plus className="h-3.5 w-3.5" />
       </button>
     </span>
@@ -162,7 +166,7 @@ export function Meter({ label, value, max, format, warnAt = 0.8 }: { label: Reac
 export function Panel({ title, icon: Icon, open, onToggle, children }: { title: ReactNode; icon?: LucideIcon; open: boolean; onToggle: () => void; children: ReactNode }) {
   return (
     <div className="rounded-[11px] border border-[var(--cf-border)] bg-[var(--cf-surface)]">
-      <button type="button" onClick={onToggle} aria-expanded={open} className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-[12.5px] font-semibold">
+      <button type="button" onClick={onToggle} aria-expanded={open} title={open ? "Plegar" : "Desplegar"} className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-[12.5px] font-semibold">
         {Icon && <Icon className="h-4 w-4 text-[var(--cf-accent)]" />}
         <span className="flex-1">{title}</span>
         <motion.span animate={{ rotate: open ? 90 : 0 }} transition={SPRING} className="text-[var(--cf-text-faint)]">
@@ -249,7 +253,7 @@ export function Modal({
             <h2 className="m-0 text-[16px] font-semibold">{title}</h2>
             {subtitle && <p className="m-0 mt-0.5 text-[12px] text-[var(--cf-text-muted)]">{subtitle}</p>}
           </div>
-          <button type="button" aria-label="Cerrar" onClick={onClose} className="grid h-[30px] w-[30px] place-items-center rounded-[8px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
+          <button type="button" aria-label="Cerrar" title="Cerrar (Esc)" onClick={onClose} className={iconButtonClass({ size: "md" })}>
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -263,34 +267,27 @@ export function Modal({
 
 export function Drawer({ onClose, children, width = 460, label }: { onClose: () => void; children: ReactNode; width?: number; label: string }) {
   useEscape(onClose);
+  const host = useContext(CrewHost);
   return createPortal(
-    <div className="fixed inset-0 z-[65]">
-      <motion.div className="absolute inset-0 bg-[color-mix(in_oklab,#0a0b10_28%,transparent)]" initial={{ opacity: 0 }} animate={{ opacity: 1 }} onClick={onClose} />
+    <div className={`${host ? "absolute" : "fixed"} inset-0 z-[65] overflow-hidden`}>
+      <motion.div className="absolute inset-0 bg-[color-mix(in_oklab,#0a0b10_18%,transparent)]" initial={{ opacity: 0 }} animate={{ opacity: 1 }} onClick={onClose} />
       <motion.aside
         role="dialog"
         aria-label={label}
         initial={{ x: 40, opacity: 0 }}
         animate={{ x: 0, opacity: 1 }}
         transition={SOFT}
-        style={{ width: `min(${width}px, 100vw)` }}
+        style={{ width: `min(${width}px, 100%)` }}
         className="absolute inset-y-0 right-0 flex flex-col border-l border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)]"
       >
         {children}
       </motion.aside>
     </div>,
-    document.body,
+    host ?? document.body,
   );
 }
 
-export const btn = {
-  base: "inline-flex h-[30px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-[8px] border px-3 text-[12.5px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-45",
-  primary: "border-[var(--cf-accent)] bg-[var(--cf-accent)] text-[var(--cf-on-accent)] hover:brightness-110",
-  secondary: "border-[var(--cf-border-strong)] bg-[var(--cf-surface)] text-[var(--cf-text)] hover:bg-[var(--cf-hover)]",
-  ghost: "border-transparent bg-transparent text-[var(--cf-text)] hover:bg-[var(--cf-hover)]",
-  danger: "border-[color-mix(in_oklab,var(--cf-danger)_35%,var(--cf-surface))] bg-[var(--cf-surface)] text-[var(--cf-danger)] hover:bg-[color-mix(in_oklab,var(--cf-danger)_8%,var(--cf-surface))]",
-  sm: "h-[26px] px-2.5 text-[12px] rounded-[7px]",
-};
-
+/** The app's button recipe (`common/Button`), under the names this view already uses. */
 export function Btn({
   kind = "secondary",
   small = false,
@@ -300,12 +297,51 @@ export function Btn({
   ...rest
 }: { kind?: "primary" | "secondary" | "ghost" | "danger"; small?: boolean; icon?: LucideIcon; children?: ReactNode } & React.ButtonHTMLAttributes<HTMLButtonElement>) {
   return (
-    <button type="button" {...rest} className={`${btn.base} ${btn[kind]} ${small ? btn.sm : ""} ${className}`}>
+    <button type="button" {...rest} className={buttonClass({ variant: kind === "danger" ? "danger-ghost" : kind, size: small ? "sm" : "md", className })}>
       {Icon && <Icon className="h-3.5 w-3.5" />}
       {children}
     </button>
   );
 }
 
-export const field =
-  "h-[32px] w-full min-w-0 rounded-[8px] border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-2.5 text-[12.5px] text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]";
+/** An icon-only button with the app's hover and its tooltip. */
+export function IconBtn({ title, onClick, icon: Icon, danger, className = "" }: { title: string; onClick: () => void; icon: LucideIcon; danger?: boolean; className?: string }) {
+  return (
+    <button type="button" title={title} aria-label={title} onClick={onClick} className={iconButtonClass({ size: "sm", className: `${danger ? "hover:text-[var(--cf-danger)]" : ""} ${className}` })}>
+      <Icon className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
+/** The app's text field (`fieldClass`), full width; size a field from a wrapper, not here. */
+export const field = fieldClass({ className: "w-full" });
+
+function textOf(node: ReactNode): string {
+  if (node == null || typeof node === "boolean") return "";
+  if (typeof node === "string" || typeof node === "number") return String(node);
+  if (Array.isArray(node)) return node.map(textOf).join("");
+  if (isValidElement(node)) return textOf((node.props as { children?: ReactNode }).children);
+  return "";
+}
+
+function optionsOf(children: ReactNode, out: SelectOption[] = []): SelectOption[] {
+  Children.forEach(children, (child) => {
+    if (!isValidElement(child)) return;
+    const el = child as ReactElement<{ value?: string; disabled?: boolean; children?: ReactNode }>;
+    if (el.type === Fragment) optionsOf(el.props.children, out);
+    else if (el.type === "option") out.push({ value: String(el.props.value ?? ""), label: textOf(el.props.children), disabled: el.props.disabled });
+  });
+  return out;
+}
+
+/**
+ * The app's `Select`, written like a native one — `<option>` children — so the forms here read the
+ * same as before. `className` sizes the wrapper (the trigger always fills it).
+ */
+export function SelectBox({ value, onChange, children, className = "w-full", compact = false, ariaLabel, title }: { value: string; onChange: (value: string) => void; children: ReactNode; className?: string; compact?: boolean; ariaLabel?: string; title?: string }) {
+  return (
+    <div className={`min-w-0 ${className}`} title={title}>
+      <Select value={value} onChange={onChange} options={optionsOf(children)} size={compact ? "compact" : "field"} ariaLabel={ariaLabel} />
+    </div>
+  );
+}

@@ -41,7 +41,7 @@ function RunChip({ run, on, onPick }: { run: TeamRun; on: boolean; onPick: () =>
   const working = state?.items.some((i) => i.status === "running");
   const asks = state?.messages.filter((m) => m.kind === "question" && m.to_id === "user" && !m.answered_at).length ?? 0;
   return (
-    <button type="button" onClick={onPick} className={`relative flex h-[38px] max-w-[280px] shrink-0 items-center gap-2 rounded-[11px] border pl-1.5 pr-2.5 text-left ${on ? "border-[var(--cf-accent-line)]" : "border-[var(--cf-border)] hover:border-[var(--cf-border-strong)]"}`}>
+    <button type="button" title={l("Muestra esta corrida en vivo", "Shows this run live")} onClick={onPick} className={`relative flex h-[38px] max-w-[280px] shrink-0 items-center gap-2 rounded-[11px] border pl-1.5 pr-2.5 text-left ${on ? "border-[var(--cf-accent-line)]" : "border-[var(--cf-border)] hover:border-[var(--cf-border-strong)]"}`}>
       {on && <motion.span layoutId="crew-run-pill" transition={SPRING} className="absolute inset-0 rounded-[11px] bg-[var(--cf-accent-soft)]" />}
       <span className="relative"><TeamAvatar size={26} state={working ? "thinking" : "idle"} /></span>
       <span className="relative min-w-0">
@@ -49,7 +49,7 @@ function RunChip({ run, on, onPick }: { run: TeamRun; on: boolean; onPick: () =>
         <span className="block truncate text-[10.5px] text-[var(--cf-text-muted)]">{run.team_name}</span>
       </span>
       <span className="relative flex items-center gap-1">
-        {asks + (run.status === "gated" ? 1 : 0) > 0 ? <Chip tone="warn">{asks + (run.status === "gated" ? 1 : 0)}</Chip> : <Chip tone={tone}>{l(es, en)}</Chip>}
+        {asks + (run.status === "gated" ? 1 : 0) > 0 ? <Chip tone="warn" title={l("Preguntas o aprobaciones que esperan por ti", "Questions or approvals waiting for you")}>{asks + (run.status === "gated" ? 1 : 0)}</Chip> : <Chip tone={tone} title={l("Estado de la corrida", "Run status")}>{l(es, en)}</Chip>}
       </span>
     </button>
   );
@@ -75,7 +75,7 @@ function RunHeader({ state }: { state: TeamRunState }) {
           <span className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-[var(--cf-text-muted)]">
             <Users className="h-3 w-3" />
             {run.team_name}
-            <Chip tone={tone}>{l(es, en)}</Chip>
+            <Chip tone={tone} title={l("Estado de la corrida", "Run status")}>{l(es, en)}</Chip>
             <span title={l("Turnos usados de los permitidos", "Turns used of those allowed")}>{l(`${run.dispatches}/${run.policy.max_dispatches} turnos`, `${run.dispatches}/${run.policy.max_dispatches} turns`)}</span>
             {run.policy.budget_usd > 0 && <span>· {l("tope", "cap")} {money(run.policy.budget_usd)}</span>}
           </span>
@@ -85,10 +85,10 @@ function RunHeader({ state }: { state: TeamRunState }) {
             <span className="max-w-[140px] truncate">{card.title}</span>
           </Btn>
         )}
-        {run.status === "running" && <Btn small icon={Pause} onClick={() => void store.control(run.id, "pause")}>{l("Pausar", "Pause")}</Btn>}
-        {run.status === "paused" && <Btn small kind="primary" icon={Play} onClick={() => void store.control(run.id, "resume")}>{l("Seguir", "Resume")}</Btn>}
+        {run.status === "running" && <Btn small icon={Pause} title={l("Detiene a todos los miembros sin perder el trabajo", "Stops every member without losing work")} onClick={() => void store.control(run.id, "pause")}>{l("Pausar", "Pause")}</Btn>}
+        {run.status === "paused" && <Btn small kind="primary" icon={Play} title={l("Reanuda la corrida donde quedó", "Resumes the run where it stopped")} onClick={() => void store.control(run.id, "resume")}>{l("Seguir", "Resume")}</Btn>}
         {runIsLive(run) && (
-          <Btn small kind="danger" icon={Square} onClick={() => void confirmAction(l("¿Cancelar la corrida? Lo que está en curso se detiene.", "Abort the run? What is in flight stops.")).then((ok) => { if (ok) void store.control(run.id, "abort"); })}>
+          <Btn small kind="danger" icon={Square} title={l("Detiene la corrida por completo, sin reanudar", "Stops the run for good, no resuming")} onClick={() => void confirmAction(l("¿Cancelar la corrida? Lo que está en curso se detiene.", "Abort the run? What is in flight stops.")).then((ok) => { if (ok) void store.control(run.id, "abort"); })}>
             {l("Cancelar", "Abort")}
           </Btn>
         )}
@@ -208,7 +208,7 @@ export function LiveSpace() {
   if (!current) {
     return (
       <Empty icon={Activity} title={l("Nada en marcha", "Nothing running")} hint={l("Cuando un equipo trabaje, aquí lo verás crecer: el plan, quién hace qué en paralelo, lo que se dicen y lo que cuesta.", "When a team works, you will see it grow here: the plan, who does what in parallel, what they tell each other and what it costs.")}>
-        <Btn kind="primary" icon={WandSparkles} onClick={() => crew.open({ kind: "launch" })}>{l("Dale una tarea a un equipo", "Hand a team a task")}</Btn>
+        <Btn kind="primary" icon={WandSparkles} title={l("Abre el lanzador para asignar una tarea a un equipo", "Opens the launcher to assign a task to a team")} onClick={() => crew.open({ kind: "launch" })}>{l("Dale una tarea a un equipo", "Hand a team a task")}</Btn>
       </Empty>
     );
   }

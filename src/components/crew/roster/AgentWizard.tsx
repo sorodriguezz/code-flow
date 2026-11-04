@@ -24,7 +24,7 @@ import type { AgentDraft } from "../../../types/domain";
 import type { LibraryItem } from "../../../types/crew";
 import { AgentAvatar } from "../kit/Avatar";
 import { useModelOptions } from "../kit/models";
-import { Btn, Chip, Label, Modal, Seg, SPRING, Stepper, Switch, ToggleChip, field } from "../kit/ui";
+import { SelectBox, Btn, Chip, Label, Modal, Seg, SPRING, Stepper, Switch, ToggleChip, field } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
 
 type Step = "template" | "identity" | "brain" | "scope";
@@ -61,7 +61,7 @@ function Preview({ draft }: { draft: AgentDraft }) {
   const [hover, setHover] = useState(false);
   const provider = AI_PROVIDERS.find((p) => p.id === draft.provider);
   return (
-    <div className="flex flex-col items-center gap-3 rounded-[16px] border border-[var(--cf-border)] bg-[radial-gradient(120%_80%_at_50%_0%,var(--cf-accent-soft),transparent_70%)] p-5 text-center" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+    <div className="flex flex-col items-center gap-3 rounded-lg border border-[var(--cf-border)] p-5 text-center" onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
       <motion.div key={`${draft.icon}-${draft.color}`} initial={{ scale: 0.8, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={SPRING}>
         <AgentAvatar agent={{ id: draft.id ?? draft.name ?? "new", icon: draft.icon, color: draft.color }} size={84} state={hover ? "thinking" : "idle"} />
       </motion.div>
@@ -71,19 +71,19 @@ function Preview({ draft }: { draft: AgentDraft }) {
       </div>
       <div className="flex flex-wrap justify-center gap-1.5">
         {draft.provider && (
-          <Chip>
+          <Chip title={l("Motor (CLI) que lo ejecuta", "Engine (CLI) that runs it")}>
             <ProviderGlyph providerId={draft.provider} size={12} />
             {provider?.label ?? draft.provider}
           </Chip>
         )}
-        {draft.model && <Chip tone="accent">{draft.model}</Chip>}
-        {draft.effort && <Chip tone="violet">{draft.effort}</Chip>}
+        {draft.model && <Chip tone="accent" title={l("Modelo", "Model")}>{draft.model}</Chip>}
+        {draft.effort && <Chip tone="violet" title={l("Esfuerzo de razonamiento", "Reasoning effort")}>{draft.effort}</Chip>}
       </div>
       <div className="flex flex-wrap justify-center gap-1.5">
-        <Chip tone={draft.edits ? "ok" : "neutral"} icon={draft.edits ? Pencil : Eye}>{draft.edits ? l("Edita", "Edits") : l("Solo lee", "Reads only")}</Chip>
-        {draft.run_in === "terminal" && <Chip icon={SquareTerminal}>{l("Terminal", "Terminal")}</Chip>}
-        {draft.max_parallel > 1 && <Chip>×{draft.max_parallel}</Chip>}
-        {draft.repos.length > 0 && <Chip icon={FolderGit2}>{draft.repos.length}</Chip>}
+        <Chip tone={draft.edits ? "ok" : "neutral"} icon={draft.edits ? Pencil : Eye} title={draft.edits ? l("Puede editar archivos y correr comandos", "Can edit files and run commands") : l("Solo lee y responde, no toca archivos", "Only reads and answers, never touches files")}>{draft.edits ? l("Edita", "Edits") : l("Solo lee", "Reads only")}</Chip>
+        {draft.run_in === "terminal" && <Chip icon={SquareTerminal} title={l("En un equipo trabaja en una terminal visible", "In a team it works in a visible terminal")}>{l("Terminal", "Terminal")}</Chip>}
+        {draft.max_parallel > 1 && <Chip title={l("Tareas que puede llevar a la vez", "Tasks it can carry at once")}>×{draft.max_parallel}</Chip>}
+        {draft.repos.length > 0 && <Chip icon={FolderGit2} title={l(`Limitado a ${draft.repos.length} repositorios`, `Limited to ${draft.repos.length} repositories`)}>{draft.repos.length}</Chip>}
       </div>
       <p className="m-0 text-[11px] text-[var(--cf-text-faint)]">{l("Pasa el mouse: así se ve cuando trabaja.", "Hover: this is how it looks at work.")}</p>
     </div>
@@ -97,7 +97,7 @@ function TemplateStep({ onPick }: { onPick: (t: LibraryItem | null) => void }) {
   const templates = useMemo(() => useLibraryStore.getState().all().filter((t) => t.kind === "agent"), [saved, lang]); // eslint-disable-line react-hooks/exhaustive-deps
   return (
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-      <motion.button type="button" whileHover={{ y: -2 }} transition={SPRING} onClick={() => onPick(null)} className="flex flex-col items-start gap-2 rounded-[12px] border border-dashed border-[var(--cf-border-strong)] p-3 text-left hover:border-[var(--cf-accent)]">
+      <motion.button type="button" transition={SPRING} title={l("Empieza un agente vacío", "Starts an empty agent")} onClick={() => onPick(null)} className="flex flex-col items-start gap-2 rounded-lg border border-dashed border-[var(--cf-border-strong)] p-3 text-left transition-colors hover:border-[var(--cf-accent)] hover:bg-[var(--cf-hover)]">
         <span className="grid h-9 w-9 place-items-center rounded-[11px] bg-[var(--cf-sunken)] text-[var(--cf-text-muted)]"><FilePlus2 className="h-4 w-4" /></span>
         <b className="text-[12.5px]">{l("En blanco", "Blank")}</b>
         <span className="text-[11.5px] text-[var(--cf-text-muted)]">{l("Lo armas tú desde cero.", "You build it from scratch.")}</span>
@@ -109,9 +109,9 @@ function TemplateStep({ onPick }: { onPick: (t: LibraryItem | null) => void }) {
           initial={{ opacity: 0, y: 6 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ ...SPRING, delay: Math.min(i, 12) * 0.025 }}
-          whileHover={{ y: -2 }}
           onClick={() => onPick(t)}
-          className="flex flex-col items-start gap-2 rounded-[12px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 text-left hover:border-[var(--cf-accent-line)] hover:shadow-[var(--cf-shadow)]"
+          title={l(`Usar «${t.name}» como punto de partida`, `Use «${t.name}» as the starting point`)}
+          className="flex flex-col items-start gap-2 rounded-lg border border-[var(--cf-border)] p-3 text-left transition-colors hover:border-[var(--cf-accent-line)] hover:bg-[var(--cf-hover)]"
         >
           <AgentAvatar agent={{ id: t.id, icon: t.icon, color: t.color }} size={36} />
           <b className="text-[12.5px]">{t.name}</b>
@@ -146,8 +146,6 @@ function IdentityStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<
             <motion.button
               key={c}
               type="button"
-              whileHover={{ scale: 1.15 }}
-              whileTap={{ scale: 0.92 }}
               transition={SPRING}
               aria-label={l(COLOR_NAMES[c][0], COLOR_NAMES[c][1])}
               title={l(COLOR_NAMES[c][0], COLOR_NAMES[c][1])}
@@ -165,10 +163,10 @@ function IdentityStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<
           <span className="flex-1"><Label>{l("Icono", "Icon")}</Label></span>
           <label className="relative">
             <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--cf-text-faint)]" />
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={l("líder, datos, test…", "lead, data, test…")} className={`${field} h-[28px] w-[180px] pl-7`} />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={l("líder, datos, test…", "lead, data, test…")} title={l("Busca un icono por palabra", "Search an icon by word")} className={`${field} !w-[180px] pl-7`} />
           </label>
         </div>
-        <div className="grid max-h-[220px] grid-cols-8 gap-1.5 overflow-auto rounded-[11px] border border-[var(--cf-border)] p-2 sm:grid-cols-10">
+        <div className="grid max-h-[220px] grid-cols-8 gap-1.5 overflow-auto rounded-lg border border-[var(--cf-border)] p-2 sm:grid-cols-10">
           {icons.map(({ id, Icon }) => {
             const on = draft.icon === id;
             return (
@@ -220,14 +218,14 @@ function BrainStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<Age
               <motion.button
                 key={p.id}
                 type="button"
-                whileHover={{ y: -2 }}
                 transition={SPRING}
                 onClick={() => patch({ provider: p.id, model: "", effort: "", account_id: null, model_ladder: [] })}
-                className={`relative flex items-center gap-2 rounded-[11px] border px-2.5 py-2 text-left text-[12.5px] font-medium ${on ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)]" : "border-[var(--cf-border)] hover:border-[var(--cf-border-strong)]"}`}
+                title={l(`Usar ${p.label} como motor`, `Use ${p.label} as the engine`)}
+                className={`relative flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-[12.5px] font-medium transition-colors ${on ? "border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)]" : "border-[var(--cf-border)] hover:bg-[var(--cf-hover)]"}`}
               >
                 <ProviderGlyph providerId={p.id} size={16} />
                 <span className="truncate">{p.label}</span>
-                {on && <motion.span layoutId="wizard-provider" className="absolute inset-0 rounded-[11px] ring-2 ring-[var(--cf-accent)]" transition={SPRING} />}
+                
               </motion.button>
             );
           })}
@@ -237,19 +235,19 @@ function BrainStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<Age
         <Label>{l("Modelo", "Model")}</Label>
         <div className="flex flex-wrap gap-1.5">
           {models.filter((m) => !m.legacy).map((m) => (
-            <ToggleChip key={m.id} on={draft.model === m.id && !custom} onClick={() => { setCustom(false); patch({ model: m.id }); }}>
+            <ToggleChip key={m.id} on={draft.model === m.id && !custom} title={m.id} onClick={() => { setCustom(false); patch({ model: m.id }); }}>
               {m.label}
             </ToggleChip>
           ))}
           {models.some((m) => m.legacy) && (
-            <select value={models.some((m) => m.legacy && m.id === draft.model) ? draft.model : ""} onChange={(e) => e.target.value && patch({ model: e.target.value })} className={`${field} h-[26px] w-auto rounded-full text-[12px]`}>
+            <SelectBox value={models.some((m) => m.legacy && m.id === draft.model) ? draft.model : ""} onChange={(v) => v && patch({ model: v })} className="w-[150px] shrink-0" compact>
               <option value="">{l("Anteriores…", "Older…")}</option>
               {models.filter((m) => m.legacy).map((m) => (
                 <option key={m.id} value={m.id}>{m.label}</option>
               ))}
-            </select>
+            </SelectBox>
           )}
-          <ToggleChip on={custom || (!!draft.model && !known)} onClick={() => setCustom(true)}>{l("Otro…", "Other…")}</ToggleChip>
+          <ToggleChip on={custom || (!!draft.model && !known)} title={l("Escribe el id exacto de otro modelo", "Type the exact id of another model")} onClick={() => setCustom(true)}>{l("Otro…", "Other…")}</ToggleChip>
         </div>
         {(custom || (!!draft.model && !known)) && <input value={draft.model} onChange={(e) => patch({ model: e.target.value.trim() })} placeholder={l("El id exacto que recibe el CLI", "The exact id the CLI takes")} className={`${field} font-mono`} />}
       </div>
@@ -267,13 +265,13 @@ function BrainStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<Age
       {accounts.length > 0 && (
         <div className="flex flex-col gap-1.5">
           <Label>{l("Cuenta", "Account")}</Label>
-          <select value={draft.account_id ?? ""} onChange={(e) => patch({ account_id: e.target.value || null })} className={field}>
+          <SelectBox value={draft.account_id ?? ""} onChange={(v) => patch({ account_id: v || null })} className="w-full">
             <option value="">{l("Automática (la del workspace)", "Automatic (the workspace's)")}</option>
             <option value={SYSTEM_ACCOUNT}>{l("La del sistema", "System login")}</option>
             {accounts.map((a) => (
               <option key={a.id} value={a.id}>{a.label}</option>
             ))}
-          </select>
+          </SelectBox>
         </div>
       )}
     </div>
@@ -286,7 +284,7 @@ function ScopeStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<Age
   const models = useModelOptions(draft.provider);
   return (
     <div className="flex flex-col gap-4">
-      <div className="rounded-[11px] border border-[var(--cf-border)] px-3 py-1.5">
+      <div className="rounded-lg border border-[var(--cf-border)] px-3 py-1.5">
         <Switch checked={draft.edits} onChange={(edits) => patch({ edits })} label={l("Puede editar archivos", "Can edit files")} hint={draft.edits ? l("Escribe código y corre comandos en su worktree.", "Writes code and runs commands in its worktree.") : l("Sus turnos corren en modo análisis: lee y responde, no toca nada.", "Its turns run in analysis mode: it reads and answers, touches nothing.")} />
         <Switch checked={draft.enabled} onChange={(enabled) => patch({ enabled })} label={l("Activo", "Active")} hint={l("Apagado no aparece en el dock ni se le asigna trabajo.", "Off, it leaves the dock and gets no work.")} />
       </div>
@@ -294,7 +292,7 @@ function ScopeStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<Age
         <Label>{l("Repositorios que puede tocar (vacío: los de cada tarea)", "Repositories it may touch (empty: each task's)")}</Label>
         <div className="flex flex-wrap gap-1.5">
           {projects.map((p) => (
-            <ToggleChip key={p.id} icon={FolderGit2} on={draft.repos.includes(p.id)} onClick={() => patch({ repos: draft.repos.includes(p.id) ? draft.repos.filter((x) => x !== p.id) : [...draft.repos, p.id] })}>
+            <ToggleChip key={p.id} icon={FolderGit2} on={draft.repos.includes(p.id)} title={draft.repos.includes(p.id) ? l(`Quitar ${p.name} de su alcance`, `Remove ${p.name} from its scope`) : l(`Dejarle tocar ${p.name}`, `Let it touch ${p.name}`)} onClick={() => patch({ repos: draft.repos.includes(p.id) ? draft.repos.filter((x) => x !== p.id) : [...draft.repos, p.id] })}>
               {p.name}
             </ToggleChip>
           ))}
@@ -303,11 +301,11 @@ function ScopeStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<Age
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <div className="flex flex-col gap-1.5">
           <Label>{l("Dentro de un equipo corre en", "In a team it runs in")}</Label>
-          <Seg size="sm" value={draft.run_in} onChange={(run_in) => patch({ run_in })} options={[{ value: "headless", label: l("Fondo", "Background") }, { value: "terminal", label: "Terminal", icon: SquareTerminal }]} />
+          <Seg size="sm" value={draft.run_in} onChange={(run_in) => patch({ run_in })} options={[{ value: "headless", label: l("Fondo", "Background"), title: l("Trabaja sin ventana, en segundo plano", "Works with no window, in the background") }, { value: "terminal", label: "Terminal", icon: SquareTerminal, title: l("Trabaja en una terminal que puedes mirar", "Works in a terminal you can watch") }]} />
         </div>
         <div className="flex flex-col gap-1.5">
           <Label>{l("Tareas a la vez", "Tasks at once")}</Label>
-          <Stepper value={draft.max_parallel} min={1} max={6} onChange={(max_parallel) => patch({ max_parallel })} label="parallel" />
+          <Stepper value={draft.max_parallel} min={1} max={6} onChange={(max_parallel) => patch({ max_parallel })} label={l("Tareas a la vez", "Tasks at once")} />
         </div>
       </div>
       {models.length > 1 && (
@@ -317,7 +315,7 @@ function ScopeStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<Age
             {models.filter((m) => !m.legacy).map((m) => {
               const index = draft.model_ladder.indexOf(m.id);
               return (
-                <ToggleChip key={m.id} on={index >= 0} onClick={() => patch({ model_ladder: index >= 0 ? draft.model_ladder.filter((x) => x !== m.id) : [...draft.model_ladder, m.id] })}>
+                <ToggleChip key={m.id} on={index >= 0} title={index >= 0 ? l(`Intento ${index + 1} al reintentar · clic para quitarlo`, `Attempt ${index + 1} on retry · click to remove`) : l("Añadir a la escalera: se usa si un intento falla", "Add to the ladder: used if an attempt fails")} onClick={() => patch({ model_ladder: index >= 0 ? draft.model_ladder.filter((x) => x !== m.id) : [...draft.model_ladder, m.id] })}>
                   {index >= 0 && <b className="tabular-nums">{index + 1}</b>}
                   {m.label}
                 </ToggleChip>
@@ -391,11 +389,11 @@ export function AgentWizard({ templateId, agentId }: { templateId?: string; agen
       onClose={crew.close}
       footer={
         <>
-          {index > 0 && <Btn kind="ghost" icon={ArrowLeft} onClick={() => go(steps[index - 1])}>{l("Atrás", "Back")}</Btn>}
+          {index > 0 && <Btn kind="ghost" icon={ArrowLeft} title={l("Paso anterior", "Previous step")} onClick={() => go(steps[index - 1])}>{l("Atrás", "Back")}</Btn>}
           <span className="flex-1 text-[12px] text-[var(--cf-text-faint)]">{!ready && step !== "template" ? l("Falta nombre, motor o modelo.", "Name, engine or model missing.") : ""}</span>
-          {step !== "template" && index < steps.length - 1 && <Btn icon={ArrowRight} onClick={() => go(steps[index + 1])}>{l("Siguiente", "Next")}</Btn>}
+          {step !== "template" && index < steps.length - 1 && <Btn icon={ArrowRight} title={l("Paso siguiente", "Next step")} onClick={() => go(steps[index + 1])}>{l("Siguiente", "Next")}</Btn>}
           {step !== "template" && (
-            <Btn kind="primary" icon={Check} disabled={!ready || busy} onClick={() => void save()}>
+            <Btn kind="primary" icon={Check} disabled={!ready || busy} title={ready ? l("Guarda el agente con lo que ves", "Saves the agent as shown") : l("Falta nombre, motor o modelo", "Name, engine or model missing")} onClick={() => void save()}>
               {busy ? l("Guardando…", "Saving…") : existing ? l("Guardar", "Save") : l("Crear agente", "Create agent")}
             </Btn>
           )}
@@ -408,8 +406,8 @@ export function AgentWizard({ templateId, agentId }: { templateId?: string; agen
           const on = s === step;
           const done = i < index;
           return (
-            <button key={s} type="button" onClick={() => (s !== "template" || !existing) && go(s)} className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-medium transition-colors ${on ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : done ? "text-[var(--cf-text)]" : "text-[var(--cf-text-faint)]"}`}>
-              <span className={`grid h-5 w-5 place-items-center rounded-full text-[10.5px] ${on ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)]" : done ? "bg-[var(--cf-success)] text-white" : "bg-[var(--cf-sunken)]"}`}>{done ? <Check className="h-3 w-3" /> : i + 1}</span>
+            <button key={s} type="button" title={l(`Ir a «${L.es}»`, `Go to «${L.en}»`)} onClick={() => (s !== "template" || !existing) && go(s)} className={`flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium transition-colors ${on ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : done ? "text-[var(--cf-text)] hover:bg-[var(--cf-hover)]" : "text-[var(--cf-text-faint)] hover:bg-[var(--cf-hover)]"}`}>
+              <span className={`grid h-[18px] w-[18px] place-items-center rounded-full text-[10.5px] ${on ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)]" : done ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)] shadow-[inset_0_0_0_1px_var(--cf-accent-line)]" : "bg-[var(--cf-hover)]"}`}>{done ? <Check className="h-3 w-3" /> : i + 1}</span>
               <span className="hidden sm:inline">{l(L.es, L.en)}</span>
             </button>
           );

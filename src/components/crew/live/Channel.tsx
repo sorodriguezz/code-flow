@@ -9,7 +9,7 @@ import { useTeamStore } from "../../../state/teamStore";
 import { useAgentsStore } from "../../../state/agentsStore";
 import type { TeamMessage, TeamRunState } from "../../../types/team";
 import { AgentAvatar } from "../kit/Avatar";
-import { Btn, Chip, ToggleChip, field } from "../kit/ui";
+import { SelectBox, Btn, Chip, ToggleChip, field } from "../kit/ui";
 import { useL } from "../state";
 import { MESSAGE_KIND } from "./look";
 
@@ -49,7 +49,7 @@ function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; c
           <b>{fromUser ? l("Tú", "You") : m.from_name}</b>
           <ArrowRight className="h-2.5 w-2.5 text-[var(--cf-text-faint)]" />
           <span className="text-[var(--cf-text-muted)]">{m.to_id === "user" ? l("ti", "you") : m.to_id === "all" ? l("todos", "everyone") : m.to_name}</span>
-          <Chip tone={tone} className="!h-[18px] !px-1.5 !text-[10px]">{l(kes, ken)}</Chip>
+          <Chip tone={tone} title={l("Tipo de mensaje", "Message type")} className="!h-[18px] !px-1.5 !text-[10px]">{l(kes, ken)}</Chip>
           <span className="ml-auto text-[10px] text-[var(--cf-text-faint)]">{new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
         </div>
         <p className={`m-0 mt-0.5 whitespace-pre-wrap break-words text-[12.5px] leading-relaxed ${compact ? "line-clamp-6" : ""}`}>{m.body}</p>
@@ -59,7 +59,7 @@ function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; c
             {m.options.length > 0 && (
               <div className="flex flex-wrap gap-1.5">
                 {m.options.map((o) => (
-                  <button key={o} type="button" onClick={() => send(o)} className="h-[26px] rounded-full border border-[var(--cf-border-strong)] bg-[var(--cf-surface)] px-2.5 text-[12px] hover:border-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)]">
+                  <button key={o} type="button" title={l("Responde con esta opción", "Answer with this option")} onClick={() => send(o)} className="h-[26px] rounded-full border border-[var(--cf-border-strong)] bg-[var(--cf-surface)] px-2.5 text-[12px] hover:border-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)]">
                     {o}
                   </button>
                 ))}
@@ -67,7 +67,7 @@ function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; c
             )}
             <div className="flex gap-1.5">
               <input value={answer} onChange={(e) => setAnswer(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send(answer)} placeholder={l("Tu respuesta…", "Your answer…")} className={`${field} h-[28px]`} />
-              <Btn small kind="primary" disabled={!answer.trim()} onClick={() => send(answer)}>{l("Responder", "Answer")}</Btn>
+              <Btn small kind="primary" title={l("Envía tu respuesta a quien preguntó", "Sends your answer to whoever asked")} disabled={!answer.trim()} onClick={() => send(answer)}>{l("Responder", "Answer")}</Btn>
             </div>
           </div>
         )}
@@ -108,9 +108,9 @@ export function Channel({ state, memberId, compact }: { state: TeamRunState; mem
     <div className="flex min-h-0 flex-1 flex-col">
       {!memberId && (
         <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-2.5 py-1.5">
-          <ToggleChip on={filter === "all"} onClick={() => setFilter("all")}>{l("Todo", "All")}</ToggleChip>
-          <ToggleChip on={filter === "talk"} onClick={() => setFilter("talk")}>{l("Conversación", "Talk")}</ToggleChip>
-          <ToggleChip on={filter === "you"} onClick={() => setFilter("you")}>
+          <ToggleChip title={l("Muestra todos los mensajes del canal", "Shows every message in the channel")} on={filter === "all"} onClick={() => setFilter("all")}>{l("Todo", "All")}</ToggleChip>
+          <ToggleChip title={l("Solo lo que se dicen los miembros", "Only what members say to each other")} on={filter === "talk"} onClick={() => setFilter("talk")}>{l("Conversación", "Talk")}</ToggleChip>
+          <ToggleChip title={l("Solo lo que te piden o te dicen a ti", "Only what is asked of or said to you")} on={filter === "you"} onClick={() => setFilter("you")}>
             {l("Contigo", "With you")}
             {waiting > 0 && <span className="grid h-4 min-w-4 place-items-center rounded-full bg-[var(--cf-warning)] px-1 text-[10px] text-white">{waiting}</span>}
           </ToggleChip>
@@ -128,16 +128,16 @@ export function Channel({ state, memberId, compact }: { state: TeamRunState; mem
       {live && (
         <div className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] p-2">
           {!memberId && (
-            <select value={to} onChange={(e) => setTo(e.target.value)} className={`${field} h-[30px] w-[120px]`} aria-label={l("Para", "To")}>
+            <SelectBox value={to} onChange={(v) => setTo(v)} ariaLabel={l("Para", "To")} title={l("Elige quién recibe tu nota", "Choose who receives your note")} className="w-[120px] shrink-0">
               <option value="all">{l("Todos", "Everyone")}</option>
               {run.lead && <option value="lead">{l("Líder", "Lead")}</option>}
               {run.members.filter((m) => m.id !== run.lead).map((m) => (
                 <option key={m.id} value={m.id}>{m.name}</option>
               ))}
-            </select>
+            </SelectBox>
           )}
           <input value={body} onChange={(e) => setBody(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={memberId ? l("Una nota para este miembro…", "A note for this member…") : l("Una nota para el equipo…", "A note for the team…")} className={`${field} h-[30px]`} />
-          <button type="button" aria-label={l("Enviar", "Send")} disabled={!body.trim()} onClick={send} className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-[8px] bg-[var(--cf-accent)] text-[var(--cf-on-accent)] disabled:opacity-40">
+          <button type="button" title={l("Envía la nota al equipo", "Sends the note to the team")} aria-label={l("Enviar", "Send")} disabled={!body.trim()} onClick={send} className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-[8px] bg-[var(--cf-accent)] text-[var(--cf-on-accent)] disabled:opacity-40">
             <Send className="h-3.5 w-3.5" />
           </button>
         </div>

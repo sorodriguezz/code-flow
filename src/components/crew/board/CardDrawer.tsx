@@ -9,7 +9,6 @@ import {
   Activity,
   BookOpen,
   Bug,
-  Check,
   ExternalLink,
   FileText,
   Flag,
@@ -39,7 +38,9 @@ import type { ChatArtifactSummary } from "../../../lib/tauri/chatRefsCommands";
 import { ArtifactViewer, artifactIcon } from "../../chat/ArtifactViewer";
 import { emptyBacklogItem, type BacklogItem, type BacklogKind, type BacklogLink, type Criterion } from "../../../types/crew";
 import { AgentAvatar, TeamAvatar } from "../kit/Avatar";
-import { Btn, Chip, Drawer, Label, Seg, field, type Tone } from "../kit/ui";
+import { Btn, Chip, Drawer, IconBtn, Label, Seg, ToggleChip, field, type Tone } from "../kit/ui";
+import { Checkbox } from "../../common/Checkbox";
+import { fieldClass } from "../../common/recipes";
 import { money, useCrewStore, useL } from "../state";
 
 const NO_PROJECTS: never[] = [];
@@ -125,6 +126,7 @@ function LinkRow({ link }: { link: BacklogLink }) {
     <button
       type="button"
       onClick={open}
+      title={l("Abre este trabajo", "Opens this work")}
       disabled={!task && !chain && !run}
       className="flex w-full items-center gap-2.5 rounded-[9px] border border-[var(--cf-border)] px-2.5 py-2 text-left hover:border-[var(--cf-border-strong)] hover:bg-[var(--cf-hover)] disabled:opacity-60"
     >
@@ -188,6 +190,7 @@ function WorkingNow({ item }: { item: BacklogItem }) {
             type="button"
             layout
             onClick={() => crew.open({ kind: "chat", runId: row.runId, memberId: row.memberId })}
+            title={l(`Abre el chat de ${row.name}`, `Opens ${row.name}'s chat`)}
             className="flex items-center gap-2.5 rounded-[10px] border border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)] px-2.5 py-2 text-left hover:brightness-[1.03]"
           >
             <AgentAvatar agent={{ id: row.agentId, icon: row.icon, color: row.color }} size={30} state={row.waiting ? "waiting" : "thinking"} />
@@ -234,7 +237,7 @@ function Artifacts({ item }: { item: BacklogItem }) {
         {list.map((a) => {
           const Icon = artifactIcon(a.kind);
           return (
-            <button key={a.id} type="button" onClick={() => setOpen(a)} className="flex items-center gap-2 rounded-[9px] border border-[var(--cf-border)] px-2.5 py-2 text-left hover:border-[var(--cf-border-strong)] hover:bg-[var(--cf-hover)]">
+            <button key={a.id} type="button" title={l("Ver el artefacto", "View the artifact")} onClick={() => setOpen(a)} className="flex items-center gap-2 rounded-[9px] border border-[var(--cf-border)] px-2.5 py-2 text-left hover:border-[var(--cf-border-strong)] hover:bg-[var(--cf-hover)]">
               <Icon className="h-4 w-4 shrink-0 text-[var(--cf-violet)]" />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-[12.5px] font-medium">{a.title || a.name}</span>
@@ -271,30 +274,22 @@ function Criteria({ criteria, onChange }: { criteria: Criterion[]; onChange: (ne
         <AnimatePresence initial={false}>
           {criteria.map((c) => (
             <motion.div key={c.id} layout initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} className="group flex items-center gap-2 rounded-[8px] px-1 py-1 hover:bg-[var(--cf-hover)]">
-              <button
-                type="button"
-                role="checkbox"
-                aria-checked={c.done}
-                onClick={() => onChange(criteria.map((x) => (x.id === c.id ? { ...x, done: !x.done } : x)))}
-                className={`grid h-[18px] w-[18px] shrink-0 place-items-center rounded-[5px] border transition-colors ${c.done ? "border-[var(--cf-success)] bg-[var(--cf-success)] text-white" : "border-[var(--cf-border-strong)]"}`}
-              >
-                {c.done && <Check className="h-3 w-3" strokeWidth={3} />}
-              </button>
+              <span title={c.done ? l("Marcar como pendiente", "Mark as pending") : l("Marcar como cumplido", "Mark as met")}>
+                <Checkbox checked={c.done} onChange={(done) => onChange(criteria.map((x) => (x.id === c.id ? { ...x, done } : x)))} />
+              </span>
               <input
                 value={c.text}
                 onChange={(e) => onChange(criteria.map((x) => (x.id === c.id ? { ...x, text: e.target.value } : x)))}
                 className={`min-w-0 flex-1 bg-transparent text-[12.5px] outline-none ${c.done ? "text-[var(--cf-text-muted)] line-through" : ""}`}
               />
-              <button type="button" aria-label={l("Quitar", "Remove")} onClick={() => onChange(criteria.filter((x) => x.id !== c.id))} className="opacity-0 transition-opacity group-hover:opacity-100">
-                <X className="h-3.5 w-3.5 text-[var(--cf-text-faint)]" />
-              </button>
+              <IconBtn title={l("Quitar el criterio", "Remove the criterion")} icon={X} onClick={() => onChange(criteria.filter((x) => x.id !== c.id))} className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100" />
             </motion.div>
           ))}
         </AnimatePresence>
       </div>
       <div className="flex gap-1.5">
         <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} placeholder={l("Dado… cuando… entonces…", "Given… when… then…")} className={field} />
-        <Btn small icon={Plus} onClick={add} disabled={!text.trim()}>{l("Añadir", "Add")}</Btn>
+        <Btn icon={Plus} onClick={add} disabled={!text.trim()} title={l("Añade el criterio (Enter)", "Adds the criterion (Enter)")}>{l("Añadir", "Add")}</Btn>
       </div>
     </section>
   );
@@ -323,7 +318,7 @@ function Subtasks({ parent }: { parent: BacklogItem }) {
     <section className="flex flex-col gap-2">
       <Label>{l("Subtareas", "Subtasks")}</Label>
       {children.map((child) => (
-        <button key={child.id} type="button" onClick={() => crew.open({ kind: "card", id: child.id })} className="flex items-center gap-2 rounded-[8px] border border-[var(--cf-border)] px-2.5 py-1.5 text-left text-[12.5px] hover:bg-[var(--cf-hover)]">
+        <button key={child.id} type="button" title={l("Abre la subtarea", "Opens the subtask")} onClick={() => crew.open({ kind: "card", id: child.id })} className="flex items-center gap-2 rounded-[8px] border border-[var(--cf-border)] px-2.5 py-1.5 text-left text-[12.5px] hover:bg-[var(--cf-hover)]">
           <SquareCheckBig className={`h-3.5 w-3.5 ${child.status === "done" ? "text-[var(--cf-success)]" : "text-[var(--cf-text-faint)]"}`} />
           <span className={`min-w-0 flex-1 truncate ${child.status === "done" ? "text-[var(--cf-text-muted)] line-through" : ""}`}>{child.title}</span>
           <Chip>{child.status}</Chip>
@@ -331,7 +326,7 @@ function Subtasks({ parent }: { parent: BacklogItem }) {
       ))}
       <div className="flex gap-1.5">
         <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && void add()} placeholder={l("Una tarea de esta historia", "A task of this story")} className={field} />
-        <Btn small icon={Plus} onClick={() => void add()} disabled={!text.trim()}>{l("Crear", "Create")}</Btn>
+        <Btn icon={Plus} onClick={() => void add()} disabled={!text.trim()} title={l("Crea la subtarea en esta historia (Enter)", "Creates the subtask in this story (Enter)")}>{l("Crear", "Create")}</Btn>
       </div>
     </section>
   );
@@ -393,26 +388,24 @@ export function CardDrawer({ cardId }: { cardId: string }) {
 
   return (
     <Drawer onClose={close} width={520} label="card">
-        <header className="flex flex-col gap-3 border-b border-[var(--cf-border)] px-4 pb-3 pt-4">
+        <header className="flex flex-col gap-3 border-b border-[var(--cf-border)] px-5 pb-4 pt-4">
           <div className="flex items-center gap-2">
             <Seg size="sm" value={item.kind} onChange={(kind) => patch({ kind }, true)} options={kinds} />
             <span className="flex-1" />
             {item.ticket && (
-              <button type="button" onClick={() => item.ticket?.url && void openExternalUrl(item.ticket.url)} className="inline-flex items-center gap-1 font-mono text-[11.5px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]">
+              <button type="button" title={l("Abre el ticket original", "Opens the original ticket")} onClick={() => item.ticket?.url && void openExternalUrl(item.ticket.url)} className="inline-flex items-center gap-1 font-mono text-[11.5px] text-[var(--cf-text-muted)] hover:text-[var(--cf-accent)]">
                 <Link2 className="h-3.5 w-3.5" />
                 {item.ticket.key}
               </button>
             )}
-            <button type="button" aria-label={l("Cerrar", "Close")} onClick={close} className="grid h-[30px] w-[30px] place-items-center rounded-[8px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
-              <X className="h-4 w-4" />
-            </button>
+            <IconBtn title={l("Cerrar (Esc)", "Close (Esc)")} icon={X} onClick={close} />
           </div>
           <textarea
             value={item.title}
             onChange={(e) => patch({ title: e.target.value.replace(/\n/g, " ") })}
             rows={1}
             placeholder={l("¿Qué hay que hacer?", "What needs doing?")}
-            className="field-sizing-content w-full resize-none bg-transparent text-[17px] font-semibold leading-snug outline-none"
+            className="field-sizing-content w-full resize-none rounded-md bg-transparent text-[17px] font-semibold leading-snug outline-none placeholder:text-[var(--cf-text-faint)]"
           />
           <div className="flex flex-wrap items-center gap-2">
             {manual ? (
@@ -428,34 +421,36 @@ export function CardDrawer({ cardId }: { cardId: string }) {
             ) : (
               <Chip tone={item.status === "done" ? "ok" : item.status === "review" ? "warn" : "accent"}>{item.status === "doing" ? l("En curso", "Doing") : item.status === "review" ? l("Revisión", "Review") : l("Hecho", "Done")}</Chip>
             )}
-            <span className="inline-flex items-center gap-1 rounded-[8px] border border-[var(--cf-border)] p-[2px]" role="radiogroup" aria-label={l("Prioridad", "Priority")}>
-              {[0, 1, 2, 3].map((p) => (
-                <button
-                  key={p}
-                  type="button"
-                  role="radio"
-                  aria-checked={item.priority === p}
-                  onClick={() => patch({ priority: p }, true)}
-                  className={`inline-flex h-[22px] items-center gap-0.5 rounded-[6px] px-1.5 text-[11px] font-semibold ${item.priority === p ? "bg-[var(--cf-sunken)] text-[var(--cf-text)]" : "text-[var(--cf-text-faint)] hover:text-[var(--cf-text)]"}`}
-                >
-                  {p === 0 ? "—" : <><Flag className="h-3 w-3" />P{4 - p}</>}
-                </button>
-              ))}
-            </span>
-            {cost > 0 && <Chip>{money(cost)}</Chip>}
+            <Seg
+              size="sm"
+              value={String(item.priority)}
+              onChange={(p) => patch({ priority: Number(p) }, true)}
+              options={[0, 1, 2, 3].map((p) => ({
+                value: String(p),
+                label: p === 0 ? "—" : `P${4 - p}`,
+                icon: p === 0 ? undefined : Flag,
+                title: p === 0 ? l("Sin prioridad", "No priority") : l(`Prioridad P${4 - p}${p === 3 ? " (la más alta)" : ""}`, `Priority P${4 - p}${p === 3 ? " (highest)" : ""}`),
+              }))}
+            />
+            {cost > 0 && <Chip title={l("Lo que lleva gastado esta tarjeta", "What this card has spent so far")}>{money(cost)}</Chip>}
           </div>
         </header>
 
-        <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-4 py-4">
-          <section className="flex items-center gap-3 rounded-[12px] border border-[var(--cf-border)] bg-[var(--cf-sunken)] p-3">
-            {agent ? <AgentAvatar agent={agent} size={36} /> : team ? <TeamAvatar size={38} /> : <span className="grid h-9 w-9 place-items-center rounded-[11px] border-2 border-dashed border-[var(--cf-border-strong)] text-[var(--cf-text-faint)]">?</span>}
+        <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-5 py-4">
+          <section className="flex items-center gap-3 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3">
+            {agent ? <AgentAvatar agent={agent} size={36} /> : team ? <TeamAvatar size={38} /> : <span className="grid h-9 w-9 shrink-0 place-items-center rounded-[11px] border border-dashed border-[var(--cf-border-strong)] text-[var(--cf-text-faint)]">?</span>}
             <span className="min-w-0 flex-1">
               <b className="block truncate text-[13px]">{agent?.name ?? team?.name ?? l("Sin asignar", "Unassigned")}</b>
               <span className="block text-[11.5px] text-[var(--cf-text-muted)]">
                 {agent ? `${agent.model}${agent.effort ? ` · ${agent.effort}` : ""}` : team ? l(`Equipo de ${team.members.length}`, `Team of ${team.members.length}`) : l("Suelta un agente o un equipo del dock sobre la tarjeta.", "Drop an agent or a team from the dock onto the card.")}
               </span>
             </span>
-            <Btn kind="primary" icon={WandSparkles} onClick={launch}>
+            <Btn
+              kind="primary"
+              icon={WandSparkles}
+              onClick={launch}
+              title={item.links.length ? l("Lanza la tarjeta otra vez", "Launches the card again") : agent || team ? l("Empieza el trabajo con quien la tiene asignada", "Starts the work with its assignee") : l("Elige quién la hace y cómo", "Choose who does it and how")}
+            >
               {item.links.length ? l("Otra vez", "Again") : agent || team ? l("Lanzar", "Launch") : l("Asignar", "Assign")}
             </Btn>
           </section>
@@ -493,22 +488,21 @@ export function CardDrawer({ cardId }: { cardId: string }) {
               {projects.map((p) => {
                 const on = item.repos.includes(p.id);
                 return (
-                  <button
+                  <ToggleChip
                     key={p.id}
-                    type="button"
-                    aria-pressed={on}
+                    on={on}
+                    icon={FolderGit2}
+                    title={on ? l(`Quitar ${p.name} de la tarjeta`, `Remove ${p.name} from the card`) : l(`Trabajar también en ${p.name}`, `Also work in ${p.name}`)}
                     onClick={() => patch({ repos: on ? item.repos.filter((r) => r !== p.id) : [...item.repos, p.id] }, true)}
-                    className={`inline-flex h-[26px] items-center gap-1.5 rounded-full border px-2.5 text-[12px] font-medium ${on ? "border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-border-strong)]"}`}
                   >
-                    <FolderGit2 className="h-3.5 w-3.5" />
                     {p.name}
-                  </button>
+                  </ToggleChip>
                 );
               })}
               {projects.length === 0 && <span className="text-[12px] text-[var(--cf-text-muted)]">{l("Este workspace no tiene repositorios.", "This workspace has no repositories.")}</span>}
             </div>
             {item.mode_config.branch && (
-              <span className="inline-flex items-center gap-1 text-[11.5px] text-[var(--cf-text-muted)]">
+              <span title={l("Rama de trabajo", "Working branch")} className="inline-flex items-center gap-1 text-[11.5px] text-[var(--cf-text-muted)]">
                 <GitBranch className="h-3.5 w-3.5" />
                 {item.mode_config.branch}
               </span>
@@ -519,22 +513,21 @@ export function CardDrawer({ cardId }: { cardId: string }) {
             <Label>{l("Etiquetas", "Labels")}</Label>
             <div className="flex flex-wrap items-center gap-1.5">
               {item.labels.map((label) => (
-                <span key={label} className="inline-flex h-[24px] items-center gap-1 rounded-full bg-[var(--cf-sunken)] pl-2 pr-1 text-[11.5px]">
-                  <Tag className="h-3 w-3 text-[var(--cf-text-faint)]" />
+                <Chip key={label} icon={Tag} className="h-6 pr-0.5">
                   {label}
-                  <button type="button" aria-label={l("Quitar", "Remove")} onClick={() => patch({ labels: item.labels.filter((x) => x !== label) }, true)} className="grid h-4 w-4 place-items-center rounded-full hover:bg-[var(--cf-hover)]">
+                  <button type="button" title={l("Quitar la etiqueta", "Remove the label")} aria-label={l("Quitar", "Remove")} onClick={() => patch({ labels: item.labels.filter((x) => x !== label) }, true)} className="grid h-4 w-4 place-items-center rounded-[4px] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]">
                     <X className="h-3 w-3" />
                   </button>
-                </span>
+                </Chip>
               ))}
-              <input value={labelText} onChange={(e) => setLabelText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addLabel()} onBlur={addLabel} placeholder={l("+ etiqueta", "+ label")} className="h-[24px] w-[110px] rounded-full border border-dashed border-[var(--cf-border-strong)] bg-transparent px-2 text-[11.5px] outline-none focus:border-[var(--cf-accent)]" />
+              <input value={labelText} onChange={(e) => setLabelText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addLabel()} onBlur={addLabel} placeholder={l("+ etiqueta", "+ label")} title={l("Escribe y pulsa Enter para añadirla", "Type and press Enter to add it")} className={fieldClass({ size: "sm", className: "w-[130px]" })} />
             </div>
           </section>
 
           <Artifacts item={item} />
 
           {item.links.length === 0 && item.criteria.length === 0 && !item.body && (
-            <p className="m-0 flex items-start gap-2 rounded-[10px] bg-[var(--cf-sunken)] p-3 text-[12px] text-[var(--cf-text-muted)]">
+            <p className="m-0 flex items-start gap-2 rounded-lg border border-[var(--cf-border)] p-3 text-[12px] text-[var(--cf-text-muted)]">
               <FileText className="mt-0.5 h-4 w-4 shrink-0" />
               {l(
                 "Los criterios y la descripción viajan con la tarea: el agente o el equipo los recibe como parte del objetivo.",
@@ -544,10 +537,10 @@ export function CardDrawer({ cardId }: { cardId: string }) {
           )}
         </div>
 
-        <footer className="flex items-center gap-2 border-t border-[var(--cf-border)] bg-[var(--cf-sunken)] px-4 py-3">
-          <Btn kind="danger" small icon={Trash2} onClick={() => void remove()}>{l("Borrar", "Delete")}</Btn>
+        <footer className="flex items-center gap-2 border-t border-[var(--cf-border)] px-5 py-3">
+          <Btn kind="danger" small icon={Trash2} onClick={() => void remove()} title={l("Borra la tarjeta del tablero", "Deletes the card from the board")}>{l("Borrar", "Delete")}</Btn>
           <span className="flex-1" />
-          <span className="inline-flex items-center gap-1 text-[11.5px] text-[var(--cf-text-faint)]">
+          <span title={l("Cada cambio se guarda al momento", "Every change is saved right away")} className="inline-flex items-center gap-1 text-[11.5px] text-[var(--cf-text-faint)]">
             <ListChecks className="h-3.5 w-3.5" />
             {l("Se guarda solo", "Saves as you type")}
           </span>

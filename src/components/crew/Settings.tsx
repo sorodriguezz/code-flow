@@ -58,8 +58,8 @@ export function GovernorDialog() {
           <span className="flex-1 text-[12px] text-[var(--cf-text-faint)]">
             {status ? l(`Ahora: ${status.running} corriendo · ${status.waiting} en cola`, `Now: ${status.running} running · ${status.waiting} queued`) : ""}
           </span>
-          <Btn kind="ghost" onClick={close}>{l("Cancelar", "Cancel")}</Btn>
-          <Btn kind="primary" onClick={() => void save()}>{l("Guardar", "Save")}</Btn>
+          <Btn kind="ghost" onClick={close} title={l("Cierra sin guardar cambios", "Closes without saving")}>{l("Cancelar", "Cancel")}</Btn>
+          <Btn kind="primary" onClick={() => void save()} title={l("Aplica los topes a todo el workspace", "Applies the caps to the whole workspace")}>{l("Guardar", "Save")}</Btn>
         </>
       }
     >
@@ -72,7 +72,7 @@ export function GovernorDialog() {
         {models.length === 0 && <span className="text-[12px] text-[var(--cf-text-muted)]">{l("Tus agentes aún no tienen modelo.", "Your agents have no model yet.")}</span>}
         {models.map((model) => (
           <div key={model} className="flex items-center justify-between gap-3 rounded-[9px] border border-[var(--cf-border)] px-3 py-1.5">
-            <span className="font-mono text-[12px]">{model}</span>
+            <span title={l("Modelo usado por tus agentes", "Model your agents use")} className="font-mono text-[12px]">{model}</span>
             <span className="flex items-center gap-2">
               <Switch checked={model in perModel} onChange={(on) => setPerModel((p) => { const next = { ...p }; if (on) next[model] = 2; else delete next[model]; return next; })} />
               {model in perModel && <Stepper value={perModel[model]} min={1} max={16} onChange={(v) => setPerModel((p) => ({ ...p, [model]: v }))} label={model} />}
@@ -125,16 +125,16 @@ export function DeciderDialog() {
       onClose={close}
       footer={
         <>
-          <Btn icon={Sparkles} onClick={() => void test()} disabled={trying}>{trying ? l("Votando…", "Voting…") : l("Probar", "Try it")}</Btn>
+          <Btn icon={Sparkles} onClick={() => void test()} disabled={trying} title={l("Hace una votación de prueba con estos ajustes", "Runs a test vote with these settings")}>{trying ? l("Votando…", "Voting…") : l("Probar", "Try it")}</Btn>
           {verdict && (
             <span className="flex flex-wrap items-center gap-1.5 text-[12px]">
-              <Chip tone={verdict.sharp ? "ok" : "warn"}>{verdict.sharp ? l("claro", "sharp") : l("dividido", "split")}</Chip>
+              <Chip tone={verdict.sharp ? "ok" : "warn"} title={verdict.sharp ? l("El voto fue claro: se actúa sin gastar un turno caro", "The vote was clear: acted on without an expensive turn") : l("El voto se dividió: decide el líder", "The vote split: the lead decides")}>{verdict.sharp ? l("claro", "sharp") : l("dividido", "split")}</Chip>
               <span>{verdict.choice ?? "—"} · p = {verdict.p.toFixed(2)} · {verdict.source} · {verdict.ms} ms</span>
             </span>
           )}
           <span className="flex-1" />
-          <Btn kind="ghost" onClick={close}>{l("Cancelar", "Cancel")}</Btn>
-          <Btn kind="primary" onClick={() => void save()}>{l("Guardar", "Save")}</Btn>
+          <Btn kind="ghost" onClick={close} title={l("Cierra sin guardar cambios", "Closes without saving")}>{l("Cancelar", "Cancel")}</Btn>
+          <Btn kind="primary" onClick={() => void save()} title={l("Guarda la capa de decisión", "Saves the decision layer")}>{l("Guardar", "Save")}</Btn>
         </>
       }
     >
@@ -145,10 +145,10 @@ export function DeciderDialog() {
           value={config.engine}
           onChange={(engine) => patch({ engine })}
           options={[
-            { value: "auto", label: l("Automático", "Automatic"), icon: Sparkles },
-            { value: "local", label: l("Modelo local", "Local model"), icon: Cpu },
-            { value: "cloud", label: l("Modelo rápido", "Fast model"), icon: Brain },
-            { value: "off", label: l("Nadie", "Nobody") },
+            { value: "auto", label: l("Automático", "Automatic"), icon: Sparkles, title: l("Local si hay uno descargado; si no, el modelo rápido", "Local if one is downloaded; otherwise the fast model") },
+            { value: "local", label: l("Modelo local", "Local model"), icon: Cpu, title: l("Vota con un modelo en tu máquina, gratis", "Votes with a model on your machine, free") },
+            { value: "cloud", label: l("Modelo rápido", "Fast model"), icon: Brain, title: l("Vota con el modelo barato de tu proveedor", "Votes with your provider's cheap model") },
+            { value: "off", label: l("Nadie", "Nobody"), title: l("Nadie vota: decide siempre el líder", "Nobody votes: the lead always decides") },
           ]}
         />
         <p className="m-0 text-[12px] text-[var(--cf-text-muted)]">
@@ -158,7 +158,7 @@ export function DeciderDialog() {
           )}
         </p>
         <div>
-          <Btn small onClick={() => { close(); useUiStore.setState({ settingsOpen: true }); }}>{l("Abrir Ajustes", "Open Settings")}</Btn>
+          <Btn small title={l("Abre Ajustes para descargar modelos locales", "Opens Settings to download local models")} onClick={() => { close(); useUiStore.setState({ settingsOpen: true }); }}>{l("Abrir Ajustes", "Open Settings")}</Btn>
         </div>
       </div>
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -168,12 +168,12 @@ export function DeciderDialog() {
         </div>
         <div className="flex flex-col gap-1.5">
           <Label>{l("Claro a partir de", "Sharp from")}</Label>
-          <input type="range" min={0.5} max={1} step={0.05} value={config.threshold} onChange={(e) => patch({ threshold: Number(e.target.value) })} className="accent-[var(--cf-accent)]" />
+          <input title={l("Probabilidad mínima para que un voto cuente como claro", "Minimum probability for a vote to count as sharp")} type="range" min={0.5} max={1} step={0.05} value={config.threshold} onChange={(e) => patch({ threshold: Number(e.target.value) })} className="accent-[var(--cf-accent)]" />
           <span className="text-[12px] tabular-nums">p ≥ {config.threshold.toFixed(2)}</span>
         </div>
         <div className="flex flex-col gap-1.5">
           <Label>{l("Si hay riesgo", "When risky")}</Label>
-          <input type="range" min={config.threshold} max={1} step={0.01} value={config.risk_threshold} onChange={(e) => patch({ risk_threshold: Number(e.target.value) })} className="accent-[var(--cf-accent)]" />
+          <input title={l("Probabilidad exigida cuando la decisión tiene riesgo", "Probability required when the decision is risky")} type="range" min={config.threshold} max={1} step={0.01} value={config.risk_threshold} onChange={(e) => patch({ risk_threshold: Number(e.target.value) })} className="accent-[var(--cf-accent)]" />
           <span className="text-[12px] tabular-nums">p ≥ {config.risk_threshold.toFixed(2)}</span>
         </div>
       </div>

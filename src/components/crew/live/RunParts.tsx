@@ -59,8 +59,8 @@ export function GateCard({ state }: { state: TeamRunState }) {
       )}
       <div className="flex flex-wrap items-center gap-2">
         <input value={comment} onChange={(e) => setComment(e.target.value)} placeholder={l("Comentario (opcional): qué cambiar, qué cuidar…", "Comment (optional): what to change, what to watch…")} className={`${field} min-w-[200px] flex-1`} />
-        <Btn kind="ghost" onClick={() => void useTeamStore.getState().decide(run.id, false, comment)}>{no}</Btn>
-        <Btn kind="primary" icon={CheckCircle2} onClick={() => void useTeamStore.getState().decide(run.id, true, comment)}>{yes}</Btn>
+        <Btn kind="ghost" title={l("No aprueba; el equipo recibe tu comentario", "Doesn't approve; the team gets your comment")} onClick={() => void useTeamStore.getState().decide(run.id, false, comment)}>{no}</Btn>
+        <Btn kind="primary" icon={CheckCircle2} title={l("Aprueba y el equipo sigue adelante", "Approves and the team carries on")} onClick={() => void useTeamStore.getState().decide(run.id, true, comment)}>{yes}</Btn>
       </div>
     </motion.div>
   );
@@ -96,12 +96,12 @@ export function ItemPanel({ state, item, onClose }: { state: TeamRunState; item:
           <b className="block text-[13px] leading-snug">{item.title}</b>
           <span className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--cf-text-muted)]">
             <span className="font-mono">{item.key}</span>· {item.member_name || l("Líder", "Lead")} · {l(kes, ken)}
-            <Chip tone={tone}>{l(es, en)}</Chip>
+            <Chip tone={tone} title={l("Estado de la tarea", "Task status")}>{l(es, en)}</Chip>
             {item.attempts > 1 && <span>· {l(`intento ${item.attempts}`, `attempt ${item.attempts}`)}</span>}
             {item.model && <span className="font-mono text-[var(--cf-violet)]">· {item.model}</span>}
           </span>
         </div>
-        <button type="button" aria-label={l("Cerrar", "Close")} onClick={onClose} className="grid h-7 w-7 place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
+        <button type="button" title={l("Cierra este panel", "Closes this panel")} aria-label={l("Cerrar", "Close")} onClick={onClose} className="grid h-7 w-7 place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
           <X className="h-4 w-4" />
         </button>
       </div>
@@ -111,7 +111,7 @@ export function ItemPanel({ state, item, onClose }: { state: TeamRunState; item:
             <GitBranch className="h-3.5 w-3.5" />
             {repo.name}
             {item.branch && <span className="font-mono">{item.branch}</span>}
-            {item.merged && <Chip tone="ok" icon={GitMerge}>{l("integrado", "merged")}</Chip>}
+            {item.merged && <Chip tone="ok" icon={GitMerge} title={l("Su trabajo ya se integró al repositorio", "Its work is already merged into the repository")}>{l("integrado", "merged")}</Chip>}
             {item.commit_sha && <span className="font-mono">{item.commit_sha.slice(0, 7)}</span>}
           </span>
         )}
@@ -121,8 +121,8 @@ export function ItemPanel({ state, item, onClose }: { state: TeamRunState; item:
             <span className="text-[12px] text-[var(--cf-text-muted)]">{l("Corre en una terminal del Taller. Cuando termine (o al escribir `cf done` allí) se cierra solo; también puedes cerrarlo aquí con un resumen.", "It runs in a Workshop terminal. When it finishes (or on `cf done` there) it closes itself; you can also close it here with a summary.")}</span>
             <textarea rows={2} value={doneText} onChange={(e) => setDoneText(e.target.value)} placeholder={l("Qué hizo, en pocas líneas", "What it did, in a few lines")} className={`${field} h-auto resize-y py-1.5`} />
             <div className="flex gap-1.5">
-              <Btn small icon={SquareTerminal} onClick={() => { crew.set({ workshopTab: "bench" }); crew.setSpace("taller"); void useBenchStore.getState().show(state.run.workspace_id); }}>{l("Ir a su terminal", "Go to its terminal")}</Btn>
-              <Btn small kind="primary" icon={CheckCircle2} onClick={() => void store.finishTerminalItem(item.run_id, item.id, doneText)}>{l("Está hecho", "It is done")}</Btn>
+              <Btn small icon={SquareTerminal} title={l("Abre el taller en la terminal de esta tarea", "Opens the workshop at this task's terminal")} onClick={() => { crew.set({ workshopTab: "bench" }); crew.setSpace("taller"); void useBenchStore.getState().show(state.run.workspace_id); }}>{l("Ir a su terminal", "Go to its terminal")}</Btn>
+              <Btn small kind="primary" icon={CheckCircle2} title={l("Marca la tarea como terminada con tu nota", "Marks the task as finished with your note")} onClick={() => void store.finishTerminalItem(item.run_id, item.id, doneText)}>{l("Está hecho", "It is done")}</Btn>
             </div>
           </div>
         )}
@@ -132,10 +132,10 @@ export function ItemPanel({ state, item, onClose }: { state: TeamRunState; item:
         {item.output_text && <Section label={l("Lo que entregó", "What it handed over")}>{item.output_text}</Section>}
       </div>
       <div className="flex flex-wrap gap-1.5 border-t border-[var(--cf-border)] p-2.5">
-        {member && <Btn small icon={MessageSquare} onClick={() => crew.open({ kind: "chat", runId: state.run.id, memberId: member.id })}>{l("Chat del miembro", "Member chat")}</Btn>}
-        {item.task_id && <Btn small icon={MessagesSquare} onClick={() => crew.open({ kind: "task", id: item.task_id })}>{l("Conversación", "Conversation")}</Btn>}
-        {["error", "cancelled", "skipped"].includes(item.status) && <Btn small icon={RotateCcw} onClick={() => void store.control(item.run_id, `retry:${item.id}`)}>{l("Reintentar", "Retry")}</Btn>}
-        {["pending", "gated", "error", "waiting"].includes(item.status) && <Btn small icon={SkipForward} onClick={() => void store.control(item.run_id, `skip:${item.id}`)}>{l("Saltar", "Skip")}</Btn>}
+        {member && <Btn small icon={MessageSquare} title={l("Abre el chat de quien hace esta tarea", "Opens the chat of whoever does this task")} onClick={() => crew.open({ kind: "chat", runId: state.run.id, memberId: member.id })}>{l("Chat del miembro", "Member chat")}</Btn>}
+        {item.task_id && <Btn small icon={MessagesSquare} title={l("Abre la conversación completa de la tarea", "Opens the task's full conversation")} onClick={() => crew.open({ kind: "task", id: item.task_id })}>{l("Conversación", "Conversation")}</Btn>}
+        {["error", "cancelled", "skipped"].includes(item.status) && <Btn small icon={RotateCcw} title={l("Vuelve a ejecutar esta tarea desde cero", "Runs this task again from scratch")} onClick={() => void store.control(item.run_id, `retry:${item.id}`)}>{l("Reintentar", "Retry")}</Btn>}
+        {["pending", "gated", "error", "waiting"].includes(item.status) && <Btn small icon={SkipForward} title={l("La omite y deja seguir a las que dependen de ella", "Skips it and lets dependent tasks go on")} onClick={() => void store.control(item.run_id, `skip:${item.id}`)}>{l("Saltar", "Skip")}</Btn>}
       </div>
     </motion.aside>
   );

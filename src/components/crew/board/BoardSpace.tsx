@@ -26,9 +26,9 @@ const COLUMNS: { id: BacklogStatus; es: string; en: string; color: string }[] = 
 
 function KindChip({ kind }: { kind: BacklogKind }) {
   const l = useL();
-  if (kind === "story") return <Chip tone="violet" icon={BookOpen}>{l("HU", "Story")}</Chip>;
-  if (kind === "bug") return <Chip tone="bad" icon={Bug}>Bug</Chip>;
-  return <Chip tone="info" icon={SquareCheckBig}>{l("Tarea", "Task")}</Chip>;
+  if (kind === "story") return <Chip tone="violet" icon={BookOpen} title={l("Historia de usuario: agrupa tareas", "User story: groups tasks")}>{l("HU", "Story")}</Chip>;
+  if (kind === "bug") return <Chip tone="bad" icon={Bug} title={l("Un fallo por corregir", "A defect to fix")}>Bug</Chip>;
+  return <Chip tone="info" icon={SquareCheckBig} title={l("Un trabajo concreto para un agente", "A concrete piece of work for an agent")}>{l("Tarea", "Task")}</Chip>;
 }
 
 function useWork() {
@@ -106,42 +106,42 @@ function CardView({ item }: { item: BacklogItem }) {
       <div className="flex flex-wrap items-center gap-1.5">
         <KindChip kind={item.kind} />
         {item.priority > 0 && (
-          <span className={`inline-flex items-center gap-0.5 text-[11px] font-semibold ${item.priority >= 3 ? "text-[var(--cf-danger)]" : item.priority === 2 ? "text-[var(--cf-warning)]" : "text-[var(--cf-text-faint)]"}`}>
+          <span title={l("Prioridad (P1 es la más alta)", "Priority (P1 is the highest)")} className={`inline-flex items-center gap-0.5 text-[11px] font-semibold ${item.priority >= 3 ? "text-[var(--cf-danger)]" : item.priority === 2 ? "text-[var(--cf-warning)]" : "text-[var(--cf-text-faint)]"}`}>
             <Flag className="h-3 w-3" />P{4 - item.priority}
           </span>
         )}
         {item.ticket && (
-          <span className="inline-flex items-center gap-0.5 font-mono text-[10.5px] text-[var(--cf-text-muted)]">
+          <span title={l("Ticket del tablero al que está ligada", "Board ticket this card is linked to")} className="inline-flex items-center gap-0.5 font-mono text-[10.5px] text-[var(--cf-text-muted)]">
             <Link2 className="h-3 w-3" />
             {item.ticket.key}
           </span>
         )}
-        {needsYou && <Chip tone="warn" icon={Hand} className="ml-auto">{l("Te necesita", "Needs you")}</Chip>}
+        {needsYou && <Chip tone="warn" icon={Hand} className="ml-auto" title={l("Un agente espera tu respuesta o aprobación", "An agent is waiting for your answer or approval")}>{l("Te necesita", "Needs you")}</Chip>}
       </div>
       <h4 className="m-0 text-[13px] font-semibold leading-snug">{item.title}</h4>
       {(item.criteria.length > 0 || item.repos.length > 0 || subtasks > 0 || cost > 0) && (
         <div className="flex flex-wrap items-center gap-2.5 text-[11.5px] text-[var(--cf-text-muted)]">
-          {item.criteria.length > 0 && <span className="inline-flex items-center gap-1"><ListChecks className="h-3.5 w-3.5" />{done}/{item.criteria.length}</span>}
-          {subtasks > 0 && <span className="inline-flex items-center gap-1"><SquareCheckBig className="h-3.5 w-3.5" />{subtasks}</span>}
-          {item.repos.length > 0 && <span className="inline-flex items-center gap-1"><FolderGit2 className="h-3.5 w-3.5" />{item.repos.length}</span>}
-          {runLinks.length > 0 && <span className="inline-flex items-center gap-1"><MessageSquare className="h-3.5 w-3.5" />{runLinks.reduce((n, lnk) => n + (work.states[lnk.ref_id]?.messages.length ?? 0), 0)}</span>}
-          {cost > 0 && <span className="inline-flex items-center gap-1"><Coins className="h-3.5 w-3.5" />{money(cost)}</span>}
+          {item.criteria.length > 0 && <span title={l("Criterios de aceptación cumplidos", "Acceptance criteria met")} className="inline-flex items-center gap-1"><ListChecks className="h-3.5 w-3.5" />{done}/{item.criteria.length}</span>}
+          {subtasks > 0 && <span title={l("Subtareas", "Subtasks")} className="inline-flex items-center gap-1"><SquareCheckBig className="h-3.5 w-3.5" />{subtasks}</span>}
+          {item.repos.length > 0 && <span title={l("Repositorios que toca", "Repositories it touches")} className="inline-flex items-center gap-1"><FolderGit2 className="h-3.5 w-3.5" />{item.repos.length}</span>}
+          {runLinks.length > 0 && <span title={l("Mensajes del equipo en esta tarea", "Team messages on this task")} className="inline-flex items-center gap-1"><MessageSquare className="h-3.5 w-3.5" />{runLinks.reduce((n, lnk) => n + (work.states[lnk.ref_id]?.messages.length ?? 0), 0)}</span>}
+          {cost > 0 && <span title={l("Costo acumulado de las tareas", "Accumulated cost of its tasks")} className="inline-flex items-center gap-1"><Coins className="h-3.5 w-3.5" />{money(cost)}</span>}
         </div>
       )}
       {progress !== null && item.status !== "done" && (
-        <div className="h-[5px] overflow-hidden rounded-full bg-[var(--cf-border)]">
-          <motion.i className="block h-full rounded-full bg-[linear-gradient(90deg,var(--cf-accent),var(--cf-agent-cyan))]" animate={{ width: `${Math.round(progress * 100)}%` }} />
+        <div title={l("Avance de la corrida del equipo", "Team run progress")} className="h-[5px] overflow-hidden rounded-full bg-[var(--cf-border)]">
+          <motion.i className="block h-full rounded-full bg-[var(--cf-accent)]" animate={{ width: `${Math.round(progress * 100)}%` }} />
         </div>
       )}
       <div className="flex items-center gap-1.5">
         {activeShown.length > 0 && <AvatarStack agents={activeShown} size={20} />}
         <span className="flex-1" />
         {agent ? (
-          <span className="flex items-center gap-1.5 text-[11.5px] font-semibold"><AgentAvatar agent={agent} size={20} />{agent.name}</span>
+          <span title={l("Agente asignado", "Assigned agent")} className="flex items-center gap-1.5 text-[11.5px] font-semibold"><AgentAvatar agent={agent} size={20} />{agent.name}</span>
         ) : team ? (
-          <span className="flex items-center gap-1.5 text-[11.5px] font-semibold"><TeamAvatar size={20} />{team.name}</span>
+          <span title={l("Equipo asignado", "Assigned team")} className="flex items-center gap-1.5 text-[11.5px] font-semibold"><TeamAvatar size={20} />{team.name}</span>
         ) : (
-          <span className="inline-flex items-center gap-1 rounded-full border border-dashed border-[var(--cf-border-strong)] px-2 py-0.5 text-[11.5px] text-[var(--cf-text-faint)]"><Hand className="h-3 w-3" />{l("Sin asignar", "Unassigned")}</span>
+          <span title={l("Arrastra un agente del dock para asignarla", "Drag an agent from the dock to assign it")} className="inline-flex items-center gap-1 rounded-full border border-dashed border-[var(--cf-border-strong)] px-2 py-0.5 text-[11.5px] text-[var(--cf-text-faint)]"><Hand className="h-3 w-3" />{l("Sin asignar", "Unassigned")}</span>
         )}
       </div>
       {drop.over && (
@@ -189,7 +189,7 @@ function Column({ id, title, color, cards }: { id: BacklogStatus; title: string;
       <header className="flex items-center gap-2 px-3 pb-1.5 pt-2.5">
         <span className="h-2 w-2 rounded-[3px]" style={{ background: color }} />
         <h3 className="m-0 text-[12.5px] font-semibold">{title}</h3>
-        <span className="text-[11px] tabular-nums text-[var(--cf-text-faint)]">{cards.length}</span>
+        <span title={l("Tarjetas en esta columna", "Cards in this column")} className="text-[11px] tabular-nums text-[var(--cf-text-faint)]">{cards.length}</span>
       </header>
       <div className="flex min-h-[60px] flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2.5 pt-1">
         {cards.map((c) => (
@@ -212,13 +212,14 @@ async function importTicket(uid: string, status: BacklogStatus) {
 }
 
 function TicketView({ ticket }: { ticket: Ticket }) {
+  const l = useL();
   const uid = ticketUid(ticket);
   const drag = useDragSource({ kind: "ticket", id: uid }, () => <div className="w-[240px] rounded-[11px] border border-[var(--cf-blue)] bg-[var(--cf-surface-raised)] p-2.5 text-[12.5px] font-semibold">{ticket.title}</div>);
   return (
-    <article {...drag} title={ticket.state} className="flex cursor-grab touch-none flex-col gap-1.5 rounded-[11px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2.5 hover:border-[var(--cf-border-strong)] active:cursor-grabbing">
+    <article {...drag} title={`${ticket.state} · ${l("arrástralo al backlog", "drag it to the backlog")}`} className="flex cursor-grab touch-none flex-col gap-1.5 rounded-[11px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2.5 hover:border-[var(--cf-border-strong)] active:cursor-grabbing">
       <div className="flex items-center gap-1.5">
-        <Chip tone={/bug/i.test(ticket.work_item_type) ? "bad" : "violet"}>{ticket.work_item_type || "Ticket"}</Chip>
-        <span className="font-mono text-[10.5px] text-[var(--cf-text-muted)]">{ticket.key || `#${ticket.id}`}</span>
+        <Chip tone={/bug/i.test(ticket.work_item_type) ? "bad" : "violet"} title={l("Tipo de ticket", "Ticket type")}>{ticket.work_item_type || "Ticket"}</Chip>
+        <span title={l("Clave del ticket", "Ticket key")} className="font-mono text-[10.5px] text-[var(--cf-text-muted)]">{ticket.key || `#${ticket.id}`}</span>
       </div>
       <h4 className="m-0 text-[12.5px] font-semibold leading-snug">{ticket.title}</h4>
     </article>
@@ -240,9 +241,9 @@ function Inbox() {
       <header className="flex items-center gap-2 px-3 pb-1 pt-2.5">
         <span className="h-2 w-2 rounded-[3px] bg-[var(--cf-blue)]" />
         <h3 className="m-0 text-[12.5px] font-semibold">{l("Entrada", "Inbox")}</h3>
-        <span className="text-[11px] text-[var(--cf-text-faint)]">{pending.length}</span>
+        <span title={l("Tickets sin traer al backlog", "Tickets not yet in the backlog")} className="text-[11px] text-[var(--cf-text-faint)]">{pending.length}</span>
         <span className="flex-1" />
-        <button type="button" title={l("Traer tickets", "Fetch tickets")} onClick={() => void useTicketStore.getState().refresh(workspaceId)} className="grid h-6 w-6 place-items-center rounded-[6px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
+        <button type="button" title={l("Trae los tickets nuevos de tus tableros", "Fetches new tickets from your boards")} onClick={() => void useTicketStore.getState().refresh(workspaceId)} className="grid h-6 w-6 place-items-center rounded-[6px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
         </button>
       </header>
@@ -300,21 +301,21 @@ export function BoardSpace() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-3.5 py-2.5">
-        <ToggleChip on={filter === "all"} onClick={() => setFilter("all")}>{l("Todo", "All")}</ToggleChip>
-        <ToggleChip on={filter === "none"} onClick={() => setFilter("none")}>{l("Sin asignar", "Unassigned")}</ToggleChip>
+        <ToggleChip on={filter === "all"} onClick={() => setFilter("all")} title={l("Muestra todas las tarjetas", "Shows every card")}>{l("Todo", "All")}</ToggleChip>
+        <ToggleChip on={filter === "none"} onClick={() => setFilter("none")} title={l("Solo las tarjetas sin responsable", "Only cards with no owner")}>{l("Sin asignar", "Unassigned")}</ToggleChip>
         {assignees.slice(0, 6).map((key) => {
           const [kind, id] = key.split(":");
           const name = kind === "team" ? teams.find((t) => t.id === id)?.name : roster.find((a) => a.id === id)?.name;
           if (!name) return null;
-          return <ToggleChip key={key} on={filter === key} onClick={() => setFilter(key)}>{name}</ToggleChip>;
+          return <ToggleChip key={key} on={filter === key} onClick={() => setFilter(key)} title={l(`Solo las tarjetas de ${name}`, `Only cards of ${name}`)}>{name}</ToggleChip>;
         })}
         <div className="relative ml-1 w-[200px]">
           <Search className="absolute left-2.5 top-[7px] h-4 w-4 text-[var(--cf-text-faint)]" />
-          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={l("Buscar", "Search")} className={`${field} h-[30px] pl-8`} />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} title={l("Filtra por título, texto o clave de ticket", "Filter by title, text or ticket key")} placeholder={l("Buscar", "Search")} className={`${field} h-[30px] pl-8`} />
         </div>
         <span className="flex-1" />
-        <Btn small icon={Plus} onClick={() => void create("story")}>{l("Historia", "Story")}</Btn>
-        <Btn small icon={Plus} onClick={() => void create("task")}>{l("Tarea", "Task")}</Btn>
+        <Btn small icon={Plus} onClick={() => void create("story")} title={l("Crea una historia de usuario nueva", "Creates a new user story")}>{l("Historia", "Story")}</Btn>
+        <Btn small icon={Plus} onClick={() => void create("task")} title={l("Crea una tarea nueva", "Creates a new task")}>{l("Tarea", "Task")}</Btn>
       </div>
       <div className="flex min-h-0 flex-1 items-stretch gap-3 overflow-x-auto p-3.5">
         <Inbox />

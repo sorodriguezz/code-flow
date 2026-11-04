@@ -78,7 +78,7 @@ function AlertRow({ alert, state }: { alert: TeamAlert; state: TeamRunState }) {
     <div className="flex items-center gap-2 rounded-[9px] border border-[var(--cf-border)] px-2.5 py-1.5">
       <Icon className={`h-4 w-4 shrink-0 ${tone === "bad" ? "text-[var(--cf-danger)]" : tone === "warn" ? "text-[var(--cf-warning)]" : "text-[var(--cf-blue)]"}`} />
       <span className="min-w-0 flex-1 text-[12px]">{l(es, en)}</span>
-      {(alert.kind === "budget_hit" || alert.kind === "budget_warn") && <Btn small onClick={() => void raise()}>{l("Subir ×1,5", "Raise ×1.5")}</Btn>}
+      {(alert.kind === "budget_hit" || alert.kind === "budget_warn") && <Btn small title={l("Sube el tope de presupuesto un 50%", "Raises the budget cap by 50%")} onClick={() => void raise()}>{l("Subir ×1,5", "Raise ×1.5")}</Btn>}
     </div>
   );
 }
@@ -162,14 +162,14 @@ export function Insights({ state, onOpenItem }: { state: TeamRunState; onOpenIte
                   );
                 })}
             </div>
-            <Btn small onClick={() => crew.open({ kind: "governor" })}>{l("Turnos a la vez…", "Turns at once…")}</Btn>
+            <Btn small title={l("Define cuántos turnos pueden correr en paralelo", "Set how many turns can run in parallel")} onClick={() => crew.open({ kind: "governor" })}>{l("Turnos a la vez…", "Turns at once…")}</Btn>
           </>
         ) : (
           <span className="text-[12px] text-[var(--cf-text-muted)]">…</span>
         )}
       </Panel>
 
-      <Panel title={<span className="inline-flex items-center gap-2">{l("Vigilancia", "Watch")}{metrics && metrics.alerts.length > 0 && <Chip tone="warn">{metrics.alerts.length}</Chip>}</span>} icon={AlertTriangle} open={open.has("watch")} onToggle={() => toggle("watch")}>
+      <Panel title={<span className="inline-flex items-center gap-2">{l("Vigilancia", "Watch")}{metrics && metrics.alerts.length > 0 && <Chip tone="warn" title={l("Alertas activas en esta corrida", "Active alerts in this run")}>{metrics.alerts.length}</Chip>}</span>} icon={AlertTriangle} open={open.has("watch")} onToggle={() => toggle("watch")}>
         {metrics && metrics.alerts.length > 0 ? metrics.alerts.map((a, i) => (
           <div key={`${a.kind}-${i}`} onClick={() => a.item_id && onOpenItem(a.item_id)} className={a.item_id ? "cursor-pointer" : ""}>
             <AlertRow alert={a} state={state} />
@@ -177,7 +177,7 @@ export function Insights({ state, onOpenItem }: { state: TeamRunState; onOpenIte
         )) : <span className="text-[12px] text-[var(--cf-text-muted)]">{l("Todo en orden: sin bucles, sin atascos, dentro del presupuesto.", "All in order: no loops, nothing stuck, within budget.")}</span>}
       </Panel>
 
-      <Panel title={<span className="inline-flex items-center gap-2">{l("Decisiones", "Decisions")}{saved > 0 && <Chip tone="ok" icon={TrendingUp}>{l(`~${compact(saved)} tokens ahorrados`, `~${compact(saved)} tokens saved`)}</Chip>}</span>} icon={Brain} open={open.has("decisions")} onToggle={() => toggle("decisions")}>
+      <Panel title={<span className="inline-flex items-center gap-2">{l("Decisiones", "Decisions")}{saved > 0 && <Chip tone="ok" icon={TrendingUp} title={l("Tokens que no gastaste gracias a decisiones automáticas", "Tokens saved by automatic decisions")}>{l(`~${compact(saved)} tokens ahorrados`, `~${compact(saved)} tokens saved`)}</Chip>}</span>} icon={Brain} open={open.has("decisions")} onToggle={() => toggle("decisions")}>
         {decisions.length === 0 && <span className="text-[12px] text-[var(--cf-text-muted)]">{state.run.policy.decider ? l("Aún no hubo decisiones cerradas que votar.", "No closed choices to vote on yet.") : l("La capa de decisión está apagada en este equipo.", "The decision layer is off for this team.")}</span>}
         <div className="flex flex-col gap-1 font-mono text-[11px]">
           {decisions.map((d) => (
@@ -198,7 +198,7 @@ export function Insights({ state, onOpenItem }: { state: TeamRunState; onOpenIte
             </motion.div>
           ))}
         </div>
-        <Btn small onClick={() => crew.open({ kind: "decider" })}>{l("Configurar decisor…", "Set up the decider…")}</Btn>
+        <Btn small title={l("Ajusta quién resuelve las dudas sin molestarte", "Adjust who settles doubts without bothering you")} onClick={() => crew.open({ kind: "decider" })}>{l("Configurar decisor…", "Set up the decider…")}</Btn>
       </Panel>
 
       {advisor && (

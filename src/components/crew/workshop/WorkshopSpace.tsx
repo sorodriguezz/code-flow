@@ -111,12 +111,12 @@ function WorkList() {
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--cf-text-faint)]" />
             <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={l("Buscar trabajo", "Search work")} className={`${field} h-[28px] w-[200px] pl-8`} />
           </label>
-          <ToggleChip on={kind === "all"} onClick={() => setKind("all")}>{l("Todo", "All")}</ToggleChip>
-          <ToggleChip on={kind === "task"} icon={MessageSquare} onClick={() => setKind("task")}>{l("Tareas", "Tasks")}</ToggleChip>
-          <ToggleChip on={kind === "race"} icon={Trophy} onClick={() => setKind("race")}>{l("Carreras", "Races")}</ToggleChip>
-          <ToggleChip on={kind === "flow"} icon={Workflow} onClick={() => setKind("flow")}>{l("Flujos", "Flows")}</ToggleChip>
-          <ToggleChip on={kind === "hybrid"} icon={Cpu} onClick={() => setKind("hybrid")}>{l("Híbridos", "Hybrids")}</ToggleChip>
-          <ToggleChip on={onlyOpen} onClick={() => setOnlyOpen((v) => !v)}>{l("Solo abiertos", "Open only")}</ToggleChip>
+          <ToggleChip on={kind === "all"} title={l("Muestra todo el trabajo", "Show all work")} onClick={() => setKind("all")}>{l("Todo", "All")}</ToggleChip>
+          <ToggleChip on={kind === "task"} icon={MessageSquare} title={l("Solo tareas de un agente", "Only single-agent tasks")} onClick={() => setKind("task")}>{l("Tareas", "Tasks")}</ToggleChip>
+          <ToggleChip on={kind === "race"} icon={Trophy} title={l("Solo carreras: varios agentes con la misma meta", "Only races: several agents on the same goal")} onClick={() => setKind("race")}>{l("Carreras", "Races")}</ToggleChip>
+          <ToggleChip on={kind === "flow"} icon={Workflow} title={l("Solo flujos fijos e historias", "Only fixed flows and stories")} onClick={() => setKind("flow")}>{l("Flujos", "Flows")}</ToggleChip>
+          <ToggleChip on={kind === "hybrid"} icon={Cpu} title={l("Solo híbridos: modelo local y plan de suscripción", "Only hybrids: local model plus subscription plan")} onClick={() => setKind("hybrid")}>{l("Híbridos", "Hybrids")}</ToggleChip>
+          <ToggleChip on={onlyOpen} title={l("Oculta lo que ya terminó o se canceló", "Hides what is finished or cancelled")} onClick={() => setOnlyOpen((v) => !v)}>{l("Solo abiertos", "Open only")}</ToggleChip>
         </div>
         <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-auto p-3">
           {rows.map((r, i) => {
@@ -130,6 +130,7 @@ function WorkList() {
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ ...SPRING, delay: Math.min(i, 14) * 0.015 }}
+                title={l("Abre el detalle de este trabajo", "Opens this work's details")}
                 onClick={() => open(r)}
                 className="flex items-center gap-2.5 rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 py-2 text-left hover:border-[var(--cf-border-strong)]"
               >
@@ -140,7 +141,7 @@ function WorkList() {
                 </span>
                 {r.kind === "task" || r.kind === "race" ? <AvatarStack agents={r.agents} size={20} /> : null}
                 {r.cost > 0 && <span className="text-[11px] tabular-nums text-[var(--cf-text-muted)]">{money(r.cost)}</span>}
-                <Chip tone={tone(r.status)}>{l(es, en)}</Chip>
+                <Chip tone={tone(r.status)} title={l("Estado actual", "Current status")}>{l(es, en)}</Chip>
               </motion.button>
             );
           })}
@@ -150,14 +151,14 @@ function WorkList() {
       <aside className="hidden w-[290px] shrink-0 flex-col gap-3 overflow-auto border-l border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_45%,var(--cf-surface))] p-3 lg:flex">
         <div className="flex flex-col gap-1.5">
           <Label>{l("Crear", "Create")}</Label>
-          <Btn icon={Workflow} onClick={() => crew.open({ kind: "chainEditor", templateId: null })}>{l("Nuevo flujo fijo", "New fixed flow")}</Btn>
-          <Btn icon={BookOpen} onClick={() => crew.open({ kind: "story" })}>{l("Realizar una historia", "Realize a story")}</Btn>
-          <Btn icon={GitFork} onClick={() => crew.open({ kind: "launch" })}>{l("Carrera o híbrido…", "Race or hybrid…")}</Btn>
+          <Btn icon={Workflow} title={l("Arma una secuencia de pasos con agentes", "Build a sequence of steps run by agents")} onClick={() => crew.open({ kind: "chainEditor", templateId: null })}>{l("Nuevo flujo fijo", "New fixed flow")}</Btn>
+          <Btn icon={BookOpen} title={l("Convierte un ticket o historia en código con agentes", "Turns a ticket or story into code with agents")} onClick={() => crew.open({ kind: "story" })}>{l("Realizar una historia", "Realize a story")}</Btn>
+          <Btn icon={GitFork} title={l("Lanza varios agentes a la vez o combina modelos", "Launch several agents at once or mix models")} onClick={() => crew.open({ kind: "launch" })}>{l("Carrera o híbrido…", "Race or hybrid…")}</Btn>
         </div>
         <div className="flex flex-col gap-1.5">
           <Label>{l("Plantillas de flujo", "Flow templates")}</Label>
           {templates.map((t) => (
-            <button key={t.id} type="button" onClick={() => crew.open({ kind: "chainEditor", templateId: t.id })} className="flex items-center gap-2 rounded-[9px] border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 text-left hover:border-[var(--cf-border-strong)]">
+            <button key={t.id} type="button" title={l("Abre esta plantilla para editarla o usarla", "Opens this template to edit or use it")} onClick={() => crew.open({ kind: "chainEditor", templateId: t.id })} className="flex items-center gap-2 rounded-[9px] border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2.5 py-1.5 text-left hover:border-[var(--cf-border-strong)]">
               {t.kind === "hybrid" ? <Cpu className="h-3.5 w-3.5 text-[var(--cf-text-muted)]" /> : <Workflow className="h-3.5 w-3.5 text-[var(--cf-text-muted)]" />}
               <span className="min-w-0 flex-1 truncate text-[12px]">{t.name}</span>
               <Pencil className="h-3 w-3 text-[var(--cf-text-faint)]" />
@@ -211,7 +212,7 @@ export function WorkshopSpace({ benchMounted }: { benchMounted: boolean }) {
           ]}
         />
         <span className="flex-1" />
-        {tab === "races" && <Btn small kind="primary" icon={Plus} onClick={() => crew.open({ kind: "launch" })}>{l("Dale una tarea", "Hand out a task")}</Btn>}
+        {tab === "races" && <Btn small kind="primary" icon={Plus} title={l("Elige agente o equipo y describe la tarea", "Pick an agent or team and describe the task")} onClick={() => crew.open({ kind: "launch" })}>{l("Dale una tarea", "Hand out a task")}</Btn>}
       </div>
       {tab === "worktrees" && (
         <div className="flex min-h-0 flex-1 overflow-hidden">
