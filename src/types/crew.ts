@@ -53,6 +53,8 @@ export interface BacklogModeConfig {
   racers?: string[];
   flowTemplateId?: string;
   branch?: string;
+  /** A team run's target branch per repository (project id → branch); `""` the checked-out one. */
+  branches?: Record<string, string>;
   worktree?: boolean;
   preset?: "autonomous" | "supervised" | "stepwise";
 }

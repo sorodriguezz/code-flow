@@ -206,9 +206,9 @@ export function WorkshopSpace({ benchMounted }: { benchMounted: boolean }) {
           value={tab}
           onChange={pick}
           options={[
-            { value: "worktrees", label: "Worktrees", icon: FolderTree },
-            { value: "bench", label: l("Terminales", "Terminals"), icon: SquareTerminal, badge: terminals ? <span className="text-[10.5px] text-[var(--cf-text-faint)]">{terminals}</span> : undefined },
-            { value: "races", label: l("Todo el trabajo", "All work"), icon: ListTree },
+            { value: "worktrees", label: "Worktrees", icon: FolderTree, title: l("Las copias de trabajo de cada agente, una por tarea, con su rama: ábrelas, revisa sus cambios o bórralas.", "Each agent's working copies, one per task, with its branch: open them, review their changes or delete them.") },
+            { value: "bench", label: l("Terminales", "Terminals"), icon: SquareTerminal, title: l("Las terminales abiertas de los agentes en modo terminal: míralos trabajar o escríbeles.", "The open terminals of agents in terminal mode: watch them work or type to them."), badge: terminals ? <span className="text-[10.5px] text-[var(--cf-text-faint)]">{terminals}</span> : undefined },
+            { value: "races", label: l("Todo el trabajo", "All work"), icon: ListTree, title: l("Cada tarea, carrera, flujo y corrida de equipo, con su estado y su resultado.", "Every task, race, flow and team run, with its status and result.") },
           ]}
         />
         <span className="flex-1" />

@@ -133,6 +133,15 @@ pub struct Policy {
     /// Alternating findings and fixes between the same two members before the view raises a
     /// ping-pong alert.
     pub ping_pong_laps: i64,
+    /// The most of an engine plan's window (Claude's or Gemini's session, Codex's, opencode's) one
+    /// run may use, in points of the window's percentage. Past it the run waits for you. `0` is no
+    /// limit. Defaults on for every team, old rows included: a run that quietly burns
+    /// two whole sessions on a task worth three prompts is the thing this exists to stop.
+    pub max_session_pct: i64,
+    /// Agent-minutes the members on engines with no published window (Grok, Cline, a custom
+    /// command) may work before the run waits for you. The local model is not counted. `0` is no
+    /// limit; on by default for the same reason as `max_session_pct`.
+    pub unmetered_minutes: i64,
     /// Let the decision layer (`crate::decide`) settle finite choices — retry or stop, the model to
     /// start on — before paying a planner turn for them.
     pub decider: bool,
@@ -154,19 +163,21 @@ impl Default for Policy {
             review: ReviewPolicy::default(),
             max_parallel: 3,
             max_attempts: 3,
-            max_dispatches: 64,
-            lead_rounds: 6,
+            max_dispatches: 24,
+            lead_rounds: 3,
             lead_final_check: true,
             cleanup: true,
             comms: "open".into(),
-            max_notes_per_item: 8,
+            max_notes_per_item: 4,
             escalate_questions: false,
-            sub_lead_rounds: 4,
+            sub_lead_rounds: 2,
             budget_usd: 0.0,
             budget_tokens: 0,
             budget_minutes: 0,
             budget_warn_pct: 80,
             ping_pong_laps: 3,
+            max_session_pct: 30,
+            unmetered_minutes: 60,
             decider: true,
         }
     }
@@ -194,6 +205,8 @@ impl Policy {
         self.budget_tokens = self.budget_tokens.max(0);
         self.budget_minutes = self.budget_minutes.clamp(0, 24 * 60);
         self.budget_warn_pct = self.budget_warn_pct.clamp(10, 100);
+        self.max_session_pct = self.max_session_pct.clamp(0, 100);
+        self.unmetered_minutes = self.unmetered_minutes.clamp(0, 24 * 60);
         self.ping_pong_laps = self.ping_pong_laps.clamp(2, 12);
         self.checks.retain(|c| !c.command.trim().is_empty());
         for c in &mut self.checks {
@@ -761,6 +774,7 @@ pub fn set_run_meta(conn: &Connection, id: &str, title: Option<&str>, pinned: Op
 pub fn delete_run(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM agent_tasks WHERE batch_id = ?1", params![format!("{TASK_BATCH_PREFIX}{id}")])?;
     conn.execute("DELETE FROM agent_team_runs WHERE id = ?1", params![id])?;
+    conn.execute("DELETE FROM app_settings WHERE key = ?1", params![format!("team_session_base:{id}")])?;
     Ok(())
 }
 

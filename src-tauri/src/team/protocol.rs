@@ -17,7 +17,7 @@ pub const FENCE: &str = "equipo";
 
 /// The most items one lead turn may add. A plan larger than this is almost always a lead that
 /// split the work into steps no one needs, and each one costs a dispatch.
-pub const MAX_ITEMS_PER_ROUND: usize = 24;
+pub const MAX_ITEMS_PER_ROUND: usize = 10;
 
 /// Who a member can address, resolved against the run's roster.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,6 +60,9 @@ pub struct LeadReply {
     pub items: Vec<PlannedItem>,
     pub cancel: Vec<String>,
     pub finish: bool,
+    /// The lead judged the request small — one member, one task per repository: what it delivers is
+    /// merged without another round of the lead's or the advisor's.
+    pub small: bool,
     /// What was dropped, and why — shown to the lead on its next turn.
     pub rejected: Vec<String>,
 }
@@ -272,6 +275,9 @@ pub fn lead_reply(text: &str, roster: &[RosterEntry], repos: &[RepoEntry], exist
         if value.get("terminar").and_then(Value::as_bool).unwrap_or(false) || value.get("finish").and_then(Value::as_bool).unwrap_or(false) {
             reply.finish = true;
         }
+        if value.get("chico").and_then(Value::as_bool).unwrap_or(false) || value.get("small").and_then(Value::as_bool).unwrap_or(false) {
+            reply.small = true;
+        }
     }
     if raw_items.len() > MAX_ITEMS_PER_ROUND {
         rejected.push(format!("pediste {} tareas; el máximo por ronda es {MAX_ITEMS_PER_ROUND}", raw_items.len()));
@@ -433,6 +439,7 @@ pub fn member_protocol(can_ask_user: bool) -> String {
          Para dejarle una nota a alguien añade un bloque:\n\
          ```equipo\n{{\"para\": \"<nombre o rol de un miembro | lider | todos | usuario>\", \"tipo\": \"mensaje\", \"texto\": \"...\"}}\n```\n\
          {ask}\
+         Deja notas solo cuando alguien las necesita para trabajar: no saludes, no confirmes que recibiste algo ni pidas acuse. Cada nota puede despertar a otro agente y gasta la cuota del usuario.\n\
          Lo destructivo o irreversible pídelo con `cf ask` antes de hacerlo."
     )
 }
@@ -451,9 +458,18 @@ pub fn lead_protocol(can_ask_user: bool) -> String {
          {{\"mensaje\": \"lo que el equipo debe saber del plan\",\n \
          \"items\": [{{\"id\": \"api\", \"miembro\": \"<nombre o rol>\", \"repo\": \"<repositorio>\", \"tipo\": \"trabajo | investigar\", \"titulo\": \"...\", \"tarea\": \"qué tiene que hacer, concreto\", \"depende_de\": [\"otro-id\"]}}],\n \
          \"cancelar\": [\"id de una tarea pendiente que ya no hace falta\"],\n \
+         \"chico\": false,\n \
          \"terminar\": false}}\n\
          ```\n\
          Reglas: cada tarea es de un miembro y un repositorio. Lo que no dependa de otra cosa corre en paralelo, así que divide para que varios trabajen a la vez sin tocar los mismos archivos. \
+         **Planifica lo mínimo.** Cada tarea arranca un agente completo y gasta la cuota del usuario: una tarea sencilla es una tarea por repositorio que de verdad cambia, nada más. \
+         No crees tareas de investigar, revisar, coordinar o verificar si la tarea no lo exige, no metas a un miembro solo porque existe, y no partas en pasos lo que una persona haría de una vez. \
+         Si dudas entre dos planes, el más corto. Si una entrega trae lo pedido, termina: no abras rondas para pulir. \
+         **Clasifica el pedido.** Si es chico —un cambio puntual como un color, un texto, un ajuste de estilo o un bug acotado— dáselo a un solo miembro, una tarea de `trabajo` por repositorio, y marca `\"chico\": true`: \
+         la entrega se integra directo, sin otra ronda tuya ni del asesor. Si no es chico, `\"chico\": false`. \
+         **Áreas con sub-líder.** Si el equipo tiene sub-líderes (por ejemplo de backend, front o base de datos), lo que es de un área dáselo entero a su sub-líder: él decide quién lo hace. \
+         Si un pedido toca varias áreas, una tarea por área a cada sub-líder, con `depende_de` cuando una necesite la entrega de otra. \
+         Si es chico, sáltate al sub-líder y asígnalo directo a quien lo ejecuta en esa área: un turno menos. \
          `trabajo` escribe código (en su propia rama); `investigar` solo lee. Un miembro de solo lectura no recibe `trabajo`. \
          Quien depende de otra tarea recibe su entrega. No repitas tareas que ya existen. \
          Cuando todo lo necesario esté hecho y revisado, responde `\"terminar\": true`.\n\

@@ -363,7 +363,6 @@ export function CardDrawer({ cardId }: { cardId: string }) {
     crew.open({
       kind: "launch",
       cardId: item.id,
-      goal: item.title,
       assignee: item.assignee_kind ? { kind: item.assignee_kind, id: item.assignee_id } : undefined,
     });
   };
@@ -414,8 +413,8 @@ export function CardDrawer({ cardId }: { cardId: string }) {
                 value={item.status}
                 onChange={(status) => void useBacklogStore.getState().move(item.id, status, item.rank)}
                 options={[
-                  { value: "backlog", label: "Backlog" },
-                  { value: "ready", label: l("Listo", "Ready") },
+                  { value: "backlog", label: "Backlog", title: l("Aún sin preparar: nadie la toma sola", "Not ready yet: nobody picks it up on their own") },
+                  { value: "ready", label: l("Listo", "Ready"), title: l("Lista para trabajar: se puede lanzar o arrastrar un agente o equipo encima", "Ready to work: launch it or drag an agent or team onto it") },
                 ]}
               />
             ) : (

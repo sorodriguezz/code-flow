@@ -76,9 +76,9 @@ export function MemberChat({ runId, memberId }: { runId: string; memberId: strin
             value={tab}
             onChange={setTab}
             options={[
-              { value: "chat", label: l("Su conversación", "Its conversation"), icon: MessageSquare },
-              { value: "channel", label: l("En el canal", "In the channel"), icon: MessagesSquare },
-              { value: "items", label: l("Sus tareas", "Its tasks"), icon: ListChecks, badge: <span className="text-[10.5px] text-[var(--cf-text-faint)]">{items.length}</span> },
+              { value: "chat", label: l("Su conversación", "Its conversation"), icon: MessageSquare, title: l("Lo que este miembro dijo e hizo en sus turnos", "What this member said and did in its turns") },
+              { value: "channel", label: l("En el canal", "In the channel"), icon: MessagesSquare, title: l("Solo los mensajes del canal del equipo que envió o recibió", "Only the team-channel messages it sent or received") },
+              { value: "items", label: l("Sus tareas", "Its tasks"), icon: ListChecks, title: l("Las tareas que se le asignaron en esta corrida y su estado", "The tasks it got in this run and their status"), badge: <span className="text-[10.5px] text-[var(--cf-text-faint)]">{items.length}</span> },
             ]}
           />
           {tab === "chat" && conversations.length > 1 && (

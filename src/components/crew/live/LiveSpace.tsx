@@ -12,6 +12,7 @@ import { useBacklogStore } from "../../../state/backlogStore";
 import { useT } from "../../../state/languageStore";
 import { confirmAction } from "../../../state/confirmStore";
 import { runIsLive, type TeamRun, type TeamRunState } from "../../../types/team";
+import { ChipRow } from "../kit/ChipRow";
 import { TeamAvatar } from "../kit/Avatar";
 import { Btn, Chip, Empty, Seg, SPRING } from "../kit/ui";
 import { money, useCrewStore, useL } from "../state";
@@ -41,7 +42,7 @@ function RunChip({ run, on, onPick }: { run: TeamRun; on: boolean; onPick: () =>
   const working = state?.items.some((i) => i.status === "running");
   const asks = state?.messages.filter((m) => m.kind === "question" && m.to_id === "user" && !m.answered_at).length ?? 0;
   return (
-    <button type="button" title={l("Muestra esta corrida en vivo", "Shows this run live")} onClick={onPick} className={`relative flex h-[38px] max-w-[280px] shrink-0 items-center gap-2 rounded-[11px] border pl-1.5 pr-2.5 text-left ${on ? "border-[var(--cf-accent-line)]" : "border-[var(--cf-border)] hover:border-[var(--cf-border-strong)]"}`}>
+    <button type="button" data-chip={run.id} title={l("Muestra esta corrida en vivo", "Shows this run live")} onClick={onPick} className={`relative flex h-[38px] max-w-[280px] shrink-0 items-center gap-2 rounded-[11px] border pl-1.5 pr-2.5 text-left ${on ? "border-[var(--cf-accent-line)]" : "border-[var(--cf-border)] hover:border-[var(--cf-border-strong)]"}`}>
       {on && <motion.span layoutId="crew-run-pill" transition={SPRING} className="absolute inset-0 rounded-[11px] bg-[var(--cf-accent-soft)]" />}
       <span className="relative"><TeamAvatar size={26} state={working ? "thinking" : "idle"} /></span>
       <span className="relative min-w-0">
@@ -171,8 +172,8 @@ function RunPage({ state }: { state: TeamRunState }) {
                 value={rail}
                 onChange={setRail}
                 options={[
-                  { value: "canal", label: l("Canal", "Channel"), icon: MessagesSquare, badge: asks ? <span className="grid h-4 min-w-4 place-items-center rounded-full bg-[var(--cf-warning)] px-1 text-[10px] text-white">{asks}</span> : undefined },
-                  { value: "panel", label: l("Recursos y decisiones", "Resources and decisions"), icon: BarChart3 },
+                  { value: "canal", label: l("Canal", "Channel"), icon: MessagesSquare, title: l("Planes, entregas, preguntas y decisiones del equipo, en orden; aquí respondes lo que te preguntan", "The team's plans, deliveries, questions and decisions, in order; answer what you're asked here"), badge: asks ? <span className="grid h-4 min-w-4 place-items-center rounded-full bg-[var(--cf-warning)] px-1 text-[10px] text-white">{asks}</span> : undefined },
+                  { value: "panel", label: l("Recursos y decisiones", "Resources and decisions"), icon: BarChart3, title: l("Costo y recursos de la corrida, alertas (bucles, atascos, presupuesto), quién habla con quién y las dudas que se decidieron sin preguntarte", "The run's cost and resources, alerts (loops, stuck work, budget), who talks to whom and the doubts settled without asking you") },
                 ]}
               />
             </div>
@@ -195,8 +196,14 @@ export function LiveSpace() {
   const ordered = useMemo(() => {
     const live = runs.filter(runIsLive).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
     const pinned = runs.filter((r) => !runIsLive(r) && r.pinned);
-    const rest = runs.filter((r) => !runIsLive(r) && !r.pinned).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).slice(0, 12);
-    return [...live, ...pinned, ...rest];
+    const rest = runs.filter((r) => !runIsLive(r) && !r.pinned).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    // The row keeps the twelve latest past runs; an older one picked from the list joins it.
+    const older = rest.slice(12).filter((r) => r.id === selectedRunId);
+    return [...live, ...pinned, ...rest.slice(0, 12), ...older];
+  }, [runs, selectedRunId]);
+  const everyRun = useMemo(() => {
+    const live = runs.filter(runIsLive).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    return [...live, ...runs.filter((r) => !runIsLive(r)).sort((a, b) => b.updated_at.localeCompare(a.updated_at))];
   }, [runs]);
   const current = ordered.find((r) => r.id === selectedRunId) ?? ordered[0] ?? null;
   const state = current ? states[current.id] : undefined;
@@ -215,10 +222,20 @@ export function LiveSpace() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 gap-1.5 overflow-x-auto border-b border-[var(--cf-border)] px-3 py-2 [scrollbar-width:thin]">
-        {ordered.map((r) => (
-          <RunChip key={r.id} run={r} on={r.id === current.id} onPick={() => void useTeamStore.getState().select(r.id)} />
-        ))}
+      <div className="flex shrink-0 border-b border-[var(--cf-border)] px-3 py-2">
+        <ChipRow
+          active={current.id}
+          noun={["corridas", "runs"]}
+          onPick={(id) => void useTeamStore.getState().select(id)}
+          entries={everyRun.map((r) => {
+            const [es, en, tone] = RUN_STATUS[r.status];
+            return { key: r.id, label: r.title || r.goal, sub: r.team_name, leading: <TeamAvatar size={24} />, aside: <Chip tone={tone}>{l(es, en)}</Chip> };
+          })}
+        >
+          {ordered.map((r) => (
+            <RunChip key={r.id} run={r} on={r.id === current.id} onPick={() => void useTeamStore.getState().select(r.id)} />
+          ))}
+        </ChipRow>
       </div>
       {state ? <RunPage key={current.id} state={state} /> : <div className="grid flex-1 place-items-center text-[12px] text-[var(--cf-text-muted)]">…</div>}
     </div>

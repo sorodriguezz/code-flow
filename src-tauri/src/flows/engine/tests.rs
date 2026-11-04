@@ -46,6 +46,9 @@ struct Script {
     /// The nodes a debugger stops the run before, and the ones it was paused at.
     stop_before: Mutex<Vec<String>>,
     paused_at: Mutex<Vec<(String, usize)>>,
+    /// Answers for one roster agent, by name — asked at once, agents would otherwise race for `answers`.
+    by_agent: Mutex<HashMap<String, std::collections::VecDeque<Result<String, String>>>>,
+    team_requests: Mutex<Vec<TeamRequest>>,
 }
 
 impl Script {
@@ -206,8 +209,13 @@ impl RunHost for Host {
                 }
             }
             let provider = if call.engine.provider.is_empty() { "claude".to_string() } else { call.engine.provider.clone() };
+            let speaker = call.system.as_deref().and_then(|system| system.strip_prefix("Eres «")).and_then(|rest| rest.split('»').next()).map(str::to_string);
             self.script.calls.lock().unwrap().push(call);
-            let text = self.script.next()?;
+            let routed = speaker.and_then(|name| self.script.by_agent.lock().unwrap().get_mut(&name).and_then(|queue| queue.pop_front()));
+            let text = match routed {
+                Some(answer) => answer?,
+                None => self.script.next()?,
+            };
             Ok(AiAnswer {
                 text,
                 provider,
@@ -223,6 +231,31 @@ impl RunHost for Host {
             self.script.local_calls.lock().unwrap().push(call);
             let text = self.script.next()?;
             Ok(LocalAnswer { text, server: "ollama".into(), model: "qwen".into(), prompt_tokens: Some(7), completion_tokens: Some(3), ..Default::default() })
+        })
+    }
+    fn roster_agent(&self, agent_id: &str) -> Result<RosterAgent, String> {
+        let (name, provider, edits) = match agent_id {
+            "ana" => ("Ana", "claude", true),
+            "beto" => ("Beto", "codex", true),
+            "caro" => ("Caro", "gemini", true),
+            "jefe" => ("Jefe", "claude", true),
+            "lectora" => ("Lectora", "claude", false),
+            other => return Err(format!("Unknown agent {other}")),
+        };
+        Ok(RosterAgent {
+            name: name.into(),
+            role: format!("rol de {name}"),
+            prompt: format!("Instrucciones de {name}."),
+            engine: EngineChoice { provider: provider.into(), model: format!("{provider}-model"), account: String::new() },
+            effort: if name == "Ana" { "high".into() } else { String::new() },
+            edits,
+        })
+    }
+    fn team_run(&self, request: TeamRequest, _cancel: CancellationToken) -> HostFuture<'_, Result<Value, String>> {
+        Box::pin(async move {
+            let answer = json!({"status": "done", "summary": format!("hecho: {}", request.goal), "work": []});
+            self.script.team_requests.lock().unwrap().push(request);
+            Ok(answer)
         })
     }
     fn project_path(&self, project_id: &str) -> Result<String, String> {
@@ -1215,3 +1248,4 @@ mod milestone11;
 mod database_node;
 mod audit_fixes;
 mod knowhow_nodes;
+mod agent_nodes;

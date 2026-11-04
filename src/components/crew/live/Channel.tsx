@@ -4,7 +4,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowRight, Send } from "lucide-react";
+import { ArrowRight, GitMerge, Send } from "lucide-react";
 import { useTeamStore } from "../../../state/teamStore";
 import { useAgentsStore } from "../../../state/agentsStore";
 import type { TeamMessage, TeamRunState } from "../../../types/team";
@@ -30,7 +30,7 @@ function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; c
 
   if (m.kind === "status") {
     return (
-      <p className="m-0 flex items-center gap-1.5 py-0.5 pl-9 text-[11px] text-[var(--cf-text-faint)]">
+      <p className="m-0 flex shrink-0 items-center gap-1.5 py-0.5 pl-9 text-[11px] text-[var(--cf-text-faint)]">
         <span className="h-1 w-1 rounded-full bg-[var(--cf-text-faint)]" />
         <b className="font-medium text-[var(--cf-text-muted)]">{m.from_name}</b> {m.body}
       </p>
@@ -38,11 +38,11 @@ function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; c
   }
 
   return (
-    <motion.div layout="position" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className={`flex gap-2 ${fromUser ? "flex-row-reverse" : ""}`}>
+    <motion.div layout="position" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className={`flex shrink-0 gap-2 ${fromUser ? "flex-row-reverse" : ""}`}>
       {member ? (
         <AgentAvatar agent={{ id: member.agent_id, icon: member.icon || agent?.icon, color: member.color || agent?.color }} size={28} />
       ) : (
-        <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-[9px] text-[10px] font-semibold ${fromUser ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)]" : "bg-[var(--cf-sunken)] text-[var(--cf-text-muted)]"}`}>{fromUser ? l("Tú", "You") : "·"}</span>
+        <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-[9px] text-[10px] font-semibold ${fromUser ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)]" : "bg-[var(--cf-sunken)] text-[var(--cf-text-muted)]"}`}>{fromUser ? l("Tú", "You") : <GitMerge className="h-3.5 w-3.5" />}</span>
       )}
       <div className={`min-w-0 max-w-[88%] rounded-[12px] border px-2.5 py-1.5 ${asking ? "cf-crew-waiting border-[var(--cf-warning)] bg-[color-mix(in_oklab,var(--cf-warning)_8%,var(--cf-surface))]" : fromUser ? "border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)]" : "border-[var(--cf-border)] bg-[var(--cf-surface-raised)]"}`} style={{ ["--cf-crew-c" as string]: "var(--cf-warning)" }}>
         <div className="flex flex-wrap items-center gap-1.5 text-[11px]">

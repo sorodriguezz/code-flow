@@ -228,15 +228,24 @@ pub fn list_branches(path: &str) -> Result<Vec<BranchInfo>, String> {
 pub fn set_branch_locked(path: &str, name: &str, locked: bool) -> Result<(), String> {
     let repo = open(path)?;
     // Refuse a name that isn't a local branch: the key would sit in the config forever with
-    // nothing to apply to, and `list_branches` would never surface it again.
-    repo.find_branch(name, BranchType::Local)
-        .map_err(|e| e.message().to_string())?;
+    // nothing to apply to, and `list_branches` would never surface it again. The one exception is
+    // the branch HEAD names in a repository with no commits yet — `main` right after `git init`
+    // exists in every sense the user sees, and becomes a real ref with the first commit.
+    if repo.find_branch(name, BranchType::Local).is_err() && !unborn_head_is(&repo, name) {
+        return Err(format!("La rama «{name}» no existe."));
+    }
     let value = if locked == lock_rules::matches(name) { None } else { Some(locked) };
     write_override(&repo, name, value)
 }
 
 /// The checked-out branch's name if it's locked. `None` on a detached HEAD or an unborn branch —
 /// there's no branch there to protect.
+/// Whether HEAD is an unborn branch called `name` — a repository with no commits yet.
+fn unborn_head_is(repo: &Repository, name: &str) -> bool {
+    repo.head().is_err()
+        && repo.find_reference("HEAD").ok().and_then(|h| h.symbolic_target().map(|t| t == format!("refs/heads/{name}"))).unwrap_or(false)
+}
+
 pub fn locked_head_branch(repo: &Repository) -> Option<String> {
     let head = repo.head().ok()?;
     if !head.is_branch() {

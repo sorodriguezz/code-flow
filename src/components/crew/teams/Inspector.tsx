@@ -19,13 +19,14 @@ import {
   UserRoundCog,
   Wrench,
 } from "lucide-react";
+import { fieldClass } from "../../common/recipes";
 import { useAgentsStore } from "../../../state/agentsStore";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
 import { useModelOptions } from "../kit/models";
 import { canReport, removeMember, reparent, subtree } from "../../../lib/agents/hierarchy";
 import { applyPreset, presetOf, type PolicyPreset, type Team, type TeamMember, type TeamPolicy } from "../../../types/team";
 import { AgentAvatar, TeamAvatar } from "../kit/Avatar";
-import { SelectBox, Btn, Label, Panel, Seg, Stepper, Switch, ToggleChip, field } from "../kit/ui";
+import { SelectBox, Btn, Label, Panel, Seg, Stepper, Switch, ToggleChip } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
 
 type Update = (fn: (team: Team) => Team, now?: boolean) => void;
@@ -34,7 +35,7 @@ const NO_PROJECTS: never[] = [];
 function Row({ label, hint, title, children }: { label: ReactNode; hint?: ReactNode; title?: string; children: ReactNode }) {
   return (
     <div title={title} className="flex items-center justify-between gap-3">
-      <span className="min-w-0">
+      <span className="min-w-0 flex-1">
         <span className="block text-[12.5px]">{label}</span>
         {hint && <span className="block text-[11.5px] text-[var(--cf-text-muted)]">{hint}</span>}
       </span>
@@ -57,20 +58,25 @@ function usePanels(initial: string) {
   };
 }
 
+/** A number with its unit; empty is no limit (∞). Fixed width, so the label beside it keeps the row. */
 function MoneyInput({ value, onChange, step = 1, suffix, title }: { value: number; onChange: (v: number) => void; step?: number; suffix: string; title?: string }) {
   return (
-    <span className="inline-flex items-center gap-1">
+    <span className="inline-flex items-center gap-1.5">
       <input
-                  type="number"
-          title={title}
-          min={0}
+        type="number"
+        inputMode="decimal"
+        title={title}
+        min={0}
         step={step}
         value={value || ""}
         placeholder="∞"
         onChange={(e) => onChange(Math.max(0, Number(e.target.value) || 0))}
-        className={`${field} h-[28px] w-[86px] text-right tabular-nums`}
+        className={fieldClass({
+          size: "sm",
+          className: "w-[84px] text-right tabular-nums [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none",
+        })}
       />
-      <span className="w-[42px] text-[11.5px] text-[var(--cf-text-muted)]">{suffix}</span>
+      <span className="w-[28px] text-[11.5px] text-[var(--cf-text-muted)]">{suffix}</span>
     </span>
   );
 }
@@ -98,6 +104,7 @@ export function TeamInspector({ team, update }: { team: Team; update: Update }) 
       <Panel title={l("Cómo trabaja", "How it works")} icon={Settings2} open={panels.is("work")} onToggle={() => panels.toggle("work")}>
         <Seg<PolicyPreset | "custom">
           size="sm"
+          full
           value={preset ?? "custom"}
           onChange={(v) => v !== "custom" && update((t) => ({ ...t, policy: applyPreset(t.policy, v) }), true)}
           options={[
@@ -221,6 +228,12 @@ export function TeamInspector({ team, update }: { team: Team; update: Update }) 
         <Row label={l("Minutos de agente", "Agent minutes")} title={l("Tope de minutos de trabajo de agentes; vacío, sin límite", "Cap on agent working minutes; empty means no limit")}>
           <MoneyInput value={p.budget_minutes} step={5} onChange={(budget_minutes) => set({ budget_minutes }, false)} suffix="min" />
         </Row>
+        <Row label={l("Cuota del plan", "Plan quota")} hint={l("0: sin límite", "0: no limit")} title={l("Lo más de la ventana de tu plan (Claude, Codex, Gemini, opencode) que puede usar una tarea antes de esperarte", "The most of your plan's window (Claude, Codex, Gemini, opencode) one task may use before it waits for you")}>
+          <MoneyInput value={p.max_session_pct} step={5} onChange={(max_session_pct) => set({ max_session_pct: Math.min(100, max_session_pct) }, false)} suffix="%" />
+        </Row>
+        <Row label={l("Motores sin cuota", "Engines with no quota")} hint={l("0: sin límite", "0: no limit")} title={l("Minutos de trabajo de los agentes con Grok, Cline u otro motor que no publica cuota; el modelo local no cuenta", "Working minutes of agents on Grok, Cline or another engine that publishes no quota; the local model does not count")}>
+          <MoneyInput value={p.unmetered_minutes} step={10} onChange={(unmetered_minutes) => set({ unmetered_minutes }, false)} suffix="min" />
+        </Row>
         <Row label={l("Avisar al", "Warn at")} title={l("Porcentaje del presupuesto en el que recibes un aviso", "Share of the budget at which you get a warning")}>
           <MoneyInput value={p.budget_warn_pct} step={5} onChange={(budget_warn_pct) => set({ budget_warn_pct: Math.min(100, budget_warn_pct) }, false)} suffix="%" />
         </Row>
@@ -230,6 +243,7 @@ export function TeamInspector({ team, update }: { team: Team; update: Update }) 
       <Panel title={l("Comunicación", "Communication")} icon={MessagesSquare} open={panels.is("comms")} onToggle={() => panels.toggle("comms")}>
         <Seg
           size="sm"
+          full
           value={p.comms}
           onChange={(comms) => set({ comms })}
           options={[

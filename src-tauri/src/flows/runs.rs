@@ -880,6 +880,14 @@ impl RunHost for AppHost {
         Box::pin(super::ai_host::agent_task(self, request, cancel))
     }
 
+    fn roster_agent(&self, agent_id: &str) -> Result<engine::RosterAgent, String> {
+        super::ai_host::roster_agent(self, agent_id)
+    }
+
+    fn team_run(&self, request: engine::TeamRequest, cancel: CancellationToken) -> engine::HostFuture<'_, Result<Value, String>> {
+        Box::pin(super::ai_host::team_run(self, request, cancel))
+    }
+
     fn project_path(&self, project_id: &str) -> Result<String, String> {
         let project = self
             .with_db(|conn| crate::db::queries::get_project(conn, project_id))?

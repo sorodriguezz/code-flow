@@ -155,16 +155,26 @@ impl AiEngine for CodexEngine {
         // its run to the map — and the ChatGPT apps too (`features.apps`): Gmail, Drive, GitHub…
         // are tools that act outside the sandbox, and on this machine their schemas alone ran to
         // hundreds of thousands of characters a request.
+        let declared = users_mcp_servers();
         let mut blocked: Vec<String> = inv.mcp_block.clone();
         if inv.read_only {
-            for name in users_mcp_servers() {
-                if !blocked.contains(&name) {
-                    blocked.push(name);
+            for name in &declared {
+                if !blocked.contains(name) {
+                    blocked.push(name.clone());
                 }
             }
             cmd.arg("-c").arg("features.apps=false");
         }
-        for server in &blocked {
+        // Only a server `config.toml` declares can be switched off by name. One a plugin brings
+        // (`cua_repl`, `codex_app` from the ChatGPT app's bundle) has no table there, and
+        // `-c mcp_servers.<it>.enabled=false` creates one with no command or url — which Codex
+        // refuses outright: "Error loading config.toml: invalid transport", before any turn. Those
+        // go with the plugins themselves, and so do they on every read-only run.
+        let from_plugins = blocked.iter().any(|name| !declared.contains(name));
+        if inv.read_only || from_plugins {
+            cmd.arg("-c").arg("features.plugins=false");
+        }
+        for server in blocked.iter().filter(|name| declared.contains(name)) {
             if !server.is_empty() && server.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
                 cmd.arg("-c").arg(format!("mcp_servers.{server}.enabled=false"));
             }
@@ -755,15 +765,20 @@ mod tests {
     fn a_read_only_turn_switches_the_users_servers_off() {
         let mut inv = AiInvocation::new("hola", "");
         inv.read_only = true;
-        inv.mcp_block = vec!["node_repl".into(), "bad name".into()];
+        inv.mcp_block = vec!["cua_repl".into(), "bad name".into()];
         let args: Vec<String> = CodexEngine
             .build_command("codex", &inv)
             .as_std()
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(args.iter().any(|a| a == "mcp_servers.node_repl.enabled=false"), "{args:?}");
         assert!(!args.iter().any(|a| a.contains("bad name")), "{args:?}");
+        // Not in `config.toml` (a plugin's): never named — Codex refuses a table with no transport —
+        // and the plugins go instead.
+        if !users_mcp_servers().iter().any(|n| n == "cua_repl") {
+            assert!(!args.iter().any(|a| a.contains("cua_repl")), "{args:?}");
+        }
+        assert!(args.iter().any(|a| a == "features.plugins=false"), "{args:?}");
     }
 
     /// Captured verbatim from `codex exec --json` on 0.147.0.

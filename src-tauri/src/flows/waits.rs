@@ -314,6 +314,11 @@ pub fn cancel_parked(app: &AppHandle, run_id: &str) -> Result<bool, String> {
     for wait in with_db(app, |conn| queries::waits_of_run(conn, run_id))? {
         if wait.decided_at.is_none() {
             let _ = settle(app, &wait.id, "canceled", "desktop", &Value::Null);
+            // A team node's run goes with it: nobody is left to follow it.
+            if let Some(link) = super::ai_host::load_link(app, &wait.flow_id, &wait.run_id, &wait.node_id) {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move { super::ai_host::team_abort(&app, &link.team_run).await });
+            }
         }
     }
     finish_parked(app, run_id, "canceled", "")?;
@@ -381,6 +386,13 @@ fn pick_up(app: &AppHandle, wait: &FlowWaitRow, answer: WaitAnswer) -> Result<()
         finish_parked(app, &run.id, "error", message)?;
         return Ok(());
     }
+    // A team node is not done when its wait is: it runs again and follows the same team run — with
+    // the decision handed to the team first, when its wait was an approval.
+    let follows_a_team = node.type_id == "ai.team";
+    if follows_a_team && answer.decision == "expired" {
+        finish_parked(app, &run.id, "error", "Nobody decided before the time limit — the team run stays waiting in Agents")?;
+        return Ok(());
+    }
     let inputs: Ports = read_gz(&wait_dir(&run.id).join(format!("{}.json.gz", node.id)))?;
     let decided = super::nodes::decided_ports(&node.type_id, &inputs, &answer);
 
@@ -398,10 +410,20 @@ fn pick_up(app: &AppHandle, wait: &FlowWaitRow, answer: WaitAnswer) -> Result<()
             quiet.insert(done.node_id.clone());
         }
     }
-    seeds.insert(node.id.clone(), (decided, false));
+    if !follows_a_team {
+        seeds.insert(node.id.clone(), (decided, false));
+    }
     // The scope the run had — a partial or a step run does not turn into a full one by waiting.
     let active = run::scope_of(&spec, &run.mode, &run.trigger_node, &run.target_node);
-    let plan = Plan { trigger: None, active, seeds, trigger_output: None, quiet, decided: Some(node.id.clone()), seed_origins };
+    let plan = Plan {
+        trigger: None,
+        active,
+        seeds,
+        trigger_output: None,
+        quiet,
+        decided: (!follows_a_team).then(|| node.id.clone()),
+        seed_origins,
+    };
 
     with_db(app, |conn| queries::set_run_status(conn, &run.id, "running"))?;
     let (vars, locale) = runs::run_environment(app, &run.workspace_id)?;
@@ -410,10 +432,22 @@ fn pick_up(app: &AppHandle, wait: &FlowWaitRow, answer: WaitAnswer) -> Result<()
     row.status = "running".into();
     row.notify = runs::notify_setting(&spec, origin);
     let label = row.mode.clone();
-    runs::launch(
-        app,
-        Launch { row, parsed: Arc::new(spec), plan, vars, locale, label, origin, respond: None, depth: 0, wait: false, parent: None },
-    );
+    let launch = Launch { row, parsed: Arc::new(spec), plan, vars, locale, label, origin, respond: None, depth: 0, wait: false, parent: None };
+    let link = if follows_a_team { super::ai_host::load_link(app, &wait.flow_id, &wait.run_id, &wait.node_id) } else { None };
+    match link.filter(|link| wait.kind == "approval" && !link.pending.is_empty()) {
+        Some(link) => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = super::ai_host::team_apply(&app, &link, &answer).await {
+                    crate::applog::info(&format!("flows: the team did not take the decision: {error}"));
+                }
+                let _ = runs::launch(&app, launch);
+            });
+        }
+        None => {
+            let _ = runs::launch(app, launch);
+        }
+    }
     Ok(())
 }
 
@@ -422,6 +456,10 @@ fn pick_up(app: &AppHandle, wait: &FlowWaitRow, answer: WaitAnswer) -> Result<()
 pub fn arm(app: &AppHandle) {
     let Ok(open) = open_waits(app, None) else { return };
     for wait in open {
+        if wait.kind == "team" {
+            super::ai_host::rewatch(app, &wait);
+            continue;
+        }
         let Some(expires) = wait.expires_at.as_deref().and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()) else { continue };
         let delay = (expires.with_timezone(&chrono::Utc) - chrono::Utc::now()).to_std().unwrap_or(Duration::ZERO);
         let app = app.clone();
@@ -439,7 +477,13 @@ pub fn arm(app: &AppHandle) {
 
 /// [`decide`] for the timer, which may settle what a person may not (`expired`).
 fn decide_as(app: &AppHandle, wait_id: &str, decision: &str) -> Result<(), String> {
-    let Some((row, answer)) = settle(app, wait_id, decision, "timer", &Value::Null)? else {
+    settle_from(app, wait_id, decision, "timer")
+}
+
+/// Ends a wait from inside the app — the timer, the watcher of a team run — and carries the run on: the
+/// node still waiting in this session, or the run picked up from its records.
+pub(super) fn settle_from(app: &AppHandle, wait_id: &str, decision: &str, by: &str) -> Result<(), String> {
+    let Some((row, answer)) = settle(app, wait_id, decision, by, &Value::Null)? else {
         return Err("already-decided".into());
     };
     let waiter = WAITERS.lock().map_err(|e| e.to_string())?.remove(wait_id);

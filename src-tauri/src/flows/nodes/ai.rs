@@ -49,6 +49,7 @@ const MAX_DIFF_CHARS: usize = crate::ai::MAX_REVIEW_DIFF_CHARS;
 /// A commit message is written from at most this much diff, as in the Changes panel.
 const MAX_COMMIT_DIFF_CHARS: usize = crate::ai::MAX_DIFF_CHARS;
 
+mod agents;
 pub(crate) mod extra;
 
 pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
@@ -56,6 +57,9 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "ai.guard" => extra::guard(ctx).await,
         "ai.transform" => extra::transform(ctx).await,
         "ai.compare" => extra::compare(ctx).await,
+        "ai.agents" => agents::parallel(ctx).await,
+        "ai.orchestrator" => agents::orchestrator(ctx).await,
+        "ai.team" => agents::team(ctx).await,
         "ai.image" => extra::image(ctx).await,
         "ai.speech" => extra::speech(ctx).await,
         "ai.agent" => agent(ctx).await,
@@ -185,6 +189,8 @@ struct Ask {
     session: Option<String>,
     mcp: Vec<String>,
     effort: Option<String>,
+    /// Stops this one question — one of several asked at once — without stopping the node.
+    cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -232,7 +238,7 @@ async fn ask_once(ctx: &NodeCtx, engine: &EngineChoice, ask: &Ask) -> Result<Rep
             node_name: ctx.node.name.clone(),
             ..Default::default()
         };
-        let answer = ctx.run.host.local_ai(call, ctx.cancel.clone()).await?;
+        let answer = ctx.run.host.local_ai(call, ask.cancel.clone().unwrap_or_else(|| ctx.cancel.clone())).await?;
         return Ok(Reply {
             text: answer.text,
             provider: "local".into(),
@@ -254,7 +260,7 @@ async fn ask_once(ctx: &NodeCtx, engine: &EngineChoice, ask: &Ask) -> Result<Rep
         effort: ask.effort.clone(),
         node_name: ctx.node.name.clone(),
     };
-    let answer = ctx.run.host.ai(call, ctx.cancel.clone()).await?;
+    let answer = ctx.run.host.ai(call, ask.cancel.clone().unwrap_or_else(|| ctx.cancel.clone())).await?;
     Ok(Reply {
         text: answer.text,
         provider: answer.provider,
@@ -648,9 +654,18 @@ fn protect_repo(ctx: &NodeCtx, engines: &[EngineChoice], root: &str, can_edit: b
 }
 
 async fn agent(ctx: &NodeCtx) -> Result<Ports, NodeError> {
-    let engines = engines(&ctx.params);
+    let roster = agents::chosen_agent(ctx)?;
+    let mut engines = engines(&ctx.params);
+    if let Some(agent) = &roster {
+        engines[0] = agent.engine.clone();
+        engines.dedup_by(|later, first| later.provider == first.provider);
+    }
     let schema = output_schema(&ctx.params)?;
-    let can_edit = ctx.param_str("access") == "edit";
+    let mut can_edit = ctx.param_str("access") == "edit";
+    if let Some(agent) = roster.as_ref().filter(|agent| can_edit && !agent.edits) {
+        ctx.log(LogStream::Info, &format!("{} may not edit files (Agents) — it works read-only", agent.name));
+        can_edit = false;
+    }
     let (cwd, repo) = work_folder(ctx)?;
     if let Some(root) = &repo {
         protect_repo(ctx, &engines, root, can_edit)?;
@@ -677,16 +692,21 @@ async fn agent(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             key => format!("ai-session:{}:{key}", ctx.node.id),
         };
         let session = if keep_session { stored_session(ctx, &session_key, &engines[0]) } else { None };
+        let node_system = Some(text(params, "system")).filter(|system| !system.trim().is_empty());
         let question = Ask {
             prompt: full,
             data: text(params, "data"),
-            system: Some(text(params, "system")).filter(|system| !system.trim().is_empty()),
+            system: match &roster {
+                Some(agent) => Some(agents::with_persona(agent, node_system.as_deref())),
+                None => node_system,
+            },
             cwd: Some(cwd.clone()),
             can_edit,
             schema: schema.clone(),
             session: session.clone(),
             mcp: mcp.clone(),
-            effort: effort_of(ctx),
+            effort: effort_of(ctx).or_else(|| roster.as_ref().and_then(agents::effort_of_agent)),
+            cancel: None,
         };
         let started = Instant::now();
         let answered = async {
@@ -716,6 +736,9 @@ async fn agent(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             json.insert("sessionId".into(), json!(id));
         }
         reply.stamp(&mut json, started);
+        if let Some(agent) = &roster {
+            json.insert("agent".into(), json!(agent.name));
+        }
         if can_edit {
             if let Some(root) = &repo {
                 if let Ok(files) = crate::git::checkpoint::flow_changed_paths(root, &ctx.run.run_id) {

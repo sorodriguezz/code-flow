@@ -116,6 +116,16 @@ fn members_of(run: &Run) -> Vec<team::Member> {
     run.members.iter().map(|m| m.member.clone()).collect()
 }
 
+/// Whether a plan is what «chico» means: one member — the one who does it, or the sub-lead of its
+/// area — at most one task per repository, nothing to investigate first.
+fn is_small(plan: &[Item]) -> bool {
+    let Some(first) = plan.first() else { return false };
+    let mut repos: Vec<&str> = plan.iter().map(|i| i.project_id.as_str()).collect();
+    repos.sort_unstable();
+    repos.dedup();
+    plan.iter().all(|i| i.member_id == first.member_id && matches!(i.kind.as_str(), "work" | "delegate")) && repos.len() == plan.len()
+}
+
 /// Who a planner may hand work to: the lead plans for everyone, a sub-lead only for its branch.
 /// A leader is in its own roster only when it is `hands_on`; an advisor is never assignable. A
 /// sub-lead that does not edit is still offered as editing — what it gets is a `delegate`, which it
@@ -343,7 +353,7 @@ pub async fn start_run(
         let repo_path = project.local_path.clone();
         let target = if target.is_empty() {
             let p = repo_path.clone();
-            blocking(move || gitops::current_branch(&p)).await?.ok_or_else(|| format!("{} no está en ninguna rama: elige la rama destino.", project.name))?
+            blocking(move || gitops::current_branch(&p)).await?.ok_or_else(|| format!("{} no tiene commits todavía o no está en ninguna rama: haz un primer commit o elige la rama destino.", project.name))?
         } else {
             target.clone()
         };
@@ -351,7 +361,15 @@ pub async fn start_run(
         let (r, p, b, t) = (repo_path.clone(), path.clone(), integration_branch.clone(), target.clone());
         let result = blocking(move || {
             if !gitops::branch_exists(&r, &t) {
+                if gitops::head_sha(&r).is_err() {
+                    return Err(format!("todavía no tiene commits: haz un primer commit en «{t}» y vuelve a lanzar"));
+                }
                 return Err(format!("la rama «{t}» no existe"));
+            }
+            // The team integrates into its target at the end: a branch locked against merges is
+            // not one it may deliver to.
+            if crate::git::branch::guard_branch_unlocked_at(&r, &t).is_err() {
+                return Err(format!("la rama «{t}» está bloqueada: elige otra rama destino o desbloquéala"));
             }
             gitops::add_worktree(&r, &p, &b, &t)
         })
@@ -536,6 +554,155 @@ pub async fn claim_run(db: &Db, run_id: &str, limit: Option<usize>) -> Result<Ve
     claim_limited(db, run_id, limit).await
 }
 
+/// Where a run keeps the plan windows it started from, per account key.
+fn session_base_key(run_id: &str) -> String {
+    format!("team_session_base:{run_id}")
+}
+
+/// The shortest plan window of every engine account the run's members use that publishes one —
+/// Claude, Codex, Gemini, opencode: `(account key, used %, resets at)`.
+///
+/// Claude's comes from what its own runs report (no keychain read — the members are running it
+/// anyway); the others through `ai_quota`'s cache, which reads at most once a minute (Gemini's CLI
+/// once per half hour, behind the answer). An engine with no window is left to [`unmetered_over`].
+async fn plan_windows(db: &Db, run_id: &str) -> Vec<(String, f64, String)> {
+    let engines = with(db, |c| {
+        let Some(run) = team::get_run(c, run_id).map_err(e2s)? else { return Ok(Vec::new()) };
+        let mut seen: Vec<String> = Vec::new();
+        let mut out = Vec::new();
+        for m in &run.members {
+            if !crate::ai_quota::QUOTA_PROVIDERS.contains(&m.provider.as_str()) {
+                continue;
+            }
+            let key = m.account_id.as_ref().map(|id| format!("{}|{id}", m.provider)).unwrap_or_else(|| m.provider.clone());
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key.clone());
+            if m.provider == "claude" {
+                out.push((key, None));
+                continue;
+            }
+            let configured = queries::get_setting(c, &format!("{}_binary_path", m.provider)).ok().flatten().filter(|p| !p.trim().is_empty());
+            let binary = configured.unwrap_or_else(|| crate::ai::engine_for(&m.provider).default_binary().to_string());
+            let Some(binary) = crate::ai::find_on_path(&binary) else { continue };
+            let account = m.account_id.as_ref().filter(|_| crate::ai_accounts::supports_accounts(&m.provider)).map(|id| crate::ai_accounts::AccountEnv::for_account(&m.provider, id));
+            out.push((key, Some(crate::ai_quota::QuotaEngine { provider: m.provider.clone(), account, binary })));
+        }
+        Ok(out)
+    })
+    .unwrap_or_default();
+    let mut windows = Vec::new();
+    for (key, engine) in engines {
+        match engine {
+            None => {
+                if let Some((limit, _)) = crate::claude::last_rate_limit(&key) {
+                    if limit.five_hour_resets_at > 0 {
+                        windows.push((key, limit.five_hour_pct, limit.five_hour_resets_at.to_string()));
+                    }
+                }
+            }
+            Some(engine) => {
+                let quota = crate::ai_quota::fetch(engine, crate::ai_quota::Trigger::Open).await;
+                // The session-like window when there is one: the week moves too slowly to stop a run.
+                let pick = quota.limits.iter().find(|l| l.kind == "session").or_else(|| quota.limits.first());
+                if let Some(limit) = pick {
+                    windows.push((key, limit.used_percent, limit.resets_at.clone()));
+                }
+            }
+        }
+    }
+    windows
+}
+
+/// Members on an engine that publishes no plan window (Grok, Cline, a custom command) have no
+/// percentage to watch, so their agent-minutes are the measure. The local model costs nothing and
+/// is left out.
+fn unmetered_over(run: &Run, items: &[Item]) -> Option<String> {
+    let cap = run.policy.unmetered_minutes;
+    if cap <= 0 {
+        return None;
+    }
+    let unmetered: Vec<&str> = run
+        .members
+        .iter()
+        .filter(|m| !crate::ai_quota::QUOTA_PROVIDERS.contains(&m.provider.as_str()) && m.provider != crate::local_agent::PROVIDER_ID)
+        .map(|m| m.member.id.as_str())
+        .collect();
+    if unmetered.is_empty() {
+        return None;
+    }
+    let mine: Vec<Item> = items.iter().filter(|i| unmetered.contains(&i.member_id.as_str())).cloned().collect();
+    let minutes = team::metrics::agent_minutes(&mine, chrono::Utc::now());
+    (minutes >= cap as f64).then(|| {
+        format!("Los agentes sin medidor de cuota (Grok, Cline…) ya llevan {} minutos de trabajo (tope {cap}). Aprueba para darles otros {cap} o detén la tarea.", minutes.round())
+    })
+}
+
+/// How much of a plan window the run has used since it started, in points of the window.
+///
+/// A window counts as rolled over only when its use went *down* and its reset moved at least half an
+/// hour later — then it is what was left of the old one plus the new one's use. Anything else is the
+/// same window: some engines report the reset instant a little differently on every read (Codex),
+/// and taking that jitter for a rollover once charged a run 100% of a plan it had barely touched.
+fn session_used(base: (f64, &str), now: (f64, &str)) -> f64 {
+    let instant = |text: &str| -> Option<i64> {
+        text.parse::<i64>().ok().or_else(|| chrono::DateTime::parse_from_rfc3339(text).ok().map(|d| d.timestamp()))
+    };
+    let rolled = now.0 < base.0 && matches!((instant(base.1), instant(now.1)), (Some(b), Some(n)) if n - b >= 1800);
+    if rolled {
+        (100.0 - base.0).max(0.0) + now.0
+    } else {
+        (now.0 - base.0).max(0.0)
+    }
+}
+
+/// `Some(note)` when the run has used more of a member account's session than its policy allows.
+/// The first reading of an account becomes its baseline.
+fn session_over(c: &Connection, run: &Run, windows: &[(String, f64, String)]) -> Result<Option<String>, String> {
+    if run.policy.max_session_pct <= 0 || windows.is_empty() {
+        return Ok(None);
+    }
+    let key = session_base_key(&run.id);
+    let mut base: std::collections::BTreeMap<String, (f64, String)> =
+        queries::get_setting(c, &key).map_err(e2s)?.and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+    let mut changed = false;
+    let mut worst = 0.0_f64;
+    let mut who = String::new();
+    for (account, pct, resets) in windows {
+        match base.get(account) {
+            Some(start) => {
+                let used = session_used((start.0, &start.1), (*pct, resets));
+                if used > worst {
+                    worst = used;
+                    who = account.split('|').next().unwrap_or(account).to_string();
+                }
+            }
+            None => {
+                base.insert(account.clone(), (*pct, resets.clone()));
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        queries::set_setting(c, &key, &serde_json::to_string(&base).map_err(e2s)?).map_err(e2s)?;
+    }
+    let cap = run.policy.max_session_pct as f64;
+    Ok((worst >= cap).then(|| {
+        format!("Esta tarea ya usó ~{worst:.0}% de tu plan de {} (tope {cap:.0}% por tarea). Lo que corre termina; aprueba para darle otro {cap:.0}% o detenla.", engine_name(&who))
+    }))
+}
+
+fn engine_name(provider: &str) -> &str {
+    match provider {
+        "claude" => "Claude",
+        "codex" => "Codex",
+        "gemini" => "Gemini",
+        "opencode" => "opencode",
+        other => other,
+    }
+}
+
 struct Picked {
     item: Item,
     repo: RunRepo,
@@ -547,6 +714,8 @@ pub async fn claim(db: &Db, run_id: &str) -> Result<Vec<Dispatch>, String> {
 }
 
 async fn claim_limited(db: &Db, run_id: &str, limit: Option<usize>) -> Result<Vec<Dispatch>, String> {
+    // The plan windows, read before the lock: the fallback reads a setting through the same handle.
+    let windows = plan_windows(db, run_id).await;
     // 1. Decide, under the database lock.
     let (run, picked) = with(db, |c| {
         let Some(run) = team::get_run(c, run_id).map_err(e2s)? else { return Ok((None, Vec::new())) };
@@ -559,7 +728,7 @@ async fn claim_limited(db: &Db, run_id: &str, limit: Option<usize>) -> Result<Ve
         let spend = team::metrics::spend(c, run_id).map_err(e2s)?;
         let (usd, tokens) = spend.values().fold((0.0, 0i64), |(u, t), (du, dt)| (u + du, t + dt));
         let minutes = team::metrics::agent_minutes(&items, chrono::Utc::now());
-        if let Some(note) = team::metrics::over_budget(&run, usd, tokens, minutes) {
+        if let Some(note) = team::metrics::over_budget(&run, usd, tokens, minutes).or(session_over(c, &run, &windows)?).or_else(|| unmetered_over(&run, &items)) {
             if team::ready_items(&run, &items).first().is_some() {
                 team::set_run_status(c, run_id, "gated", "budget", &note).map_err(e2s)?;
             }
@@ -756,14 +925,29 @@ fn compose(run: &Run, repos: &[RunRepo], items: &[Item], messages: &[team::Messa
             } else {
                 repos.iter().filter(|r| mm.member.repos.contains(&r.project_id)).map(|r| r.name.clone()).collect::<Vec<_>>().join(", ")
             };
+            // Where it sits: a sub-lead says whom it leads, someone under one says whose it is — the
+            // lead routes an area's work to its sub-lead, and only a small change straight to the hands.
+            let members = members_of(run);
+            let mut place = String::new();
+            if delegates(run, &mm.member.id, &item.member_id) {
+                let under: Vec<String> = hierarchy::subtree(&members, &run.lead, &mm.member.id)
+                    .iter()
+                    .filter(|id| **id != mm.member.id)
+                    .filter_map(|id| member(run, id).map(|m| m.member.name.clone()))
+                    .collect();
+                place = format!(" · **sub-líder**: dale el trabajo de su área entero y él lo reparte entre {}", under.join(", "));
+            } else if let Some(boss) = manager_of(run, &mm.member.id).filter(|boss| boss.member.id != item.member_id) {
+                place = format!(" · en el área de {}", boss.member.name);
+            }
             out.push_str(&format!(
-                "- **{}** — {} · {} · {}{} · {}\n",
+                "- **{}** — {} · {} · {}{} · {}{}\n",
                 mm.member.name,
                 if mm.member.role.trim().is_empty() { "sin rol descrito" } else { mm.member.role.trim() },
                 if mm.member.edits { "escribe código" } else { "solo lectura" },
                 mm.model,
                 if mm.effort.is_empty() { String::new() } else { format!(" ({})", mm.effort) },
-                repos_of
+                repos_of,
+                place
             ));
         }
         out.push_str("\n## Repositorios\n");
@@ -1535,7 +1719,14 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
         let added = fresh.len();
         // The first plan of the lead is read by the advisor before anything in it starts.
         let first_plan_now = !sub_lead && item.kind == "plan" && added > 0 && !items.iter().any(|i| i.kind == "plan" && i.id != item.id && i.status == "done");
-        let advice = if first_plan_now {
+        // A small request — one member, at most one piece of work per repository — skips the
+        // ceremony: no advisor on the plan, and no last look of the lead's (nor the advisor's) once
+        // it is delivered. Checks and integration still run.
+        let small = first_plan_now && reply.small && is_small(&fresh.iter().map(|(new, _)| new.clone()).collect::<Vec<_>>());
+        if first_plan_now && reply.small && !small {
+            team::post(c, &run.id, "", ("system", "CodeFlow"), ("all", "Equipo"), "status", "el líder lo marcó como chico, pero su plan reparte trabajo entre varios: sigue como tarea normal", &[]).map_err(e2s)?;
+        }
+        let advice = if first_plan_now && !small {
             let plan_text: Vec<String> = reply.items.iter().map(|p| format!("- `{}` {} → {}", p.key, p.title, member(run, &p.member_id).map(|m| m.member.name.clone()).unwrap_or_default())).collect();
             new_advice(c, run, "plan", &format!("El líder propone este plan:\n{}\n¿Falta algo, sobra algo, o hay un riesgo que no vio?", plan_text.join("\n")))?
         } else {
@@ -1550,7 +1741,10 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
             team::post(c, &run.id, &new.id, from, (&new.member_id, &new.member_name), "plan", &format!("asignó «{}»", new.title), &[]).map_err(e2s)?;
         }
         if !sub_lead {
-            if reply.finish {
+            if reply.finish || small {
+                if small {
+                    team::post(c, &run.id, "", ("system", "CodeFlow"), ("all", "Equipo"), "status", "tarea chica: se integra al entregarse, sin revisión final", &[]).map_err(e2s)?;
+                }
                 team::set_lead_done(c, &run.id, true).map_err(e2s)?;
             } else if added > 0 {
                 team::set_lead_done(c, &run.id, false).map_err(e2s)?;
@@ -1771,26 +1965,9 @@ async fn land_all(db: &Db, run: &Run) -> Result<(), String> {
             }
         }
     }
-    // Everything landed: tidy up.
+    // Everything landed: tidy up — the worktrees, and the branches whose work is now in the target.
     if run.policy.cleanup {
-        let items = with(db, |c| team::list_items(c, &run.id).map_err(e2s))?;
-        for repo in &repos {
-            let paths: Vec<String> = items
-                .iter()
-                .filter(|i| i.project_id == repo.project_id && i.kind == "work" && !i.worktree_path.is_empty())
-                .map(|i| i.worktree_path.clone())
-                .chain(std::iter::once(repo.integration_path.clone()))
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect();
-            let r = repo.local_path.clone();
-            let _ = blocking(move || {
-                for p in paths {
-                    gitops::remove_worktree(&r, &p);
-                }
-            })
-            .await;
-        }
+        tidy_run(db, &run.id).await?;
     }
     with(db, |c| team::set_run_status(c, &run.id, "done", "", "").map_err(e2s))
 }
@@ -1951,6 +2128,11 @@ pub async fn decide(db: &Db, run_id: &str, approve: bool, comment: &str) -> Resu
                 policy.budget_minutes = policy.budget_minutes * 3 / 2;
             }
             set_run_policy(c, &run_id, &policy)?;
+            if policy.unmetered_minutes > 0 && unmetered_over(&run, &team::list_items(c, &run_id).map_err(e2s)?).is_some() {
+                policy.unmetered_minutes *= 2;
+            }
+            // Past the plan cap: start counting again from here, another cap's worth.
+            c.execute("DELETE FROM app_settings WHERE key = ?1", rusqlite::params![session_base_key(&run_id)]).map_err(e2s)?;
             return team::set_run_status(c, &run_id, "running", "", "").map_err(e2s);
         }
         if let Some(id) = gate.strip_prefix("stuck:") {
@@ -1969,10 +2151,12 @@ pub async fn decide(db: &Db, run_id: &str, approve: bool, comment: &str) -> Resu
                     }
                 }
             }
-            // More budget when that is what stopped it.
+            // More budget when that is what stopped it — a quarter more, never a fresh full allowance:
+            // resetting to zero handed a looping team its whole budget again on every «seguir».
+            let more = (run.policy.max_dispatches / 4).max(4);
             c.execute(
-                "UPDATE agent_team_runs SET dispatches = MIN(dispatches, 0), lead_rounds_used = MIN(lead_rounds_used, 0) WHERE id = ?1 AND (gate_note LIKE '%presupuesto%' OR gate_note LIKE '%rondas%')",
-                rusqlite::params![run_id],
+                "UPDATE agent_team_runs SET dispatches = MAX(0, dispatches - ?2), lead_rounds_used = MAX(0, lead_rounds_used - 1) WHERE id = ?1 AND (gate_note LIKE '%presupuesto%' OR gate_note LIKE '%rondas%')",
+                rusqlite::params![run_id, more],
             )
             .map_err(e2s)?;
             return team::set_run_status(c, &run_id, "running", "", "").map_err(e2s);
@@ -2035,8 +2219,51 @@ pub async fn team_control(app: AppHandle, db: State<'_, Db>, run_id: String, act
     if action != "abort" && action != "pause" {
         advance(&db, &run_id).await?;
     }
+    if action == "abort" {
+        // A cancelled run leaves nothing behind but work: clean worktrees and empty branches go.
+        let _ = tidy_run(&db, &run_id).await;
+    }
     changed(&app, &run_id);
     Ok(running)
+}
+
+/// Removes a run's worktrees (only clean ones — `git worktree remove` without force) and then every
+/// run branch whose commits are all in the target branch already: the item branches and, unless the
+/// run leaves it for you (`integrate: branch`), the integration branch. A branch holding work that
+/// never reached the target — a cancelled member's commits, a dirty worktree's branch — stays.
+async fn tidy_run(db: &Db, run_id: &str) -> Result<(), String> {
+    let (run, repos, items) = with(db, |c| {
+        let run = team::get_run(c, run_id).map_err(e2s)?;
+        Ok((run, team::list_repos(c, run_id).map_err(e2s)?, team::list_items(c, run_id).map_err(e2s)?))
+    })?;
+    let keep_integration = run.as_ref().is_some_and(|r| r.policy.integrate == "branch");
+    for repo in repos {
+        let mine: Vec<&Item> = items.iter().filter(|i| i.project_id == repo.project_id).collect();
+        let mut paths: Vec<String> = mine.iter().map(|i| i.worktree_path.clone()).filter(|p| !p.is_empty()).collect();
+        paths.push(repo.integration_path.clone());
+        paths.sort();
+        paths.dedup();
+        let mut branches: Vec<String> = mine.iter().map(|i| i.branch.clone()).filter(|b| !b.is_empty()).collect();
+        branches.sort();
+        branches.dedup();
+        let (r, target, integration) = (repo.local_path.clone(), repo.target_branch.clone(), repo.integration_branch.clone());
+        let _ = blocking(move || {
+            let _git = crate::git::write_lock();
+            for p in &paths {
+                gitops::remove_worktree(&r, p);
+            }
+            // Item branches into the integration branch they were merged into, when that one stays.
+            let into = if keep_integration { &integration } else { &target };
+            for b in &branches {
+                gitops::delete_branch_if_contained(&r, b, into);
+            }
+            if !keep_integration {
+                gitops::delete_branch_if_contained(&r, &integration, &target);
+            }
+        })
+        .await;
+    }
+    Ok(())
 }
 
 fn set_run_policy(conn: &Connection, run_id: &str, policy: &Policy) -> Result<(), String> {
@@ -2106,25 +2333,12 @@ pub fn team_item_terminal(db: State<'_, Db>, item_id: String, session_id: String
     })
 }
 
-/// Deletes a run with its tasks, and removes its worktrees where they are clean. The branches stay.
+/// Deletes a run with its tasks, its clean worktrees and the branches with nothing of their own.
 #[tauri::command]
 pub async fn team_delete_run(db: State<'_, Db>, run_id: String) -> Result<(), String> {
     crate::runner::cancel_run(&run_id);
     team::artifacts::forget(&run_id, &[]);
-    let (repos, items) = with(&db, |c| Ok((team::list_repos(c, &run_id).map_err(e2s)?, team::list_items(c, &run_id).map_err(e2s)?)))?;
-    for repo in &repos {
-        let mut paths: Vec<String> = items.iter().filter(|i| i.project_id == repo.project_id && i.kind == "work").map(|i| i.worktree_path.clone()).filter(|p| !p.is_empty()).collect();
-        paths.sort();
-        paths.dedup();
-        paths.push(repo.integration_path.clone());
-        let r = repo.local_path.clone();
-        let _ = blocking(move || {
-            for p in paths {
-                gitops::remove_worktree(&r, &p);
-            }
-        })
-        .await;
-    }
+    tidy_run(&db, &run_id).await?;
     with(&db, |c| {
         crate::crew::delete_decisions_for_run(c, &run_id).map_err(e2s)?;
         team::delete_run(c, &run_id).map_err(e2s)
@@ -2134,6 +2348,31 @@ pub async fn team_delete_run(db: State<'_, Db>, run_id: String) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_run_will_not_deliver_to_a_locked_branch() {
+        let (_serial, _dir, db, ws, project, [lead, dev, _qa]) = fixture();
+        let repo = with(&db, |c| Ok(queries::get_project(c, &project).unwrap().unwrap().local_path)).unwrap();
+        sh(&repo, &["config", "branch.main.codeflowLocked", "true"]);
+        let member = |id: &str, agent: &str| team::Member { id: id.into(), agent_id: agent.into(), name: id.into(), edits: true, ..Default::default() };
+        let tm = with(&db, |c| {
+            team::save_team(c, team::Team { workspace_id: ws.clone(), name: "Equipo".into(), lead: "l".into(), members: vec![member("l", &lead), member("d", &dev)], ..Default::default() })
+        })
+        .unwrap();
+        let err = start_run(&db, ws.clone(), tm.id.clone(), "x".into(), None, vec![RepoPick { project_id: project.clone(), target_branch: "main".into() }], None, None).await.unwrap_err();
+        assert!(err.contains("bloqueada"), "{err}");
+    }
+
+    #[test]
+    fn session_use_counts_from_the_start_and_across_a_rollover() {
+        assert_eq!(session_used((40.0, "100"), (55.0, "100")), 15.0);
+        assert_eq!(session_used((40.0, "100"), (30.0, "100")), 0.0);
+        // The window rolled over: the 60 points left of the old one, plus 10 of the new.
+        assert_eq!(session_used((40.0, "100"), (10.0, "18100")), 70.0);
+        // A reset instant that jitters between reads is the same window, not a rollover.
+        assert_eq!(session_used((40.0, "2026-11-04T20:00:00+00:00"), (41.0, "2026-11-04T20:00:07+00:00")), 1.0);
+        assert_eq!(session_used((40.0, "2026-11-04T20:00:00+00:00"), (40.0, "2026-11-04T20:00:03+00:00")), 0.0);
+    }
     use std::path::Path;
 
     fn sh(dir: &str, args: &[&str]) {
@@ -2162,6 +2401,10 @@ mod tests {
         std::fs::write(Path::new(&repo).join("README.md"), "hola\n").unwrap();
         sh(&repo, &["add", "-A"]);
         sh(&repo, &["commit", "-q", "-m", "init"]);
+        // `main` is locked by the app's default rules; these runs deliver to it on purpose.
+        // Pinned in the repo's own config rather than through `set_branch_locked`, which writes
+        // nothing when the shared rule list (other tests change it) happens to agree.
+        sh(&repo, &["config", "branch.main.codeflowLocked", "false"]);
         *WORKTREE_ROOT.lock().unwrap() = Some(dir.0.join("worktrees"));
 
         let conn = Connection::open_in_memory().unwrap();
@@ -2181,6 +2424,69 @@ mod tests {
 
     fn item_of<'a>(state: &'a RunState, key: &str) -> &'a Item {
         state.items.iter().find(|i| i.key == key).unwrap_or_else(|| panic!("no item {key}: {:?}", state.items.iter().map(|i| &i.key).collect::<Vec<_>>()))
+    }
+
+    #[tokio::test]
+    async fn a_small_request_skips_the_advisor_and_the_lead_s_last_look() {
+        let (_serial, _dir, db, ws, project, [lead, dev, adv]) = fixture();
+        let member = |id: &str, agent: &str, name: &str, edits: bool, advisor: bool| team::Member {
+            id: id.into(),
+            agent_id: agent.into(),
+            name: name.into(),
+            edits,
+            advisor,
+            max_parallel: 1,
+            ..Default::default()
+        };
+        let mut policy = Policy::default();
+        policy.approve_plan = false;
+        policy.approve_merge = false;
+        let tm = with(&db, |c| {
+            team::save_team(
+                c,
+                team::Team {
+                    workspace_id: ws.clone(),
+                    name: "Equipo".into(),
+                    lead: "l".into(),
+                    policy,
+                    members: vec![member("l", &lead, "Líder", false, false), member("d", &dev, "Dev", true, false), member("a", &adv, "Asesor", false, true)],
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+        let state = start_run(&db, ws.clone(), tm.id.clone(), "Cambia el color del botón".into(), None, vec![RepoPick { project_id: project.clone(), target_branch: String::new() }], None, None)
+            .await
+            .unwrap();
+        let run_id = state.run.id.clone();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert!(d[0].message.contains("\"chico\""), "the lead is told it can say so");
+        let plan = "Es chico.\n```equipo\n{\"items\":[{\"id\":\"color\",\"miembro\":\"dev\",\"tarea\":\"cambia el color\"}],\"chico\":true}\n```";
+        settle_core(&db, &d[0].item.id, "ok", plan, "").await.unwrap();
+
+        // Straight to the dev: no advisor reading the plan.
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].item.key, "color");
+        std::fs::write(Path::new(&d[0].cwd).join("boton.css"), "button { color: red }\n").unwrap();
+        let state = settle_core(&db, &d[0].item.id, "ok", "Listo.", "").await.unwrap();
+
+        // Delivered, merged and landed: no last look of the lead's, no advisor before finishing.
+        assert_eq!(state.run.status, "done", "{}", state.run.last_reason);
+        assert!(state.items.iter().all(|i| i.kind != "advise" && i.kind != "final"), "{:?}", state.items.iter().map(|i| &i.kind).collect::<Vec<_>>());
+        assert!(claim(&db, &run_id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_plan_called_small_that_spreads_work_runs_as_a_normal_one() {
+        let plan_of = |members: &[&str], repos: &[&str]| -> Vec<Item> {
+            members.iter().zip(repos).map(|(m, r)| Item { member_id: m.to_string(), project_id: r.to_string(), kind: "work".into(), ..Default::default() }).collect()
+        };
+        assert!(is_small(&plan_of(&["d"], &["p1"])));
+        assert!(is_small(&plan_of(&["d", "d"], &["p1", "p2"])), "one task in each repository that changes");
+        assert!(!is_small(&plan_of(&["d", "q"], &["p1", "p2"])), "two members");
+        assert!(!is_small(&plan_of(&["d", "d"], &["p1", "p1"])), "two tasks in one repository");
+        assert!(!is_small(&[]));
     }
 
     #[tokio::test]
@@ -2298,6 +2604,8 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(Path::new(&repo).join("a.txt")).unwrap(), "algo\n");
         assert!(!Path::new(&integ).exists(), "worktrees cleaned up");
+        let left = crate::git::cli::run_in(&repo, &["branch", "--list", "codeflow/*"], &[]).unwrap().stdout;
+        assert!(left.trim().is_empty(), "the run's branches are gone once their work is in main: {left}");
     }
 
     #[tokio::test]
@@ -2389,6 +2697,62 @@ mod tests {
         assert_eq!(state.run.gate, "merge");
         let state = decide(&db, &run_id, true, "").await.unwrap();
         assert_eq!(state.run.status, "done", "{:?}", state.run.gate_note);
+    }
+
+    #[tokio::test]
+    async fn the_lead_sees_its_areas_and_a_small_change_through_a_sub_lead_skips_the_ceremony() {
+        let (_serial, _dir, db, ws, project, [lead, dev, qa]) = fixture();
+        let member = |id: &str, agent: &str, name: &str, edits: bool, boss: &str, leads: bool| team::Member {
+            id: id.into(),
+            agent_id: agent.into(),
+            name: name.into(),
+            edits,
+            reports_to: boss.into(),
+            leads,
+            ..Default::default()
+        };
+        let mut policy = Policy::default();
+        policy.approve_plan = false;
+        policy.approve_merge = false;
+        let tm = with(&db, |c| {
+            team::save_team(
+                c,
+                team::Team {
+                    workspace_id: ws.clone(),
+                    name: "Equipo".into(),
+                    lead: "l".into(),
+                    policy,
+                    members: vec![
+                        member("l", &lead, "Tech lead", false, "", false),
+                        member("s", &qa, "Líder backend", false, "l", true),
+                        member("d", &dev, "Dev backend", true, "s", false),
+                    ],
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+        let state = start_run(&db, ws.clone(), tm.id.clone(), "Cambia el timeout de la API".into(), None, vec![RepoPick { project_id: project.clone(), target_branch: String::new() }], None, None)
+            .await
+            .unwrap();
+        let run_id = state.run.id.clone();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert!(d[0].message.contains("**sub-líder**") && d[0].message.contains("entre Dev backend"), "{}", d[0].message);
+        assert!(d[0].message.contains("en el área de Líder backend"), "{}", d[0].message);
+        assert!(d[0].message.contains("Áreas con sub-líder"));
+
+        // The lead hands it to the backend's sub-lead and calls it small.
+        let plan = "```equipo\n{\"items\":[{\"id\":\"api\",\"miembro\":\"Líder backend\",\"tarea\":\"sube el timeout\"}],\"chico\":true}\n```";
+        settle_core(&db, &d[0].item.id, "ok", plan, "").await.unwrap();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d[0].item.kind, "delegate");
+        settle_core(&db, &d[0].item.id, "ok", "```equipo\n{\"items\":[{\"id\":\"t\",\"miembro\":\"Dev backend\",\"tarea\":\"sube el timeout a 30 s\"}]}\n```", "").await.unwrap();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d[0].item.member_name, "Dev backend");
+        std::fs::write(Path::new(&d[0].cwd).join("timeout.txt"), "30\n").unwrap();
+        let state = settle_core(&db, &d[0].item.id, "ok", "Listo.", "").await.unwrap();
+        assert_eq!(state.run.status, "done", "{}", state.run.last_reason);
+        assert!(state.items.iter().all(|i| i.kind != "final" && i.kind != "advise"));
     }
 
     #[tokio::test]

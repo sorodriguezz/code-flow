@@ -4,7 +4,10 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Copy, FlaskConical, LayoutTemplate, Network, Plus, Search, Trash2, WandSparkles, Workflow } from "lucide-react";
+import { Copy, FlaskConical, LayoutTemplate, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, Search, Trash2, WandSparkles, Workflow } from "lucide-react";
+import { ResizeHandle } from "../../common/ResizeHandle";
+import { ChipRow } from "../kit/ChipRow";
+import { iconButtonClass } from "../../common/Button";
 import { useTeamStore } from "../../../state/teamStore";
 import { useAgentsStore } from "../../../state/agentsStore";
 import { useLibraryStore } from "../../../state/libraryStore";
@@ -32,7 +35,7 @@ function PaletteAgent({ agent, inTeam }: { agent: WorkspaceAgent; inTeam: number
     </span>
   ));
   return (
-    <motion.div {...drag} layout transition={SPRING} title={l("Arrastra al organigrama para añadirlo al equipo", "Drag onto the chart to add it to the team")} className="flex cursor-grab touch-none items-center gap-2 rounded-[10px] border border-transparent px-1.5 py-1 hover:border-[var(--cf-border)] hover:bg-[var(--cf-surface)] active:cursor-grabbing">
+    <motion.div {...drag} title={l("Arrastra al organigrama para añadirlo al equipo", "Drag onto the chart to add it to the team")} className="flex cursor-grab touch-none items-center gap-2 rounded-[10px] border border-transparent px-1.5 py-1 hover:border-[var(--cf-border)] hover:bg-[var(--cf-surface)] active:cursor-grabbing">
       <AgentAvatar agent={agent} size={30} />
       <span className="min-w-0 flex-1">
         <b className="block truncate text-[12.5px]">{agent.name}</b>
@@ -59,7 +62,42 @@ function PaletteTemplate({ item }: { item: LibraryItem }) {
   );
 }
 
-function Palette({ team }: { team: Team }) {
+/** A side panel's width and whether it is folded, remembered on this machine. */
+function useSide(key: string, initial: number) {
+  const read = <T,>(name: string, fallback: T): T => {
+    try {
+      const raw = localStorage.getItem(`crew.teams.${key}.${name}`);
+      return raw === null ? fallback : (JSON.parse(raw) as T);
+    } catch {
+      return fallback;
+    }
+  };
+  const write = (name: string, value: unknown) => {
+    try {
+      localStorage.setItem(`crew.teams.${key}.${name}`, JSON.stringify(value));
+    } catch {
+      /* a private window: it is only a preference */
+    }
+  };
+  const [width, setWidth] = useState(() => read("width", initial));
+  const [open, setOpen] = useState(() => read("open", true));
+  return {
+    width,
+    open,
+    resize: setWidth,
+    commit: (value: number) => {
+      setWidth(value);
+      write("width", value);
+    },
+    toggle: () =>
+      setOpen((now) => {
+        write("open", !now);
+        return !now;
+      }),
+  };
+}
+
+function Palette({ team, width }: { team: Team; width: number }) {
   const l = useL();
   const crew = useCrewStore();
   const roster = useAgentsStore((s) => s.roster);
@@ -72,7 +110,7 @@ function Palette({ team }: { team: Team }) {
   const tpl = templates.filter((t) => match(t.name) || match(t.description));
 
   return (
-    <aside className="hidden w-[232px] shrink-0 flex-col border-r border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_55%,var(--cf-surface))] md:flex">
+    <aside style={{ width }} className="hidden shrink-0 flex-col bg-[color-mix(in_oklab,var(--cf-sunken)_55%,var(--cf-surface))] md:flex">
       <div className="p-2.5">
         <label className="relative block">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--cf-text-faint)]" />
@@ -113,22 +151,42 @@ function TeamEditor({ teamId }: { teamId: string }) {
   const [tab, setTab] = useState<"org" | "flow" | "checks">("org");
   const selectedMemberId = useCrewStore((s) => s.selectedMemberId);
   const member = team?.members.find((m) => m.id === selectedMemberId) ?? null;
+  const left = useSide("palette", 232);
+  const right = useSide("inspector", 330);
   if (!team) return null;
   const select = (id: string | null) => crew.set({ selectedMemberId: id });
 
   return (
     <div className="flex min-h-0 flex-1">
-      <Palette team={team} />
+      {left.open && (
+        <>
+          <Palette team={team} width={left.width} />
+          <span className="hidden md:contents">
+            <ResizeHandle axis="x" value={left.width} min={180} max={420} onChange={left.resize} onCommit={left.commit} />
+          </span>
+        </>
+      )}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
+          <span className="hidden md:contents">
+            <button
+              type="button"
+              onClick={left.toggle}
+              title={left.open ? l("Ocultar agentes y plantillas", "Hide agents and templates") : l("Mostrar agentes y plantillas", "Show agents and templates")}
+              aria-label={left.open ? l("Ocultar panel izquierdo", "Hide left panel") : l("Mostrar panel izquierdo", "Show left panel")}
+              className={iconButtonClass({ size: "sm" })}
+            >
+              {left.open ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeftOpen className="h-4 w-4" />}
+            </button>
+          </span>
           <Seg
             size="sm"
             value={tab}
             onChange={setTab}
             options={[
-              { value: "org", label: l("Organigrama", "Org chart"), icon: Network },
-              { value: "flow", label: l("Flujo fijo", "Fixed flow"), icon: Workflow, badge: team.plan.length ? <span className="text-[10.5px] text-[var(--cf-text-faint)]">{team.plan.length}</span> : undefined },
-              { value: "checks", label: l("Checks", "Checks"), icon: FlaskConical, badge: team.policy.checks.length ? <span className="text-[10.5px] text-[var(--cf-text-faint)]">{team.policy.checks.length}</span> : undefined },
+              { value: "org", label: l("Organigrama", "Org chart"), icon: Network, title: l("Quién lidera y quién reporta a quién. El líder arma el plan en cada corrida y lo reparte según esta jerarquía.", "Who leads and who reports to whom. The lead makes the plan on each run and hands it out along this hierarchy.") },
+              { value: "flow", label: l("Flujo fijo", "Fixed flow"), icon: Workflow, title: l("Pasos en orden, con compuertas, para un equipo sin líder: cada corrida los sigue tal cual. Con líder no se usan: el líder arma el plan en cada corrida.", "Steps in order, with gates, for a team with no lead: each run follows them as they are. With a lead they are not used: the lead plans each run."), badge: team.lead ? <span className="rounded-full bg-[var(--cf-hover)] px-1.5 text-[10px] text-[var(--cf-text-faint)]">{l("no se usa", "unused")}</span> : team.plan.length ? <span className="text-[10.5px] text-[var(--cf-text-faint)]">{team.plan.length}</span> : undefined },
+              { value: "checks", label: l("Checks", "Checks"), icon: FlaskConical, title: l("Comandos de verificación (tests, lint, build). Cada uno corre «tras cada tarea», en su worktree antes del commit (si falla, vuelve a su autor con el error), o «al final», con todo integrado (si falla, el líder asigna el arreglo).", "Verification commands (tests, lint, build). Each runs «after each task», in its worktree before the commit (on failure it goes back to its author with the error), or «at the end», with everything merged (on failure the lead assigns the fix)."), badge: team.policy.checks.length ? <span className="text-[10.5px] text-[var(--cf-text-faint)]">{team.policy.checks.length}</span> : undefined },
             ]}
           />
           <span className="flex-1" />
@@ -140,13 +198,49 @@ function TeamEditor({ teamId }: { teamId: string }) {
           <Btn small kind="primary" icon={WandSparkles} disabled={team.members.length === 0} title={team.members.length === 0 ? l("Añade miembros al equipo primero", "Add members to the team first") : l("Asigna una tarea al equipo entero", "Assigns a task to the whole team")} onClick={() => crew.open({ kind: "launch", assignee: { kind: "team", id: team.id } })}>
             {l("Darle una tarea", "Hand it a task")}
           </Btn>
+          {tab === "org" && (
+            <span className="hidden lg:contents">
+              <button
+                type="button"
+                onClick={right.toggle}
+                title={right.open ? l("Ocultar los ajustes del equipo", "Hide the team settings") : l("Mostrar los ajustes del equipo", "Show the team settings")}
+                aria-label={right.open ? l("Ocultar panel derecho", "Hide right panel") : l("Mostrar panel derecho", "Show right panel")}
+                className={iconButtonClass({ size: "sm" })}
+              >
+                {right.open ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />}
+              </button>
+            </span>
+          )}
         </div>
+        <p className="m-0 shrink-0 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_40%,var(--cf-surface))] px-3 py-1.5 text-[11.5px] text-[var(--cf-text-muted)]">
+          {tab === "org"
+            ? l(
+                "Quiénes forman el equipo y a quién reporta cada uno. Se usa siempre. Las tres pestañas no son modos a elegir: son tres partes del mismo equipo.",
+                "Who is on the team and who reports to whom. Always used. The three tabs are not modes to pick from: they are three parts of the same team.",
+              )
+            : tab === "flow"
+              ? team.lead
+                ? l(
+                    "Este equipo tiene líder, así que estos pasos no se usan: el líder arma el plan en cada corrida. Para que el equipo siga estos pasos, elige «Ninguno» en Cómo trabaja › Líder.",
+                    "This team has a lead, so these steps are not used: the lead plans each run. For the team to follow these steps, pick «None» in How it works › Lead.",
+                  )
+                : l("Este equipo no tiene líder: cada corrida sigue estos pasos en orden.", "This team has no lead: each run follows these steps in order.")
+              : l(
+                  "Se aplican siempre, con líder o sin él: verifican el trabajo tras cada tarea o al final, con todo integrado.",
+                  "Always applied, with a lead or without: they check the work after each task or at the end, with everything merged.",
+                )}
+        </p>
         {tab === "org" && <OrgCanvas team={team} update={update} selected={member?.id ?? null} onSelect={select} />}
         {tab === "flow" && <FlowTab team={team} update={update} />}
         {tab === "checks" && <ChecksTab team={team} update={update} />}
       </div>
-      {tab === "org" && (
-        <aside className="hidden w-[330px] shrink-0 overflow-auto border-l border-[var(--cf-border)] bg-[var(--cf-surface)] p-3.5 lg:block">
+      {tab === "org" && right.open && (
+        <span className="hidden lg:contents">
+          <ResizeHandle axis="x" invert value={right.width} min={280} max={560} onChange={right.resize} onCommit={right.commit} />
+        </span>
+      )}
+      {tab === "org" && right.open && (
+        <aside style={{ width: right.width }} className="hidden shrink-0 overflow-auto bg-[var(--cf-surface)] p-3.5 lg:block">
           {member ? <MemberInspector key={member.id} team={team} member={member} update={update} onClose={() => select(null)} /> : <TeamInspector team={team} update={update} />}
         </aside>
       )}
@@ -208,13 +302,19 @@ export function TeamsSpace() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
-        <div className="flex min-w-0 flex-1 gap-1.5 overflow-x-auto [scrollbar-width:none]">
+        <ChipRow
+          active={selected?.id}
+          noun={["equipos", "teams"]}
+          onPick={(id) => crew.set({ selectedTeamId: id, selectedMemberId: null })}
+          entries={teams.map((t) => ({ key: t.id, label: t.name, sub: l(`${t.members.length} miembros`, `${t.members.length} members`), leading: <TeamAvatar size={24} /> }))}
+        >
           {teams.map((t) => {
             const on = t.id === selected?.id;
             return (
               <button
                 key={t.id}
                 type="button"
+                data-chip={t.id}
                 title={l("Abre este equipo", "Opens this team")}
                 onClick={() => crew.set({ selectedTeamId: t.id, selectedMemberId: null })}
                 className={`relative flex h-[32px] shrink-0 items-center gap-2 rounded-full border pl-1 pr-3 text-[12.5px] font-medium transition-colors ${on ? "border-[var(--cf-accent-line)] text-[var(--cf-text)]" : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-border-strong)]"}`}
@@ -226,7 +326,7 @@ export function TeamsSpace() {
               </button>
             );
           })}
-        </div>
+        </ChipRow>
         <Btn small icon={Plus} title={l("Crea un equipo en blanco", "Creates a blank team")} onClick={() => void create()}>{l("Nuevo", "New")}</Btn>
         <Btn small icon={LayoutTemplate} title={l("Crea un equipo desde una plantilla", "Creates a team from a template")} onClick={() => crew.open({ kind: "teamTemplates" })}>{l("Plantillas", "Templates")}</Btn>
         {selected && (

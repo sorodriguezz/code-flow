@@ -66,6 +66,18 @@ pub fn remove_worktree(repo: &str, target: &str) {
     }
 }
 
+/// Deletes `branch` when every commit on it is already in `into` — so nothing can be lost — and it
+/// is not checked out anywhere (git refuses that itself). A branch with work of its own stays.
+pub fn delete_branch_if_contained(repo: &str, branch: &str, into: &str) -> bool {
+    if branch.is_empty() || branch == into || !branch_exists(repo, branch) {
+        return false;
+    }
+    if !git(repo, &["merge-base", "--is-ancestor", branch, into]).is_ok_and(|o| o.success) {
+        return false;
+    }
+    git(repo, &["branch", "-D", branch]).is_ok_and(|o| o.success)
+}
+
 /// Paths git reports as unmerged in `path`.
 pub fn unmerged_paths(path: &str) -> Vec<String> {
     git_ok(path, &["diff", "--name-only", "--diff-filter=U"])

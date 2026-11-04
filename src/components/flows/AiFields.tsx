@@ -9,6 +9,8 @@ import { Rows, asRows, str } from "./fieldRows";
 import { flowsAiModels, flowsLocalModels, type FlowEngineChoice } from "../../lib/tauri/flowsCommands";
 import { mcpList, type McpServer } from "../../lib/tauri/mcpCommands";
 import { aiReadOnlyEngines, listChainTemplates, listWorkspaceAgents } from "../../lib/tauri/commands";
+import { teamList } from "../../lib/tauri/teamCommands";
+import type { Team } from "../../types/team";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
 import { SYSTEM_ACCOUNT, resolveAccount } from "../../lib/aiAccounts";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -487,6 +489,22 @@ const agentCache = new Map<string, WorkspaceAgent[]>();
 /** An agent of the workspace's roster. */
 export function AgentPicker({ value, onChange }: { value: unknown; onChange: (next: unknown) => void }) {
   const t = useT();
+  const agents = useRoster();
+  return (
+    <div className="max-w-[300px]">
+      <Select
+        value={str(value)}
+        onChange={onChange}
+        placeholder={t("flows.ai.pickAgent")}
+        options={agents.map((agent) => ({ value: agent.id, label: agent.name }))}
+        size="sm"
+      />
+    </div>
+  );
+}
+
+/** The workspace's enabled roster agents, cached per workspace so a form opens with them. */
+function useRoster(): WorkspaceAgent[] {
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const [agents, setAgents] = useState<WorkspaceAgent[]>(() => (workspaceId ? agentCache.get(workspaceId) ?? [] : []));
   useEffect(() => {
@@ -502,13 +520,67 @@ export function AgentPicker({ value, onChange }: { value: unknown; onChange: (ne
       alive = false;
     };
   }, [workspaceId]);
+  return agents.filter((agent) => agent.enabled);
+}
+
+/** Several agents of the roster, toggled on and off; the order chosen is the order they answer in. */
+export function AgentsPicker({ value, onChange }: { value: unknown; onChange: (next: unknown) => void }) {
+  const t = useT();
+  const agents = useRoster();
+  const chosen = Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+  if (agents.length === 0) return <span className="text-[12px] text-[var(--cf-text-muted)]">{t("flows.ai.noAgents")}</span>;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {agents.map((agent) => {
+        const on = chosen.includes(agent.id);
+        return (
+          <button
+            key={agent.id}
+            type="button"
+            aria-pressed={on}
+            title={agent.role || agent.name}
+            className={`h-[24px] rounded-md px-2 text-[11.5px] transition-colors ${
+              on
+                ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)] shadow-[inset_0_0_0_1px_var(--cf-accent-line)]"
+                : "text-[var(--cf-text-muted)] shadow-[inset_0_0_0_1px_var(--cf-border)] hover:bg-[var(--cf-hover)]"
+            }`}
+            onClick={() => onChange(on ? chosen.filter((id) => id !== agent.id) : [...chosen, agent.id])}
+          >
+            {agent.name}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+const teamCache = new Map<string, Team[]>();
+
+/** One of the workspace's agent teams. */
+export function TeamPicker({ value, onChange }: { value: unknown; onChange: (next: unknown) => void }) {
+  const t = useT();
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const [teams, setTeams] = useState<Team[]>(() => (workspaceId ? teamCache.get(workspaceId) ?? [] : []));
+  useEffect(() => {
+    if (!workspaceId) return;
+    let alive = true;
+    void teamList(workspaceId)
+      .then((rows) => {
+        teamCache.set(workspaceId, rows);
+        if (alive) setTeams(rows);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [workspaceId]);
   return (
     <div className="max-w-[300px]">
       <Select
         value={str(value)}
         onChange={onChange}
-        placeholder={t("flows.ai.pickAgent")}
-        options={agents.filter((agent) => agent.enabled).map((agent) => ({ value: agent.id, label: agent.name }))}
+        placeholder={t("flows.ai.pickTeam")}
+        options={teams.map((team) => ({ value: team.id, label: `${team.name} · ${team.members.length}` }))}
         size="sm"
       />
     </div>

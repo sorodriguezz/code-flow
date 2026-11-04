@@ -192,6 +192,9 @@ pub const CATALOG: &[NodeDescriptor] = &[
     branching("ai.guard", Ai, "shield-alert", &["pass", "blocked"], 12).group("aiTasks"),
     node("ai.transform", Ai, "wand-sparkles", 12).group("aiTasks"),
     node("ai.chat", Ai, "messages-square", 7).group("aiTasks"),
+    node("ai.agents", Ai, "git-fork", 12).group("aiAgents"),
+    node("ai.orchestrator", Ai, "network", 12).group("aiAgents"),
+    node("ai.team", Ai, "users", 12).group("aiAgents"),
     node("ai.embed", Ai, "binary", 9).group("aiRag"),
     node("ai.vectors", Ai, "database-zap", 9).group("aiRag"),
     node("app.knowledge", App, "library-big", 12).shown_in(Ai).group("aiRag"),
@@ -478,7 +481,7 @@ mod tests {
     fn the_catalogue_has_the_families_the_plan_lists() {
         let count = |family: Family| CATALOG.iter().filter(|d| d.family == family).count();
         assert_eq!(count(Trigger), 35);
-        assert_eq!(count(Ai), 18);
+        assert_eq!(count(Ai), 21);
         assert_eq!(count(Code), 12);
         assert_eq!(count(Git), 17);
         assert_eq!(count(Net), 15);
@@ -490,7 +493,7 @@ mod tests {
         assert_eq!(count(Transform), 20);
         // + «Resumen de trabajo» (2026-10-23).
         assert_eq!(count(App), 19);
-        assert_eq!(CATALOG.len(), 180);
+        assert_eq!(CATALOG.len(), 183);
     }
 
     #[test]

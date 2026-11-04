@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Copy, Hourglass, UserCheck, Webhook } from "lucide-react";
+import { Copy, Hourglass, UserCheck, Users, Webhook } from "lucide-react";
 import { Button, iconButtonClass } from "../common/Button";
 import { flowsDecideWait, flowsWebhookBase, resumeUrlOf, type FlowWait } from "../../lib/tauri/flowsCommands";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
+import { fieldClass } from "../common/recipes";
 import { formatWhen } from "./runFormat";
 
 /**
@@ -17,6 +18,7 @@ export function WaitCard({ wait, showFlow = true }: { wait: FlowWait; showFlow?:
   const language = useLanguageStore((s) => s.language);
   const [busy, setBusy] = useState(false);
   const [url, setUrl] = useState<string | null>(null);
+  const [comment, setComment] = useState("");
 
   useEffect(() => {
     if (wait.kind !== "webhook") return;
@@ -30,7 +32,7 @@ export function WaitCard({ wait, showFlow = true }: { wait: FlowWait; showFlow?:
   const decide = async (decision: "approved" | "rejected") => {
     setBusy(true);
     try {
-      await flowsDecideWait(wait.id, decision);
+      await flowsDecideWait(wait.id, decision, comment.trim() || undefined);
     } catch (error) {
       if (String(error) !== "already-decided") pushErrorToast(String(error));
     } finally {
@@ -38,10 +40,10 @@ export function WaitCard({ wait, showFlow = true }: { wait: FlowWait; showFlow?:
     }
   };
 
-  const Icon = wait.kind === "approval" ? UserCheck : wait.kind === "webhook" ? Webhook : Hourglass;
+  const Icon = wait.kind === "approval" ? UserCheck : wait.kind === "webhook" ? Webhook : wait.kind === "team" ? Users : Hourglass;
   const until = wait.expiresAt ? new Date(wait.expiresAt).toLocaleString(language, { dateStyle: "short", timeStyle: "short" }) : null;
   const headline =
-    wait.kind === "approval"
+    wait.kind === "approval" || wait.kind === "team"
       ? wait.message || t("flows.wait.approval")
       : wait.kind === "webhook"
         ? t("flows.wait.call")
@@ -56,6 +58,16 @@ export function WaitCard({ wait, showFlow = true }: { wait: FlowWait; showFlow?:
       <div className="min-w-0 flex-1">
         <div className="whitespace-pre-wrap break-words text-[12.5px] font-medium text-[var(--cf-text)]">{headline}</div>
         <div className="mt-0.5 truncate text-[11.5px] text-[var(--cf-text-muted)]">{meta}</div>
+        {wait.kind === "approval" && (
+          <input
+            value={comment}
+            onChange={(e) => setComment(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && !busy && void decide("approved")}
+            placeholder={t("flows.wait.comment")}
+            title={t("flows.wait.commentHint")}
+            className={fieldClass({ size: "sm", className: "mt-1.5 w-full" })}
+          />
+        )}
         {url && (
           <div className="mt-1.5 flex min-w-0 items-center gap-1">
             <code className="min-w-0 truncate rounded bg-[var(--cf-sunken)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--cf-text-muted)]">{url}</code>

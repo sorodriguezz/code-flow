@@ -22,6 +22,7 @@ import { pushErrorToast } from "../../../state/toastStore";
 import { ProviderGlyph } from "../../ai/ProviderGlyph";
 import type { AgentDraft } from "../../../types/domain";
 import type { LibraryItem } from "../../../types/crew";
+import { TemplateActions, TemplateEditor } from "./TemplateEditor";
 import { AgentAvatar } from "../kit/Avatar";
 import { useModelOptions } from "../kit/models";
 import { SelectBox, Btn, Chip, Label, Modal, Seg, SPRING, Stepper, Switch, ToggleChip, field } from "../kit/ui";
@@ -95,6 +96,7 @@ function TemplateStep({ onPick }: { onPick: (t: LibraryItem | null) => void }) {
   const saved = useLibraryStore((s) => s.saved);
   const lang = useLanguageStore((s) => s.language);
   const templates = useMemo(() => useLibraryStore.getState().all().filter((t) => t.kind === "agent"), [saved, lang]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [editing, setEditing] = useState<LibraryItem | null>(null);
   return (
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
       <motion.button type="button" transition={SPRING} title={l("Empieza un agente vacío", "Starts an empty agent")} onClick={() => onPick(null)} className="flex flex-col items-start gap-2 rounded-lg border border-dashed border-[var(--cf-border-strong)] p-3 text-left transition-colors hover:border-[var(--cf-accent)] hover:bg-[var(--cf-hover)]">
@@ -103,22 +105,24 @@ function TemplateStep({ onPick }: { onPick: (t: LibraryItem | null) => void }) {
         <span className="text-[11.5px] text-[var(--cf-text-muted)]">{l("Lo armas tú desde cero.", "You build it from scratch.")}</span>
       </motion.button>
       {templates.map((t, i) => (
-        <motion.button
-          key={t.id}
+        <motion.div key={t.id} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ ...SPRING, delay: Math.min(i, 12) * 0.025 }} className="group relative flex">
+        <button
           type="button"
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ ...SPRING, delay: Math.min(i, 12) * 0.025 }}
           onClick={() => onPick(t)}
           title={l(`Usar «${t.name}» como punto de partida`, `Use «${t.name}» as the starting point`)}
-          className="flex flex-col items-start gap-2 rounded-lg border border-[var(--cf-border)] p-3 text-left transition-colors hover:border-[var(--cf-accent-line)] hover:bg-[var(--cf-hover)]"
+          className="flex w-full flex-col items-start gap-2 rounded-lg border border-[var(--cf-border)] p-3 text-left transition-colors hover:border-[var(--cf-accent-line)] hover:bg-[var(--cf-hover)]"
         >
           <AgentAvatar agent={{ id: t.id, icon: t.icon, color: t.color }} size={36} />
           <b className="text-[12.5px]">{t.name}</b>
           <span className="line-clamp-2 text-[11.5px] text-[var(--cf-text-muted)]">{t.description}</span>
           <span className="font-mono text-[10.5px] text-[var(--cf-text-faint)]">{(t.body as AgentTemplateBody).model}</span>
-        </motion.button>
+        </button>
+        <span className="absolute right-2 top-2 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+          <TemplateActions item={t} onEdit={() => setEditing(t)} />
+        </span>
+        </motion.div>
       ))}
+      {editing && <TemplateEditor item={editing} onClose={() => setEditing(null)} />}
     </div>
   );
 }
@@ -258,7 +262,10 @@ function BrainStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<Age
             size="sm"
             value={draft.effort || "default"}
             onChange={(v) => patch({ effort: v === "default" ? "" : v })}
-            options={[{ value: "default", label: l("Por defecto", "Default") }, ...CHAT_EFFORTS.map((e) => ({ value: e, label: e }))]}
+            options={[
+              { value: "default", label: l("Por defecto", "Default"), title: l("El nivel que el modelo usa si no se le pide otro", "The level the model uses when not asked for another") },
+              ...CHAT_EFFORTS.map((e) => ({ value: e, label: e, title: l(`Piensa con esfuerzo «${e}» en cada turno: más esfuerzo, mejores respuestas difíciles, pero más lento y más gasto`, `Thinks at «${e}» effort each turn: more effort answers hard problems better, but slower and costlier`) })),
+            ]}
           />
         </div>
       )}

@@ -142,7 +142,7 @@ export function FlowTab({ team, update }: { team: Team; update: Update }) {
     <div className="flex min-h-0 flex-1">
       <div className="relative min-h-0 flex-1 overflow-auto bg-[radial-gradient(circle,var(--cf-border)_1px,transparent_1px)] [background-size:22px_22px] p-6">
         {team.plan.length === 0 ? (
-          <Empty icon={Workflow} title={l("Sin flujo fijo", "No fixed flow")} hint={team.lead ? l("Con líder, el plan lo arma él en cada corrida. Un flujo fijo le da un punto de partida.", "With a lead, it plans each run. A fixed flow gives it a starting point.") : l("Sin líder, el equipo sigue estos pasos en orden.", "Without a lead, the team follows these steps in order.")}>
+          <Empty icon={Workflow} title={l("Sin flujo fijo", "No fixed flow")} hint={team.lead ? l("Con líder, el plan lo arma él en cada corrida y estos pasos no se usan. Sirven para un equipo sin líder.", "With a lead, it plans each run and these steps are not used. They are for a team with no lead.") : l("Sin líder, el equipo sigue estos pasos en orden.", "Without a lead, the team follows these steps in order.")}>
             <Btn kind="primary" icon={Plus} onClick={add} title={l("Crea el primer paso del flujo fijo", "Creates the first step of the fixed flow")} disabled={workers.length === 0}>{l("Primer paso", "First step")}</Btn>
             {workers.length === 0 && <span className="text-[12px] text-[var(--cf-text-muted)]">{l("Antes, suma miembros en el organigrama.", "First, add members in the org chart.")}</span>}
           </Empty>

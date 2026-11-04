@@ -77,7 +77,7 @@ function WaitRow({ wait }: { wait: FlowWait }) {
       "flows",
       t(decision === "approved" ? "toast.flowApproved" : "toast.flowRejected"),
     );
-  const kindLine = wait.kind === "approval" ? wait.message : wait.kind === "webhook" ? t("flows.waitsCall") : t("flows.waitsTime");
+  const kindLine = wait.kind === "approval" || wait.kind === "team" ? wait.message : wait.kind === "webhook" ? t("flows.waitsCall") : t("flows.waitsTime");
   const subtitle = [
     `${wait.flowName} · ${wait.nodeName}`,
     sinceIso(wait.createdAt),

@@ -594,6 +594,321 @@ pub(super) async fn agent_task(host: &AppHost, request: AgentRequest, cancel: Ca
     }
 }
 
+// ------------------------------------------------------------------------------ roster and teams
+
+pub(super) fn roster_agent(host: &AppHost, agent_id: &str) -> Result<super::engine::RosterAgent, String> {
+    let conn = lock_db(host)?;
+    let agent = queries::get_workspace_agent(&conn, agent_id)
+        .map_err(|e| e.to_string())?
+        .filter(|agent| agent.workspace_id == host.workspace_id)
+        .ok_or_else(|| "That agent is no longer in this workspace's roster".to_string())?;
+    if !agent.enabled {
+        return Err(format!("{} is switched off in Agents", agent.name));
+    }
+    Ok(super::engine::RosterAgent {
+        name: agent.name,
+        role: agent.role,
+        prompt: agent.prompt,
+        engine: EngineChoice { provider: agent.provider, model: agent.model, account: agent.account_id.unwrap_or_default() },
+        effort: agent.effort,
+        edits: agent.edits,
+    })
+}
+
+const TEAM_POLL: Duration = Duration::from_secs(3);
+
+/// What a flow run remembers about the team run one of its nodes follows — in the flow's state, so a
+/// restart finds it: the node runs again and picks the same team run up instead of starting another.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(super) struct TeamLink {
+    pub team_run: String,
+    pub decide_in_flow: bool,
+    /// What the node's open approval answers: `gate`, `question:<message id>`, or `""`.
+    #[serde(default)]
+    pub pending: String,
+}
+
+fn team_key(flow_run: &str, node_id: &str) -> String {
+    format!("team-run:{flow_run}:{node_id}")
+}
+
+fn flow_db<T>(app: &tauri::AppHandle, work: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<T>) -> Result<T, String> {
+    let db = app.state::<Db>();
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    work(&conn).map_err(|e| e.to_string())
+}
+
+pub(super) fn load_link(app: &tauri::AppHandle, flow_id: &str, flow_run: &str, node_id: &str) -> Option<TeamLink> {
+    let key = team_key(flow_run, node_id);
+    flow_db(app, |conn| crate::db::flow_run_queries::state_get(conn, flow_id, &key)).ok().flatten().and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn save_link(app: &tauri::AppHandle, flow_id: &str, flow_run: &str, node_id: &str, link: Option<&TeamLink>) {
+    let key = team_key(flow_run, node_id);
+    let _ = flow_db(app, |conn| match link {
+        Some(link) => crate::db::flow_run_queries::state_set(conn, flow_id, &key, &serde_json::to_value(link).unwrap_or_default(), &super::engine::now_text()),
+        None => crate::db::flow_run_queries::state_delete(conn, flow_id, &key),
+    });
+}
+
+fn team_changed(app: &tauri::AppHandle, run_id: &str) {
+    let _ = app.emit("team:changed", json!({ "runId": run_id }));
+    crate::runner::kick(app, run_id);
+}
+
+fn team_state_of(app: &tauri::AppHandle, run_id: &str) -> Result<Option<crate::team::RunState>, String> {
+    flow_db(app, |conn| crate::team::state(conn, run_id))
+}
+
+fn is_over(status: &str) -> bool {
+    matches!(status, "done" | "failed" | "aborted")
+}
+
+/// The question for you the team left open, if any.
+fn open_question(state: &crate::team::RunState) -> Option<&crate::team::Message> {
+    state.messages.iter().find(|m| m.kind == "question" && m.to_id == "user" && m.answered_at.is_empty())
+}
+
+/// Whether the node has something to do about the run: it ended, or — when it decides in the flow —
+/// it waits for an approval or an answer.
+fn needs_the_node(state: &crate::team::RunState, decide_in_flow: bool) -> bool {
+    is_over(&state.run.status) || (decide_in_flow && (state.run.status == "gated" || open_question(state).is_some()))
+}
+
+/// What the node answers with: the run, what each piece of work came to, and where it landed.
+fn team_summary(state: &crate::team::RunState) -> Value {
+    let work: Vec<Value> = state
+        .items
+        .iter()
+        .filter(|item| item.kind != "advise")
+        .map(|item| {
+            json!({
+                "title": item.title,
+                "member": item.member_name,
+                "kind": item.kind,
+                "status": item.status,
+                "output": crate::team::protocol::prose(&item.output_text),
+                "error": item.last_error,
+            })
+        })
+        .collect();
+    let decisions: Vec<&str> = state.messages.iter().filter(|m| m.kind == "decision").map(|m| m.body.as_str()).collect();
+    json!({
+        "runId": state.run.id,
+        "team": state.run.team_name,
+        "title": state.run.title,
+        "status": state.run.status,
+        "reason": state.run.last_reason,
+        "summary": decisions.last().copied().unwrap_or_default(),
+        "work": work,
+        "repos": state.repos.iter().map(|repo| json!({
+            "name": repo.name,
+            "target": repo.target_branch,
+            "branch": repo.integration_branch,
+            "status": repo.status,
+            "error": repo.last_error,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn comment_of(answer: &super::engine::WaitAnswer) -> String {
+    match &answer.payload {
+        Value::String(text) => text.trim().to_string(),
+        Value::Object(map) => ["comment", "text", "answer"].iter().find_map(|key| map.get(*key).and_then(Value::as_str)).unwrap_or_default().trim().to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Hands the team what was decided at the node's approval — in this session, or after a restart from
+/// the wait's record (`waits::pick_up`).
+pub(super) async fn team_apply(app: &tauri::AppHandle, link: &TeamLink, answer: &super::engine::WaitAnswer) -> Result<(), String> {
+    use crate::commands::team_cmd;
+    let db = app.state::<Db>();
+    if link.pending == "gate" {
+        team_cmd::decide(&db, &link.team_run, answer.decision == "approved", &comment_of(answer)).await?;
+    } else if let Some(message_id) = link.pending.strip_prefix("question:") {
+        let reply = match comment_of(answer) {
+            reply if !reply.is_empty() => reply,
+            _ if answer.decision == "rejected" => "No. Sigue sin eso.".to_string(),
+            _ => "Decide tú con lo que sabes y sigue.".to_string(),
+        };
+        team_cmd::answer_question(&db, message_id, &reply).await?;
+    } else {
+        return Ok(());
+    }
+    team_changed(app, &link.team_run);
+    Ok(())
+}
+
+/// Stops the team run a flow run's node follows, when that flow run is stopped.
+pub(super) async fn team_abort(app: &tauri::AppHandle, team_run: &str) {
+    let _ = crate::commands::team_cmd::team_control(app.clone(), app.state::<Db>(), team_run.to_string(), "abort".into()).await;
+}
+
+/// Watches a team run on behalf of the node's «team» wait, and ends the wait when the node has
+/// something to do. Started with the wait, and again at launch for a wait the last session left open.
+pub(super) fn watch_team(app: tauri::AppHandle, flow_run: String, node_id: String, team_run: String, decide_in_flow: bool) {
+    tauri::async_runtime::spawn(async move {
+        crate::runner::kick(&app, &team_run);
+        let mut seen = false;
+        let mut tries = 0;
+        loop {
+            tokio::time::sleep(TEAM_POLL).await;
+            let open = flow_db(&app, |conn| crate::db::flow_run_queries::waits_of_run(conn, &flow_run))
+                .ok()
+                .and_then(|waits| waits.into_iter().find(|wait| wait.node_id == node_id && wait.kind == "team" && wait.decided_at.is_none()));
+            let Some(wait) = open else {
+                tries += 1;
+                // Not open yet (the node is about to ask), or settled: either way not ours to keep after a while.
+                if seen || tries > 10 {
+                    return;
+                }
+                continue;
+            };
+            seen = true;
+            let ready = match team_state_of(&app, &team_run) {
+                Ok(Some(state)) => needs_the_node(&state, decide_in_flow),
+                // The team run was deleted in Agents: the node finds out when it runs again.
+                Ok(None) => true,
+                Err(_) => false,
+            };
+            if ready {
+                let _ = super::waits::settle_from(&app, &wait.id, "resumed", "team");
+                return;
+            }
+        }
+    });
+}
+
+/// At launch: a «team» wait the last session left open gets its watcher back.
+pub(super) fn rewatch(app: &tauri::AppHandle, wait: &crate::db::flow_run_queries::FlowWaitRow) {
+    if let Some(link) = load_link(app, &wait.flow_id, &wait.run_id, &wait.node_id) {
+        watch_team(app.clone(), wait.run_id.clone(), wait.node_id.clone(), link.team_run, link.decide_in_flow);
+    }
+}
+
+fn wait_request(request: &super::engine::TeamRequest, kind: &str, message: String, timeout: Option<Duration>) -> super::engine::WaitRequest {
+    super::engine::WaitRequest {
+        node_id: request.node_id.clone(),
+        node_name: request.node_name.clone(),
+        kind: kind.into(),
+        message,
+        timeout,
+        inputs: Vec::new(),
+        links: false,
+    }
+}
+
+pub(super) async fn team_run(host: &AppHost, request: super::engine::TeamRequest, cancel: CancellationToken) -> Result<Value, String> {
+    use crate::commands::team_cmd;
+    let app = host.app.clone();
+    let (flow, flow_run, node) = (host.flow_id.clone(), host.run_id.clone(), request.node_id.clone());
+    // A node run again after a restart follows the team run it started, never a second one.
+    let earlier = load_link(&app, &flow, &flow_run, &node).filter(|link| team_state_of(&app, &link.team_run).ok().flatten().is_some());
+    let mut link = match earlier {
+        Some(link) => {
+            host.log(&node, LogStream::Info, "Agents: picking up the team run this node started");
+            link
+        }
+        None => {
+            let db = app.state::<Db>();
+            let repos = vec![team_cmd::RepoPick { project_id: request.project_id.clone(), target_branch: request.target_branch.trim().to_string() }];
+            let title = nonblank(&request.title);
+            let started = team_cmd::start_run(&db, host.workspace_id.clone(), request.team_id.clone(), request.goal.clone(), title, repos, None, None).await?;
+            team_changed(&app, &started.run.id);
+            host.log(&node, LogStream::Info, &format!("Agents: team «{}» started «{}»", started.run.team_name, started.run.title));
+            if !request.wait {
+                return Ok(team_summary(&started));
+            }
+            let link = TeamLink { team_run: started.run.id.clone(), decide_in_flow: request.decide_in_flow, pending: String::new() };
+            save_link(&app, &flow, &flow_run, &node, Some(&link));
+            link
+        }
+    };
+
+    let finish = |result: Result<Value, String>| {
+        save_link(&app, &flow, &flow_run, &node, None);
+        result
+    };
+    loop {
+        if cancel.is_cancelled() {
+            team_abort(&app, &link.team_run).await;
+            return finish(Err(ai_runs::CANCELLED_MARKER.to_string()));
+        }
+        let Some(state) = team_state_of(&app, &link.team_run)? else {
+            return finish(Err("The team run was deleted from Agents".to_string()));
+        };
+        match state.run.status.as_str() {
+            "done" => return finish(Ok(team_summary(&state))),
+            "failed" | "aborted" => {
+                let reason = state.run.last_reason.trim();
+                return finish(Err(if reason.is_empty() {
+                    format!("The team run ended {} in Agents", state.run.status)
+                } else {
+                    format!("The team run ended {} in Agents: {reason}", state.run.status)
+                }));
+            }
+            _ => {}
+        }
+        let ask = if !link.decide_in_flow {
+            None
+        } else if let Some(question) = open_question(&state) {
+            let mut text = format!("{} pregunta:\n{}", question.from_name, question.body);
+            if !question.options.is_empty() {
+                text.push_str(&format!("\n\nOpciones: {}", question.options.join(" · ")));
+            }
+            text.push_str("\n\nEscribe tu respuesta y apruébala. Sin respuesta, el equipo decide con lo que sabe.");
+            Some((format!("question:{}", question.id), text))
+        } else if state.run.status == "gated" {
+            let what = match state.run.gate.as_str() {
+                "plan" => "aprobar el plan",
+                "merge" => "integrar el trabajo en la rama destino",
+                gate if gate.starts_with("stuck") => "darle más rondas al equipo",
+                _ => "aprobar una tarea",
+            };
+            let mut text = format!("El equipo «{}» espera para {what}.", state.run.team_name);
+            if !state.run.gate_note.trim().is_empty() {
+                text.push_str(&format!("\n\n{}", state.run.gate_note.trim()));
+            }
+            Some(("gate".to_string(), text))
+        } else {
+            None
+        };
+        let answered = match ask {
+            Some((pending, text)) => {
+                link.pending = pending;
+                save_link(&app, &flow, &flow_run, &node, Some(&link));
+                RunHost::wait_for(host, wait_request(&request, "approval", text, request.wait_timeout), cancel.clone()).await
+            }
+            None => {
+                // The team works: the node waits on a record, so a restart does not lose it.
+                link.pending.clear();
+                save_link(&app, &flow, &flow_run, &node, Some(&link));
+                watch_team(app.clone(), flow_run.clone(), node.clone(), link.team_run.clone(), link.decide_in_flow);
+                let text = format!("El equipo «{}» trabaja en «{}».", state.run.team_name, state.run.title);
+                RunHost::wait_for(host, wait_request(&request, "team", text, None), cancel.clone()).await
+            }
+        };
+        let answer = match answered {
+            Ok(answer) => answer,
+            Err(error) => {
+                if cancel.is_cancelled() {
+                    team_abort(&app, &link.team_run).await;
+                    return finish(Err(ai_runs::CANCELLED_MARKER.to_string()));
+                }
+                return finish(Err(error));
+            }
+        };
+        if answer.decision == "expired" {
+            return finish(Err("Nobody decided before the time limit — the team run stays waiting in Agents".to_string()));
+        }
+        if !link.pending.is_empty() {
+            team_apply(&app, &link, &answer).await?;
+            link.pending.clear();
+        }
+    }
+}
+
 fn chain_summary(detail: &crate::db::models::ChainDetail) -> Value {
     json!({
         "chainId": detail.chain.id,
@@ -617,6 +932,26 @@ fn chain_summary(detail: &crate::db::models::ChainDetail) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_team_node_is_woken_only_for_what_it_handles() {
+        let mut state = crate::team::RunState::default();
+        state.run.status = "running".into();
+        assert!(!needs_the_node(&state, true));
+        state.run.status = "gated".into();
+        assert!(needs_the_node(&state, true));
+        assert!(!needs_the_node(&state, false), "approvals stay in Agents when the node does not decide them");
+        state.run.status = "running".into();
+        state.messages.push(crate::team::Message { kind: "question".into(), to_id: "user".into(), ..Default::default() });
+        assert!(needs_the_node(&state, true));
+        state.messages[0].answered_at = "2026-11-04T10:00:00Z".into();
+        assert!(!needs_the_node(&state, true));
+        state.run.status = "done".into();
+        assert!(needs_the_node(&state, false), "the end always wakes it");
+        let link = TeamLink { team_run: "r1".into(), decide_in_flow: true, pending: "question:m1".into() };
+        let back: TeamLink = serde_json::from_value(serde_json::to_value(&link).unwrap()).unwrap();
+        assert_eq!(back.pending.strip_prefix("question:"), Some("m1"));
+    }
 
     #[test]
     fn settings_key_goes_only_to_the_server_settings_names() {

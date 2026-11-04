@@ -62,6 +62,8 @@ export type FlowParamKind =
   | { type: "file"; placeholder: string; save: string[] }
   | { type: "apiModel"; purpose: "chat" | "embed" }
   | { type: "agent" }
+  | { type: "agents" }
+  | { type: "team" }
   | { type: "chainTemplate" }
   | { type: "dbConnection"; kinds: string[] }
   | { type: "dbTable" }
@@ -403,7 +405,7 @@ export interface FlowWait {
   flowName: string;
   nodeId: string;
   nodeName: string;
-  kind: "approval" | "webhook" | "time";
+  kind: "approval" | "webhook" | "time" | "form" | "team";
   message: string;
   createdAt: string;
   expiresAt: string | null;

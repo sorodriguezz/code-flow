@@ -141,17 +141,18 @@ export function CrewView() {
     );
   }
 
-  const spaces: { value: Space; label: string; icon: typeof Kanban; badge?: React.ReactNode }[] = [
-    { value: "tablero", label: l("Tablero", "Board"), icon: Kanban },
-    { value: "equipos", label: l("Equipos", "Teams"), icon: Network },
-    { value: "agentes", label: l("Agentes", "Agents"), icon: Bot },
+  const spaces: { value: Space; label: string; icon: typeof Kanban; badge?: React.ReactNode; title: string }[] = [
+    { value: "tablero", label: l("Tablero", "Board"), icon: Kanban, title: l("Las tareas e historias por columna. Arrastra un agente o un equipo a una tarjeta para que la trabaje.", "Tasks and stories by column. Drag an agent or a team onto a card to have it worked on.") },
+    { value: "equipos", label: l("Equipos", "Teams"), icon: Network, title: l("Arma equipos: quién lidera, quién reporta a quién y cómo trabajan (aprobaciones, presupuesto, integración).", "Build teams: who leads, who reports to whom and how they work (approvals, budget, merging).") },
+    { value: "agentes", label: l("Agentes", "Agents"), icon: Bot, title: l("Tus agentes: modelo, rol, instrucciones y permisos. Se crean desde una plantilla o desde cero.", "Your agents: model, role, instructions and permissions. Made from a template or from scratch.") },
     {
       value: "en-vivo",
       label: l("En vivo", "Live"),
       icon: Activity,
+      title: l("Lo que se está ejecutando ahora: el canal del equipo, cada miembro trabajando y lo que espera tu respuesta.", "What is running now: the team's channel, each member at work and what waits for your answer."),
       badge: liveCount ? <span className="grid h-[17px] min-w-[17px] place-items-center rounded-full bg-[var(--cf-accent)] px-1 text-[10.5px] font-semibold text-[var(--cf-on-accent)]">{liveCount}</span> : undefined,
     },
-    { value: "taller", label: l("Taller", "Workshop"), icon: SquareTerminal },
+    { value: "taller", label: l("Taller", "Workshop"), icon: SquareTerminal, title: l("Las terminales de los agentes que trabajan en modo terminal: míralos trabajar o escríbeles.", "The terminals of agents that work in terminal mode: watch them work or type to them.") },
   ];
 
   return (

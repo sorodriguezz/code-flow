@@ -17,6 +17,8 @@ import { Rows, asRows, str, type Row } from "./fieldRows";
 import {
   AccessHint,
   AgentPicker,
+  AgentsPicker,
+  TeamPicker,
   AnswerFieldsEditor,
   CategoriesEditor,
   ChainTemplatePicker,
@@ -1241,6 +1243,12 @@ function ParamField({
         break;
       case "agent":
         editor = <AgentPicker value={value} onChange={onChange} />;
+        break;
+      case "agents":
+        editor = <AgentsPicker value={value} onChange={onChange} />;
+        break;
+      case "team":
+        editor = <TeamPicker value={value} onChange={onChange} />;
         break;
       case "chainTemplate":
         editor = <ChainTemplatePicker value={value} onChange={onChange} />;

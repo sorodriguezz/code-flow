@@ -237,6 +237,40 @@ pub struct AgentRequest {
     pub wait: bool,
 }
 
+/// An agent of the workspace's roster as a flow node uses it: who it is, which engine it runs on and
+/// what it may do.
+#[derive(Debug, Clone, Default)]
+pub struct RosterAgent {
+    pub name: String,
+    pub role: String,
+    /// Its own instructions — the system prompt of every turn it takes.
+    pub prompt: String,
+    pub engine: EngineChoice,
+    /// `""` for the CLI's default.
+    pub effort: String,
+    pub edits: bool,
+}
+
+/// A run of one of the workspace's agent teams, started from a flow.
+#[derive(Debug, Clone, Default)]
+pub struct TeamRequest {
+    pub node_id: String,
+    pub node_name: String,
+    pub team_id: String,
+    pub goal: String,
+    pub title: String,
+    pub project_id: String,
+    /// `""` is the branch the repository has checked out.
+    pub target_branch: String,
+    /// Wait for it to end and answer with what the team did.
+    pub wait: bool,
+    /// The team's approvals and its questions for you are asked as the flow's own waits (desk, phone)
+    /// instead of only in Agents.
+    pub decide_in_flow: bool,
+    /// How long one of those waits lasts before the run gives up on it; `None` waits until decided.
+    pub wait_timeout: Option<Duration>,
+}
+
 /// A run parked at a node until someone decides — see [`RunHost::wait_for`].
 #[derive(Debug, Clone)]
 pub struct WaitRequest {
@@ -339,6 +373,15 @@ pub trait RunHost: Send + Sync {
     fn agent_task(&self, request: AgentRequest, cancel: CancellationToken) -> HostFuture<'_, Result<Value, String>> {
         let _ = (request, cancel);
         not_here("The Agents console")
+    }
+    /// An agent of the workspace's roster, by id.
+    fn roster_agent(&self, agent_id: &str) -> Result<RosterAgent, String> {
+        Err(format!("Unknown agent {agent_id}"))
+    }
+    /// Starts a run of one of the workspace's agent teams (and, with `wait`, follows it to its end).
+    fn team_run(&self, request: TeamRequest, cancel: CancellationToken) -> HostFuture<'_, Result<Value, String>> {
+        let _ = (request, cancel);
+        not_here("Agent teams")
     }
     /// A repository of the workspace, by id: its folder on disk.
     fn project_path(&self, project_id: &str) -> Result<String, String> {

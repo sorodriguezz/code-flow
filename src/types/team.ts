@@ -53,6 +53,10 @@ export interface TeamPolicy {
   budget_minutes: number;
   budget_warn_pct: number;
   ping_pong_laps: number;
+  /** The most of an engine plan's window (Claude, Codex, Gemini, opencode) one run may use, in points; `0` no limit. */
+  max_session_pct: number;
+  /** Agent-minutes for members on engines with no published quota (Grok, Cline…); `0` no limit. */
+  unmetered_minutes: number;
   /** Let the decision layer settle finite choices before paying a planner turn. */
   decider: boolean;
 }
@@ -269,19 +273,21 @@ export function defaultPolicy(): TeamPolicy {
     review: { enabled: false, reviewer: "", of: [], exigence: "correct", laps: 3 },
     max_parallel: 3,
     max_attempts: 3,
-    max_dispatches: 64,
-    lead_rounds: 6,
+    max_dispatches: 24,
+    lead_rounds: 3,
     lead_final_check: true,
     cleanup: true,
     comms: "open",
-    max_notes_per_item: 8,
+    max_notes_per_item: 4,
     escalate_questions: false,
-    sub_lead_rounds: 4,
+    sub_lead_rounds: 2,
     budget_usd: 0,
     budget_tokens: 0,
     budget_minutes: 0,
     budget_warn_pct: 80,
     ping_pong_laps: 3,
+    max_session_pct: 30,
+    unmetered_minutes: 60,
     decider: true,
   };
 }

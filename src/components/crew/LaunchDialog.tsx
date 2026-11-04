@@ -1,6 +1,6 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { FolderGit2, GitBranch, Info, Network, Play, Split, Trophy, User, WandSparkles, Waypoints, type LucideIcon } from "lucide-react";
+import { FolderGit2, Info, Network, Play, Split, Trophy, User, WandSparkles, Waypoints, type LucideIcon } from "lucide-react";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useChainStore } from "../../state/chainStore";
 import { useTeamStore } from "../../state/teamStore";
@@ -13,7 +13,9 @@ import { composeGoal } from "../../lib/backlog/status";
 import { emptyBacklogItem, type BacklogItem, type BacklogMode } from "../../types/crew";
 import type { PolicyPreset } from "../../types/team";
 import { AgentAvatar, TeamAvatar } from "./kit/Avatar";
-import { Btn, Label, Modal, SPRING, Switch, ToggleChip, field } from "./kit/ui";
+import { Btn, Label, Modal, SPRING, SelectBox, Switch, ToggleChip, field } from "./kit/ui";
+import { listBranches } from "../../lib/tauri/commands";
+import type { BranchInfo } from "../../types/domain";
 import { useCrewStore, useL } from "./state";
 
 type Who = { kind: "agent" | "team"; id: string } | null;
@@ -63,7 +65,7 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
   });
   const [racers, setRacers] = useState<string[]>(card?.mode_config.racers ?? []);
   const [repos, setRepos] = useState<string[]>(card?.repos.length ? card.repos : projects.slice(0, 1).map((p) => p.id));
-  const [branch, setBranch] = useState(card?.mode_config.branch ?? "");
+  const [branches, setBranches] = useState<Record<string, string>>(card?.mode_config.branches ?? {});
   const [worktree, setWorktree] = useState(card?.mode_config.worktree ?? true);
   const [preset, setPreset] = useState<PolicyPreset | undefined>(card?.mode_config.preset);
   const [flowId, setFlowId] = useState<string>(card?.mode_config.flowTemplateId ?? "");
@@ -83,7 +85,9 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
     return list;
   }, [templates, team, l]);
   const modeOk = (m: LaunchMode) => (m === "team" ? who?.kind === "team" : m === "flow" ? true : who?.kind !== "team");
-  const effectiveGoal = goal.trim() || (card ? composeGoal(card) : "");
+  // A card always travels whole — title, description, criteria, ticket — whatever the goal field
+  // says; a goal typed here only renames it.
+  const effectiveGoal = card ? composeGoal({ ...card, title: goal.trim() || card.title }) : goal.trim();
 
   const explain = (() => {
     const name = team?.name ?? agent?.name ?? "";
@@ -101,7 +105,7 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
     }
   })();
 
-  const modeConfig = (): BacklogItem["mode_config"] => ({ racers, branch, worktree, preset, flowTemplateId: flowId || undefined });
+  const modeConfig = (): BacklogItem["mode_config"] => ({ racers, branches, worktree, preset, flowTemplateId: flowId || undefined });
 
   const saveCard = async (status: BacklogItem["status"] | null): Promise<BacklogItem | null> => {
     if (!workspaceId) return null;
@@ -135,7 +139,7 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
       repos,
       racers,
       worktree,
-      branch,
+      branches,
       preset,
       flowSteps: mode === "flow" ? flow?.steps : undefined,
     };
@@ -292,12 +296,23 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
         </div>
       </div>
       <div className="flex flex-wrap items-end gap-4">
-        {mode === "team" && (
-          <div className="flex min-w-[220px] flex-col gap-1.5">
-            <Label>{l("Rama destino", "Target branch")}</Label>
-            <div className="relative">
-              <GitBranch className="absolute left-2.5 top-2 h-4 w-4 text-[var(--cf-text-faint)]" />
-              <input title={l("Rama a la que el equipo entrega su trabajo", "Branch the team delivers its work to")} value={branch} onChange={(e) => setBranch(e.target.value)} className={`${field} pl-8`} placeholder={l("la que esté activa (main, develop…)", "the checked-out one (main, develop…)")} />
+        {mode === "team" && repos.length > 0 && (
+          <div className="flex w-full flex-col gap-1.5">
+            <Label>{repos.length > 1 ? l("Rama destino de cada repositorio", "Target branch of each repository") : l("Rama destino", "Target branch")}</Label>
+            <div className="flex flex-col gap-1.5">
+              {repos.map((id) => {
+                const project = projects.find((p) => p.id === id);
+                return project ? (
+                  <TargetBranch
+                    key={id}
+                    name={project.name}
+                    path={project.local_path}
+                    value={branches[id] ?? ""}
+                    onChange={(b) => setBranches((all) => ({ ...all, [id]: b }))}
+                    showName={repos.length > 1}
+                  />
+                ) : null;
+              })}
             </div>
           </div>
         )}
@@ -324,5 +339,64 @@ function Pick({ on, onClick, children, title }: { on: boolean; onClick: () => vo
     >
       {children}
     </motion.button>
+  );
+}
+
+/**
+ * One repository's target branch, picked from its local branches. A locked branch is shown but cannot
+ * be picked: the team merges into its target at the end, and a lock is there to stop exactly that.
+ * A repository with no commits yet has nothing to branch from, and says so.
+ */
+function TargetBranch({ name, path, value, onChange, showName }: { name: string; path: string; value: string; onChange: (branch: string) => void; showName: boolean }) {
+  const l = useL();
+  const [list, setList] = useState<BranchInfo[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    listBranches(path)
+      .then((all) => alive && setList(all.filter((b) => !b.is_remote)))
+      .catch(() => alive && setList([]));
+    return () => {
+      alive = false;
+    };
+  }, [path]);
+
+  const head = list?.find((b) => b.is_head);
+  // The default is the checked-out branch — unless it is locked, then the first one that is not.
+  useEffect(() => {
+    if (!list || value) return;
+    if (head && !head.is_locked) return;
+    const free = list.find((b) => !b.is_locked);
+    if (free) onChange(free.name);
+  }, [list]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const label = showName ? <span className="w-[140px] shrink-0 truncate text-[12.5px] font-medium" title={name}>{name}</span> : null;
+  if (list === null) return <div className="flex items-center gap-2">{label}<span className="text-[12px] text-[var(--cf-text-faint)]">{l("Leyendo ramas…", "Reading branches…")}</span></div>;
+  if (list.length === 0) {
+    return (
+      <div className="flex items-center gap-2">
+        {label}
+        <span className="text-[12px] text-[var(--cf-warning)]">{l("Sin commits todavía: haz un primer commit para poder lanzar aquí.", "No commits yet: make a first commit to launch here.")}</span>
+      </div>
+    );
+  }
+  const lockNote = l(" — bloqueada", " — locked");
+  return (
+    <div className="flex items-center gap-2">
+      {label}
+      <SelectBox
+        value={value}
+        onChange={onChange}
+        className="w-[280px] shrink-0"
+        title={l("Rama a la que el equipo entrega su trabajo; las bloqueadas no se pueden elegir", "Branch the team delivers its work to; locked ones cannot be picked")}
+      >
+        {head && !head.is_locked && <option value="">{l(`La activa (${head.name})`, `The checked-out one (${head.name})`)}</option>}
+        {list.map((b) => (
+          <option key={b.name} value={b.name} disabled={b.is_locked}>
+            {b.name}
+            {b.is_locked ? lockNote : ""}
+          </option>
+        ))}
+      </SelectBox>
+    </div>
   );
 }

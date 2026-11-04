@@ -25,6 +25,8 @@ export interface LaunchInput {
   worktree?: boolean;
   /** A team run's target branch for every repository, `""` the one checked out. */
   branch?: string;
+  /** Per repository, over `branch`: project id → target branch. */
+  branches?: Record<string, string>;
   /** A team run's permission preset, on top of the team's own policy. */
   preset?: PolicyPreset;
   /** A fixed flow: the agents in order (from a chain template or the team's fixed plan). */
@@ -53,7 +55,7 @@ export function planLaunch(input: LaunchInput, firstRepo: string | null, newBatc
   switch (input.mode) {
     case "team": {
       if (assignee.kind !== "team") throw new LaunchError("crew.launch.needTeam");
-      return [{ kind: "team", teamId: assignee.id, repos: repos.map((projectId) => ({ projectId, targetBranch: input.branch ?? "" })), preset: input.preset }];
+      return [{ kind: "team", teamId: assignee.id, repos: repos.map((projectId) => ({ projectId, targetBranch: input.branches?.[projectId] ?? input.branch ?? "" })), preset: input.preset }];
     }
     case "race": {
       if (assignee.kind !== "agent") throw new LaunchError("crew.launch.needAgent");

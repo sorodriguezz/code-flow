@@ -509,7 +509,8 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
         "app.notify" | "data.state" | "data.vars" | "net.respond" | "code.service" => app::execute(ctx).await,
         "logic.subflow" => logic::subflow(ctx).await,
         "ai.agent" | "ai.local" | "ai.classify" | "ai.extract" | "ai.summarize" | "ai.review" | "ai.prReview" | "ai.prFix" | "ai.prReply"
-        | "ai.chat" | "ai.commit" | "app.agent" | "ai.vision" | "ai.guard" | "ai.transform" | "ai.compare" | "ai.image" | "ai.speech" => {
+        | "ai.chat" | "ai.commit" | "app.agent" | "ai.vision" | "ai.guard" | "ai.transform" | "ai.compare" | "ai.image" | "ai.speech"
+        | "ai.agents" | "ai.orchestrator" | "ai.team" => {
             ai::execute(ctx).await
         }
         "files.file" | "files.list" | "files.move" | "files.git" | "code.docker" => files::execute(ctx).await,

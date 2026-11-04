@@ -182,6 +182,7 @@ fn kind_text(spec: &ParamSpec) -> String {
         | Kind::McpServers
         | Kind::LocalModel
         | Kind::Agent
+        | Kind::Team
         | Kind::ChainTemplate
         | Kind::DbConnection { .. }
         | Kind::RemoteHost { .. }
@@ -189,6 +190,7 @@ fn kind_text(spec: &ParamSpec) -> String {
         | Kind::VaultItem
         | Kind::ApiRequest
         | Kind::ApiEnvironment => "an id the user picks: \"\"".into(),
+        Kind::Agents => "ids the user picks: []".into(),
     }
 }
 

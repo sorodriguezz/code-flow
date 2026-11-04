@@ -69,6 +69,10 @@ pub enum Kind {
     LocalModel,
     /// An agent of the workspace (the Agents console's roster), by id.
     Agent,
+    /// Several agents of the roster, by id.
+    Agents,
+    /// One of the workspace's agent teams, by id.
+    Team,
     /// A saved chain template of the workspace, by id.
     ChainTemplate,
     /// A saved connection of the Databases workspace, of one of these engines.
@@ -680,7 +684,9 @@ const SUBJECT: ParamSpec = p("text", long_text("{{ $json.text }}"), "\"={{ $json
 const INSTRUCTIONS: ParamSpec = p("instructions", long_text(""), "\"\"");
 
 const AGENT: &[ParamSpec] = &[
-    ENGINE,
+    RUN_AS,
+    ENGINE.when("runAs", &["anyEngine"]),
+    p("agent", Kind::Agent, "\"\"").literal().when("runAs", &["rosterAgent"]),
     p("prompt", long_text("Revisa los errores de hoy y dime cuáles son nuevos"), "\"\""),
     p("data", long_text("{{ JSON.stringify($json, null, 2) }}"), "\"\""),
     p("system", long_text(""), "\"\""),
@@ -2145,6 +2151,70 @@ const AI_TRANSFORM: &[ParamSpec] = &[
 ];
 
 /// «Preguntar a varios modelos»: one prompt, several engines, and optionally one that picks.
+/// Whether an AI node runs on an engine picked here or as one of the roster's agents (its model, its
+/// instructions, its effort, whether it may edit).
+const RUN_AS: ParamSpec = p("runAs", select(&["anyEngine", "rosterAgent"]), "\"anyEngine\"").literal();
+const AT_ONCE: ParamSpec = p("concurrency", Kind::Number { min: Some(1.0), max: Some(8.0) }, "3").literal();
+/// Where agents that only read look: an empty folder of the run's, a repository, a folder.
+const READ_IN: [ParamSpec; 4] = [
+    p("workIn", select(&["temp", "project", "path"]), "\"temp\"").literal(),
+    p("project", Kind::Project, "\"\"").literal().when("workIn", &["project"]),
+    p("subfolder", text("docs"), "\"\"").literal().when("workIn", &["project"]),
+    p("workDir", Kind::Folder, "\"\"").literal().when("workIn", &["path"]),
+];
+
+/// «Agentes en paralelo»: one task to several agents, their answers joined — or one agent over every item.
+const AI_AGENTS: &[ParamSpec] = &[
+    p("mode", select(&["sameTask", "perItem"]), "\"sameTask\"").literal(),
+    p("agents", Kind::Agents, "[]").literal().when("mode", &["sameTask"]),
+    p("agent", Kind::Agent, "\"\"").literal().when("mode", &["perItem"]),
+    p("prompt", long_text("Investiga qué opinan los usuarios de {{ $json.producto }} y resume lo más repetido"), "\"\""),
+    p("data", long_text("{{ JSON.stringify($json, null, 2) }}"), "\"\""),
+    p("combine", select(&["allAnswers", "firstAnswer", "majority", "judgeByAgent"]), "\"allAnswers\"").literal().when("mode", &["sameTask"]),
+    p("judgeAgent", Kind::Agent, "\"\"").literal().when("combine", &["judgeByAgent"]).and_when("mode", &["sameTask"]),
+    p("judgeCriteria", long_text("La respuesta más precisa y accionable"), "\"\"").when("combine", &["judgeByAgent"]).and_when("mode", &["sameTask"]),
+    AT_ONCE,
+    READ_IN[0],
+    READ_IN[1],
+    READ_IN[2],
+    READ_IN[3],
+    p("output", select(&["text", "json", "schema"]), "\"text\"").literal(),
+    ANSWER_FIELDS.when("output", &["json"]),
+    ANSWER_SCHEMA.when("output", &["schema"]),
+];
+
+/// «Orquestador»: a lead that hands work to agents and flows for a few rounds, then answers.
+const AI_ORCHESTRATOR: &[ParamSpec] = &[
+    RUN_AS,
+    ENGINE.when("runAs", &["anyEngine"]),
+    p("agent", Kind::Agent, "\"\"").literal().when("runAs", &["rosterAgent"]),
+    p("prompt", long_text("Prepara un informe de la competencia de {{ $json.empresa }}: precios, novedades y riesgos"), "\"\""),
+    p("data", long_text(""), "\"\""),
+    p("helpers", Kind::Agents, "[]").literal(),
+    TOOL_FLOWS,
+    p("maxRounds", Kind::Number { min: Some(1.0), max: Some(8.0) }, "3").literal(),
+    p("maxCalls", Kind::Number { min: Some(1.0), max: Some(8.0) }, "4").literal(),
+    AT_ONCE,
+    READ_IN[0],
+    READ_IN[1],
+    READ_IN[2],
+    READ_IN[3],
+    p("effort", select(&["default", "low", "medium", "high", "max"]), "\"default\"").literal(),
+    FALLBACK_ENGINES,
+];
+
+/// «Equipo de agentes»: a run of one of the workspace's teams.
+const AI_TEAM: &[ParamSpec] = &[
+    p("team", Kind::Team, "\"\"").literal(),
+    p("prompt", long_text("Añade la exportación a CSV del informe mensual"), "\"\""),
+    p("project", Kind::Project, "\"\"").literal(),
+    p("targetBranch", text("main"), "\"\""),
+    p("title", text(""), "\"\""),
+    p("waitEnd", Kind::Boolean, "true").literal(),
+    p("decideIn", select(&["inFlow", "inAgents"]), "\"inFlow\"").literal().when("waitEnd", &["true"]),
+    p("timeoutHours", COUNT, "0").literal().when("decideIn", &["inFlow"]),
+];
+
 const AI_COMPARE: &[ParamSpec] = &[
     p("compareEngines", Kind::Engines, "[]").literal(),
     p("prompt", long_text("¿Qué riesgos ves en este cambio? {{ $json.diff }}"), "\"\""),
@@ -2677,6 +2747,9 @@ pub fn for_type(type_id: &str) -> &'static [ParamSpec] {
         "ai.guard" => GUARD,
         "ai.transform" => AI_TRANSFORM,
         "ai.compare" => AI_COMPARE,
+        "ai.agents" => AI_AGENTS,
+        "ai.orchestrator" => AI_ORCHESTRATOR,
+        "ai.team" => AI_TEAM,
         "ai.image" => AI_IMAGE,
         "ai.speech" => AI_SPEECH,
         "net.search" => WEB_SEARCH,

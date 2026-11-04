@@ -16,6 +16,7 @@ import { draftFromTemplate, type TeamSlot, type TeamTemplateBody } from "../../.
 import { defaultPolicy, emptyTeam, type TeamMember } from "../../../types/team";
 import type { LibraryItem } from "../../../types/crew";
 import type { WorkspaceAgent } from "../../../types/domain";
+import { TemplateActions } from "../roster/TemplateEditor";
 import { AgentAvatar, TeamAvatar } from "../kit/Avatar";
 import { SelectBox, Btn, Label, Modal, SPRING, field } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
@@ -180,15 +181,12 @@ export function TeamTemplatesDialog() {
           {teams.map((t, i) => {
             const b = t.body as TeamTemplateBody;
             return (
-              <motion.button
-                key={t.id}
+              <motion.div key={t.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ ...SPRING, delay: i * 0.04 }} className="group relative flex">
+              <button
                 type="button"
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ ...SPRING, delay: i * 0.04 }}
                 onClick={() => choose(t)}
                 title={l(`Armar «${t.name}»: eliges quién ocupa cada puesto`, `Build «${t.name}»: you choose who takes each seat`)}
-                className="flex flex-col gap-2.5 rounded-lg border border-[var(--cf-border)] p-3.5 text-left transition-colors hover:border-[var(--cf-accent-line)] hover:bg-[var(--cf-hover)]"
+                className="flex w-full flex-col gap-2.5 rounded-lg border border-[var(--cf-border)] p-3.5 text-left transition-colors hover:border-[var(--cf-accent-line)] hover:bg-[var(--cf-hover)]"
               >
                 <span className="flex items-center gap-2.5">
                   <TeamAvatar size={34} />
@@ -201,7 +199,11 @@ export function TeamTemplatesDialog() {
                     return <AgentAvatar key={s.slot} agent={template ? { id: template.id, icon: template.icon, color: template.color } : { id: s.slot }} size={24} title={s.name} />;
                   })}
                 </span>
-              </motion.button>
+              </button>
+              <span className="absolute right-2 top-2 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+                <TemplateActions item={t} />
+              </span>
+              </motion.div>
             );
           })}
         </div>

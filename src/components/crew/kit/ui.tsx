@@ -64,17 +64,20 @@ export function Seg<T extends string>({
   options,
   onChange,
   size = "md",
+  full = false,
   className = "",
 }: {
   value: T;
   options: { value: T; label: ReactNode; icon?: LucideIcon; badge?: ReactNode; title?: string }[];
   onChange: (value: T) => void;
   size?: "sm" | "md";
+  /** Fills its row, the options sharing it; otherwise it is as wide as its options, even in a column that stretches. */
+  full?: boolean;
   className?: string;
 }) {
   const id = useId();
   return (
-    <div role="tablist" className={segTrackClass({ className: `min-w-0 overflow-x-auto [scrollbar-width:none] ${className}` })}>
+    <div role="tablist" className={segTrackClass({ full, className: `min-w-0 overflow-x-auto [scrollbar-width:none] ${full ? "" : "w-fit max-w-full"} ${className}` })}>
       {options.map((option) => {
         const on = option.value === value;
         const Icon = option.icon;
@@ -86,7 +89,7 @@ export function Seg<T extends string>({
             aria-selected={on}
             title={option.title}
             onClick={() => onChange(option.value)}
-            className={segItemClass(on, { size, className: "shrink-0" })}
+            className={segItemClass(on, { size, full, className: full ? "" : "shrink-0" })}
           >
             {on && <ActivePill layoutId={`seg-${id}`} variant="raised" />}
             <span className="relative inline-flex items-center gap-1.5">
@@ -132,7 +135,7 @@ export function Switch({ checked, onChange, label, hint, disabled, title }: { ch
 
 export function Stepper({ value, min, max, onChange, label }: { value: number; min: number; max: number; onChange: (value: number) => void; label: string }) {
   return (
-    <span className="inline-flex items-center overflow-hidden rounded-md shadow-[inset_0_0_0_1px_var(--cf-border-strong)]" aria-label={label} title={label}>
+    <span className="inline-flex w-fit items-center overflow-hidden rounded-md shadow-[inset_0_0_0_1px_var(--cf-border-strong)]" aria-label={label} title={label}>
       <button type="button" aria-label="−" title={`${label}: −1`} disabled={value <= min} onClick={() => onChange(Math.max(min, value - 1))} className="grid h-[26px] w-[26px] place-items-center text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] disabled:opacity-40">
         <Minus className="h-3.5 w-3.5" />
       </button>

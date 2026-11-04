@@ -310,6 +310,9 @@ pub const EXECUTABLE_TYPES: &[&str] = &[
     "app.terminal",
     "app.agent",
     "ai.agent",
+    // An agent team edits and lands work on a branch; a lead calls flows.
+    "ai.team",
+    "ai.orchestrator",
     "data.sql",
     "data.mongo",
     "data.redis",
