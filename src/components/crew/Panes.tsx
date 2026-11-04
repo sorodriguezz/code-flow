@@ -5,10 +5,10 @@
  * comparison, and the two authoring dialogs for fixed flows and for realizing a story.
  */
 import { Suspense, lazy } from "react";
+import { AgentTaskDetail } from "../agents/AgentTaskDetail";
 import { Drawer } from "./kit/ui";
 import { useCrewStore } from "./state";
 
-const AgentTaskDetail = lazy(() => import("../agents/AgentTaskDetail").then((m) => ({ default: m.AgentTaskDetail })));
 const ChainDetail = lazy(() => import("../agents/ChainDetail").then((m) => ({ default: m.ChainDetail })));
 const RacePanel = lazy(() => import("../agents/RacePanel").then((m) => ({ default: m.RacePanel })));
 const NewChainModal = lazy(() => import("../agents/NewChainModal").then((m) => ({ default: m.NewChainModal })));
@@ -19,9 +19,7 @@ export function TaskPane({ taskId }: { taskId: string }) {
   return (
     <Drawer onClose={close} width={780} label="task">
       <div className="flex min-h-0 flex-1 flex-col">
-        <Suspense fallback={null}>
-          <AgentTaskDetail key={taskId} taskId={taskId} />
-        </Suspense>
+        <AgentTaskDetail key={taskId} taskId={taskId} />
       </div>
     </Drawer>
   );

@@ -12732,37 +12732,37 @@ const en = {
     "Press this button again whenever you want this walk-through back. It follows whichever app is on screen, so switching to the API client from the app rail above it gives you that one's tour instead.",
 
   // ── Agents ───────────────────────────────────────────────────────────────────────────────
-  "tour.agents.intro.title": "The agent console",
+  "tour.agents.intro.title": "The Agents view",
   "tour.agents.intro.body":
-    "Where AI work that runs on its own lives. A task is a conversation with a role attached: an agent, one repository of this workspace, and what you asked for. It runs in the background — leave the view, switch repositories, keep working — and the bell tells you when it is finished. Same engine and same history as the AI panel, so nothing here is a second, separate kind of chat.",
+    "Five spaces over one dock: the Board (the work to do), Teams (who answers to whom), Agents (the roster and its templates), Live (the runs as they happen) and the Workshop (worktrees, terminals and all past work). It looks the same in the main window and in an island, and runs keep going with the window in the tray: they move in the backend.",
 
-  "tour.agents.tree.title": "One tree, three sections",
+  "tour.agents.tree.title": "The board",
   "tour.agents.tree.body":
-    "Projects are folders you create, and they are not repositories: a project is a piece of work, and it can span several repos or none yet. Inside them sit tasks and chains, each chain opening into the tasks its steps produced; anything not filed waits under Tasks. Pinned rows get a section of their own, right under the projects and outside every folder, so whatever you are running all week is one click away. The switch above regroups the same work by status, and keeps the plans you saved as templates on a tab of their own.",
+    "Stories, tasks and bugs of this workspace, plus an inbox with your Azure DevOps or Jira tickets. Drop an agent or a team from the dock onto a card to hand it out; from then on the card moves by itself with the work — doing, review, done — and opening it shows who is on it right now.",
 
-  "tour.agents.actions.title": "Starting something",
+  "tour.agents.actions.title": "Hand out a task",
   "tour.agents.actions.body":
-    "New task, the one filled button, is the thing done most, and its caret holds the other ways to start: a new chain, realizing a story, and a new project. Then, left to right, the terminals, the roster of agents, and the manual. Task, chain and story each ask which project they belong to as they open, so you can start from up here without having selected anything first.",
+    "⌘K anywhere in the view. Pick who (an agent or a team) and how: on its own, a race between several, a team, a fixed flow or a hybrid with a local model. You can also just leave it on the board for later.",
 
-  "tour.agents.task.title": "A task",
+  "tour.agents.task.title": "Teams as an org chart",
   "tour.agents.task.body":
-    "Opening one shows the conversation and every turn in it. You choose the agent and the repository when you create it, and you can keep replying afterwards — a task is a thread you come back to, not a single shot. The detail pane is where you follow what it is doing, stop it, or continue it with a different agent.",
+    "Drag agents or templates onto the chart: dropped on someone, it reports to them. A sub-lead plans its own branch, the lead wears the crown, and the advisor watches from the side. On the right, the team's rules: approvals, Git, review, budgets, who may talk to whom and the decision layer.",
 
-  "tour.agents.chains.title": "Chains, templates and realizing a story",
+  "tour.agents.chains.title": "Live",
   "tour.agents.chains.body":
-    "A chain is several steps in order, each with its own agent and prompt, each starting from what the step before it produced — and any step can pause for your approval or run a check that sends it back. Save one as a template and it becomes a plan, kept on the Templates tab, that you can run again on another project or another repository. Realizing a story is a chain with a human gate in the middle: it reads a work item from your board, plans in every repository it might touch, waits for you to approve the plan, and only then writes anything — which is what makes it safe to point at more than one repository at a time.",
+    "The work graph grows as the lead plans, with what runs in parallel counted in the corner; the Team tab shows each message travelling the hierarchy, and Members has a lane per member. On the side, the channel (answer questions here) and the run's cost, watch alerts, decisions and advice. Click a member to open its own chat.",
 
-  "tour.agents.bench.title": "Terminals for the workspace",
+  "tour.agents.bench.title": "The workshop",
   "tour.agents.bench.body":
-    "Not the terminals in the services panel — those belong to the repository, and these belong to the workspace, so its shells outlive switching repository and are there when you come back. Tabs of tiled panes, each running whichever shell profile you pick, and each one recorded: closing the panel puts it away without killing anything. They open in your home directory, because a workspace is a set of repositories rather than one.",
-  "tour.agents.roster.title": "Where an agent is defined",
+    "Worktrees, one per task, with their files, diff and review; the terminal bench, the workspace's own shells, which stay alive while you look elsewhere; and every piece of work started here — tasks, races, fixed flows and hybrids — with the flow templates.",
+  "tour.agents.roster.title": "The dock and the roster",
   "tour.agents.roster.body":
-    "This rail is the piece people go looking for. An agent is a name, a role, the provider and model it runs on, and the instructions it carries into every task it is given. The roster belongs to the workspace, so the same agents are available to every repository in it, and one can be switched off without being deleted — useful for the agent you only run at release time.",
+    "The dock at the bottom holds your agents and teams on every space — drag them onto a card — and, on the right, how many agent turns run at once. In Agents you create them (from a template or from scratch) with an icon, a colour, a model and what they may touch.",
 
   "tour.agents.settings.title": "Where the models come from",
   "tour.agents.settings.body": "The engines themselves are in Settings → AI engines. Providers, where this lands, is which engines are installed and the binary, model and tools each one uses; Accounts, the logins each one has. Tasks and prompts, a section of its own beside it, is which engine runs each of the app's AI actions — the heavy ones on a stronger model, if you like — and what it is told. The roster offers every engine CodeFlow supports, and an agent whose engine is not installed here is marked Not found rather than hidden. An agent brings its own instructions, followed by the workspace's notes from PR review → Context; the prompts under Tasks and prompts belong to the app's other AI actions, not to agents.",
 
-  "tour.agents.done.title": "That is the agent console",
+  "tour.agents.done.title": "That is the Agents view",
   "tour.agents.done.body":
     "Press this button again whenever you want this walk-through back. It follows whichever app is on screen, so opening Specs or the API client from the app rail above it gives you that one's tour instead.",
 

@@ -63,7 +63,7 @@ export function WorkGraph({ state, selected, onSelect }: { state: TeamRunState; 
               const d = `M${x1},${y1} C${x1 + GX / 2},${y1} ${x2 - GX / 2},${y2} ${x2},${y2}`;
               return (
                 <g key={`${e.from}-${e.to}`}>
-                  <motion.path initial={{ pathLength: 0, opacity: 0 }} animate={{ pathLength: 1, opacity: 1, d }} transition={{ duration: 0.5 }} fill="none" stroke={live ? "var(--cf-accent)" : e.kind === "delegate" ? "var(--cf-blue)" : "var(--cf-border-strong)"} strokeWidth={live ? 1.8 : 1.4} strokeDasharray={e.kind === "plan" ? "3 4" : undefined} opacity={e.kind === "plan" ? 0.7 : 1} />
+                  <motion.path d={d} initial={{ pathLength: 0, opacity: 0, d }} animate={{ pathLength: 1, opacity: 1, d }} transition={{ duration: 0.5 }} fill="none" stroke={live ? "var(--cf-accent)" : e.kind === "delegate" ? "var(--cf-blue)" : "var(--cf-border-strong)"} strokeWidth={live ? 1.8 : 1.4} strokeDasharray={e.kind === "plan" ? "3 4" : undefined} opacity={e.kind === "plan" ? 0.7 : 1} />
                   {live && <path d={d} fill="none" stroke="var(--cf-accent)" strokeWidth={2} className="cf-crew-flow" />}
                 </g>
               );
@@ -105,16 +105,16 @@ export function WorkGraph({ state, selected, onSelect }: { state: TeamRunState; 
                     {item.run_in === "terminal" && <SquareTerminal className="h-3.5 w-3.5 text-[var(--cf-text-faint)]" />}
                   </span>
                   <span className="line-clamp-2 text-[12px] leading-snug">{item.title}</span>
-                  <span className="flex items-center gap-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
+                  <span className="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[10.5px] text-[var(--cf-text-muted)]">
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: itemColor(item) }} />
-                    {l(es, en)} · {l(kes, ken)}
+                    <span className="shrink-0">{l(es, en)} · {l(kes, ken)}</span>
                     {item.attempts > 1 && (
                       <span className="inline-flex items-center gap-0.5" title={l("Intentos", "Attempts")}>
                         · <RotateCw className="h-2.5 w-2.5" />
                         {item.attempts}
                       </span>
                     )}
-                    {item.model && <span className="ml-auto truncate font-mono text-[10px] text-[var(--cf-violet)]">{item.model}</span>}
+                    {item.model && <span className="ml-auto min-w-0 truncate font-mono text-[10px] text-[var(--cf-violet)]">{item.model}</span>}
                   </span>
                 </motion.button>
               );
@@ -122,7 +122,7 @@ export function WorkGraph({ state, selected, onSelect }: { state: TeamRunState; 
           </AnimatePresence>
         </div>
       </div>
-      <div className="pointer-events-none absolute left-3 top-3 flex items-center gap-2">
+      <div className="pointer-events-none absolute bottom-3 left-3 flex items-center gap-2">
         <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11.5px] font-semibold shadow-[var(--cf-shadow)] ${par.now > 1 ? "border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]" : "border-[var(--cf-border)] bg-[var(--cf-surface)] text-[var(--cf-text-muted)]"}`}>
           <Zap className="h-3.5 w-3.5" />
           {l(`${par.now} en paralelo`, `${par.now} in parallel`)}

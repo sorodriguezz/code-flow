@@ -12575,37 +12575,37 @@ export const es = {
     "Pulsa este botón de nuevo cuando quieras repetir el recorrido. Sigue a la app que tengas en pantalla, así que si te cambias al cliente de API desde la franja de apps, justo encima, te da el tour de ese.",
 
   // ── Agentes ──────────────────────────────────────────────────────────────────────────────
-  "tour.agents.intro.title": "La consola de agentes",
+  "tour.agents.intro.title": "La vista de Agentes",
   "tour.agents.intro.body":
-    "Donde vive el trabajo de IA que corre solo. Una tarea es una conversación con un rol encima: un agente, un repositorio de este workspace y lo que le pediste. Corre en segundo plano — te puedes ir de la vista, cambiar de repositorio, seguir trabajando — y la campana te avisa cuando termina. Mismo motor y mismo historial que el panel de IA, así que esto no es un segundo tipo de chat aparte.",
+    "Cinco espacios sobre un mismo dock: el Tablero (el trabajo por hacer), Equipos (quién responde a quién), Agentes (el roster y sus plantillas), En vivo (las corridas mientras pasan) y el Taller (worktrees, terminales y todo el trabajo hecho). Se ve igual en la ventana principal y en una isla, y las corridas siguen con la ventana en la bandeja: avanzan en el backend.",
 
-  "tour.agents.tree.title": "Un árbol, tres secciones",
+  "tour.agents.tree.title": "El tablero",
   "tour.agents.tree.body":
-    "Los proyectos son carpetas que tú creas, y no son repositorios: un proyecto es un trabajo, y puede abarcar varios repos o ninguno todavía. Dentro van las tareas y las cadenas, y cada cadena se abre en las tareas que produjeron sus pasos; lo que no está archivado espera bajo Tareas. Las filas fijadas tienen su propia sección, justo bajo los proyectos y fuera de toda carpeta, así que lo que estés corriendo toda la semana queda a un clic. El selector de arriba reagrupa el mismo trabajo por estado, y deja los planes que guardaste como plantillas en una pestaña aparte.",
+    "Historias, tareas y bugs de este workspace, más una entrada con tus tickets de Azure DevOps o Jira. Suelta un agente o un equipo del dock sobre una tarjeta para asignarla; desde ahí la tarjeta se mueve sola con el trabajo —en curso, revisión, hecho— y al abrirla ves quién está en ella ahora.",
 
-  "tour.agents.actions.title": "Empezar algo",
+  "tour.agents.actions.title": "Dale una tarea",
   "tour.agents.actions.body":
-    "Nueva tarea, el único botón relleno, es lo que más se hace, y su flechita guarda las otras formas de empezar: una cadena nueva, realizar una historia y un proyecto nuevo. Después, de izquierda a derecha, las terminales, el roster de agentes y el manual. La tarea, la cadena y la historia preguntan a qué proyecto pertenecen al abrirse, así que puedes empezar desde aquí arriba sin haber seleccionado nada antes.",
+    "⌘K en cualquier parte de la vista. Elige quién (un agente o un equipo) y cómo: solo, una carrera entre varios, un equipo, un flujo fijo o un híbrido con un modelo local. También puedes dejarla en el tablero para después.",
 
-  "tour.agents.task.title": "Una tarea",
+  "tour.agents.task.title": "Equipos como organigrama",
   "tour.agents.task.body":
-    "Al abrir una ves la conversación y cada turno dentro de ella. Eliges el agente y el repositorio al crearla, y puedes seguir respondiendo después: una tarea es un hilo al que vuelves, no un disparo único. El panel de detalle es donde sigues lo que está haciendo, la detienes, o la continúas con otro agente.",
+    "Arrastra agentes o plantillas al organigrama: si lo sueltas sobre alguien, le reporta. Un sub-líder planifica su propia rama, el líder lleva la corona y el asesor mira desde el costado. A la derecha, las reglas del equipo: aprobaciones, Git, revisión, presupuestos, quién puede hablar con quién y la capa de decisión.",
 
-  "tour.agents.chains.title": "Cadenas, plantillas y realizar una historia",
+  "tour.agents.chains.title": "En vivo",
   "tour.agents.chains.body":
-    "Una cadena son varios pasos en orden, cada uno con su agente y su prompt, y cada uno partiendo de lo que produjo el anterior — y cualquier paso puede esperar tu aprobación o correr una verificación que lo devuelve atrás. Guarda una como plantilla y se vuelve un plan, en la pestaña Plantillas, que puedes volver a correr sobre otro proyecto u otro repositorio. Realizar una historia es una cadena con una compuerta humana al medio: lee un work item de tu tablero, planifica en cada repositorio que podría tocar, espera a que apruebes el plan, y recién ahí escribe algo — que es lo que la hace segura cuando apunta a más de un repositorio a la vez.",
+    "El grafo de trabajo crece a medida que el líder planifica, con lo que corre en paralelo contado en la esquina; la pestaña Equipo muestra cada mensaje viajando por la jerarquía y Miembros tiene un carril por miembro. Al costado, el canal (las preguntas se responden aquí) y el costo, la vigilancia, las decisiones y los consejos de la corrida. Clic en un miembro abre su propio chat.",
 
-  "tour.agents.bench.title": "Terminales del workspace",
+  "tour.agents.bench.title": "El taller",
   "tour.agents.bench.body":
-    "No son las terminales del panel de servicios — esas son del repositorio, y estas del workspace, así que sus shells sobreviven a cambiar de repositorio y siguen ahí cuando vuelves. Pestañas de paneles en mosaico, cada uno con el perfil de shell que elijas, y cada uno grabado: cerrar el panel lo guarda sin matar nada. Abren en tu carpeta personal, porque un workspace es un conjunto de repositorios y no uno solo.",
-  "tour.agents.roster.title": "Dónde se define un agente",
+    "Los worktrees, uno por tarea, con sus archivos, su diff y su revisión; el banco de terminales, las consolas del workspace, que siguen vivas mientras miras otra cosa; y todo el trabajo empezado aquí —tareas, carreras, flujos fijos e híbridos— con las plantillas de flujo.",
+  "tour.agents.roster.title": "El dock y el roster",
   "tour.agents.roster.body":
-    "Este panel es lo que la gente sale a buscar. Un agente es un nombre, un rol, el proveedor y modelo con el que corre, y las instrucciones que se lleva a cada tarea que le tocan. El roster pertenece al workspace, así que los mismos agentes están disponibles para todos sus repositorios, y uno se puede desactivar sin borrarlo — útil para el agente que solo corres cuando liberas versión.",
+    "El dock de abajo tiene a tus agentes y equipos en todos los espacios —arrástralos a una tarjeta— y, a la derecha, cuántos turnos de agentes corren a la vez. En Agentes los creas (desde una plantilla o de cero) con un icono, un color, un modelo y lo que pueden tocar.",
 
   "tour.agents.settings.title": "De dónde salen los modelos",
   "tour.agents.settings.body": "Los motores están en Configuración → Motores de IA. Proveedores, donde cae este paso, es qué motores están instalados y el binario, modelo y herramientas de cada uno; Cuentas, las sesiones de cada motor. Tareas y prompts, una sección propia al lado, es qué motor corre cada acción de IA de la app —las pesadas en un modelo más potente, si quieres— y qué se le dice. El roster ofrece todos los motores que CodeFlow soporta, y un agente cuyo motor no está instalado aquí aparece como No encontrado en vez de desaparecer. Un agente trae sus propias instrucciones, seguidas de las notas del workspace en Revisión de PR → Contexto; los prompts de Tareas y prompts son de las otras acciones de IA de la app, no de los agentes.",
 
-  "tour.agents.done.title": "Eso es la consola de agentes",
+  "tour.agents.done.title": "Eso es la vista de Agentes",
   "tour.agents.done.body":
     "Pulsa este botón de nuevo cuando quieras repetir el recorrido. Sigue a la app que tengas en pantalla, así que si abres Especificación o el cliente de API desde la franja de apps, justo encima, te da el tour de esa.",
 

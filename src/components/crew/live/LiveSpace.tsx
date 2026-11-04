@@ -70,7 +70,7 @@ function RunHeader({ state }: { state: TeamRunState }) {
     <div className="flex shrink-0 flex-col gap-1.5 border-b border-[var(--cf-border)] px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-2">
         <TeamAvatar size={30} state={state.items.some((i) => i.status === "running") ? "thinking" : "idle"} />
-        <div className="min-w-0 flex-1">
+        <div className="min-w-[200px] flex-1">
           <b className="block truncate text-[14px]">{run.title || run.goal}</b>
           <span className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-[var(--cf-text-muted)]">
             <Users className="h-3 w-3" />

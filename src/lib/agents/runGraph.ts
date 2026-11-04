@@ -23,8 +23,6 @@ export function isLeadItem(item: Pick<TeamItem, "kind">): boolean {
 export function layoutRun(items: TeamItem[]): RunGraph {
   const byId = new Map(items.map((i) => [i.id, i]));
   const ordered = [...items].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.key.localeCompare(b.key));
-  const planOfRound = new Map<number, TeamItem>();
-  for (const i of ordered) if (i.kind === "plan" && !planOfRound.has(i.round)) planOfRound.set(i.round, i);
 
   const edges: RunGraph["edges"] = [];
   const parents = new Map<string, string[]>();
@@ -48,7 +46,10 @@ export function layoutRun(items: TeamItem[]): RunGraph {
       const leaves = before.filter((o) => !before.some((x) => (parents.get(x.id) ?? []).includes(o.id)));
       for (const leaf of leaves) add(leaf.id, item.id, "plan");
     } else if (!parents.has(item.id)) {
-      const plan = planOfRound.get(item.round) ?? [...planOfRound.values()].filter((p) => p.created_at <= item.created_at).pop();
+      // The plan it came out of: the latest one made before it, never a later one (the advice the
+      // first plan waits for comes before that plan, not after it).
+      const at = ordered.indexOf(item);
+      const plan = ordered.slice(0, at).filter((p) => p.kind === "plan" && p.round <= item.round).pop();
       if (plan) add(plan.id, item.id, "plan");
     }
   }

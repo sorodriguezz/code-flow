@@ -139,7 +139,7 @@ const ReviewerView = lazy(() =>
 const CodeMapView = lazy(() => import("./components/codemap/CodeMapView").then((m) => ({ default: m.CodeMapView })));
 const EnvView = lazy(() => import("./components/env/EnvView").then((m) => ({ default: m.EnvView })));
 const ApiView = lazy(() => import("./components/api/ApiView").then((m) => ({ default: m.ApiView })));
-const AgentsView = lazy(() => import("./components/agents/AgentsView").then((m) => ({ default: m.AgentsView })));
+const AgentsView = lazy(() => import("./components/crew/CrewView").then((m) => ({ default: m.CrewView })));
 const StoriesView = lazy(() => import("./components/stories/StoriesView").then((m) => ({ default: m.StoriesView })));
 const RemoteView = lazy(() => import("./components/remote/RemoteView").then((m) => ({ default: m.RemoteView })));
 const NotesView = lazy(() => import("./components/notes/NotesView").then((m) => ({ default: m.NotesView })));

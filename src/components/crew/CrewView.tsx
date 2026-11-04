@@ -11,7 +11,7 @@
  * It is the same in the main window and in an island: every run moves in the backend
  * (`src-tauri/src/runner`) and every window only watches and sends orders.
  */
-import { Suspense, lazy, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Activity, Bot, Hand, Kanban, Network, SquareTerminal, WandSparkles } from "lucide-react";
 import { useAgentsStore } from "../../state/agentsStore";
@@ -25,6 +25,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
 import { EmptyState } from "../common/EmptyState";
 import { runIsLive } from "../../types/team";
+import { TerminalBench } from "../agents/TerminalBench";
 import { DragLayer } from "./kit/drag";
 import { Seg, SOFT } from "./kit/ui";
 import { Dock } from "./Dock";
@@ -41,8 +42,6 @@ import { LiveSpace } from "./live/LiveSpace";
 import { MemberChat } from "./live/MemberChat";
 import { WORKSHOP_BAR, WorkshopSpace } from "./workshop/WorkshopSpace";
 import { useCrewStore, useL, type Space } from "./state";
-
-const TerminalBench = lazy(() => import("../agents/TerminalBench").then((m) => ({ default: m.TerminalBench })));
 
 export function CrewView() {
   const l = useL();
@@ -156,7 +155,7 @@ export function CrewView() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
       <div className="flex shrink-0 items-center gap-3 border-b border-[var(--cf-border)] px-3.5 py-2.5">
-        <Seg value={space} onChange={setSpace} options={spaces} />
+        <Seg value={space} onChange={setSpace} options={spaces} className="min-w-0 shrink" />
         <span className="flex-1" />
         <AnimatePresence>
           {needsYou > 0 && (
@@ -166,11 +165,13 @@ export function CrewView() {
               exit={{ opacity: 0, scale: 0.9 }}
               type="button"
               onClick={() => setSpace("en-vivo")}
-              className="cf-crew-waiting flex h-[28px] items-center gap-1.5 rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_15%,var(--cf-surface))] px-3 text-[12px] font-semibold text-[var(--cf-warning)]"
+              title={l(`Te necesitan ${needsYou}`, `${needsYou} need you`)}
+              className="cf-crew-waiting flex h-[28px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_15%,var(--cf-surface))] px-3 text-[12px] font-semibold text-[var(--cf-warning)]"
               style={{ ["--cf-crew-c" as string]: "var(--cf-warning)" }}
             >
               <Hand className="h-3.5 w-3.5" />
-              {l(`Te necesitan ${needsYou}`, `${needsYou} need you`)}
+              <span className="hidden sm:inline">{l(`Te necesitan ${needsYou}`, `${needsYou} need you`)}</span>
+              <span className="sm:hidden">{needsYou}</span>
             </motion.button>
           )}
         </AnimatePresence>
@@ -178,7 +179,7 @@ export function CrewView() {
           type="button"
           data-tour="agents-tree-actions"
           onClick={() => open({ kind: "launch" })}
-          className="flex h-[34px] items-center gap-2 rounded-[10px] bg-[var(--cf-accent)] pl-3 pr-2 text-[12.5px] font-semibold text-[var(--cf-on-accent)] shadow-[0_6px_18px_-8px_color-mix(in_oklab,var(--cf-accent)_80%,transparent)] transition-transform hover:-translate-y-px"
+          className="flex h-[34px] shrink-0 items-center gap-2 rounded-[10px] bg-[var(--cf-accent)] pl-3 pr-2 text-[12.5px] font-semibold text-[var(--cf-on-accent)] shadow-[0_6px_18px_-8px_color-mix(in_oklab,var(--cf-accent)_80%,transparent)] transition-transform hover:-translate-y-px"
         >
           <WandSparkles className="h-4 w-4" />
           <span className="hidden sm:inline">{l("Dale una tarea", "Hand out a task")}</span>
@@ -198,9 +199,7 @@ export function CrewView() {
         </AnimatePresence>
         {benchMounted && (
           <div className={benchShown ? "absolute inset-x-0 bottom-0 flex min-h-0 flex-col" : "hidden"} style={{ top: WORKSHOP_BAR }}>
-            <Suspense fallback={null}>
-              <TerminalBench />
-            </Suspense>
+            <TerminalBench />
           </div>
         )}
       </div>

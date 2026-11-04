@@ -230,7 +230,8 @@ function Inbox() {
   const tickets = useTicketStore((s) => s.tickets);
   const loading = useTicketStore((s) => s.loading);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const imported = useBacklogStore((s) => new Set(s.items.map((i) => i.ticket?.uid).filter(Boolean)));
+  const items = useBacklogStore((s) => s.items);
+  const imported = useMemo(() => new Set(items.map((i) => i.ticket?.uid).filter(Boolean)), [items]);
   const pending = tickets.filter((t) => !imported.has(ticketUid(t)));
   const groups = new Map<string, Ticket[]>();
   for (const t of pending) groups.set(t.provider, [...(groups.get(t.provider) ?? []), t]);

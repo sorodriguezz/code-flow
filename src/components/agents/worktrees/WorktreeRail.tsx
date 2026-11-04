@@ -28,16 +28,15 @@ import { ContextMenu, type MenuItem } from "../../common/ContextMenu";
 import { Tooltip } from "../../common/Tooltip";
 import { ThinkingOrb } from "../../common/ThinkingOrb";
 import { explorerClass, explorerHeadClass, fieldClass, sectionLabelClass } from "../../common/recipes";
-import { LayoutSwitch } from "./LayoutSwitch";
 import { TallyText, useRowLive, useRowTally } from "./rowStatus";
 import { relativeTime } from "../../api/settingsChrome";
 import { agentName } from "../agentName";
-import { useAgentsStore } from "../../../state/agentsStore";
 import { useBenchStore } from "../../../state/benchStore";
 import { useTerminalAgentStore } from "../../../state/terminalAgentStore";
 import { useUiStore } from "../../../state/uiStore";
 import { useWorktreeViewStore } from "../../../state/worktreeViewStore";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
+import { useCrewStore } from "../../crew/crewStore";
 import { pushErrorToast } from "../../../state/toastStore";
 import { useT } from "../../../state/languageStore";
 import { revealInFileManager } from "../../../lib/tauri/commands";
@@ -167,8 +166,8 @@ export function WorktreeRail({
   const names = useWorktreeViewStore((s) => s.names);
   const showAll = useWorktreeViewStore((s) => s.showAll);
   const benchOpen = useBenchStore((s) => s.open);
-  const rosterOpen = useAgentsStore((s) => s.rosterOpen);
-  const toggleRoster = useAgentsStore((s) => s.toggleRoster);
+  // The roster is a space of its own now: the button takes you there.
+  const toggleRoster = () => useCrewStore.getState().setSpace("agentes");
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
 
   const toggleBench = () => {
@@ -251,7 +250,6 @@ export function WorktreeRail({
 
   return (
     <div style={{ width }} className={`${explorerClass} h-full overflow-hidden`}>
-      <LayoutSwitch />
       <div className={explorerHeadClass}>
         <button
           type="button"
@@ -289,9 +287,8 @@ export function WorktreeRail({
           <button
             type="button"
             onClick={toggleRoster}
-            aria-pressed={rosterOpen}
             aria-label={t("agents.manageAgents")}
-            className={iconButtonClass({ active: rosterOpen })}
+            className={iconButtonClass()}
           >
             <Users size={15} />
           </button>

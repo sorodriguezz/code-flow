@@ -75,6 +75,18 @@ describe("run graph", () => {
     expect(g.pos.get("sub")!.col).toBe(2);
   });
 
+  it("draws the advice the first plan waits for before that plan", () => {
+    const advise = item("adv", "advise", { status: "done" });
+    const plan = item("plan2", "plan");
+    const work = item("w", "work");
+    const g = layoutRun([advise, plan, work]);
+    expect(g.pos.get("adv")!.col).toBe(0);
+    expect(g.pos.get("plan2")!.col).toBe(1);
+    expect(g.pos.get("w")!.col).toBe(2);
+    expect(g.edges).toContainEqual({ from: "adv", to: "plan2", kind: "plan" });
+    expect(g.edges.some((e) => e.from === "plan2" && e.to === "adv")).toBe(false);
+  });
+
   it("counts what runs at once now and at the peak", () => {
     const items = [
       item("a", "work", { status: "done", started_at: "1", finished_at: "5" }),

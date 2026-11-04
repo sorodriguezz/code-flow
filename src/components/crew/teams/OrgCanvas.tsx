@@ -254,7 +254,7 @@ export function OrgCanvas({ team, update, selected, onSelect }: { team: Team; up
                       transition={SPRING}
                       className="pointer-events-none absolute left-0 top-0 rounded-[18px] border border-dashed border-[var(--cf-accent-line)] bg-[color-mix(in_oklab,var(--cf-accent)_4%,transparent)]"
                     >
-                      <span className="absolute -top-2.5 right-3 rounded-full bg-[var(--cf-surface)] px-2 text-[10.5px] font-semibold text-[var(--cf-accent)]">
+                      <span className="absolute -bottom-2.5 right-3 rounded-full bg-[var(--cf-surface)] px-2 text-[10.5px] font-semibold text-[var(--cf-accent)]">
                         {l(`Rama de ${m?.name ?? ""}`, `${m?.name ?? ""}'s branch`)}
                       </span>
                     </motion.div>
@@ -274,6 +274,7 @@ export function OrgCanvas({ team, update, selected, onSelect }: { team: Team; up
                       <motion.path
                         key={`${e.from}-${e.to}`}
                         initial={false}
+                        d={`M${x1},${y1} C${x1},${mid} ${x2},${mid} ${x2},${y2}`}
                         animate={{ d: `M${x1},${y1} C${x1},${mid} ${x2},${mid} ${x2},${y2}` }}
                         transition={SPRING}
                         fill="none"
@@ -292,6 +293,7 @@ export function OrgCanvas({ team, update, selected, onSelect }: { team: Team; up
                           <motion.path
                             key={`adv-${m.id}`}
                             initial={false}
+                            d={`M${lead.x + SIZE.w},${lead.y + SIZE.h / 2} L${b.x},${b.y + SIZE.h / 2}`}
                             animate={{ d: `M${lead.x + SIZE.w},${lead.y + SIZE.h / 2} L${b.x},${b.y + SIZE.h / 2}` }}
                             fill="none"
                             stroke="var(--cf-violet)"

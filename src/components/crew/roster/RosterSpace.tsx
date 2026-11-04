@@ -183,7 +183,7 @@ function AgentCard({ agent, index, onSync }: { agent: WorkspaceAgent; index: num
         </div>
       </div>
       <div className="mt-auto flex items-center gap-2 border-t border-[var(--cf-border)] px-3 py-2 text-[11.5px] text-[var(--cf-text-muted)]">
-        <span>{l(`${mine.length} tareas`, `${mine.length} tasks`)}</span>
+        <span>{mine.length === 1 ? l("1 tarea", "1 task") : l(`${mine.length} tareas`, `${mine.length} tasks`)}</span>
         {spent > 0 && <span>· {money(spent)}</span>}
         {inTeams.length > 0 && <span className="inline-flex items-center gap-0.5">· <Users className="h-3 w-3" />{inTeams.length}</span>}
         <span className="flex-1" />

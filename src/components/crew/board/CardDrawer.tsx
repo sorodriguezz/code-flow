@@ -44,6 +44,20 @@ import { money, useCrewStore, useL } from "../state";
 
 const NO_PROJECTS: never[] = [];
 
+const STATUS_LABEL: Record<string, [string, string]> = {
+  draft: ["Borrador", "Draft"],
+  running: ["Trabajando", "Working"],
+  idle: ["Para revisar", "To review"],
+  done: ["Hecho", "Done"],
+  error: ["Error", "Error"],
+  cancelled: ["Cancelado", "Cancelled"],
+  queued: ["En cola", "Queued"],
+  gated: ["Te espera", "Waiting on you"],
+  paused: ["En pausa", "Paused"],
+  failed: ["Falló", "Failed"],
+  aborted: ["Cancelado", "Aborted"],
+};
+
 function useSaver(item: BacklogItem | undefined) {
   const [draft, setDraft] = useState<BacklogItem | undefined>(item);
   const timer = useRef<number | null>(null);
@@ -125,7 +139,7 @@ function LinkRow({ link }: { link: BacklogLink }) {
           {task?.agent_name ? ` · ${task.agent_name}` : ""}
         </span>
       </span>
-      {status && <Chip tone={tone}>{status}</Chip>}
+      {status && <Chip tone={tone}>{l(...(STATUS_LABEL[status] ?? [status, status]))}</Chip>}
       <ExternalLink className="h-3.5 w-3.5 shrink-0 text-[var(--cf-text-faint)]" />
     </button>
   );
@@ -289,7 +303,8 @@ function Criteria({ criteria, onChange }: { criteria: Criterion[]; onChange: (ne
 function Subtasks({ parent }: { parent: BacklogItem }) {
   const l = useL();
   const crew = useCrewStore();
-  const children = useBacklogStore((s) => s.items.filter((i) => i.parent_id === parent.id));
+  const items = useBacklogStore((s) => s.items);
+  const children = useMemo(() => items.filter((i) => i.parent_id === parent.id), [items, parent.id]);
   const [text, setText] = useState("");
   const add = async () => {
     const t = text.trim();

@@ -162,7 +162,7 @@ export function FlowTab({ team, update }: { team: Team; update: Update }) {
                   const y1 = a.row * (H + GY) + H / 2;
                   const x2 = b.col * (W + GX);
                   const y2 = b.row * (H + GY) + H / 2;
-                  return <motion.path key={`${dep}-${s.key}`} initial={false} animate={{ d: `M${x1},${y1} C${x1 + GX / 2},${y1} ${x2 - GX / 2},${y2} ${x2 - 2},${y2}` }} fill="none" stroke="var(--cf-border-strong)" strokeWidth={1.6} markerEnd="url(#cf-flow-arrow)" />;
+                  return <motion.path key={`${dep}-${s.key}`} initial={false} d={`M${x1},${y1} C${x1 + GX / 2},${y1} ${x2 - GX / 2},${y2} ${x2 - 2},${y2}`} animate={{ d: `M${x1},${y1} C${x1 + GX / 2},${y1} ${x2 - GX / 2},${y2} ${x2 - 2},${y2}` }} fill="none" stroke="var(--cf-border-strong)" strokeWidth={1.6} markerEnd="url(#cf-flow-arrow)" />;
                 }),
               )}
             </svg>

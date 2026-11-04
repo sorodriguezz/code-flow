@@ -1,7 +1,5 @@
-import { useAgentsStore } from "../../state/agentsStore";
 import { useArchitectureViewStore, type Lens } from "../../state/architectureViewStore";
-import { useBenchStore } from "../../state/benchStore";
-import { useWorktreeViewStore, type ConsoleLayout } from "../../state/worktreeViewStore";
+import { useCrewStore, type Space } from "../../components/crew/crewStore";
 import type { ApiSettingsTab } from "../../state/apiModalStore";
 import { useDbModalStore, type DbModal } from "../../state/dbModalStore";
 import { useDiagramsStore } from "../../state/diagramsStore";
@@ -38,24 +36,9 @@ export interface TourStage {
    * choice inside one view, and resetting it from a step about the terminal would move a tab
    * nothing on screen is pointing at. */
   storiesMode?: StoriesMode;
-  /** The agent console's roster rail, for the one step that is about defining an agent rather than
-   * about running one. Default `false`, like the other two panels — a stage is applied whole, so a
-   * rail opened by one step has to be closed again by every step that doesn't ask for it. */
-  agentsRoster?: boolean;
-  /**
-   * The agent console's terminal bench, for the step about it.
-   *
-   * `open` is written straight onto the store like every other flag here, rather than going through
-   * `show()` — that one also re-reads the workspace's terminals, and a tour has no business firing a
-   * query per step. An empty bench still shows what a bench *is*, which is what the step is for.
-   */
-  agentsBench?: boolean;
-  /**
-   * Which layout the agent console is in. The agents tour is about the task list, so its steps ask
-   * for `tasks`; written onto the store like the panels, never persisted, and put back from the
-   * snapshot.
-   */
-  agentsLayout?: ConsoleLayout;
+  /** Which space of the Agents view a step shows. Written onto the view's store like the panels,
+   * never persisted, and put back from the snapshot. */
+  crewSpace?: Space;
   /**
    * The database workspace's Data sources dialog, open on the whole set.
    *
@@ -133,9 +116,7 @@ export interface AppSnapshot {
   /** Which panel the dock was on — a step that opens the terminals must not leave a dock that was
    *  on the services showing the terminals. */
   dockView: DockView;
-  agentsRosterOpen: boolean;
-  agentsBenchOpen: boolean;
-  agentsLayout: ConsoleLayout;
+  crewSpace: Space;
   dbModal: DbModal | null;
   diagramsAiOpen: boolean;
   flowsPalette: { at: [number, number] | null } | null;
@@ -172,9 +153,7 @@ export function captureAppState(): AppSnapshot {
     apiSettingsTab: ui.apiSettingsTab,
     terminalOpen: useTerminalStore.getState().panelOpen,
     dockView: useTerminalStore.getState().dockView,
-    agentsRosterOpen: useAgentsStore.getState().rosterOpen,
-    agentsBenchOpen: useBenchStore.getState().open,
-    agentsLayout: useWorktreeViewStore.getState().layout,
+    crewSpace: useCrewStore.getState().space,
     dbModal: useDbModalStore.getState().modal,
     diagramsAiOpen: useDiagramsStore.getState().aiOpen,
     flowsPalette: useFlowsStore.getState().palette,
@@ -196,9 +175,7 @@ export function restoreAppState(snapshot: AppSnapshot): void {
     apiSettingsTab: snapshot.apiSettingsTab,
   });
   useTerminalStore.setState({ panelOpen: snapshot.terminalOpen, dockView: snapshot.dockView });
-  useAgentsStore.setState({ rosterOpen: snapshot.agentsRosterOpen });
-  useBenchStore.setState({ open: snapshot.agentsBenchOpen });
-  useWorktreeViewStore.setState({ layout: snapshot.agentsLayout });
+  useCrewStore.setState({ space: snapshot.crewSpace });
   useDbModalStore.setState({ modal: snapshot.dbModal });
   useDiagramsStore.setState({ aiOpen: snapshot.diagramsAiOpen });
   useFlowsStore.setState({ palette: snapshot.flowsPalette });
@@ -242,9 +219,8 @@ export function applyStage(stage: TourStage | undefined): void {
   // The view only when the step opens the dock: a closed dock's panel is nobody's business, and
   // leaving it keeps the snapshot's restore the one place it changes back.
   useTerminalStore.setState(stage?.terminal ? { panelOpen: true, dockView: "terminal" } : { panelOpen: false });
-  useAgentsStore.setState({ rosterOpen: stage?.agentsRoster ?? false });
-  useBenchStore.setState({ open: stage?.agentsBench ?? false });
-  if (stage?.agentsLayout) useWorktreeViewStore.setState({ layout: stage.agentsLayout });
+  // The Agents view's overlays close with any step: a dialog left open would sit over the tour.
+  if (stage?.crewSpace) useCrewStore.setState({ space: stage.crewSpace, overlay: null });
   // `kind: "connections"` is the dialog opened from the workspace rather than from one connection's
   // menu — nothing preselected, which is the state a tour wants: the list first, then the form.
   useDbModalStore.setState({ modal: stage?.dbDataSources ? { kind: "connections" } : null });

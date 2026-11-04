@@ -3,19 +3,19 @@
  * directly), what the channel says to and about it, and its items. The card it works for is a click
  * away, so the board and the chat stay one thing.
  */
-import { Suspense, lazy, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Crown, Kanban, Lightbulb, ListChecks, MessageSquare, MessagesSquare, Star, X } from "lucide-react";
 import { useTeamStore } from "../../../state/teamStore";
 import { useAgentsStore } from "../../../state/agentsStore";
 import { useBacklogStore } from "../../../state/backlogStore";
 import { ProviderGlyph } from "../../ai/ProviderGlyph";
+import { AgentTaskDetail } from "../../agents/AgentTaskDetail";
 import { AgentAvatar } from "../kit/Avatar";
 import { Btn, Chip, Drawer, Empty, Seg } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
 import { Channel } from "./Channel";
 import { ITEM_KIND, ITEM_STATUS } from "./look";
 
-const AgentTaskDetail = lazy(() => import("../../agents/AgentTaskDetail").then((m) => ({ default: m.AgentTaskDetail })));
 
 export function MemberChat({ runId, memberId }: { runId: string; memberId: string }) {
   const l = useL();
@@ -93,9 +93,7 @@ export function MemberChat({ runId, memberId }: { runId: string; memberId: strin
       <div className="flex min-h-0 flex-1 flex-col">
         {tab === "chat" &&
           (shown ? (
-            <Suspense fallback={null}>
-              <AgentTaskDetail key={shown} taskId={shown} />
-            </Suspense>
+            <AgentTaskDetail key={shown} taskId={shown} />
           ) : (
             <Empty icon={MessageSquare} title={l("Todavía no habló", "It has not spoken yet")} hint={l("Su conversación aparece en cuanto empieza su primera tarea.", "Its conversation shows up as soon as its first task starts.")} />
           ))}

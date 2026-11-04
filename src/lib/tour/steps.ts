@@ -494,8 +494,8 @@ const DB_TOUR: TourStep[] = [
   closingStep("db", "tour.chapter.db", "tour.db.done.title", "tour.db.done.body", DB_STAGE),
 ];
 
-// The tour walks the task list, so it shows that layout whichever one the user had open.
-const AGENTS_STAGE: TourStage = { view: "agents", agentsLayout: "tasks" };
+// The tour walks the Agents view's spaces in the order work moves through them.
+const AGENTS_STAGE: TourStage = { view: "agents", crewSpace: "tablero" };
 
 const AGENTS_TOUR: TourStep[] = [
   {
@@ -529,41 +529,35 @@ const AGENTS_TOUR: TourStep[] = [
     chapterKey: "tour.chapter.agents",
     titleKey: "tour.agents.task.title",
     bodyKey: "tour.agents.task.body",
-    anchors: ['[data-tour="main-content"]'],
-    placement: "inside",
-    stage: AGENTS_STAGE,
+    anchors: ['[data-tour="agents-tree"]', '[data-tour="main-content"]'],
+    stage: { ...AGENTS_STAGE, crewSpace: "equipos" },
   },
   {
     id: "agents.chains",
     chapterKey: "tour.chapter.agents",
     titleKey: "tour.agents.chains.title",
     bodyKey: "tour.agents.chains.body",
-    anchors: ['[data-tour="main-content"]'],
-    placement: "inside",
-    stage: AGENTS_STAGE,
+    anchors: ['[data-tour="agents-tree"]', '[data-tour="main-content"]'],
+    stage: { ...AGENTS_STAGE, crewSpace: "en-vivo" },
   },
-  // Like the roster below it: a panel the app keeps closed, holding something nothing on the
-  // default screen mentions. Worth its own step because the bench is easy to mistake for the
-  // repository's terminal dock, and the difference — whose it is, and where it opens — is the
-  // entire reason it exists separately.
+  // The workshop: worktrees, the terminal bench (easy to mistake for the repository's terminal
+  // dock, which is why it gets a step) and every piece of work started here.
   {
     id: "agents.bench",
     chapterKey: "tour.chapter.agents",
     titleKey: "tour.agents.bench.title",
     bodyKey: "tour.agents.bench.body",
-    anchors: ['[data-tour="agents-bench"]', '[data-tour="main-content"]'],
-    stage: { ...AGENTS_STAGE, agentsBench: true },
+    anchors: ['[data-tour="agents-tree"]', '[data-tour="main-content"]'],
+    stage: { ...AGENTS_STAGE, crewSpace: "taller" },
   },
-  // The one step that needs a panel the app keeps closed by default, which is exactly why it is
-  // worth a step: the roster is where an agent *is defined*, and nothing on the default screen
-  // says so.
+  // The dock is on every space; the roster behind it is where an agent *is defined*.
   {
     id: "agents.roster",
     chapterKey: "tour.chapter.agents",
     titleKey: "tour.agents.roster.title",
     bodyKey: "tour.agents.roster.body",
     anchors: ['[data-tour="agents-roster"]', '[data-tour="main-content"]'],
-    stage: { ...AGENTS_STAGE, agentsRoster: true },
+    stage: { ...AGENTS_STAGE, crewSpace: "agentes" },
   },
   {
     id: "agents.settings",
