@@ -1924,6 +1924,7 @@ sharded_invoke_handler! {
         commands::team_cmd::team_pump,
         commands::team_cmd::team_run_policy,
         commands::team_cmd::team_run_metrics,
+        commands::team_cmd::team_run_artifacts,
         decide::decider_config,
         decide::decider_set,
         decide::decider_try,

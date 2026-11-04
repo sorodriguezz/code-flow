@@ -54,3 +54,5 @@ export const teamDeleteRun = (runId: string) => invoke<void>("team_delete_run", 
 
 export const teamRunPolicy = (runId: string, policy: TeamPolicy) => invoke<TeamRunState>("team_run_policy", { runId, policy });
 export const teamRunMetrics = (runId: string) => invoke<TeamRunMetrics>("team_run_metrics", { runId });
+export const teamRunArtifacts = (runId: string) =>
+  invoke<import("./chatRefsCommands").ChatArtifactSummary[]>("team_run_artifacts", { runId });

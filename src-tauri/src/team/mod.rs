@@ -19,6 +19,7 @@
 //! The backend decides, the frontend drives: [`claim_ready`] marks items running and the main window
 //! runs them (headless turn or a CLI in a terminal), then reports each one back to `team_cmd`.
 
+pub mod artifacts;
 pub mod gitops;
 pub mod hierarchy;
 pub mod metrics;

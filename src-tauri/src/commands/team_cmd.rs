@@ -634,6 +634,7 @@ async fn claim_limited(db: &Db, run_id: &str, limit: Option<usize>) -> Result<Ve
                 continue;
             };
             let cwd = cwd_of(&item, &items, &repo);
+            team::artifacts::mirror_into(run_id, std::slice::from_ref(&cwd));
             let (message, delivered) = compose(&run, &repos, &items, &messages, &item, &m, &cwd);
             team::mark_delivered(c, &delivered).map_err(e2s)?;
             let task = if item.run_in == "terminal" {
@@ -825,7 +826,14 @@ fn compose(run: &Run, repos: &[RunRepo], items: &[Item], messages: &[team::Messa
         if !deps.is_empty() {
             out.push_str("## Lo que te entregan\n");
             for d in deps {
-                out.push_str(&format!("### `{}` — {}: {}\n{}\n\n", d.key, d.member_name, d.title, trim_chars(&protocol::prose(&d.output_text), team::HANDOFF_PER_DEP)));
+                let prose = team::artifacts::strip(&protocol::prose(&d.output_text));
+                out.push_str(&format!("### `{}` — {}: {}\n{}\n", d.key, d.member_name, d.title, trim_chars(&prose, team::HANDOFF_PER_DEP)));
+                let files = team::artifacts::files_of(&run.id, &d.key);
+                if !files.is_empty() {
+                    let folder = team::artifacts::relative_folder(&run.id);
+                    out.push_str(&format!("Artefactos que dejó, para abrir cuando los necesites: {}\n", files.iter().map(|f| format!("`{folder}/{f}`")).collect::<Vec<_>>().join(", ")));
+                }
+                out.push('\n');
             }
         }
     }
@@ -1029,6 +1037,16 @@ async fn on_failure(db: &Db, run: &Run, mut item: Item, reason: &str, kind: &str
 
 async fn on_ok(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String> {
     item.output_text = text.to_string();
+    // What the answer carried as artifacts becomes files the next members open (`team::artifacts`).
+    let filed = with(db, |c| Ok(team::artifacts::file_item(c, run, &item, text)))?;
+    if !filed.is_empty() {
+        with(db, |c| {
+            let names: Vec<String> = filed.iter().map(|f| format!("`{f}`")).collect();
+            team::post(c, &run.id, &item.id, (&item.member_id, &item.member_name), ("all", "Equipo"), "note", &format!("publicó {}", names.join(", ")), &[])
+                .map(|_| ())
+                .map_err(e2s)
+        })?;
+    }
     if item.is_lead() {
         return on_lead(db, run, item, text);
     }
@@ -2042,6 +2060,29 @@ pub async fn team_run_policy(app: AppHandle, db: State<'_, Db>, run_id: String, 
     state_of(&db, &run_id)
 }
 
+/// The artifacts a run's members published, newest first — the record the run's views draw.
+#[tauri::command]
+pub fn team_run_artifacts(db: State<'_, Db>, run_id: String) -> Result<Vec<crate::chat_refs::artifacts::ArtifactSummary>, String> {
+    with(&db, |c| {
+        let run = team::get_run(c, &run_id).map_err(e2s)?.ok_or("La corrida ya no existe.")?;
+        let items = team::list_items(c, &run_id).map_err(e2s)?;
+        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
+        let mut out = crate::chat_refs::artifacts::list(c, &run.workspace_id, Some(&format!("team:{run_id}"))).map_err(e2s)?;
+        for task_id in items.iter().map(|i| i.task_id.as_str()).filter(|t| !t.is_empty()).collect::<std::collections::BTreeSet<_>>() {
+            if let Some(task) = queries::get_agent_task(c, task_id).map_err(e2s)? {
+                for a in crate::chat_refs::artifacts::list(c, &run.workspace_id, Some(&task.conversation_id)).map_err(e2s)? {
+                    if !out.iter().any(|x| x.name == a.name && x.version == a.version) {
+                        out.push(a);
+                    }
+                }
+            }
+        }
+        out.retain(|a| a.surface != "team" || ids.contains(&a.message_id.as_str()));
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(out)
+    })
+}
+
 /// Spend per member, who talks to whom, and the alerts the live view shows.
 #[tauri::command]
 pub fn team_run_metrics(db: State<'_, Db>, run_id: String) -> Result<team::metrics::RunMetrics, String> {
@@ -2067,6 +2108,7 @@ pub fn team_item_terminal(db: State<'_, Db>, item_id: String, session_id: String
 #[tauri::command]
 pub async fn team_delete_run(db: State<'_, Db>, run_id: String) -> Result<(), String> {
     crate::runner::cancel_run(&run_id);
+    team::artifacts::forget(&run_id, &[]);
     let (repos, items) = with(&db, |c| Ok((team::list_repos(c, &run_id).map_err(e2s)?, team::list_items(c, &run_id).map_err(e2s)?)))?;
     for repo in &repos {
         let mut paths: Vec<String> = items.iter().filter(|i| i.project_id == repo.project_id && i.kind == "work").map(|i| i.worktree_path.clone()).filter(|p| !p.is_empty()).collect();
