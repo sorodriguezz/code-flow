@@ -10,7 +10,7 @@ export type Overlay =
   | { kind: "launch"; goal?: string; assignee?: { kind: "agent" | "team"; id: string }; cardId?: string }
   | { kind: "wizard"; templateId?: string; agentId?: string }
   | { kind: "card"; id: string }
-  | { kind: "chat"; runId: string; memberId: string }
+  | { kind: "chat"; runId: string; memberId: string; taskId?: string }
   | { kind: "task"; id: string }
   | { kind: "chain"; id: string }
   | { kind: "teamTemplates" }

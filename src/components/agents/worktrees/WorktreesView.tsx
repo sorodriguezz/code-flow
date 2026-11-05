@@ -68,7 +68,16 @@ export function WorktreesView({ onNewAgent, onHelp }: { onNewAgent: (projectId: 
     void useWorktreeViewStore.getState().refreshListings(repos);
   }, [repos, worktreeTasks]);
 
-  const blocks = useMemo(() => buildRepoBlocks(repos, listings, tasks), [repos, listings, tasks]);
+  // The Workshop is for console agents started here: tasks (chats, teams, races) live in the board
+  // and «En vivo». Their worktrees still go to `buildRepoBlocks`, so they are not listed as bare folders.
+  const blocks = useMemo(
+    () =>
+      buildRepoBlocks(repos, listings, tasks).map((block) => {
+        const rows = block.rows.filter((row) => !row.task);
+        return { ...block, rows, items: block.items.filter((item) => item.kind === "row" && !item.row.task) };
+      }),
+    [repos, listings, tasks],
+  );
   const allRows = useMemo(() => blocks.flatMap((block) => block.rows), [blocks]);
   // Every terminal agent under the row whose folder it is in — over every row, so a nested worktree
   // keeps its own agent even while its parent is the only one on the rail.
@@ -215,10 +224,6 @@ export function WorktreesView({ onNewAgent, onHelp }: { onNewAgent: (projectId: 
           repos={repos}
           initialProjectId={creating || (current?.projectId ?? "")}
           onClose={() => setCreating(null)}
-          onChat={(projectId: string) => {
-            setCreating(null);
-            onNewAgent(projectId);
-          }}
           onCreated={(path, sessionId) => setArriving({ path, sessionId })}
         />
       )}

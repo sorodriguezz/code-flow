@@ -34,7 +34,7 @@ import { reviewOf, useTaskReviewStore } from "../../../state/taskReviewStore";
 import { pushErrorToast } from "../../../state/toastStore";
 import { useT } from "../../../state/languageStore";
 import { revealInFileManager } from "../../../lib/tauri/commands";
-import { openPathAsProject } from "../../../lib/openAsProject";
+import { openPathAsProject, worktreeProjectName } from "../../../lib/openAsProject";
 import { raceIdOf } from "../../../lib/agents/race";
 import { samePath } from "../../../lib/agents/terminalTask";
 import { CLI_PROVIDERS, hasCli } from "../../../lib/agents/cliLaunch";
@@ -377,7 +377,7 @@ export function WorktreeWorkspace({
       if (workspaceId) void focusProject(workspaceId, row.projectId).then(() => setActiveView("changes"));
       return;
     }
-    void openPathAsProject(row.path, null, row.branch || undefined).then(() => setActiveView("changes"));
+    void openPathAsProject(row.path, null, worktreeProjectName(row.path)).then(() => setActiveView("changes"));
   };
 
   /**

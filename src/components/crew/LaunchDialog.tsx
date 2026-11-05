@@ -16,6 +16,7 @@ import { AgentAvatar, TeamAvatar } from "./kit/Avatar";
 import { Btn, Label, Modal, SPRING, SelectBox, Switch, ToggleChip, field } from "./kit/ui";
 import { listBranches } from "../../lib/tauri/commands";
 import type { BranchInfo } from "../../types/domain";
+import { GoalFilesBar, useDropRef, useGoalFiles, withFiles } from "./kit/GoalFiles";
 import { useCrewStore, useL } from "./state";
 
 type Who = { kind: "agent" | "team"; id: string } | null;
@@ -57,6 +58,8 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
   const runnable = roster.filter((a) => a.enabled && a.provider && a.model);
 
   const [goal, setGoal] = useState(initialGoal ?? "");
+  const filesBox = useDropRef();
+  const goalFiles = useGoalFiles(filesBox);
   const [who, setWho] = useState<Who>(assignee ?? (card?.assignee_kind ? { kind: card.assignee_kind, id: card.assignee_id } : null));
   const [mode, setMode] = useState<LaunchMode>(() => {
     const stored = card?.mode;
@@ -87,7 +90,7 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
   const modeOk = (m: LaunchMode) => (m === "team" ? who?.kind === "team" : m === "flow" ? true : who?.kind !== "team");
   // A card always travels whole — title, description, criteria, ticket — whatever the goal field
   // says; a goal typed here only renames it.
-  const effectiveGoal = card ? composeGoal({ ...card, title: goal.trim() || card.title }) : goal.trim();
+  const effectiveGoal = withFiles(card ? composeGoal({ ...card, title: goal.trim() || card.title }) : goal.trim(), goalFiles.files);
 
   const explain = (() => {
     const name = team?.name ?? agent?.name ?? "";
@@ -109,7 +112,7 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
 
   const saveCard = async (status: BacklogItem["status"] | null): Promise<BacklogItem | null> => {
     if (!workspaceId) return null;
-    const base = card ?? { ...emptyBacklogItem(workspaceId, "task"), title: (goal.trim().split("\n")[0] || l("Tarea nueva", "New task")).slice(0, 90), body: goal.trim() };
+    const base = card ?? { ...emptyBacklogItem(workspaceId, "task"), title: (goal.trim().split("\n")[0] || l("Tarea nueva", "New task")).slice(0, 90), body: withFiles(goal.trim(), goalFiles.files) };
     return useBacklogStore.getState().save({
       ...base,
       assignee_kind: who?.kind ?? "",
@@ -200,12 +203,11 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
         </>
       }
     >
-      {!card && (
-        <div className="flex flex-col gap-1.5">
-          <Label>{l("Objetivo", "Goal")}</Label>
-          <textarea title={l("Lo que quieres lograr, con tus palabras", "What you want done, in your own words")} autoFocus value={goal} onChange={(e) => setGoal(e.target.value)} rows={3} className={`${field} h-auto py-2`} placeholder={l("Ej.: agregar recordatorio de cita 24 h antes por correo", "E.g.: email an appointment reminder 24 h before")} />
-        </div>
-      )}
+      <div ref={filesBox} className={`flex flex-col gap-1.5 rounded-[10px] ${goalFiles.over ? "outline outline-2 outline-[var(--cf-accent)]" : ""}`}>
+        {!card && <Label>{l("Objetivo", "Goal")}</Label>}
+        {!card && <textarea title={l("Lo que quieres lograr, con tus palabras", "What you want done, in your own words")} autoFocus value={goal} onChange={(e) => setGoal(e.target.value)} onPaste={goalFiles.onPaste} rows={3} className={`${field} h-auto py-2`} placeholder={l("Ej.: agregar recordatorio de cita 24 h antes por correo", "E.g.: email an appointment reminder 24 h before")} />}
+        <GoalFilesBar goalFiles={goalFiles} />
+      </div>
       <div className="flex flex-col gap-1.5">
         <Label>{l("Quién", "Who")}</Label>
         <div className="flex flex-wrap gap-2">

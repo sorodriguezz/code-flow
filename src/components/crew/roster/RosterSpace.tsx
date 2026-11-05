@@ -5,7 +5,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { BookMarked, Bot, Copy, Eye, FolderGit2, Pencil, Plus, RefreshCw, Search, SquareTerminal, Trash2, Users, WandSparkles } from "lucide-react";
+import { BookMarked, Bot, Copy, Eye, FolderGit2, MessageSquare, Pencil, Plus, RefreshCw, Search, SquareTerminal, Trash2, Users, WandSparkles } from "lucide-react";
 import { draftOf, useAgentsStore } from "../../../state/agentsStore";
 import { useLibraryStore } from "../../../state/libraryStore";
 import { useLanguageStore } from "../../../state/languageStore";
@@ -19,7 +19,8 @@ import type { LibraryItem } from "../../../types/crew";
 import { AgentAvatar } from "../kit/Avatar";
 import { useDragSource, useDropTarget } from "../kit/drag";
 import { Btn, Chip, Empty, IconBtn, Modal, SPRING, field } from "../kit/ui";
-import { money, useAgentStates, useCrewStore, useL } from "../state";
+import { lNow, money, useAgentStates, useCrewStore, useL } from "../state";
+import { useWorkspaceStore } from "../../../state/workspaceStore";
 
 function useLibrary() {
   const saved = useLibraryStore((s) => s.saved);
@@ -198,6 +199,7 @@ function AgentCard({ agent, index, onSync }: { agent: WorkspaceAgent; index: num
       {/* The actions slide up on hover or focus: nothing turns, nothing spins. */}
       <div className="pointer-events-none absolute inset-x-2 bottom-2 flex translate-y-3 items-center justify-center gap-1 rounded-[12px] border border-[var(--cf-border)] bg-[var(--cf-surface)] p-1 opacity-0 shadow-[var(--cf-shadow)] transition-[opacity,transform] duration-150 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100">
         <Btn small kind="primary" icon={WandSparkles} title={l("Dale una tarea a este agente", "Hand this agent a task")} onClick={() => crew.open({ kind: "launch", assignee: { kind: "agent", id: agent.id } })}>{l("Tarea", "Task")}</Btn>
+        <IconBtn title={l("Conversa con este agente en el repositorio activo, como en el chat del repositorio: preguntas, imágenes, su modelo y su forma de trabajar", "Chat with this agent in the active repository, like the repository chat: questions, images, its model and its way of working")} onClick={() => void chatWith(agent)} icon={MessageSquare} />
         <IconBtn title={l("Editar", "Edit")} onClick={() => crew.open({ kind: "wizard", agentId: agent.id })} icon={Pencil} />
         <IconBtn title={l("Duplicar", "Duplicate")} onClick={() => void useAgentsStore.getState().duplicateAgent(agent.id)} icon={Copy} />
         <IconBtn title={l("Guardar como plantilla", "Save as template")} onClick={() => void saveAsTemplate()} icon={BookMarked} />
@@ -258,4 +260,21 @@ export function RosterSpace() {
       {sync && <SyncDialog agent={sync.agent} template={sync.template} onClose={() => setSync(null)} />}
     </div>
   );
+}
+
+/** A conversation with one agent: a task with no goal yet, in the repository on screen, opened on
+ *  its composer. Everything the repository chat brings (context, memory, images) comes with it. */
+async function chatWith(agent: WorkspaceAgent): Promise<void> {
+  const projectId = useWorkspaceStore.getState().activeProjectId;
+  if (!projectId) {
+    pushErrorToast(lNow("Abre un repositorio para conversar con el agente.", "Open a repository to chat with the agent."));
+    return;
+  }
+  try {
+    const task = await useAgentsStore.getState().create({ projectId, agent, goal: "" });
+    await useAgentsStore.getState().rename(task.id, lNow(`Conversación con ${agent.name}`, `Chat with ${agent.name}`));
+    useCrewStore.getState().open({ kind: "task", id: task.id });
+  } catch (e) {
+    pushErrorToast(String(e));
+  }
 }

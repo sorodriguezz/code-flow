@@ -895,3 +895,9 @@ export interface WorkspaceChatSnapshot {
 /** What a workspace chat's next turn is told about the workspace. */
 export const workspaceChatSnapshot = (workspaceId: string) =>
   invoke<WorkspaceChatSnapshot>("workspace_chat_snapshot", { workspaceId });
+
+/** A file for a goal handed to agents, a team or a card — copied under its own root. */
+export const crewAttachFile = (sourcePath: string) => invoke<ChatAttachment>("crew_attach_file", { sourcePath });
+
+/** A pasted screenshot for such a goal. */
+export const crewAttachBytes = (name: string, data: number[]) => invoke<ChatAttachment>("crew_attach_bytes", { name, data });

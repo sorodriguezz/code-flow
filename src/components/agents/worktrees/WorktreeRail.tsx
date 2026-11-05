@@ -18,6 +18,7 @@ import {
   Plus,
   Search,
   TerminalSquare,
+  Trash2,
   Users,
   X,
   type LucideIcon,
@@ -40,7 +41,12 @@ import { useCrewStore } from "../../crew/crewStore";
 import { pushErrorToast } from "../../../state/toastStore";
 import { useT } from "../../../state/languageStore";
 import { revealInFileManager } from "../../../lib/tauri/commands";
-import { openPathAsProject } from "../../../lib/openAsProject";
+import { branchUnmergedCount, deleteBranch } from "../../../lib/tauri/commands";
+import { removeWorktree } from "../../../lib/tauri/gitCommands";
+import { GIT_ERROR, hasTag } from "../../../lib/gitErrors";
+import { confirmAction } from "../../../state/confirmStore";
+import { translate } from "../../../state/languageStore";
+import { openPathAsProject, worktreeProjectName } from "../../../lib/openAsProject";
 import { raceIdOf } from "../../../lib/agents/race";
 import { pathKey } from "../../../lib/agents/terminalTask";
 import {
@@ -482,6 +488,7 @@ function RailCard({
   const name = useWorktreeViewStore((s) => s.names[pathKey(row.path)] ?? "");
   const task = row.task;
   const repoName = repo?.name ?? "";
+  const repoPath = useWorkspaceStore((s) => Object.values(s.projectsByWorkspace).flat().find((p) => p.id === row.projectId)?.local_path ?? "");
 
   const lines = useMemo(() => {
     const out: AgentLine[] = [];
@@ -513,7 +520,7 @@ function RailCard({
       }
       return;
     }
-    void openPathAsProject(row.path, null, row.branch || undefined).then(() => useUiStore.getState().setActiveView("changes"));
+    void openPathAsProject(row.path, null, worktreeProjectName(row.path)).then(() => useUiStore.getState().setActiveView("changes"));
   };
 
   const menu: MenuItem[] = [
@@ -567,6 +574,17 @@ function RailCard({
       disabled: row.path === "",
       onClick: () => void revealInFileManager(row.path),
     },
+    ...(!row.isMain && row.path && repoPath
+      ? [
+          {
+            label: t("wt.delete"),
+            icon: Trash2,
+            danger: true,
+            separated: true,
+            onClick: () => void deleteSpace(repoPath, row.path, row.branch),
+          },
+        ]
+      : []),
   ];
 
   const ago = (at: number) =>
@@ -711,4 +729,33 @@ export function LineGlyph({ state, size = 10 }: { state: LineState | null; size?
   ) : (
     <span className="shrink-0 rounded-full border-[1.5px] border-[var(--cf-text-faint)]" style={box} />
   );
+}
+
+/**
+ * «Eliminar»: the worktree goes, then its branch — the order git needs, since a branch checked out
+ * in a worktree cannot be deleted. Uncommitted work and commits that reached no other branch are
+ * each asked about before they are lost.
+ */
+async function deleteSpace(repoPath: string, path: string, branch: string): Promise<void> {
+  if (!(await confirmAction(translate("wt.deleteConfirm", { path }), true, translate("wt.delete")))) return;
+  try {
+    try {
+      await removeWorktree(repoPath, path, false);
+    } catch (e) {
+      if (!hasTag(e, GIT_ERROR.worktreeDirty)) throw e;
+      if (!(await confirmAction(translate("worktrees.removeDirtyConfirm", { path }), true, translate("worktrees.removeForce")))) return;
+      await removeWorktree(repoPath, path, true);
+    }
+    if (branch) {
+      const unmerged = await branchUnmergedCount(repoPath, branch).catch(() => 0);
+      const go = unmerged === 0 || (await confirmAction(translate("wt.deleteBranchUnmerged", { branch, n: String(unmerged) }), true, translate("wt.delete")));
+      if (go) await deleteBranch(repoPath, branch, false);
+    }
+  } catch (e) {
+    pushErrorToast(String(e));
+  } finally {
+    const ws = useWorkspaceStore.getState();
+    const repos = (ws.activeWorkspaceId ? ws.projectsByWorkspace[ws.activeWorkspaceId] ?? [] : []).map((p) => ({ id: p.id, name: p.name, local_path: p.local_path }));
+    void useWorktreeViewStore.getState().refreshListings(repos);
+  }
 }

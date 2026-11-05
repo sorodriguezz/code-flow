@@ -4,6 +4,7 @@
  * chain's run, a team run in «En vivo»), and a member at work opens its own chat.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { CardFilesButton, addFilesTo, pastedImage } from "../kit/GoalFiles";
 import { AnimatePresence, motion } from "framer-motion";
 import {
   Activity,
@@ -342,6 +343,7 @@ export function CardDrawer({ cardId }: { cardId: string }) {
   const projects = useWorkspaceStore((s) => (s.activeWorkspaceId ? s.projectsByWorkspace[s.activeWorkspaceId] ?? NO_PROJECTS : NO_PROJECTS));
   const tasks = useAgentsStore((s) => s.tasks);
   const [labelText, setLabelText] = useState("");
+  const bodyBox = useRef<HTMLElement>(null);
 
   useEffect(() => {
     if (!stored && useBacklogStore.getState().loaded) crew.close();
@@ -467,10 +469,14 @@ export function CardDrawer({ cardId }: { cardId: string }) {
             </section>
           )}
 
-          <section className="flex flex-col gap-2">
-            <Label>{l("Descripción", "Description")}</Label>
+          <section ref={bodyBox} className="flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <Label>{l("Descripción", "Description")}</Label>
+              <CardFilesButton dropTarget={bodyBox} onAdd={(files) => patch({ body: addFilesTo(item.body, files) }, true)} />
+            </div>
             <textarea
               value={item.body}
+              onPaste={(e) => pastedImage(e, (files) => patch({ body: addFilesTo(item.body, files) }, true))}
               onChange={(e) => patch({ body: e.target.value })}
               rows={5}
               placeholder={l("Contexto, enlaces, lo que el agente debe saber…", "Context, links, what the agent should know…")}

@@ -19,6 +19,12 @@ function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
 
+/** What a worktree opened as a project is called: its folder, marked as a worktree — never its
+ *  branch, which read as one more branch of the repository in the sidebar. */
+export function worktreeProjectName(path: string): string {
+  return `${basename(path)} · worktree`;
+}
+
 export async function openPathAsProject(path: string, remoteUrl: string | null, name?: string): Promise<void> {
   const workspace = useWorkspaceStore.getState();
   const workspaceId = workspace.activeWorkspaceId;

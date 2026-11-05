@@ -1230,6 +1230,8 @@ sharded_invoke_handler! {
     ]
     shard_03 => [
         commands::chat_attach::repo_chat_attach_bytes,
+        commands::chat_attach::crew_attach_file,
+        commands::chat_attach::crew_attach_bytes,
         commands::chat_attach::repo_chat_remove_attachment,
         commands::chat_attach::chat_sweep_attachments,
         commands::chat_attach::chat_list_outputs,

@@ -1209,6 +1209,8 @@ pub async fn send_chat_message(
     let mut context_sources: Vec<crate::context::ContextSource> = Vec::new();
     let mut learned_memory: Option<String> = None;
     let mut learned_outcome: Option<crate::ai_memory::Remembered> = None;
+    // A finished team member's worktree brought back to read: this turn writes nothing.
+    let mut revived = false;
     let project = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         // Moved to the chat workspace (`chat_cmd::chat_move_from_panel`): it lives there now, and a
@@ -1227,7 +1229,17 @@ pub async fn send_chat_message(
         if let Some(id) = conversation_id.as_deref().filter(|id| id.starts_with(queries::AGENT_CONVERSATION_PREFIX)) {
             if let Some((path, _)) = queries::agent_task_worktree(&conn, id).map_err(|e| e.to_string())? {
                 if !std::path::Path::new(&path).is_dir() {
-                    return Err(format!("El worktree de esta tarea ya no existe: {path}"));
+                    // A team member's worktree goes once its work is integrated. The conversation
+                    // carries on: the folder comes back detached at the branch the run landed on
+                    // (same path, so the engine's session resumes) and the turn only reads.
+                    match crate::team::landed_at(&conn, id) {
+                        Some((repo, target)) => {
+                            crate::team::gitops::add_detached(&repo, &path, &target)
+                                .map_err(|e| format!("El worktree de esta tarea ya no existe y no se pudo recrear: {e}"))?;
+                            revived = true;
+                        }
+                        None => return Err(format!("El worktree de esta tarea ya no existe: {path}")),
+                    }
                 }
                 project.local_path = path;
             }
@@ -1309,7 +1321,7 @@ pub async fn send_chat_message(
         // A team item that must not write: the lead's turns, investigations, reviews, and any item of
         // a read-only member. See `team::read_only_conversation`.
         // A solo task of an agent that may not edit, likewise (`crew::agent_read_only`).
-        let analysis = analysis || conversation_id.as_deref().is_some_and(|id| crate::team::read_only_conversation(&conn, id) || crate::crew::agent_read_only(&conn, id));
+        let analysis = analysis || revived || conversation_id.as_deref().is_some_and(|id| crate::team::read_only_conversation(&conn, id) || crate::crew::agent_read_only(&conn, id));
         let contexts = queries::list_review_contexts(&conn, &workspace_id).map_err(|e| e.to_string())?;
         let skills = queries::list_workspace_skills(&conn, &workspace_id).map_err(|e| e.to_string())?;
         // An active agent runs on its own provider + model — and its own account, when it names

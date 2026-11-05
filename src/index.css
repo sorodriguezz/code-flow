@@ -5445,3 +5445,11 @@ svg.\-rotate-180 {
   background: var(--cf-crew-c, var(--cf-accent));
   opacity: 0.55;
 }
+
+/* A team message or an item's text rendered as markdown: no leading or trailing gap in its box. */
+.cf-crew-msg > :first-child {
+  margin-top: 0;
+}
+.cf-crew-msg > :last-child {
+  margin-bottom: 0;
+}

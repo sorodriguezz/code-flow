@@ -236,7 +236,8 @@ export function Modal({
   onClose: () => void;
   children: ReactNode;
   footer?: ReactNode;
-  wide?: boolean;
+  /** `true` is a wider modal; `"landscape"` is wider still and kept shorter than it is wide. */
+  wide?: boolean | "landscape";
 }) {
   useEscape(onClose);
   return createPortal(
@@ -248,7 +249,7 @@ export function Modal({
         initial={{ opacity: 0, y: 16, scale: 0.97 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
         transition={SPRING}
-        className={`relative flex max-h-[calc(100vh-40px)] w-full flex-col overflow-hidden rounded-[16px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)] ${wide ? "max-w-[980px]" : "max-w-[760px]"}`}
+        className={`relative flex w-full flex-col overflow-hidden rounded-[16px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)] ${wide === "landscape" ? "max-h-[min(720px,calc(100vh-40px))] max-w-[min(1320px,calc(100vw-48px))]" : wide ? "max-h-[calc(100vh-40px)] max-w-[980px]" : "max-h-[calc(100vh-40px)] max-w-[760px]"}`}
       >
         <div className="flex items-center gap-3 border-b border-[var(--cf-border)] px-[18px] py-4">
           {leading}

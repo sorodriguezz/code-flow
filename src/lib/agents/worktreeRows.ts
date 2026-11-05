@@ -25,6 +25,7 @@
  */
 
 import type { AgentTask, TerminalAgent } from "../../types/domain";
+import { isTeamTask } from "../../types/team";
 import { raceIdOf } from "./race";
 import { isWithin, pathKey, samePath } from "./terminalTask";
 
@@ -92,6 +93,9 @@ export function buildRepoBlocks(
     for (const task of inWorktree) {
       const path = task.worktree_path ?? "";
       const listed = listing.find((entry) => samePath(entry.path, path));
+      // A team member's worktree goes once its work is integrated; the task lives on in the run
+      // (En vivo), and a row here would point at a folder that is gone.
+      if (isTeamTask(task) && listing.length > 0 && (!listed || listed.prunable)) continue;
       rows.push({
         key: `task:${task.id}`,
         projectId: repo.id,
@@ -211,7 +215,11 @@ export interface RailSection {
 /** A row's status. Keyed by folder, not by row key: a task row becomes a plain row when its task is
  *  deleted, and the working copy is still the same one, filed where the user put it. */
 export function laneOf(row: WorktreeRow, lanes: Readonly<Record<string, LaneId>>): LaneId {
-  return lanes[pathKey(row.path)] ?? DEFAULT_LANE;
+  const filed = lanes[pathKey(row.path)];
+  if (filed) return filed;
+  // Nobody filed it: a finished task is done, not in progress — what the run says it is.
+  if (row.task?.status === "done") return "done";
+  return DEFAULT_LANE;
 }
 
 /**

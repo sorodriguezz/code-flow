@@ -8,6 +8,8 @@ import { useTeamStore } from "../../../state/teamStore";
 import { useAgentsStore } from "../../../state/agentsStore";
 import { useBenchStore } from "../../../state/benchStore";
 import { AiRunLog } from "../../ai/AiRunLog";
+import { Markdown } from "../../common/Markdown";
+import { readableTeamText } from "../../../lib/team/teamText";
 import type { TeamItem, TeamRunState } from "../../../types/team";
 import { AgentAvatar } from "../kit/Avatar";
 import { Btn, Chip, Label, SOFT, field } from "../kit/ui";
@@ -66,11 +68,15 @@ export function GateCard({ state }: { state: TeamRunState }) {
   );
 }
 
-function Section({ label, tone, children }: { label: string; tone?: "bad"; children: React.ReactNode }) {
+function Section({ label, tone, text }: { label: string; tone?: "bad"; text: string }) {
   return (
     <div className="flex flex-col gap-1">
       <Label>{label}</Label>
-      <div className={`max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-[9px] bg-[var(--cf-sunken)] p-2 text-[12px] leading-relaxed ${tone === "bad" ? "text-[var(--cf-danger)]" : ""}`}>{children}</div>
+      {tone === "bad" ? (
+        <div className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded-[9px] bg-[var(--cf-sunken)] p-2 text-[12px] leading-relaxed text-[var(--cf-danger)]">{text}</div>
+      ) : (
+        <Markdown source={readableTeamText(text)} className="cf-markdown-chat cf-crew-msg max-h-72 select-text overflow-auto break-words rounded-[9px] bg-[var(--cf-sunken)] p-2.5 text-[12.5px]" />
+      )}
     </div>
   );
 }
@@ -126,14 +132,17 @@ export function ItemPanel({ state, item, onClose }: { state: TeamRunState; item:
             </div>
           </div>
         )}
-        {item.instruction && <Section label={l("Instrucción", "Instruction")}>{item.instruction}</Section>}
-        {item.feedback && <Section label={l("Devolución", "Feedback")}>{item.feedback}</Section>}
-        {item.last_error && item.status !== "done" && <Section label={l("Último error", "Last error")} tone="bad">{item.last_error}</Section>}
-        {item.output_text && <Section label={l("Lo que entregó", "What it handed over")}>{item.output_text}</Section>}
+        {item.instruction && <Section label={l("Instrucción", "Instruction")} text={item.instruction} />}
+        {item.feedback && <Section label={l("Devolución", "Feedback")} text={item.feedback} />}
+        {item.last_error && item.status !== "done" && <Section label={l("Último error", "Last error")} tone="bad" text={item.last_error} />}
+        {item.output_text && <Section label={l("Lo que entregó", "What it handed over")} text={item.output_text} />}
       </div>
       <div className="flex flex-wrap gap-1.5 border-t border-[var(--cf-border)] p-2.5">
-        {member && <Btn small icon={MessageSquare} title={l("Abre el chat de quien hace esta tarea", "Opens the chat of whoever does this task")} onClick={() => crew.open({ kind: "chat", runId: state.run.id, memberId: member.id })}>{l("Chat del miembro", "Member chat")}</Btn>}
-        {item.task_id && <Btn small icon={MessagesSquare} title={l("Abre la conversación completa de la tarea", "Opens the task's full conversation")} onClick={() => crew.open({ kind: "task", id: item.task_id })}>{l("Conversación", "Conversation")}</Btn>}
+        {member ? (
+          <Btn small icon={MessageSquare} title={l("Abre la conversación de esta tarea con quien la hizo; puedes seguir hablándole ahí", "Opens this task's conversation with whoever did it; you can keep talking to it there")} onClick={() => crew.open({ kind: "chat", runId: state.run.id, memberId: member.id, taskId: item.task_id || undefined })}>{l("Conversación", "Conversation")}</Btn>
+        ) : (
+          item.task_id && <Btn small icon={MessagesSquare} title={l("Abre la conversación completa de la tarea", "Opens the task's full conversation")} onClick={() => crew.open({ kind: "task", id: item.task_id })}>{l("Conversación", "Conversation")}</Btn>
+        )}
         {["error", "cancelled", "skipped"].includes(item.status) && <Btn small icon={RotateCcw} title={l("Vuelve a ejecutar esta tarea desde cero", "Runs this task again from scratch")} onClick={() => void store.control(item.run_id, `retry:${item.id}`)}>{l("Reintentar", "Retry")}</Btn>}
         {["pending", "gated", "error", "waiting"].includes(item.status) && <Btn small icon={SkipForward} title={l("La omite y deja seguir a las que dependen de ella", "Skips it and lets dependent tasks go on")} onClick={() => void store.control(item.run_id, `skip:${item.id}`)}>{l("Saltar", "Skip")}</Btn>}
       </div>

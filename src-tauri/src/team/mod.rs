@@ -740,6 +740,14 @@ pub fn set_run_status(conn: &Connection, id: &str, status: &str, gate: &str, not
         "UPDATE agent_team_runs SET status = ?2, gate = ?3, gate_note = ?4, updated_at = ?5 WHERE id = ?1",
         params![id, status, gate, note, now()],
     )?;
+    // A run that ended leaves its members' conversations finished, not "your turn": the Workshop
+    // and the task list read the task's own status, and an idle one there reads as work in progress.
+    if matches!(status, "done" | "failed" | "aborted") {
+        conn.execute(
+            "UPDATE agent_tasks SET status = 'done' WHERE batch_id = ?1 AND status = 'idle'",
+            params![format!("{TASK_BATCH_PREFIX}{id}")],
+        )?;
+    }
     Ok(())
 }
 
@@ -1133,6 +1141,22 @@ pub fn read_only_conversation(conn: &Connection, conversation_id: &str) -> bool 
         let edits = members.iter().find(|m| m.member.id == member_id).is_some_and(|m| m.member.edits);
         !matches!(kind.as_str(), "work" | "integrate") || !edits
     })
+}
+
+/// Where a team member's conversation can be read again after its worktree went (integrated and
+/// tidied): the repository and the branch the run landed on. `None` for a task of no team.
+pub fn landed_at(conn: &Connection, conversation_id: &str) -> Option<(String, String)> {
+    conn.query_row(
+        "SELECT r.local_path, r.target_branch FROM agent_tasks t
+         JOIN agent_team_items i ON i.task_id = t.id
+         JOIN agent_team_repos r ON r.run_id = i.run_id AND r.project_id = i.project_id
+         WHERE t.conversation_id = ?1 LIMIT 1",
+        params![conversation_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )
+    .optional()
+    .ok()
+    .flatten()
 }
 
 /// The team item a terminal folder belongs to, while it is running there — what `cf done` closes.

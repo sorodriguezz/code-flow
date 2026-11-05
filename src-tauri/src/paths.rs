@@ -482,6 +482,11 @@ pub fn chat_conversation_attachments_dir(conversation_id: &str) -> PathBuf {
 /// A sibling root rather than a share of [`chat_attachments_dir`], for the sweep's sake again: that
 /// root's sweep keeps only the chat workspace's conversations, and a panel conversation is a row in
 /// `activity_log`, which it does not read — so its folder would be collected on the next launch.
+/// Files attached to a goal for agents, a team run or a board card — see `crew_attach_file`.
+pub fn crew_attachments_dir() -> PathBuf {
+    state_dir().join("crew-attachments")
+}
+
 pub fn repo_chat_attachments_dir() -> PathBuf {
     state_dir().join("repo-chat-attachments")
 }

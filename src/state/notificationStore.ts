@@ -135,7 +135,9 @@ export interface NotificationTarget {
       | "pullRequest"
       /** `${projectId}:${provider}:${runId}` — a run number alone is ambiguous across
        *  repositories exactly as a PR number is. See `runKey` in `ciStore`. */
-      | "pipelineRun";
+      | "pipelineRun"
+      /** A team run in the Agents view's live space. */
+      | "teamRun";
     id: string;
   };
 }
@@ -371,6 +373,11 @@ async function enterWorkspace(stampedWorkspaceId: string | null, target: Notific
         await useAgentsStore.getState().setWorkspace(workspaceId);
         break;
       }
+      case "teamRun": {
+        const { useTeamStore } = await import("./teamStore");
+        await useTeamStore.getState().load(workspaceId);
+        break;
+      }
       case "chain": {
         const { useChainStore } = await import("./chainStore");
         await useChainStore.getState().setWorkspace(workspaceId);
@@ -480,6 +487,10 @@ export async function followTarget(
   } else if (kind === "agentTask") {
     const { useAgentsStore } = await import("./agentsStore");
     await useAgentsStore.getState().select(id);
+  } else if (kind === "teamRun") {
+    const [{ useTeamStore }, { useCrewStore }] = await Promise.all([import("./teamStore"), import("../components/crew/crewStore")]);
+    useCrewStore.getState().setSpace("en-vivo");
+    await useTeamStore.getState().select(id);
   } else if (kind === "chain") {
     const { useChainStore } = await import("./chainStore");
     await useChainStore.getState().select(id);

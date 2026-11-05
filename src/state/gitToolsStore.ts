@@ -14,7 +14,7 @@ import type { TagInfo } from "../types/domain";
 import { translations, type TranslationKey } from "../lib/i18n/translations";
 import { describeGitError, GIT_ERROR, hasTag } from "../lib/gitErrors";
 import { describeUndo, reflogSubject } from "../lib/undoPlan";
-import { openPathAsProject } from "../lib/openAsProject";
+import { openPathAsProject, worktreeProjectName } from "../lib/openAsProject";
 import { useLanguageStore } from "./languageStore";
 import { useRepoStore } from "./repoStore";
 import { chooseAction, confirmAction } from "./confirmStore";
@@ -327,7 +327,7 @@ export const useGitToolsStore = create<GitToolsState>((set, get) => {
     openWorktree: async (worktree) => {
       const remote = useRepoStore.getState().remotes[0]?.url ?? null;
       try {
-        await openPathAsProject(worktree.path, remote);
+        await openPathAsProject(worktree.path, remote, worktreeProjectName(worktree.path));
       } catch (e) {
         pushErrorToast(String(e));
       }

@@ -936,7 +936,9 @@ fn compose(run: &Run, repos: &[RunRepo], items: &[Item], messages: &[team::Messa
                     .filter_map(|id| member(run, id).map(|m| m.member.name.clone()))
                     .collect();
                 place = format!(" · **sub-líder**: dale el trabajo de su área entero y él lo reparte entre {}", under.join(", "));
-            } else if let Some(boss) = manager_of(run, &mm.member.id).filter(|boss| boss.member.id != item.member_id) {
+            } else if let Some(boss) = manager_of(run, &mm.member.id).filter(|boss| boss.member.id != item.member_id && delegates(run, &boss.member.id, &item.member_id)) {
+                // Only under a sub-lead that hands work out: reporting to someone who does not
+                // delegate is an org chart line, not a route the lead must take.
                 place = format!(" · en el área de {}", boss.member.name);
             }
             out.push_str(&format!(

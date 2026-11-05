@@ -98,7 +98,7 @@ function TemplateStep({ onPick }: { onPick: (t: LibraryItem | null) => void }) {
   const templates = useMemo(() => useLibraryStore.getState().all().filter((t) => t.kind === "agent"), [saved, lang]); // eslint-disable-line react-hooks/exhaustive-deps
   const [editing, setEditing] = useState<LibraryItem | null>(null);
   return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
       <motion.button type="button" transition={SPRING} title={l("Empieza un agente vacío", "Starts an empty agent")} onClick={() => onPick(null)} className="flex flex-col items-start gap-2 rounded-lg border border-dashed border-[var(--cf-border-strong)] p-3 text-left transition-colors hover:border-[var(--cf-accent)] hover:bg-[var(--cf-hover)]">
         <span className="grid h-9 w-9 place-items-center rounded-[11px] bg-[var(--cf-sunken)] text-[var(--cf-text-muted)]"><FilePlus2 className="h-4 w-4" /></span>
         <b className="text-[12.5px]">{l("En blanco", "Blank")}</b>
@@ -390,7 +390,7 @@ export function AgentWizard({ templateId, agentId }: { templateId?: string; agen
 
   return (
     <Modal
-      wide
+      wide="landscape"
       title={existing ? l(`Editar ${existing.name}`, `Edit ${existing.name}`) : l("Nuevo agente", "New agent")}
       subtitle={l("Un agente es un papel con su motor, su modelo y su alcance. Se puede sumar a equipos y recibir tareas solo.", "An agent is a role with its engine, model and scope. It can join teams and take tasks on its own.")}
       onClose={crew.close}

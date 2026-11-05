@@ -13,7 +13,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, Bot, Hand, Kanban, Network, SquareTerminal, WandSparkles } from "lucide-react";
+import { Activity, Bot, Hand, Kanban, Network, SquareTerminal } from "lucide-react";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useChainStore } from "../../state/chainStore";
 import { useTeamStore } from "../../state/teamStore";
@@ -28,7 +28,6 @@ import { runIsLive } from "../../types/team";
 import { TerminalBench } from "../agents/TerminalBench";
 import { DragLayer } from "./kit/drag";
 import { CrewHost, Seg, SOFT } from "./kit/ui";
-import { buttonClass } from "../common/Button";
 import { Dock } from "./Dock";
 import { LaunchDialog } from "./LaunchDialog";
 import { ChainEditorPane, ChainPane, RacePane, StoryPane, TaskPane } from "./Panes";
@@ -43,6 +42,9 @@ import { LiveSpace } from "./live/LiveSpace";
 import { MemberChat } from "./live/MemberChat";
 import { WORKSHOP_BAR, WorkshopSpace } from "./workshop/WorkshopSpace";
 import { useCrewStore, useL, type Space } from "./state";
+
+/** The spaces about who works — drawn apart from the ones about the work. */
+const CAST: readonly Space[] = ["equipos", "agentes"];
 
 export function CrewView() {
   const l = useL();
@@ -159,7 +161,8 @@ export function CrewView() {
     <CrewHost.Provider value={host}>
     <div ref={setHost} className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
       <div className="flex shrink-0 items-center gap-3 border-b border-[var(--cf-border)] px-3.5 py-2.5">
-        <Seg value={space} onChange={setSpace} options={spaces} className="min-w-0 shrink" />
+        {/* The work on the left; who does it — teams and agents — on the right. */}
+        <Seg value={space} onChange={setSpace} options={spaces.filter((o) => !CAST.includes(o.value))} className="min-w-0 shrink" />
         <span className="flex-1" />
         <AnimatePresence>
           {needsYou > 0 && (
@@ -179,16 +182,9 @@ export function CrewView() {
             </motion.button>
           )}
         </AnimatePresence>
-        <button
-          type="button"
-          data-tour="agents-tree-actions"
-          onClick={() => open({ kind: "launch" })}
-          title={`${l("Dale una tarea", "Hand out a task")} (⌘K)`}
-          className={buttonClass({ variant: "primary", size: "lg" })}
-        >
-          <WandSparkles className="h-3.5 w-3.5" />
-          <span className="hidden sm:inline">{l("Dale una tarea", "Hand out a task")}</span>
-        </button>
+        <span data-tour="agents-tree-actions" className="flex shrink-0">
+          <Seg value={space} onChange={setSpace} options={spaces.filter((o) => CAST.includes(o.value))} className="min-w-0 shrink-0" />
+        </span>
       </div>
 
       <div className="relative min-h-0 flex-1 overflow-hidden" data-tour="agents-tree">
@@ -214,7 +210,7 @@ export function CrewView() {
       {overlay?.kind === "launch" && <LaunchDialog goal={overlay.goal} assignee={overlay.assignee} cardId={overlay.cardId} />}
       {overlay?.kind === "wizard" && <AgentWizard templateId={overlay.templateId} agentId={overlay.agentId} />}
       {overlay?.kind === "card" && <CardDrawer cardId={overlay.id} />}
-      {overlay?.kind === "chat" && <MemberChat runId={overlay.runId} memberId={overlay.memberId} />}
+      {overlay?.kind === "chat" && <MemberChat key={`${overlay.runId}:${overlay.memberId}:${overlay.taskId ?? ""}`} runId={overlay.runId} memberId={overlay.memberId} taskId={overlay.taskId} />}
       {overlay?.kind === "task" && <TaskPane taskId={overlay.id} />}
       {overlay?.kind === "chain" && <ChainPane chainId={overlay.id} />}
       {overlay?.kind === "teamTemplates" && <TeamTemplatesDialog />}

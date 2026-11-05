@@ -1254,3 +1254,20 @@ mod tests {
         assert_eq!(unsent(files, &[]).len(), 1);
     }
 }
+
+// ===================== work handed to agents =====================
+//
+// A goal typed for an agent, a team or a board card can carry files too. They are copied once
+// under a root of their own (no conversation owns them yet, so no chat sweep may touch them) and
+// named in the goal text itself — `ai::attachment_note`'s shape — so every member that reads the
+// goal reads the files with its own tool.
+
+#[tauri::command]
+pub fn crew_attach_file(source_path: String) -> Result<ChatAttachment, String> {
+    store_file(&crate::paths::crew_attachments_dir(), &source_path)
+}
+
+#[tauri::command]
+pub fn crew_attach_bytes(name: String, data: Vec<u8>) -> Result<ChatAttachment, String> {
+    store_bytes(&crate::paths::crew_attachments_dir(), &name, data)
+}

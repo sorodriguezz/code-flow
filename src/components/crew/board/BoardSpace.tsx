@@ -314,8 +314,7 @@ export function BoardSpace() {
           <input value={query} onChange={(e) => setQuery(e.target.value)} title={l("Filtra por título, texto o clave de ticket", "Filter by title, text or ticket key")} placeholder={l("Buscar", "Search")} className={`${field} h-[30px] pl-8`} />
         </div>
         <span className="flex-1" />
-        <Btn small icon={Plus} onClick={() => void create("story")} title={l("Crea una historia de usuario nueva", "Creates a new user story")}>{l("Historia", "Story")}</Btn>
-        <Btn small icon={Plus} onClick={() => void create("task")} title={l("Crea una tarea nueva", "Creates a new task")}>{l("Tarea", "Task")}</Btn>
+        <Btn small icon={Plus} onClick={() => void create("task")} title={l("Crea una tarjeta nueva; dentro eliges si es tarea, historia o bug", "Creates a new card; inside you pick task, story or bug")}>{l("Tarea", "Task")}</Btn>
       </div>
       <div className="flex min-h-0 flex-1 items-stretch gap-3 overflow-x-auto p-3.5">
         <Inbox />

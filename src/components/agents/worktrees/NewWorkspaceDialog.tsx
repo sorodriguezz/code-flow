@@ -44,8 +44,8 @@ export function NewWorkspaceDialog({
   repos: readonly RepoRef[];
   initialProjectId: string;
   onClose: () => void;
-  /** Hands over to the task dialog, on this repository. */
-  onChat: (projectId: string) => void;
+  /** Hands over to the task dialog, on this repository. Absent where only console agents belong. */
+  onChat?: (projectId: string) => void;
   /** The folder the agent was started in, and its terminal session — so the rail can open it. */
   onCreated: (path: string, sessionId: string | null) => void;
 }) {
@@ -122,10 +122,12 @@ export function NewWorkspaceDialog({
       onClose={onClose}
       footer={
         <>
-          <GhostButton onClick={() => onChat(projectId)} disabled={busy}>
-            <MessagesSquare size={13} />
-            {t("wt.launchChat")}
-          </GhostButton>
+          {onChat && (
+            <GhostButton onClick={() => onChat(projectId)} disabled={busy}>
+              <MessagesSquare size={13} />
+              {t("wt.launchChat")}
+            </GhostButton>
+          )}
           <span className="ml-auto flex items-center gap-2">
             <GhostButton onClick={onClose} disabled={busy}>
               {t("common.cancel")}

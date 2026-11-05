@@ -1506,6 +1506,17 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   checkoutBranch: async (name) => {
     const { repoPath } = get();
     if (!repoPath) return;
+    // A branch can be checked out in one working copy at a time: one another worktree holds is not
+    // switched to here (git refuses), it is opened where it is.
+    const holder = ((await gitApi.listWorktrees(repoPath).catch(() => [])) ?? []).find((w) => w.branch === name && !w.is_current && !w.prunable);
+    if (holder) {
+      const open = await confirmAction(translate("branches.heldByWorktree", { name, path: holder.path }), false, translate("branches.openHolder"));
+      if (open) {
+        const { openPathAsProject, worktreeProjectName } = await import("../lib/openAsProject");
+        await openPathAsProject(holder.path, null, holder.is_main ? undefined : worktreeProjectName(holder.path));
+      }
+      return;
+    }
     await checkoutGuarded(set, get, name, () => api.checkoutLocalBranch(repoPath, name));
   },
 
@@ -1588,12 +1599,18 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     // the branch's upstream has, which go with the branch. A count that cannot be read falls back to
     // the ordinary note rather than blocking the delete.
     const unmerged = isRemote ? 0 : await api.branchUnmergedCount(repoPath, name).catch(() => 0);
-    const note =
+    // A branch checked out in a linked worktree cannot go while the worktree stands (git refuses
+    // with "current HEAD of a linked repository"): the worktree goes first, said up front.
+    const holder = isRemote
+      ? undefined
+      : ((await gitApi.listWorktrees(repoPath).catch(() => [])) ?? []).find((w) => !w.is_main && w.branch === name && !w.prunable);
+    const baseNote =
       unmerged === 0
         ? translate("confirm.deleteBranchNote")
         : unmerged === 1
           ? translate("confirm.deleteBranchUnmergedNoteOne")
           : translate("confirm.deleteBranchUnmergedNote", { n: String(unmerged) });
+    const note = holder ? `${translate("confirm.deleteBranchWorktreeNote", { path: holder.path })} ${baseNote}` : baseNote;
     const confirmed = await confirmFlow({
       flow: {
         kind: "branch-delete",
@@ -1606,6 +1623,19 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       danger: true,
     });
     if (!confirmed) return;
+    if (holder) {
+      try {
+        await gitApi.removeWorktree(repoPath, holder.path, false);
+      } catch (e) {
+        if (!hasTag(e, GIT_ERROR.worktreeDirty)) {
+          useToastStore.getState().pushToast(String(e), "error");
+          return;
+        }
+        const force = await confirmAction(translate("worktrees.removeDirtyConfirm", { path: holder.path }), true, translate("worktrees.removeForce"));
+        if (!force) return;
+        await gitApi.removeWorktree(repoPath, holder.path, true);
+      }
+    }
     await guarded(set, async () => {
       await api.deleteBranch(repoPath, name, isRemote);
       await get().refreshBranches();

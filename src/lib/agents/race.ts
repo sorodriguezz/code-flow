@@ -18,7 +18,9 @@ import type { AgentTask, AgentTaskStatus } from "../../types/domain";
 
 /** The race a task belongs to, or `""` when it was started on its own. */
 export function raceIdOf(task: Pick<AgentTask, "batch_id">): string {
-  return (task.batch_id ?? "").trim();
+  const id = (task.batch_id ?? "").trim();
+  // A team run's items share a batch too (`team:<run>`), but they split one goal, not race for it.
+  return id.startsWith("team:") ? "" : id;
 }
 
 /**

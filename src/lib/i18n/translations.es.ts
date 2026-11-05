@@ -2865,6 +2865,10 @@ export const es = {
   "notifications.docsGenerateFailed": "No se pudo generar el documento",
   "notifications.agentDone": "Tarea de agente terminada",
   "notifications.agentFailed": "La tarea de agente falló",
+  "notifications.teamWaiting": "El equipo {team} te espera",
+  "notifications.teamQuestion": "{who} te hace una pregunta",
+  "notifications.teamDone": "El equipo {team} terminó",
+  "notifications.teamFailed": "El equipo {team} falló",
   "notifications.reviewDone": "Revisión terminada",
   "notifications.reviewFailed": "La revisión falló",
   "notifications.analyzeDone": "Análisis terminado",
@@ -6180,6 +6184,9 @@ export const es = {
   "confirm.createBranchNote": "Se crea en el mismo commit que {source}. Sigues en tu rama actual.",
   "confirm.deleteBranchTitle": '¿Eliminar la rama local "{name}"?',
   "confirm.deleteBranchNote": "Solo se va el puntero de la rama — sus commits sobreviven mientras otra rama o etiqueta llegue a ellos.",
+  "branches.heldByWorktree": "«{name}» ya está abierta en {path}. Una rama vive en una sola copia de trabajo a la vez: ¿abrir esa en su lugar?",
+  "branches.openHolder": "Abrirla",
+  "confirm.deleteBranchWorktreeNote": "Está abierta en el worktree {path}, que se elimina primero.",
   "confirm.leaveUnbornTitle": "¿Salir de «{name}» antes de su primer commit?",
   "confirm.leaveUnbornNote": "«{name}» no tiene commits, así que existe solo como la rama en la que estás. Cambiarte la descarta para siempre — no se puede volver a ella ni recuperarla del reflog. Haz un commit primero si quieres conservarla.",
   "confirm.leaveUnbornConfirm": "Cambiar y descartar",
@@ -12614,9 +12621,9 @@ export const es = {
   "tour.agents.tree.body":
     "Historias, tareas y bugs de este workspace, más una entrada con tus tickets de Azure DevOps o Jira. Suelta un agente o un equipo del dock sobre una tarjeta para asignarla; desde ahí la tarjeta se mueve sola con el trabajo —en curso, revisión, hecho— y al abrirla ves quién está en ella ahora.",
 
-  "tour.agents.actions.title": "Dale una tarea",
+  "tour.agents.actions.title": "Equipos y agentes",
   "tour.agents.actions.body":
-    "⌘K en cualquier parte de la vista. Elige quién (un agente o un equipo) y cómo: solo, una carrera entre varios, un equipo, un flujo fijo o un híbrido con un modelo local. También puedes dejarla en el tablero para después.",
+    "A la derecha armas a quién trabaja: tus equipos y tus agentes. Para darles una tarea, ⌘K en cualquier parte de la vista o arrastra uno a una tarjeta del tablero: eliges cómo (solo, carrera, equipo, flujo fijo o híbrido).",
 
   "tour.agents.task.title": "Equipos como organigrama",
   "tour.agents.task.body":
@@ -15233,6 +15240,9 @@ export const es = {
   "wt.noTasksHint": "Empieza una con «Nuevo agente»: un worktree propio y un agente trabajando en él.",
   "wt.showAll": "Mostrar también repos y worktrees sin tarea",
   "wt.forget": "Quitar de la lista",
+  "wt.delete": "Eliminar",
+  "wt.deleteConfirm": "¿Eliminar el worktree {path} y su rama?",
+  "wt.deleteBranchUnmerged": "La rama {branch} tiene {n} commit(s) que no están en ninguna otra rama. ¿Borrarla igual?",
   "inbox.workspaceChat": "Espacio de trabajo",
   "agents.openTerminalHere": "Abrir una terminal aquí",
   "agents.review.tabs": "Conversación o cambios",

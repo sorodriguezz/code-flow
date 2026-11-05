@@ -2891,6 +2891,10 @@ const en = {
   "notifications.docsGenerateFailed": "The document could not be generated",
   "notifications.agentDone": "Agent task finished",
   "notifications.agentFailed": "The agent task failed",
+  "notifications.teamWaiting": "The team {team} is waiting for you",
+  "notifications.teamQuestion": "{who} has a question for you",
+  "notifications.teamDone": "The team {team} finished",
+  "notifications.teamFailed": "The team {team} failed",
   "notifications.reviewDone": "Review finished",
   "notifications.reviewFailed": "The review failed",
   "notifications.analyzeDone": "Analysis finished",
@@ -6310,6 +6314,9 @@ const en = {
   "confirm.createBranchNote": "Created at the same commit as {source}. You stay on your current branch.",
   "confirm.deleteBranchTitle": 'Delete local branch "{name}"?',
   "confirm.deleteBranchNote": "Only the branch pointer goes — its commits survive as long as another branch or tag reaches them.",
+  "branches.heldByWorktree": "«{name}» is already checked out in {path}. A branch lives in one working copy at a time: open that one instead?",
+  "branches.openHolder": "Open it",
+  "confirm.deleteBranchWorktreeNote": "It is checked out in the worktree {path}, which is removed first.",
   "confirm.leaveUnbornTitle": "Leave \"{name}\" before its first commit?",
   "confirm.leaveUnbornNote": "\"{name}\" has no commits, so it only exists as the branch you are on. Switching away discards it for good — it cannot be checked out again or recovered from the reflog. Commit something first to keep it.",
   "confirm.leaveUnbornConfirm": "Switch and discard",
@@ -12771,9 +12778,9 @@ const en = {
   "tour.agents.tree.body":
     "Stories, tasks and bugs of this workspace, plus an inbox with your Azure DevOps or Jira tickets. Drop an agent or a team from the dock onto a card to hand it out; from then on the card moves by itself with the work — doing, review, done — and opening it shows who is on it right now.",
 
-  "tour.agents.actions.title": "Hand out a task",
+  "tour.agents.actions.title": "Teams and agents",
   "tour.agents.actions.body":
-    "⌘K anywhere in the view. Pick who (an agent or a team) and how: on its own, a race between several, a team, a fixed flow or a hybrid with a local model. You can also just leave it on the board for later.",
+    "On the right you set up who does the work: your teams and your agents. To hand them a task, press ⌘K anywhere in the view or drag one onto a board card, then pick how (on its own, race, team, fixed flow or hybrid).",
 
   "tour.agents.task.title": "Teams as an org chart",
   "tour.agents.task.body":
@@ -15392,6 +15399,9 @@ const en = {
   "wt.noTasksHint": "Start one with «New agent»: a worktree of its own and an agent working in it.",
   "wt.showAll": "Also show repositories and worktrees without a task",
   "wt.forget": "Remove from the list",
+  "wt.delete": "Delete",
+  "wt.deleteConfirm": "Delete the worktree {path} and its branch?",
+  "wt.deleteBranchUnmerged": "The branch {branch} has {n} commit(s) that are on no other branch. Delete it anyway?",
   "inbox.workspaceChat": "Workspace",
   "agents.openTerminalHere": "Open a terminal here",
   "agents.review.tabs": "Conversation or changes",

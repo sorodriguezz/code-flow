@@ -12,6 +12,8 @@ import { AgentAvatar } from "../kit/Avatar";
 import { SelectBox, Btn, Chip, ToggleChip, field } from "../kit/ui";
 import { useL } from "../state";
 import { MESSAGE_KIND } from "./look";
+import { Markdown } from "../../common/Markdown";
+import { readableTeamText } from "../../../lib/team/teamText";
 
 function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; compact?: boolean }) {
   const l = useL();
@@ -52,7 +54,7 @@ function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; c
           <Chip tone={tone} title={l("Tipo de mensaje", "Message type")} className="!h-[18px] !px-1.5 !text-[10px]">{l(kes, ken)}</Chip>
           <span className="ml-auto text-[10px] text-[var(--cf-text-faint)]">{new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
         </div>
-        <p className={`m-0 mt-0.5 whitespace-pre-wrap break-words text-[12.5px] leading-relaxed ${compact ? "line-clamp-6" : ""}`}>{m.body}</p>
+        <Markdown source={readableTeamText(m.body)} className={`cf-markdown-chat cf-crew-msg mt-0.5 select-text break-words text-[12.5px] ${compact ? "line-clamp-6" : ""}`} />
         {m.answer && <p className="m-0 mt-1 border-l-2 border-[var(--cf-accent)] pl-2 text-[12px] text-[var(--cf-text-muted)]">{l("Respondida", "Answered")}: {m.answer}</p>}
         {asking && (
           <div className="mt-1.5 flex flex-col gap-1.5">
@@ -103,6 +105,14 @@ export function Channel({ state, memberId, compact }: { state: TeamRunState; mem
     setBody("");
   };
   const live = run.status === "running" || run.status === "gated" || run.status === "paused";
+  const [asking, setAsking] = useState(false);
+  const followUp = async () => {
+    if (!body.trim() || asking) return;
+    setAsking(true);
+    const id = await useTeamStore.getState().followUp(run.id, body.trim());
+    setAsking(false);
+    if (id) setBody("");
+  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -140,6 +150,15 @@ export function Channel({ state, memberId, compact }: { state: TeamRunState; mem
           <button type="button" title={l("Envía la nota al equipo", "Sends the note to the team")} aria-label={l("Enviar", "Send")} disabled={!body.trim()} onClick={send} className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-[8px] bg-[var(--cf-accent)] text-[var(--cf-on-accent)] disabled:opacity-40">
             <Send className="h-3.5 w-3.5" />
           </button>
+        </div>
+      )}
+      {!live && !memberId && (
+        <div className="flex shrink-0 flex-col gap-1 border-t border-[var(--cf-border)] p-2">
+          <span className="px-0.5 text-[11px] text-[var(--cf-text-faint)]">{l("Esta corrida terminó. Lo que escribas abre una de seguimiento con el mismo equipo, partiendo de lo que ya se integró.", "This run is over. What you write opens a follow-up run with the same team, starting from what was merged.")}</span>
+          <div className="flex items-end gap-1.5">
+            <textarea rows={2} value={body} onChange={(e) => setBody(e.target.value)} onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), void followUp())} placeholder={l("Pídele algo más al equipo…", "Ask the team for something else…")} className={`${field} h-auto min-h-[52px] resize-y py-1.5`} />
+            <Btn kind="primary" icon={Send} disabled={!body.trim() || asking} title={l("Abre una corrida de seguimiento con este pedido", "Opens a follow-up run with this request")} onClick={() => void followUp()}>{l("Seguir", "Follow up")}</Btn>
+          </div>
         </div>
       )}
     </div>

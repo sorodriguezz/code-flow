@@ -110,6 +110,9 @@ export interface OrgLayout {
   height: number;
 }
 
+/** Extra room each side of a framed branch, past the frame's own padding. */
+const BRANCH_ROOM = 14;
+
 /**
  * A tidy tree: each leaf takes one slot, a parent sits centred over its children, levels are rows.
  * The advisor sits beside the lead, outside the tree. A team with no lead (a fixed plan) is a row.
@@ -136,10 +139,14 @@ export function layoutOrg(members: M[], lead: string, size: { w: number; h: numb
       left = x;
       right = x + w;
     } else {
+      // A sub-lead's branch is drawn in a frame: leave room on both sides so two frames never touch.
+      const framed = id !== lead && !!inTree.find((m) => m.id === id)?.leads;
+      if (framed) cursor += BRANCH_ROOM;
       const spans = kids.map((k) => {
         edges.push({ from: id, to: k.id });
         return place(k.id, d + 1, seen);
       });
+      if (framed) cursor += BRANCH_ROOM;
       const first = nodes.find((n) => n.id === kids[0].id) as NodeBox;
       const last = nodes.find((n) => n.id === kids[kids.length - 1].id) as NodeBox;
       x = (first.x + last.x) / 2;

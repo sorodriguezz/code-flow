@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import {
   Bot,
+  Paperclip,
+  ChevronRight,
   CircleCheck,
   FolderOpen,
   GitBranch,
@@ -24,6 +26,15 @@ import { TaskPlanningBar, planningMenuItems } from "./taskPlanning";
 import { ChainStrip } from "./ChainStrip";
 import { ContinueWithModal } from "./ContinueWithModal";
 import { RacePanel } from "./RacePanel";
+import { raceIdOf } from "../../lib/agents/race";
+import { isTeamTask } from "../../types/team";
+import { Markdown } from "../common/Markdown";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { AttachmentBar } from "../chat/AttachmentBar";
+import { useChatStore } from "../../state/chatStore";
+import type { ChatAttachment } from "../../lib/tauri/chatCommands";
+import { useImageDrop } from "../../lib/useImageDrop";
+import { useModelReadsImages } from "../../lib/useModelReadsImages";
 import { TaskReviewPanel } from "./TaskReviewPanel";
 import { useChainStore } from "../../state/chainStore";
 import { AiRunLog } from "../ai/AiRunLog";
@@ -44,10 +55,12 @@ import { useTerminalStore } from "../../state/terminalStore";
 import { useUiStore } from "../../state/uiStore";
 import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
-import { useT } from "../../state/languageStore";
+import { useLanguageStore, useT } from "../../state/languageStore";
 import { scrollBehavior } from "../../lib/motion";
 import { revealInFileManager } from "../../lib/tauri/commands";
-import { openPathAsProject } from "../../lib/openAsProject";
+import { openPathAsProject, worktreeProjectName } from "../../lib/openAsProject";
+
+const NO_FILES: ChatAttachment[] = [];
 
 /**
  * One task, open: who is doing it, where, what has been said so far, and the box to say the next
@@ -119,7 +132,7 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
    *  same condition the control is, so a tab left on the review cannot outlive it. */
   const reviewing = tab === "review" && repoPath !== "" && task.turns > 0;
   /** The race this task was started as part of, or `""` — see `lib/agents/race`. */
-  const raceId = (task.batch_id ?? "").trim();
+  const raceId = raceIdOf(task);
 
   const commitRename = () => {
     if (renaming !== null) void useAgentsStore.getState().rename(taskId, renaming);
@@ -163,7 +176,7 @@ export function AgentTaskDetail({ taskId }: { taskId: string }) {
             label: t("agents.openWorktreeAsRepo"),
             icon: GitBranch,
             onClick: () => {
-              void openPathAsProject(worktree, null, task.worktree_branch || undefined).then(() =>
+              void openPathAsProject(worktree, null, worktreeProjectName(worktree)).then(() =>
                 setActiveView("changes"),
               );
             },
@@ -376,6 +389,7 @@ export function TaskConversation({ taskId }: { taskId: string }) {
   // composer's send does.
   const repoTaken = useAgentsStore((s) => (task ? s.runningInProject(task.project_id, task.id) !== null : false));
   const scrollRef = useRef<HTMLDivElement>(null);
+  const team = task ? isTeamTask(task) : false;
   const messages = live?.messages ?? [];
   const sending = live?.sending ?? false;
 
@@ -390,7 +404,8 @@ export function TaskConversation({ taskId }: { taskId: string }) {
       <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
         {/* One column of a readable width, like every transcript in the app. */}
         <div className="mx-auto w-full max-w-[760px] space-y-3.5">
-          {messages.length === 0 && !sending && (
+          {/* A chat opened with an agent has no goal: just the composer below. */}
+          {messages.length === 0 && !sending && task.goal.trim() !== "" && (
             <div className="rounded-lg border border-dashed border-[var(--cf-border-strong)] px-3.5 py-3">
               <p className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--cf-text-muted)]">{task.goal}</p>
               {/* A task that has never run — its first turn was refused because the repository was
@@ -416,7 +431,11 @@ export function TaskConversation({ taskId }: { taskId: string }) {
             // transcripts. `stamp="compact"` is what this thread has always drawn: the header above
             // already names the agent, the repository and the model, and repeating the duration and
             // the CLI version under every turn was noise here in a way it is not in the AI panel.
-            <ChatMessageBubble key={i} message={message} stamp="compact" />
+            team && message.role === "user" && message.content.startsWith("# Equipo") ? (
+              <TeamBrief key={i} text={message.content} />
+            ) : (
+              <ChatMessageBubble key={i} message={message} stamp="compact" />
+            )
           ))}
           {sending && live?.runId && (
             <AiRunLog
@@ -429,6 +448,27 @@ export function TaskConversation({ taskId }: { taskId: string }) {
       </div>
       <AgentComposer taskId={taskId} />
     </>
+  );
+}
+
+/**
+ * What a team hands a member each turn — the team, the goal, the rules, its task — is a brief, not
+ * something the user typed: folded under one line, and read as the markdown it is when opened.
+ */
+function TeamBrief({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const es = useLanguageStore((s) => s.language) === "es";
+  const now = text.split(/\n## /).find((part) => part.startsWith("Ahora") || part.startsWith("Tu tarea"));
+  const headline = (now ?? "").split("\n").slice(1).find((line) => line.trim()) ?? "";
+  return (
+    <div className="rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)]">
+      <button type="button" onClick={() => setOpen((v) => !v)} aria-expanded={open} className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] hover:bg-[var(--cf-hover)]">
+        <ChevronRight size={14} className={`shrink-0 text-[var(--cf-text-muted)] transition-transform ${open ? "rotate-90" : ""}`} />
+        <b className="shrink-0 font-medium">{es ? "Encargo del equipo" : "The team's brief"}</b>
+        {!open && headline && <span className="min-w-0 truncate text-[var(--cf-text-muted)]">{headline}</span>}
+      </button>
+      {open && <Markdown source={text} className="cf-markdown-chat cf-crew-msg select-text border-t border-[var(--cf-border)] px-3.5 py-3 text-[12.5px]" />}
+    </div>
   );
 }
 
@@ -496,13 +536,37 @@ function AgentComposer({ taskId }: { taskId: string }) {
   useEffect(() => registerDictationSend(boxRef.current, () => submitRef.current()));
   const dictating = useDictatingHere(boxRef);
 
+  // Files and images for the next turn, staged like the repository chat's — under this task's
+  // conversation, by `chatStore` — and named to the engine with the question.
+  const conversationId = task?.conversation_id ?? "";
+  const staged = useChatStore((s) => (conversationId ? s.attachments[conversationId] : undefined)) ?? NO_FILES;
+  const readsImages = useModelReadsImages(task?.provider ?? "", task?.model ?? "");
+  const composerRef = useRef<HTMLDivElement>(null);
+  const attachPaths = async (paths: string[]) => {
+    if (!conversationId) return;
+    for (const path of paths) await useChatStore.getState().attachFilePath(conversationId, path);
+    boxRef.current?.focus();
+  };
+  const dropOver = useImageDrop(composerRef, (paths) => void attachPaths(paths), () => true);
+  const onPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const file = Array.from(event.clipboardData.items).find((entry) => entry.type.startsWith("image/"))?.getAsFile();
+    if (!file || !conversationId) return;
+    event.preventDefault();
+    const extension = (file.type.split("/")[1] ?? "png").replace(/[^a-z0-9]/gi, "") || "png";
+    void file.arrayBuffer().then((buffer) => useChatStore.getState().attachFileBytes(conversationId, `pegado.${extension}`, new Uint8Array(buffer)));
+  };
+
   if (!task) return null;
 
   const submit = () => {
     if (!input.trim() || sending || blockedBy || chainLocked || localExec) return;
     // Cleared only for a send the store took: its guards are read fresh and can refuse one that
     // `blockedBy` — a render behind — waved through, and emptying the box then lost the message.
-    if (useAgentsStore.getState().send(taskId, input)) setInput("");
+    if (useAgentsStore.getState().send(taskId, input, staged.length ? staged : undefined)) {
+      setInput("");
+      // Sent with the turn: the files stay on disk for the engine, the chips leave the box.
+      if (staged.length) useChatStore.setState((s) => ({ attachments: { ...s.attachments, [conversationId]: [] } }));
+    }
   };
   submitRef.current = submit;
 
@@ -510,11 +574,17 @@ function AgentComposer({ taskId }: { taskId: string }) {
     // A card rather than a box under a rule: the field and the controls that decide how it is sent
     // (the model, the send) read as one object, the way the chat's composer does.
     <div className="shrink-0 px-4 pb-4 pt-2">
-      <div className="mx-auto w-full max-w-[760px] rounded-[12px] border border-[var(--cf-field-border)] bg-[var(--cf-field)] px-3 pb-2 pt-2.5 shadow-[var(--cf-shadow-lift)] transition-[border-color,box-shadow] duration-100 focus-within:border-[var(--cf-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]">
+      <div ref={composerRef} className={`mx-auto w-full max-w-[760px] rounded-[12px] border ${dropOver ? "border-[var(--cf-accent)]" : "border-[var(--cf-field-border)]"} bg-[var(--cf-field)] px-3 pb-2 pt-2.5 shadow-[var(--cf-shadow-lift)] transition-[border-color,box-shadow] duration-100 focus-within:border-[var(--cf-accent)] focus-within:shadow-[0_0_0_3px_color-mix(in_oklab,var(--cf-accent)_20%,transparent)]`}>
+        {staged.length > 0 && (
+          <div className="mb-1.5">
+            <AttachmentBar files={staged} canSeeImages={readsImages} onRemove={(id) => useChatStore.getState().removeAttachment(conversationId, id)} />
+          </div>
+        )}
         <textarea
           ref={boxRef}
           data-ai-input="inline"
           value={input}
+          onPaste={onPaste}
           rows={3}
           disabled={chainLocked || localExec}
           onChange={(e) => setInput(e.target.value)}
@@ -545,6 +615,18 @@ function AgentComposer({ taskId }: { taskId: string }) {
         ) : (
         <div className="mt-1.5 flex items-center gap-2">
           {!localExec && <AgentModelMenu taskId={taskId} />}
+          {!(chainLocked || localExec) && (
+            <Tooltip label={t("chat.attach")}>
+              <button
+                type="button"
+                aria-label={t("chat.attach")}
+                onClick={() => void openDialog({ multiple: true }).then((picked) => attachPaths(typeof picked === "string" ? [picked] : Array.isArray(picked) ? picked : []))}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+              >
+                <Paperclip size={14} />
+              </button>
+            </Tooltip>
+          )}
           {blockedBy && (
             <span className="min-w-0 truncate text-[11px] text-[var(--cf-warning)]">
               {t("agents.busyInRepo", { name: repoName })}

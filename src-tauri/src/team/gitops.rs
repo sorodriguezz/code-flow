@@ -59,6 +59,14 @@ pub fn add_worktree(repo: &str, target: &str, branch: &str, start: &str) -> Resu
     crate::git::worktree::add(repo, target, branch, true, Some(start))
 }
 
+/// A worktree at `target` with `start` checked out detached — a place to read a finished run's
+/// work again without a branch of its own.
+pub fn add_detached(repo: &str, target: &str, start: &str) -> Result<(), String> {
+    ensure_parent(target)?;
+    let _ = git(repo, &["worktree", "prune"]);
+    git_ok(repo, &["worktree", "add", "--detach", target, start]).map(|_| ())
+}
+
 /// Removes a worktree when it is clean; a dirty one is left where it is (the same rule tasks follow).
 pub fn remove_worktree(repo: &str, target: &str) {
     if !target.is_empty() && Path::new(target).exists() {

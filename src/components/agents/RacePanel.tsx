@@ -13,7 +13,7 @@ import { pushErrorToast } from "../../state/toastStore";
 import { confirmAction } from "../../state/confirmStore";
 import { fieldClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
-import { openPathAsProject } from "../../lib/openAsProject";
+import { openPathAsProject, worktreeProjectName } from "../../lib/openAsProject";
 import { raceRunning, racersOf, tally } from "../../lib/agents/race";
 import type { AgentTask } from "../../types/domain";
 
@@ -194,7 +194,7 @@ function RaceColumn({ task, rivals }: { task: AgentTask; rivals: AgentTask[] }) 
             type="button"
             disabled={!task.worktree_path}
             aria-label={t("agents.openWorktreeAsRepo")}
-            onClick={() => void openPathAsProject(task.worktree_path ?? "", null, task.worktree_branch || undefined)}
+            onClick={() => void openPathAsProject(task.worktree_path ?? "", null, worktreeProjectName(task.worktree_path ?? ""))}
             className={iconButtonClass({ size: "sm" })}
           >
             <FolderGit2 size={14} />

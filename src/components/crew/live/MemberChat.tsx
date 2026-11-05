@@ -17,7 +17,7 @@ import { Channel } from "./Channel";
 import { ITEM_KIND, ITEM_STATUS } from "./look";
 
 
-export function MemberChat({ runId, memberId }: { runId: string; memberId: string }) {
+export function MemberChat({ runId, memberId, taskId: initialTask }: { runId: string; memberId: string; taskId?: string }) {
   const l = useL();
   const crew = useCrewStore();
   const state = useTeamStore((s) => s.states[runId]);
@@ -37,7 +37,7 @@ export function MemberChat({ runId, memberId }: { runId: string; memberId: strin
     return out.sort((a, b) => Number(b.live) - Number(a.live));
   }, [items]);
   const [tab, setTab] = useState<"chat" | "channel" | "items">(conversations.length ? "chat" : "channel");
-  const [taskId, setTaskId] = useState<string | null>(null);
+  const [taskId, setTaskId] = useState<string | null>(initialTask ?? null);
   const shown = taskId ?? conversations[0]?.taskId ?? null;
 
   if (!state || !member) return null;

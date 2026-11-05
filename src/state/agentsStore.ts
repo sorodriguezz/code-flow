@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { ChatAttachment } from "../lib/tauri/chatCommands";
 import {
   createAgentTask,
   deleteAgentProject,
@@ -244,7 +245,8 @@ interface AgentsState {
   forget: (taskIds: string[]) => void;
   /** Starts a turn unless one of its guards refuses it, and says which: `true` when the turn was
    * dispatched. A caller that empties a box on send must only do so for a `true`. */
-  send: (taskId: string, message: string) => boolean;
+  /** `files` are staged with `chatStore` under the task's conversation id (`repoChatAttach*`). */
+  send: (taskId: string, message: string, files?: ChatAttachment[]) => boolean;
   /** `send` without its guards, for a caller that has already decided. Always settles. */
   runTurn: (
     taskId: string,
@@ -264,6 +266,8 @@ interface AgentsState {
        * case a workspace switch mid-turn has always produced. */
       task?: AgentTask;
       onSettle?: (outcome: TurnOutcome) => void;
+      /** Files staged for this turn, sent by id. */
+      files?: ChatAttachment[];
     },
   ) => Promise<void>;
   stop: (taskId: string) => Promise<void>;
@@ -577,7 +581,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       };
     }),
 
-  send: (taskId, message) => {
+  send: (taskId, message, files) => {
     const trimmed = message.trim();
     if (!trimmed) return false;
     const task = get().tasks.find((candidate) => candidate.id === taskId);
@@ -606,6 +610,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
     // it is said once, quietly, rather than filed in the transcript — and the text goes back to
     // the composer it was typed in.
     void get().runTurn(taskId, trimmed, {
+      files,
       onSettle: (outcome) => {
         if (outcome.kind === "error" && outcome.busy) {
           pushErrorToast(translate("agents.busyInRepo", { name: busyRepoName(outcome.message) }));
@@ -659,7 +664,15 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
           ...current,
           // Stamped client-side: the turn isn't persisted until the reply lands, and the question
           // was asked now, not whenever the engine finishes answering it.
-          messages: [...current.messages, { role: "user", content: trimmed, createdAt: new Date().toISOString() }],
+          messages: [
+            ...current.messages,
+            {
+              role: "user",
+              content: trimmed,
+              createdAt: new Date().toISOString(),
+              ...(opts?.files?.length ? { attachments: opts.files } : {}),
+            },
+          ],
           sending: true,
           runId,
           runStartedAt: startedAt,
@@ -719,7 +732,7 @@ export const useAgentsStore = create<AgentsState>((set, get) => ({
       // The agent's account preference, copied onto the task with its provider and model. Null is
       // automatic — the task's workspace default, then the provider's.
       account: task.account_id ?? null,
-    }, undefined, undefined, undefined, task.effort || null)
+    }, undefined, undefined, opts?.files?.length ? opts.files.map((f) => f.id) : undefined, task.effort || null)
       .then((reply) => {
         // The live log is already in memory and formatted; attaching it to the message is what
         // keeps "what did it actually do?" answerable after the run ends. A copy, never the
