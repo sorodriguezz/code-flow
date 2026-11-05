@@ -221,7 +221,7 @@ export function ChecksTab({ team, update }: { team: Team; update: Update }) {
     <div className="min-h-0 flex-1 overflow-auto p-5">
       <div className="mx-auto flex max-w-[720px] flex-col gap-4">
         <div>
-          <h3 className="m-0 flex items-center gap-2 text-[14px] font-semibold"><FlaskConical className="h-4 w-4 text-[var(--cf-accent)]" />{l("Checks", "Checks")}</h3>
+          <h3 className="m-0 flex items-center gap-2 text-[14px] font-semibold"><FlaskConical className="h-4 w-4 text-[var(--cf-accent)]" />{l("Verificaciones", "Checks")}</h3>
           <p className="m-0 mt-1 text-[12.5px] text-[var(--cf-text-muted)]">
             {l("Comandos que deben pasar. Por tarea: corren en el worktree del miembro antes de darla por hecha, y si fallan vuelve con el error. Al final: corren sobre la rama integrada.", "Commands that must pass. Per task: they run in the member's worktree before the task counts as done, and a failure sends it back with the error. At the end: they run on the integrated branch.")}
           </p>

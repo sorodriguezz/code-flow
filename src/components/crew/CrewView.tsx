@@ -12,8 +12,10 @@
  * (`src-tauri/src/runner`) and every window only watches and sends orders.
  */
 import { useEffect, useMemo, useState } from "react";
+import { Inbox } from "./live/Inbox";
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, Bot, Hand, Kanban, Network, SquareTerminal } from "lucide-react";
+import { Activity, Bot, Hand, Kanban, Network, SquareTerminal, WandSparkles } from "lucide-react";
+import { iconButtonClass } from "../common/Button";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useChainStore } from "../../state/chainStore";
 import { useTeamStore } from "../../state/teamStore";
@@ -56,6 +58,7 @@ export function CrewView() {
   const setSpace = useCrewStore((s) => s.setSpace);
   const open = useCrewStore((s) => s.open);
   const runs = useTeamStore((s) => s.runs);
+  const [inbox, setInbox] = useState(false);
   const states = useTeamStore((s) => s.states);
   const chains = useChainStore((s) => s.chains);
   const tasks = useAgentsStore((s) => s.tasks);
@@ -160,7 +163,7 @@ export function CrewView() {
   return (
     <CrewHost.Provider value={host}>
     <div ref={setHost} className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
-      <div className="flex shrink-0 items-center gap-3 border-b border-[var(--cf-border)] px-3.5 py-2.5">
+      <div className="relative flex shrink-0 items-center gap-3 border-b border-[var(--cf-border)] px-3.5 py-2.5">
         {/* The work on the left; who does it — teams and agents — on the right. */}
         <Seg value={space} onChange={setSpace} options={spaces.filter((o) => !CAST.includes(o.value))} className="min-w-0 shrink" />
         <span className="flex-1" />
@@ -171,8 +174,10 @@ export function CrewView() {
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.9 }}
               type="button"
-              onClick={() => setSpace("en-vivo")}
-              title={l(`Te necesitan ${needsYou}`, `${needsYou} need you`)}
+              data-inbox-toggle
+              aria-expanded={inbox}
+              onClick={() => setInbox((v) => !v)}
+              title={l("Lo que espera tu respuesta, de todas las corridas", "What waits on your answer, from every run")}
               className="cf-crew-waiting flex h-[28px] shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_15%,var(--cf-surface))] px-3 text-[12px] font-semibold text-[var(--cf-warning)]"
               style={{ ["--cf-crew-c" as string]: "var(--cf-warning)" }}
             >
@@ -182,8 +187,22 @@ export function CrewView() {
             </motion.button>
           )}
         </AnimatePresence>
-        <span data-tour="agents-tree-actions" className="flex shrink-0">
-          <Seg value={space} onChange={setSpace} options={spaces.filter((o) => CAST.includes(o.value))} className="min-w-0 shrink-0" />
+        <AnimatePresence>{inbox && <Inbox onClose={() => setInbox(false)} />}</AnimatePresence>
+        <span data-tour="agents-tree-actions" className="flex shrink-0 items-center gap-1.5">
+          <Seg
+            value={space}
+            onChange={(next) => {
+              // Coming into Teams starts on the list; a team opens when you pick it.
+              if (next === "equipos" && space !== "equipos") useCrewStore.setState({ selectedTeamId: null, selectedMemberId: null });
+              setSpace(next);
+            }}
+            options={spaces.filter((o) => CAST.includes(o.value))}
+            className="min-w-0 shrink-0"
+          />
+          {/* Small on purpose: ⌘K is the way in, this is where it is found. */}
+          <button type="button" onClick={() => open({ kind: "launch" })} title={l("Dale una tarea a un agente o equipo (⌘K)", "Hand a task to an agent or team (⌘K)")} aria-label={l("Dale una tarea", "Hand out a task")} className={iconButtonClass({ size: "sm" })}>
+            <WandSparkles className="h-4 w-4" />
+          </button>
         </span>
       </div>
 

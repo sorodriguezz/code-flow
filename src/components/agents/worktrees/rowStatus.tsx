@@ -26,7 +26,7 @@ export const ROW_STATE: Record<RowState, { icon: LucideIcon | null; color: strin
   // Drawn as the orb, the mark every live AI run in the app wears.
   working: { icon: null, color: "text-[var(--cf-accent)]", labelKey: "wt.state.working" },
   failed: { icon: CircleAlert, color: "text-[var(--cf-danger)]", labelKey: "wt.state.failed" },
-  ready: { icon: CircleDot, color: "text-[var(--cf-accent)]", labelKey: "wt.state.ready" },
+  ready: { icon: CircleDot, color: "text-[var(--cf-warning)]", labelKey: "wt.state.ready" },
   done: { icon: CircleCheck, color: "text-[var(--cf-success)]", labelKey: "wt.state.done" },
   draft: { icon: Circle, color: "text-[var(--cf-text-muted)]", labelKey: "wt.state.draft" },
   stopped: { icon: CircleSlash, color: "text-[var(--cf-text-muted)]", labelKey: "wt.state.stopped" },

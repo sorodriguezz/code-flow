@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { humanizeRaw } from "../lib/rawErrors";
 
 /** What pressing the card does, instead of closing it — "Undo". */
 export interface ToastAction {
@@ -27,6 +28,8 @@ export const useToastStore = create<ToastState>((set) => ({
   toasts: [],
 
   pushToast: (message, type = "error", options) => {
+    // An error from git or the disk, as the tool printed it, is said in plain words where known.
+    if (type === "error") message = humanizeRaw(message, typeof document === "undefined" || (document.documentElement.lang || "es").startsWith("es"));
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     set((s) => ({ toasts: [...s.toasts, { id, message, type, ...options }] }));
   },

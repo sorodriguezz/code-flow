@@ -712,7 +712,7 @@ pub async fn http(request: &Request, app: &AppHandle) -> Reply {
 }
 
 /// `Collection/Folder/Sub/Request`, as the API client's sidebar names it.
-fn request_path(tree: &crate::db::models::ApiTree, request: &crate::db::models::ApiRequestRow) -> String {
+pub(crate) fn request_path(tree: &crate::db::models::ApiTree, request: &crate::db::models::ApiRequestRow) -> String {
     let mut parts = vec![request.name.clone()];
     let mut folder = request.folder_id.clone();
     let mut guard = 0;

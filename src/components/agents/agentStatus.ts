@@ -16,8 +16,9 @@ import type { AgentTaskStatus } from "../../types/domain";
 export const AGENT_STATUS: Record<AgentTaskStatus, { icon: LucideIcon; color: string; labelKey: TranslationKey }> = {
   draft: { icon: Circle, color: "text-[var(--cf-text-muted)]", labelKey: "agents.statusDraft" },
   running: { icon: CircleDot, color: "text-[var(--cf-accent)]", labelKey: "agents.statusRunning" },
-  // "Your turn" — the state a task spends most of its life in, and the one worth an accent.
-  idle: { icon: CircleDot, color: "text-[var(--cf-accent)]", labelKey: "agents.statusIdle" },
+  // «Te espera»: the agent answered and the next move is yours — the same amber every surface uses
+  // for work waiting on you.
+  idle: { icon: CircleDot, color: "text-[var(--cf-warning)]", labelKey: "agents.statusIdle" },
   done: { icon: CircleCheck, color: "text-[var(--cf-success)]", labelKey: "agents.statusDone" },
   error: { icon: CircleAlert, color: "text-[var(--cf-danger)]", labelKey: "agents.statusError" },
   cancelled: { icon: CircleSlash, color: "text-[var(--cf-text-muted)]", labelKey: "agents.statusCancelled" },

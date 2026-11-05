@@ -181,7 +181,8 @@ export function layoutOrg(members: M[], lead: string, size: { w: number; h: numb
     const x0 = Math.min(...boxes.map((b) => b.x)) - pad;
     const y0 = Math.min(...boxes.map((b) => b.y)) - pad - 12;
     const x1 = Math.max(...boxes.map((b) => b.x + w)) + pad;
-    const y1 = Math.max(...boxes.map((b) => b.y + h)) + pad;
+    // Room under the last row for the branch's name, written inside the frame.
+    const y1 = Math.max(...boxes.map((b) => b.y + h)) + pad + 16;
     frames.push({ id: m.id, x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
   }
 

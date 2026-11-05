@@ -97,14 +97,30 @@ function TemplateStep({ onPick }: { onPick: (t: LibraryItem | null) => void }) {
   const lang = useLanguageStore((s) => s.language);
   const templates = useMemo(() => useLibraryStore.getState().all().filter((t) => t.kind === "agent"), [saved, lang]); // eslint-disable-line react-hooks/exhaustive-deps
   const [editing, setEditing] = useState<LibraryItem | null>(null);
+  const [query, setQuery] = useState("");
+  const [area, setArea] = useState<Area | "all">("all");
+  const q = query.trim().toLowerCase();
+  const shown = templates.filter((t) => (area === "all" || areaOf(t) === area) && (!q || `${t.name} ${t.description} ${t.tags.join(" ")}`.toLowerCase().includes(q)));
   return (
+    <div className="flex flex-col gap-3">
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="relative w-[240px]">
+        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--cf-text-faint)]" />
+        <input autoFocus value={query} onChange={(e) => setQuery(e.target.value)} placeholder={l("Buscar plantilla", "Search templates")} className={`${field} h-[30px] pl-8`} />
+      </div>
+      {(["all", ...AREAS] as const).map((a) => (
+        <ToggleChip key={a} on={area === a} onClick={() => setArea(a)} title={l("Filtra las plantillas por área", "Filters templates by area")}>
+          {a === "all" ? l("Todas", "All") : l(AREA_LABEL[a][0], AREA_LABEL[a][1])}
+        </ToggleChip>
+      ))}
+    </div>
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4">
       <motion.button type="button" transition={SPRING} title={l("Empieza un agente vacío", "Starts an empty agent")} onClick={() => onPick(null)} className="flex flex-col items-start gap-2 rounded-lg border border-dashed border-[var(--cf-border-strong)] p-3 text-left transition-colors hover:border-[var(--cf-accent)] hover:bg-[var(--cf-hover)]">
         <span className="grid h-9 w-9 place-items-center rounded-[11px] bg-[var(--cf-sunken)] text-[var(--cf-text-muted)]"><FilePlus2 className="h-4 w-4" /></span>
         <b className="text-[12.5px]">{l("En blanco", "Blank")}</b>
         <span className="text-[11.5px] text-[var(--cf-text-muted)]">{l("Lo armas tú desde cero.", "You build it from scratch.")}</span>
       </motion.button>
-      {templates.map((t, i) => (
+      {shown.map((t, i) => (
         <motion.div key={t.id} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ ...SPRING, delay: Math.min(i, 12) * 0.025 }} className="group relative flex">
         <button
           type="button"
@@ -124,7 +140,23 @@ function TemplateStep({ onPick }: { onPick: (t: LibraryItem | null) => void }) {
       ))}
       {editing && <TemplateEditor item={editing} onClose={() => setEditing(null)} />}
     </div>
+    {shown.length === 0 && <p className="m-0 text-center text-[12px] text-[var(--cf-text-muted)]">{l("Ninguna plantilla coincide.", "No template matches.")}</p>}
+    </div>
   );
+}
+
+type Area = "eng" | "product" | "design" | "ops";
+const AREAS: readonly Area[] = ["eng", "product", "design", "ops"];
+const AREA_LABEL: Record<Area, [string, string]> = { eng: ["Ingeniería", "Engineering"], product: ["Producto", "Product"], design: ["Diseño", "Design"], ops: ["Operaciones", "Operations"] };
+/** Built-in templates by key; a template of your own counts as engineering unless it is based on one. */
+const AREA_BY_KEY: Record<string, Area> = {
+  "product-owner": "product", "scrum-master": "product", "business-analyst": "product", "data-analyst": "product", marketing: "product",
+  "ux-designer": "design", "ui-designer": "design", "ux-researcher": "design", "ux-writer": "design",
+  devops: "ops", sre: "ops", security: "ops", support: "ops", compliance: "ops",
+};
+function areaOf(t: LibraryItem): Area {
+  const key = (t.id.startsWith("builtin:") ? t.id : t.based_on).replace(/^builtin:/, "");
+  return AREA_BY_KEY[key] ?? "eng";
 }
 
 function IdentityStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<AgentDraft>) => void }) {

@@ -1101,3 +1101,55 @@ mod tests {
         assert!(download_destination(missing.to_str().unwrap()).is_err(), "no folder");
     }
 }
+
+/// What an agent sees of a repository's pipelines (the `pipelines` tool of `codemap::mcp`): the
+/// latest runs, one run's jobs, or one job's log — as text, read with the user's own connection.
+/// Read-only: nothing here starts, cancels or re-runs anything.
+pub(crate) async fn for_agent(project: &crate::db::models::Project, action: &str, run_id: &str, job_id: &str, branch: Option<String>, limit: usize) -> Result<String, String> {
+    match action {
+        "runs" | "" => {
+            let branch = branch_filter(&branch);
+            let limit = clamp(limit.max(1).min(20));
+            let runs = match linked_repo(project)? {
+                LinkedRepo::GitHub { host, owner, repo } => ci::github::list_runs(&host, &owner, &repo, branch, limit, &github_token(&host)?).await?,
+                LinkedRepo::GitLab { host, project: path } => ci::gitlab::list_pipelines(&host, &path, branch, limit, &gitlab_token(&host)?).await?,
+                LinkedRepo::Azure { org, project: ado_project, repo_id } => ci::azure::list_builds(&org, &ado_project, &repo_id, branch, limit, &pat_for_org(&org)?).await?,
+                LinkedRepo::Bitbucket { workspace, repo } => ci::bitbucket::list_pipelines(&workspace, &repo, branch, limit, &bitbucket_auth(&workspace)?).await?,
+            };
+            if runs.is_empty() {
+                return Ok("No pipeline runs.".into());
+            }
+            Ok(runs
+                .iter()
+                .map(|r| format!("{} · {} · {} · branch {} · {} · {}", r.id, r.name, r.status, r.branch, r.commit_title.as_deref().unwrap_or(&r.commit_sha), r.created_at))
+                .collect::<Vec<_>>()
+                .join("\n"))
+        }
+        "detail" => {
+            if run_id.is_empty() {
+                return Err("run_id is required".into());
+            }
+            let detail = match linked_repo(project)? {
+                LinkedRepo::GitHub { host, owner, repo } => ci::github::run_detail(&host, &owner, &repo, run_id, &github_token(&host)?).await?,
+                LinkedRepo::GitLab { host, project: path } => ci::gitlab::pipeline_detail(&host, &path, run_id, &gitlab_token(&host)?).await?,
+                LinkedRepo::Azure { org, project: ado_project, .. } => ci::azure::build_detail(&org, &ado_project, run_id, &pat_for_org(&org)?).await?,
+                LinkedRepo::Bitbucket { workspace, repo } => ci::bitbucket::pipeline_detail(&workspace, &repo, run_id, &bitbucket_auth(&workspace)?).await?,
+            };
+            let mut out = vec![format!("{} · {} · {} · branch {}", detail.run.id, detail.run.name, detail.run.status, detail.run.branch)];
+            for job in &detail.jobs {
+                out.push(format!("- job {} · {}{} · {}{}", job.id, job.stage.as_deref().map(|s| format!("{s} / ")).unwrap_or_default(), job.name, job.status, job.log_ref.as_deref().map(|r| format!(" · log_ref {r}")).unwrap_or_default()));
+            }
+            Ok(out.join("\n"))
+        }
+        "log" => {
+            if run_id.is_empty() || job_id.is_empty() {
+                return Err("run_id and job_id are required".into());
+            }
+            let (job, log_ref) = job_id.split_once(" log_ref ").map_or((job_id, None), |(j, r)| (j, Some(r.to_string())));
+            let log = job_log_of(project, run_id, job, log_ref).await?;
+            let (text, _) = crate::secret_scan::redact(&log.text);
+            Ok(if log.truncated { format!("[log cut: showing the end]\n{text}") } else { text })
+        }
+        other => Err(format!("unknown action «{other}»: runs, detail or log")),
+    }
+}

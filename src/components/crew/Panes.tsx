@@ -4,7 +4,11 @@
  * engines — what makes a task a real chat with the CLI — framed by this view. So are a race's
  * comparison, and the two authoring dialogs for fixed flows and for realizing a story.
  */
-import { Suspense, lazy } from "react";
+import { Suspense, lazy, useEffect } from "react";
+import { useAgentsStore } from "../../state/agentsStore";
+import { useTeamStore } from "../../state/teamStore";
+import { isTeamTask, TEAM_TASK_BATCH_PREFIX } from "../../types/team";
+import { MemberChat } from "./live/MemberChat";
 import { AgentTaskDetail } from "../agents/AgentTaskDetail";
 import { Drawer } from "./kit/ui";
 import { useCrewStore } from "./state";
@@ -16,6 +20,15 @@ const StoryRealizerModal = lazy(() => import("../agents/StoryRealizerModal").the
 
 export function TaskPane({ taskId }: { taskId: string }) {
   const close = useCrewStore((s) => s.close);
+  // A team member's task opens in one place — its member's sheet, on this task — wherever the
+  // click came from, so the same work never shows in two different layouts.
+  const task = useAgentsStore((s) => s.tasks.find((t) => t.id === taskId));
+  const runId = task && isTeamTask(task) ? (task.batch_id ?? "").slice(TEAM_TASK_BATCH_PREFIX.length) : "";
+  const memberId = useTeamStore((s) => (runId ? s.states[runId]?.items.find((i) => i.task_id === taskId)?.member_id ?? "" : ""));
+  useEffect(() => {
+    if (runId && !useTeamStore.getState().states[runId]) void useTeamStore.getState().refresh(runId);
+  }, [runId]);
+  if (runId && memberId) return <MemberChat runId={runId} memberId={memberId} taskId={taskId} />;
   return (
     <Drawer onClose={close} width={780} label="task">
       <div className="flex min-h-0 flex-1 flex-col">

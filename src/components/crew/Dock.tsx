@@ -244,7 +244,6 @@ export function Dock() {
         )}
       </div>
       <AnimatePresence>{all && <Everyone agents={agents} teams={teams} states={states} onClose={() => setAll(false)} />}</AnimatePresence>
-      <span className="flex-1" />
       <button
         type="button"
         onClick={() => crew.open({ kind: "governor" })}

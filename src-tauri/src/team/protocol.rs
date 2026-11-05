@@ -440,9 +440,23 @@ pub fn member_protocol(can_ask_user: bool) -> String {
          ```equipo\n{{\"para\": \"<nombre o rol de un miembro | lider | todos | usuario>\", \"tipo\": \"mensaje\", \"texto\": \"...\"}}\n```\n\
          {ask}\
          Deja notas solo cuando alguien las necesita para trabajar: no saludes, no confirmes que recibiste algo ni pidas acuse. Cada nota puede despertar a otro agente y gasta la cuota del usuario.\n\
-         Lo destructivo o irreversible pídelo con `cf ask` antes de hacerlo."
+         Lo destructivo o irreversible pídelo con `cf ask` antes de hacerlo.\n\n\
+         {APPS}",
+        APPS = APPS
     )
 }
+
+/// The rest of CodeFlow, as tools of its `codeflow` MCP server — told to every member that works,
+/// so a test against an API, a failing pipeline or a database check is done with the user's own
+/// connections instead of guessed. Which ones a turn has depends on its access (read-only runs get
+/// only the readers) and on what the user connected.
+pub const APPS: &str = "## Las demás apps de CodeFlow\n\
+    Tienes herramientas del servidor MCP `codeflow` para usar el resto de la app con las conexiones del usuario: \
+    `pipelines` (corridas, jobs y logs de CI), `containers`/`kubernetes`/`azure` (mirar contenedores y clústeres), \
+    `db_connections`/`db_schema`/`db_read`/`db_write` (bases de datos abiertas a la IA), `api_requests` + `http_request` \
+    (el cliente de API guardado), `service_logs`/`service_wait`/`service_restart` (los servicios que corre la app), \
+    `terminal_output` (otras terminales), `read_note`/`write_note` (Notas) y `search_knowledge`/`recall` (conocimiento y memoria). \
+    Úsalas cuando sirvan para verificar tu trabajo; lo que pida aprobación, el usuario lo aprueba en la app.";
 
 /// How a lead is told to answer. Appended to every lead turn.
 pub fn lead_protocol(can_ask_user: bool) -> String {

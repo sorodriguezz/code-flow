@@ -878,6 +878,24 @@ fn app_read_tools() -> Vec<Value> {
             }},
         }),
         json!({
+            "name": "pipelines",
+            "description": "This repository's CI/CD pipelines (GitHub Actions, GitLab, Azure Pipelines, Bitbucket), read with the user's connection in CodeFlow: the latest runs, one run's jobs, or one job's log (secrets removed). Use it to see whether a build or test job passed and why it failed.",
+            "inputSchema": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["runs", "detail", "log"], "description": "runs (default), detail of run_id, log of job_id in run_id"},
+                "run_id": {"type": "string"},
+                "job_id": {"type": "string", "description": "log: the job's id as detail lists it (with its log_ref, if shown, as «<id> log_ref <ref>»)"},
+                "branch": {"type": "string", "description": "runs: only this branch. Optional."},
+                "limit": {"type": "integer", "description": "runs: how many (default 10, at most 20)"}
+            }},
+        }),
+        json!({
+            "name": "api_requests",
+            "description": "The requests saved in CodeFlow's API client for this workspace — method, name and URL — so you can run one with http_request instead of rebuilding it.",
+            "inputSchema": {"type": "object", "properties": {
+                "filter": {"type": "string", "description": "Only requests whose path, name or URL contains this. Optional."}
+            }},
+        }),
+        json!({
             "name": "local_llm",
             "description": "Asks the local model on this machine (nothing leaves it) — for work too cheap or too long for you: summarising a long log, sorting a list, extracting fields. Long material is read in parts and the answers merged.",
             "inputSchema": {"type": "object", "properties": {
@@ -1182,6 +1200,15 @@ fn app_action_tools() -> Vec<Value> {
             }, "required": ["title"]},
         }), false, false),
         acts(json!({
+            "name": "write_note",
+            "description": "Writes a note in CodeFlow's Notes, in the «Agentes» notebook of this workspace — a finding, a report, a how-to the user should keep. Markdown. Never a secret.",
+            "inputSchema": {"type": "object", "properties": {
+                "title": {"type": "string"},
+                "content": {"type": "string", "description": "The note, in Markdown"},
+                "tags": {"type": "string", "description": "Comma-separated. Optional."}
+            }, "required": ["title", "content"]},
+        }), false, false),
+        acts(json!({
             "name": "http_request",
             "description": "Sends a request saved in CodeFlow's API client, with its environment, auth and scripts, and returns the answer with every credential removed. The user approves it in the app first.",
             "inputSchema": {"type": "object", "properties": {
@@ -1206,6 +1233,9 @@ fn app_action_tools() -> Vec<Value> {
 /// (`agentcli::run_verb`). `None` for a name that is not one of these.
 async fn app_tool(access: &Access, name: &str, args: &Value) -> Option<Result<String, String>> {
     let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    if matches!(name, "pipelines" | "api_requests" | "write_note") {
+        return Some(other_apps(access, name, args).await);
+    }
     // The interface: the `cf ui` verb, in-process.
     if CODI_TOOLS.contains(&name) {
         let list: Vec<String> = match name {
@@ -1635,10 +1665,10 @@ mod tests {
 
         let (status, reply) = post(&headers, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
         assert_eq!(status, StatusCode::OK);
-        // The seven map, knowledge and note queries, the app's four read tools and the four chat
-        // reads — no actions for this token.
+        // The seven map, knowledge and note queries, the app's six read tools (pipelines and the API
+        // client's requests among them) and the four chat reads — no actions for this token.
         let counted = reply["result"]["tools"].as_array().unwrap().iter().filter(|t| !INFRA_TOOLS.contains(&t["name"].as_str().unwrap_or_default())).count();
-        assert_eq!(counted, 15);
+        assert_eq!(counted, 17);
 
         let (_, reply) = post(
             &headers,
@@ -2110,5 +2140,65 @@ mod live {
         );
         assert!(answer.contains("src/lib/pricing.js"), "{answer}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// The apps an agent reaches beyond the `cf` verbs: the Pipelines tab, the API client's saved
+/// requests, and Notes — each read or written as the user's own CodeFlow, for this run's repository.
+async fn other_apps(access: &Access, name: &str, args: &Value) -> Result<String, String> {
+    let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+    let app = crate::ai_usage::app().ok_or("CodeFlow is not ready yet")?;
+    let place = crate::agentcli::place::of(app, &access.root, &access.session);
+    match name {
+        "pipelines" => {
+            let project = place.project.ok_or("this folder is not a repository of any workspace")?;
+            let branch = Some(text("branch")).filter(|b| !b.is_empty());
+            let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+            crate::commands::ci_cmd::for_agent(&project, &text("action"), &text("run_id"), &text("job_id"), branch, limit).await
+        }
+        "api_requests" => {
+            let workspace = place.workspace_id.ok_or("this folder is in no workspace")?;
+            let tree = crate::ai_usage::with_conn(|conn| crate::db::api_queries::load_tree(conn, &workspace))
+                .ok_or("the API client could not be read")?
+                .map_err(|e| e.to_string())?;
+            let filter = text("filter").to_lowercase();
+            let lines: Vec<String> = tree
+                .requests
+                .iter()
+                .map(|r| (crate::agentcli::request_path(&tree, r), r))
+                .filter(|(path, r)| filter.is_empty() || format!("{path} {} {}", r.name, r.url).to_lowercase().contains(&filter))
+                .map(|(path, r)| format!("{} {} — {}", r.method, path, r.url))
+                .collect();
+            Ok(if lines.is_empty() { "No saved requests.".into() } else { lines.join("\n") })
+        }
+        "write_note" => {
+            if !access.acts {
+                return Err("write_note is not available to a read-only run".into());
+            }
+            let workspace = place.workspace_id.ok_or("this folder is in no workspace")?;
+            let (title, content) = (text("title"), args.get("content").and_then(Value::as_str).unwrap_or_default().to_string());
+            if title.is_empty() || content.trim().is_empty() {
+                return Err("title and content are required".into());
+            }
+            let (content, _) = crate::secret_scan::redact(&content);
+            let meta = crate::ai_usage::with_conn(|conn| -> Result<_, String> {
+                let book: Option<String> = rusqlite::OptionalExtension::optional(conn.query_row(
+                    "SELECT id FROM note_books WHERE workspace_id = ?1 AND parent_id IS NULL AND name = 'Agentes' ORDER BY sort_order LIMIT 1",
+                    rusqlite::params![workspace],
+                    |row| row.get(0),
+                ))
+                .map_err(|e| e.to_string())?;
+                let book = match book {
+                    Some(id) => id,
+                    None => crate::db::note_queries::create_book(conn, &workspace, None, "Agentes", "").map_err(|e| e.to_string())?.id,
+                };
+                crate::db::note_queries::create_note(conn, &workspace, &book, &title, &content, &text("tags")).map_err(|e| e.to_string())
+            })
+            .ok_or("Notes could not be written")??;
+            use tauri::Emitter;
+            let _ = app.emit("notes:changed", json!({ "workspaceId": workspace, "noteId": meta.id }));
+            Ok(format!("Note «{title}» written in Notes › Agentes."))
+        }
+        _ => Err(format!("unknown tool {name}")),
     }
 }

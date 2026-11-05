@@ -105,10 +105,11 @@ function RunHeader({ state }: { state: TeamRunState }) {
       {state.repos.length > 0 && (
         <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-[var(--cf-text-muted)]">
           {state.repos.map((r) => (
-            <span key={r.project_id} className="inline-flex items-center gap-1" title={r.integration_path}>
+            // The repository and where the work lands; the run's own branch and folder are in the tooltip.
+            <span key={r.project_id} className="inline-flex items-center gap-1" title={`${r.integration_branch} → ${r.target_branch}\n${r.integration_path}`}>
               <GitBranch className="h-3 w-3" />
               <b className="font-medium text-[var(--cf-text)]">{r.name}</b>
-              <span className="font-mono">{r.integration_branch}</span>→<span className="font-mono">{r.target_branch}</span>
+              <span>→ <span className="font-mono">{r.target_branch}</span></span>
               {r.status === "merged" && <span className="text-[var(--cf-success)]">· {l("integrado", "merged")}</span>}
               {r.status === "failed" && <span className="text-[var(--cf-danger)]" title={r.last_error}>· {l("falló", "failed")}</span>}
               {r.status === "left" && <span>· {l("en su rama", "on its branch")}</span>}
@@ -165,7 +166,7 @@ function RunPage({ state }: { state: TeamRunState }) {
           </div>
         </div>
         {wide && (
-          <aside className="flex w-[380px] shrink-0 flex-col border-l border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_45%,var(--cf-surface))]">
+          <aside style={{ width: state.items.filter((i) => !["advise", "answer"].includes(i.kind)).length <= 3 ? 520 : 380 }} className="flex shrink-0 flex-col border-l border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_45%,var(--cf-surface))]">
             <div className="shrink-0 px-2.5 pt-2.5">
               <Seg
                 size="sm"

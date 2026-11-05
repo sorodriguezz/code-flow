@@ -12,12 +12,12 @@ import { rankBetween, workState } from "../../../lib/backlog/status";
 import { emptyBacklogItem, type BacklogItem, type BacklogKind, type BacklogStatus } from "../../../types/crew";
 import type { Ticket } from "../../../lib/tauri/ticketCommands";
 import { AgentAvatar, AvatarStack, TeamAvatar } from "../kit/Avatar";
-import { useDragSource, useDropTarget, type DragPayload } from "../kit/drag";
+import { useDragSource, useDropTarget, type DragPayload, useDragStore } from "../kit/drag";
 import { Btn, Chip, ToggleChip, field } from "../kit/ui";
 import { activeAgents, money, useCrewStore, useL } from "../state";
 
 const COLUMNS: { id: BacklogStatus; es: string; en: string; color: string }[] = [
-  { id: "backlog", es: "Backlog", en: "Backlog", color: "var(--cf-text-faint)" },
+  { id: "backlog", es: "Pendientes", en: "Backlog", color: "var(--cf-text-faint)" },
   { id: "ready", es: "Listo", en: "Ready", color: "var(--cf-agent-cyan)" },
   { id: "doing", es: "En curso", en: "Doing", color: "var(--cf-accent)" },
   { id: "review", es: "Revisión", en: "Review", color: "var(--cf-warning)" },
@@ -184,6 +184,7 @@ function Column({ id, title, color, cards }: { id: BacklogStatus; title: string;
     if (p.kind === "card") moveInto(p.id, id, null);
     if (p.kind === "ticket") void importTicket(p.id, id);
   });
+  const dragging = useDragStore((s) => s.payload !== null && (s.payload.kind === "card" || s.payload.kind === "ticket"));
   return (
     <section {...drop.props} className={`flex min-h-0 w-[272px] shrink-0 flex-col rounded-[12px] border bg-[var(--cf-sunken)] transition-colors ${drop.over ? "border-[var(--cf-accent)]" : "border-[var(--cf-border)]"}`}>
       <header className="flex items-center gap-2 px-3 pb-1.5 pt-2.5">
@@ -195,7 +196,9 @@ function Column({ id, title, color, cards }: { id: BacklogStatus; title: string;
         {cards.map((c) => (
           <CardView key={c.id} item={c} />
         ))}
-        {cards.length === 0 && <div className="rounded-[10px] border-[1.5px] border-dashed border-[var(--cf-border-strong)] px-2.5 py-4 text-center text-[12px] text-[var(--cf-text-faint)]">{l("Suelta aquí una tarjeta", "Drop a card here")}</div>}
+        {/* The drop hint only while something is being dragged: five idle copies of it were noise. */}
+        {cards.length === 0 && dragging && <div className={`rounded-[10px] border-[1.5px] border-dashed px-2.5 py-4 text-center text-[12px] ${drop.over ? "border-[var(--cf-accent)] text-[var(--cf-accent)]" : "border-[var(--cf-border-strong)] text-[var(--cf-text-faint)]"}`}>{l("Suelta aquí una tarjeta", "Drop a card here")}</div>}
+        {cards.length === 0 && !dragging && <span className="px-1 pt-1 text-[11.5px] text-[var(--cf-text-faint)]">{l("Vacía", "Empty")}</span>}
       </div>
     </section>
   );
@@ -216,7 +219,7 @@ function TicketView({ ticket }: { ticket: Ticket }) {
   const uid = ticketUid(ticket);
   const drag = useDragSource({ kind: "ticket", id: uid }, () => <div className="w-[240px] rounded-[11px] border border-[var(--cf-blue)] bg-[var(--cf-surface-raised)] p-2.5 text-[12.5px] font-semibold">{ticket.title}</div>);
   return (
-    <article {...drag} title={`${ticket.state} · ${l("arrástralo al backlog", "drag it to the backlog")}`} className="flex cursor-grab touch-none flex-col gap-1.5 rounded-[11px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2.5 hover:border-[var(--cf-border-strong)] active:cursor-grabbing">
+    <article {...drag} title={`${ticket.state} · ${l("arrástralo a Pendientes", "drag it to the backlog")}`} className="flex cursor-grab touch-none flex-col gap-1.5 rounded-[11px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2.5 hover:border-[var(--cf-border-strong)] active:cursor-grabbing">
       <div className="flex items-center gap-1.5">
         <Chip tone={/bug/i.test(ticket.work_item_type) ? "bad" : "violet"} title={l("Tipo de ticket", "Ticket type")}>{ticket.work_item_type || "Ticket"}</Chip>
         <span title={l("Clave del ticket", "Ticket key")} className="font-mono text-[10.5px] text-[var(--cf-text-muted)]">{ticket.key || `#${ticket.id}`}</span>
@@ -241,13 +244,13 @@ function Inbox() {
       <header className="flex items-center gap-2 px-3 pb-1 pt-2.5">
         <span className="h-2 w-2 rounded-[3px] bg-[var(--cf-blue)]" />
         <h3 className="m-0 text-[12.5px] font-semibold">{l("Entrada", "Inbox")}</h3>
-        <span title={l("Tickets sin traer al backlog", "Tickets not yet in the backlog")} className="text-[11px] text-[var(--cf-text-faint)]">{pending.length}</span>
+        <span title={l("Tickets sin traer a Pendientes", "Tickets not yet in the backlog")} className="text-[11px] text-[var(--cf-text-faint)]">{pending.length}</span>
         <span className="flex-1" />
         <button type="button" title={l("Trae los tickets nuevos de tus tableros", "Fetches new tickets from your boards")} onClick={() => void useTicketStore.getState().refresh(workspaceId)} className="grid h-6 w-6 place-items-center rounded-[6px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
         </button>
       </header>
-      <p className="m-0 px-3 pb-1 text-[11.5px] text-[var(--cf-text-faint)]">{l("Tickets de tus tableros (Azure DevOps, Jira…). Arrástralos al backlog.", "Tickets from your boards (Azure DevOps, Jira…). Drag them into the backlog.")}</p>
+      <p className="m-0 px-3 pb-1 text-[11.5px] text-[var(--cf-text-faint)]">{l("Tickets de tus tableros (Azure DevOps, Jira…). Arrástralos a Pendientes.", "Tickets from your boards (Azure DevOps, Jira…). Drag them into the backlog.")}</p>
       <div className="flex min-h-[60px] flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2.5 pt-1">
         {[...groups.entries()].map(([provider, list]) => (
           <div key={provider} className="flex flex-col gap-2">

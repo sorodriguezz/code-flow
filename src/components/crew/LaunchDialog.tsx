@@ -195,7 +195,7 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
           <span className="flex-1" />
           <Btn kind="ghost" onClick={close} title={l("Cierra sin crear nada", "Closes without creating anything")}>{l("Cancelar", "Cancel")}</Btn>
           <Btn onClick={() => void onAssign()} title={card ? l("Deja la tarjeta asignada sin empezar", "Assigns the card without starting it") : l("Guarda la tarea para lanzarla después", "Saves the task to launch later")} disabled={!who || busy || (!card && !goal.trim())}>
-            {card ? l("Solo asignar", "Just assign") : l("Guardar en el backlog", "Save to the backlog")}
+            {card ? l("Solo asignar", "Just assign") : l("Guardar en Pendientes", "Save to the backlog")}
           </Btn>
           <Btn kind="primary" icon={Play} onClick={() => void onLaunch()} title={l("Crea la tarea y la empieza ya", "Creates the task and starts it now")} disabled={!who || busy || !effectiveGoal || !modeOk(mode)}>
             {l("Lanzar ahora", "Launch now")}

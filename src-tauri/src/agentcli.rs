@@ -55,6 +55,7 @@ mod infra;
 mod knowhow;
 pub(crate) mod place;
 mod vault;
+pub(crate) use vault::request_path;
 mod work;
 
 /// What the user lets a model do on a saved database connection — read by the map server too.

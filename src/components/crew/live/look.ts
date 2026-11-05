@@ -1,12 +1,18 @@
-/** How a run's statuses and messages read in the live view. */
+/**
+ * How a run's statuses and messages read in the live view.
+ *
+ * Statuses use the app's six words everywhere — Por hacer, Trabajando, Te espera, Hecho, Falló,
+ * Cancelado — the same as a task's (`agents.status*`) and a Workshop row's (`wt.state.*`), so one
+ * piece of work never reads «terminó» in one place and «en curso» in another.
+ */
 import type { TeamItem, TeamItemKind, TeamItemStatus, TeamMessageKind, TeamRunStatus } from "../../../types/team";
 import type { Tone } from "../kit/ui";
 
 export const ITEM_STATUS: Record<TeamItemStatus, [string, string, Tone]> = {
-  pending: ["En espera", "Pending", "neutral"],
-  gated: ["Espera tu OK", "Needs your OK", "warn"],
+  pending: ["Por hacer", "To do", "neutral"],
+  gated: ["Te espera", "Waiting on you", "warn"],
   running: ["Trabajando", "Working", "accent"],
-  waiting: ["Pregunta", "Asking", "warn"],
+  waiting: ["Te espera", "Waiting on you", "warn"],
   done: ["Hecho", "Done", "ok"],
   error: ["Error", "Error", "bad"],
   cancelled: ["Cancelado", "Cancelled", "neutral"],
@@ -27,12 +33,12 @@ export const ITEM_KIND: Record<TeamItemKind, [string, string]> = {
 };
 
 export const RUN_STATUS: Record<TeamRunStatus, [string, string, Tone]> = {
-  running: ["En marcha", "Running", "accent"],
+  running: ["Trabajando", "Working", "accent"],
   gated: ["Te espera", "Waiting on you", "warn"],
   paused: ["En pausa", "Paused", "warn"],
-  done: ["Terminada", "Done", "ok"],
+  done: ["Hecho", "Done", "ok"],
   failed: ["Falló", "Failed", "bad"],
-  aborted: ["Cancelada", "Aborted", "neutral"],
+  aborted: ["Cancelado", "Cancelled", "neutral"],
 };
 
 export const MESSAGE_KIND: Record<TeamMessageKind, [string, string, Tone]> = {

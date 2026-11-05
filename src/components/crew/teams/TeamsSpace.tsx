@@ -2,11 +2,10 @@
  * «Equipos»: pick a team, draw who answers to whom, say how it works. The palette on the left holds
  * the roster and the template library; both drag onto the chart.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Copy, FlaskConical, LayoutTemplate, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, Search, Trash2, WandSparkles, Workflow } from "lucide-react";
+import { ArrowLeft, Copy, FlaskConical, LayoutTemplate, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, Search, Trash2, WandSparkles, Workflow } from "lucide-react";
 import { ResizeHandle } from "../../common/ResizeHandle";
-import { ChipRow } from "../kit/ChipRow";
 import { iconButtonClass } from "../../common/Button";
 import { useTeamStore } from "../../../state/teamStore";
 import { useAgentsStore } from "../../../state/agentsStore";
@@ -186,17 +185,18 @@ function TeamEditor({ teamId }: { teamId: string }) {
             options={[
               { value: "org", label: l("Organigrama", "Org chart"), icon: Network, title: l("Quién lidera y quién reporta a quién. El líder arma el plan en cada corrida y lo reparte según esta jerarquía.", "Who leads and who reports to whom. The lead makes the plan on each run and hands it out along this hierarchy.") },
               { value: "flow", label: l("Flujo fijo", "Fixed flow"), icon: Workflow, title: l("Pasos en orden, con compuertas, para un equipo sin líder: cada corrida los sigue tal cual. Con líder no se usan: el líder arma el plan en cada corrida.", "Steps in order, with gates, for a team with no lead: each run follows them as they are. With a lead they are not used: the lead plans each run."), badge: team.lead ? <span className="rounded-full bg-[var(--cf-hover)] px-1.5 text-[10px] text-[var(--cf-text-faint)]">{l("no se usa", "unused")}</span> : team.plan.length ? <span className="text-[10.5px] text-[var(--cf-text-faint)]">{team.plan.length}</span> : undefined },
-              { value: "checks", label: l("Checks", "Checks"), icon: FlaskConical, title: l("Comandos de verificación (tests, lint, build). Cada uno corre «tras cada tarea», en su worktree antes del commit (si falla, vuelve a su autor con el error), o «al final», con todo integrado (si falla, el líder asigna el arreglo).", "Verification commands (tests, lint, build). Each runs «after each task», in its worktree before the commit (on failure it goes back to its author with the error), or «at the end», with everything merged (on failure the lead assigns the fix)."), badge: team.policy.checks.length ? <span className="text-[10.5px] text-[var(--cf-text-faint)]">{team.policy.checks.length}</span> : undefined },
+              { value: "checks", label: l("Verificaciones", "Checks"), icon: FlaskConical, title: l("Comandos de verificación (tests, lint, build). Cada uno corre «tras cada tarea», en su worktree antes del commit (si falla, vuelve a su autor con el error), o «al final», con todo integrado (si falla, el líder asigna el arreglo).", "Verification commands (tests, lint, build). Each runs «after each task», in its worktree before the commit (on failure it goes back to its author with the error), or «at the end», with everything merged (on failure the lead assigns the fix)."), badge: team.policy.checks.length ? <span className="text-[10.5px] text-[var(--cf-text-faint)]">{team.policy.checks.length}</span> : undefined },
             ]}
           />
-          <span className="flex-1" />
-          <span className="hidden text-[11.5px] text-[var(--cf-text-faint)] lg:inline">
+          {/* One group, pinned right: on a narrow window it wraps whole, with the panel toggle last. */}
+          <div className="ml-auto flex shrink-0 items-center gap-2">
+          <span className="hidden text-[11.5px] text-[var(--cf-text-faint)] 2xl:inline">
             {l(`${team.members.filter((m) => !m.advisor).length} miembros`, `${team.members.filter((m) => !m.advisor).length} members`)}
             {team.members.some((m) => m.leads) ? l(" · con sub-líderes", " · with sub-leads") : ""}
             {team.members.some((m) => m.advisor) ? l(" · con asesor", " · with advisor") : ""}
           </span>
           <Btn small kind="primary" icon={WandSparkles} disabled={team.members.length === 0} title={team.members.length === 0 ? l("Añade miembros al equipo primero", "Add members to the team first") : l("Asigna una tarea al equipo entero", "Assigns a task to the whole team")} onClick={() => crew.open({ kind: "launch", assignee: { kind: "team", id: team.id } })}>
-            {l("Darle una tarea", "Hand it a task")}
+            <span className="hidden xl:inline">{l("Darle una tarea", "Hand it a task")}</span>
           </Btn>
           {tab === "org" && (
             <span className="hidden lg:contents">
@@ -211,6 +211,7 @@ function TeamEditor({ teamId }: { teamId: string }) {
               </button>
             </span>
           )}
+          </div>
         </div>
         <p className="m-0 shrink-0 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_40%,var(--cf-surface))] px-3 py-1.5 text-[11.5px] text-[var(--cf-text-muted)]">
           {tab === "org"
@@ -254,11 +255,8 @@ export function TeamsSpace() {
   const teams = useTeamStore((s) => s.teams);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const selectedTeamId = useCrewStore((s) => s.selectedTeamId);
-  const selected = teams.find((t) => t.id === selectedTeamId) ?? teams[0] ?? null;
-
-  useEffect(() => {
-    if (selected && selected.id !== selectedTeamId) crew.set({ selectedTeamId: selected.id });
-  }, [selected, selectedTeamId, crew]);
+  // No team is opened for you: the space starts on the list, and editing is a choice.
+  const selected = teams.find((t) => t.id === selectedTeamId) ?? null;
 
   const create = async () => {
     if (!workspaceId) return;
@@ -299,48 +297,117 @@ export function TeamsSpace() {
     );
   }
 
+  const actions = (
+    <>
+      <Btn small icon={Plus} title={l("Crea un equipo en blanco", "Creates a blank team")} onClick={() => void create()}>{l("Nuevo", "New")}</Btn>
+      <Btn small icon={LayoutTemplate} title={l("Crea un equipo desde una plantilla", "Creates a team from a template")} onClick={() => crew.open({ kind: "teamTemplates" })}>{l("Plantillas", "Templates")}</Btn>
+    </>
+  );
+
+  if (!selected) return <TeamList teams={teams} actions={actions} onDuplicate={duplicate} onRemove={remove} />;
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
-        <ChipRow
-          active={selected?.id}
-          noun={["equipos", "teams"]}
-          onPick={(id) => crew.set({ selectedTeamId: id, selectedMemberId: null })}
-          entries={teams.map((t) => ({ key: t.id, label: t.name, sub: l(`${t.members.length} miembros`, `${t.members.length} members`), leading: <TeamAvatar size={24} /> }))}
+        <button
+          type="button"
+          onClick={() => crew.set({ selectedTeamId: null, selectedMemberId: null })}
+          title={l("Vuelve a la lista de equipos", "Back to the list of teams")}
+          className="flex h-[30px] shrink-0 items-center gap-1 rounded-[8px] px-2 text-[12.5px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         >
-          {teams.map((t) => {
-            const on = t.id === selected?.id;
-            return (
-              <button
-                key={t.id}
-                type="button"
-                data-chip={t.id}
-                title={l("Abre este equipo", "Opens this team")}
-                onClick={() => crew.set({ selectedTeamId: t.id, selectedMemberId: null })}
-                className={`relative flex h-[32px] shrink-0 items-center gap-2 rounded-full border pl-1 pr-3 text-[12.5px] font-medium transition-colors ${on ? "border-[var(--cf-accent-line)] text-[var(--cf-text)]" : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:border-[var(--cf-border-strong)]"}`}
-              >
-                {on && <motion.span layoutId="crew-team-pill" transition={SPRING} className="absolute inset-0 rounded-full bg-[var(--cf-accent-soft)]" />}
-                <span className="relative"><TeamAvatar size={24} /></span>
-                <span className="relative">{t.name}</span>
-                <span className="relative text-[11px] tabular-nums text-[var(--cf-text-faint)]">{t.members.length}</span>
-              </button>
-            );
-          })}
-        </ChipRow>
-        <Btn small icon={Plus} title={l("Crea un equipo en blanco", "Creates a blank team")} onClick={() => void create()}>{l("Nuevo", "New")}</Btn>
-        <Btn small icon={LayoutTemplate} title={l("Crea un equipo desde una plantilla", "Creates a team from a template")} onClick={() => crew.open({ kind: "teamTemplates" })}>{l("Plantillas", "Templates")}</Btn>
-        {selected && (
-          <>
-            <button type="button" title={l("Crea una copia de este equipo", "Makes a copy of this team")} onClick={() => void duplicate(selected)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
-              <Copy className="h-3.5 w-3.5" />
-            </button>
-            <button type="button" title={l("Borra este equipo; sus corridas pasadas se conservan", "Deletes this team; its past runs are kept")} onClick={() => void remove(selected)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]">
-              <Trash2 className="h-3.5 w-3.5" />
-            </button>
-          </>
-        )}
+          <ArrowLeft className="h-3.5 w-3.5" />
+          {l("Equipos", "Teams")}
+        </button>
+        <span className="text-[var(--cf-text-faint)]">/</span>
+        <span className="flex min-w-0 items-center gap-2">
+          <TeamAvatar size={24} />
+          <b className="truncate text-[13px]">{selected.name}</b>
+        </span>
+        <span className="flex-1" />
+        <button type="button" title={l("Crea una copia de este equipo", "Makes a copy of this team")} onClick={() => void duplicate(selected)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
+          <Copy className="h-3.5 w-3.5" />
+        </button>
+        <button type="button" title={l("Borra este equipo; sus corridas pasadas se conservan", "Deletes this team; its past runs are kept")} onClick={() => void remove(selected)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]">
+          <Trash2 className="h-3.5 w-3.5" />
+        </button>
       </div>
-      {selected && <TeamEditor key={selected.id} teamId={selected.id} />}
+      <TeamEditor key={selected.id} teamId={selected.id} />
+    </div>
+  );
+}
+
+/** The space's first view: every team as a card — what it is, who is in it — to open one or hand it work. */
+function TeamList({ teams, actions, onDuplicate, onRemove }: { teams: Team[]; actions: React.ReactNode; onDuplicate: (t: Team) => void; onRemove: (t: Team) => void }) {
+  const l = useL();
+  const crew = useCrewStore();
+  const roster = useAgentsStore((s) => s.roster);
+  const runs = useTeamStore((s) => s.runs);
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const shown = teams.filter((t) => !q || `${t.name} ${t.description} ${t.members.map((m) => m.name).join(" ")}`.toLowerCase().includes(q));
+  const open = (id: string) => crew.set({ selectedTeamId: id, selectedMemberId: null });
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3.5 py-2.5">
+        <div className="relative w-[240px]">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--cf-text-faint)]" />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={l("Buscar equipo o miembro", "Search team or member")} className={`${field} h-[30px] pl-8`} />
+        </div>
+        <span className="text-[11.5px] text-[var(--cf-text-faint)]">{l(`${teams.length} equipos`, `${teams.length} teams`)}</span>
+        <span className="flex-1" />
+        {actions}
+      </div>
+      <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3 overflow-y-auto p-3.5">
+        {shown.map((t) => {
+          const lead = t.members.find((m) => m.id === t.lead);
+          const live = runs.filter((r) => r.team_id === t.id && (r.status === "running" || r.status === "gated")).length;
+          const total = runs.filter((r) => r.team_id === t.id).length;
+          return (
+            <article
+              key={t.id}
+              role="button"
+              tabIndex={0}
+              onClick={() => open(t.id)}
+              onKeyDown={(e) => e.key === "Enter" && open(t.id)}
+              title={l("Abre el equipo para editarlo", "Opens the team to edit it")}
+              className="group flex cursor-pointer flex-col gap-2.5 rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3.5 text-left transition-colors hover:border-[var(--cf-accent-line)]"
+            >
+              <div className="flex items-start gap-2.5">
+                <TeamAvatar size={36} />
+                <div className="min-w-0 flex-1">
+                  <b className="block truncate text-[13.5px]">{t.name}</b>
+                  <span className="line-clamp-2 text-[11.5px] text-[var(--cf-text-muted)]">{t.description || (lead ? l(`${lead.name} al mando`, `${lead.name} in charge`) : l("Flujo fijo, sin líder", "Fixed flow, no lead"))}</span>
+                </div>
+              </div>
+              <div className="flex items-center">
+                {t.members.slice(0, 7).map((m, i) => {
+                  const agent = roster.find((a) => a.id === m.agent_id);
+                  return (
+                    <span key={m.id} title={m.name} className="rounded-[10px] ring-2 ring-[var(--cf-surface-raised)]" style={{ marginLeft: i ? -6 : 0 }}>
+                      <AgentAvatar agent={{ id: m.agent_id, icon: agent?.icon, color: agent?.color }} size={26} />
+                    </span>
+                  );
+                })}
+                {t.members.length > 7 && <span className="ml-1.5 text-[11px] text-[var(--cf-text-faint)]">+{t.members.length - 7}</span>}
+                {t.members.length === 0 && <span className="text-[11.5px] text-[var(--cf-text-faint)]">{l("Sin miembros todavía", "No members yet")}</span>}
+              </div>
+              <div className="flex items-center gap-2 text-[11px] text-[var(--cf-text-faint)]">
+                <span>{l(`${t.members.filter((m) => !m.advisor).length} miembros`, `${t.members.filter((m) => !m.advisor).length} members`)}</span>
+                {t.members.some((m) => m.leads) && <span>· {l("sub-líderes", "sub-leads")}</span>}
+                {t.members.some((m) => m.advisor) && <span>· {l("asesor", "advisor")}</span>}
+                <span>· {live ? l(`${live} en marcha`, `${live} running`) : l(`${total} corridas`, `${total} runs`)}</span>
+                <span className="flex-1" />
+                <span className="flex gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100" onClick={(e) => e.stopPropagation()}>
+                  <button type="button" title={l("Darle una tarea", "Hand it a task")} disabled={t.members.length === 0} onClick={() => crew.open({ kind: "launch", assignee: { kind: "team", id: t.id } })} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-accent)] hover:bg-[var(--cf-hover)] disabled:opacity-40"><WandSparkles className="h-3.5 w-3.5" /></button>
+                  <button type="button" title={l("Duplicar", "Duplicate")} onClick={() => onDuplicate(t)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"><Copy className="h-3.5 w-3.5" /></button>
+                  <button type="button" title={l("Borrar", "Delete")} onClick={() => onRemove(t)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"><Trash2 className="h-3.5 w-3.5" /></button>
+                </span>
+              </div>
+            </article>
+          );
+        })}
+        {shown.length === 0 && <p className="col-span-full m-0 p-6 text-center text-[12.5px] text-[var(--cf-text-muted)]">{l("Ningún equipo coincide.", "No team matches.")}</p>}
+      </div>
     </div>
   );
 }
