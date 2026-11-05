@@ -340,7 +340,12 @@ async function guarded(
   },
 ): Promise<boolean> {
   const silent = options?.silent === true;
-  if (!silent) set({ busy: true, error: null });
+  // Read once: the action belongs to the repository it started in, whichever is shown when it ends.
+  const path = useRepoStore.getState().repoPath;
+  if (!silent) {
+    beginBusy(path);
+    set({ error: null });
+  }
   try {
     await fn();
     return true;
@@ -356,7 +361,7 @@ async function guarded(
     pushErrorToast(message);
     return false;
   } finally {
-    if (!silent) set({ busy: false });
+    if (!silent) endBusy(path);
   }
 }
 
@@ -590,7 +595,8 @@ async function checkoutGuarded(
     if (!confirmed) return;
   }
 
-  set({ checkingOutBranch: target, busy: true, error: null });
+  beginBusy(repoPath);
+  set({ checkingOutBranch: target, error: null });
   try {
     try {
       await run();
@@ -612,7 +618,8 @@ async function checkoutGuarded(
     set({ error: message });
     pushErrorToast(message);
   } finally {
-    set({ busy: false, checkingOutBranch: null });
+    endBusy(repoPath);
+    set({ checkingOutBranch: null });
   }
 }
 
@@ -678,12 +685,85 @@ const wasCancelled = (e: unknown) => remoteFailure(e) === "cancelled";
 const toastCancelled = () => useToastStore.getState().pushToast(translate("git.opCancelled"), "info");
 
 /** The op settled: the lock and this repository's progress go together. */
-const settledRemote = (s: RepoState, repoPath: string | null, extra?: Partial<RepoState>): Partial<RepoState> => ({
-  remoteOp: null,
-  remoteOpSilent: false,
-  remoteProgress: repoPath ? clearRemoteProgress(s.remoteProgress, repoPath) : s.remoteProgress,
-  ...extra,
-});
+/**
+ * The fetch/pull/push running in each repository, and how many `busy` actions each has in flight.
+ *
+ * The store's `remoteOp`/`remoteOpBranch`/`remoteOpSilent` and `busy` used to *be* the lock, and the
+ * store has one of each per window — so a push in one repository greyed out Commit, Pull and Push
+ * in every repository the user switched to until it came back, and its `finally` then cleared
+ * whatever the repository on screen had running (user, 2026-11-05: «se bloquea el commitear,
+ * pushear/pull del resto. Debería ser por separado»). These maps are the lock now, keyed by path;
+ * the store's fields are only the on-screen repository's view of them, re-derived on every switch.
+ */
+interface RemoteRun {
+  op: "fetch" | "pull" | "push";
+  branch: string | null;
+  silent: boolean;
+}
+const remoteRuns = new Map<string, RemoteRun>();
+const busyRuns = new Map<string, number>();
+
+/** The store's remote fields for `path`: its own run, or none. */
+function remoteFieldsOf(path: string | null): Pick<RepoState, "remoteOp" | "remoteOpBranch" | "remoteOpSilent"> {
+  const run = path ? remoteRuns.get(path) : undefined;
+  return { remoteOp: run?.op ?? null, remoteOpBranch: run?.branch ?? null, remoteOpSilent: run?.silent ?? false };
+}
+
+/** Whether `path` has a fetch, pull or push of its own running — the guard every remote op checks. */
+function remoteRunning(path: string): boolean {
+  return remoteRuns.has(path);
+}
+
+function beginRemote(
+  set: (partial: Partial<RepoState>) => void,
+  get: () => RepoState,
+  path: string,
+  op: RemoteRun["op"],
+  options?: { branch?: string | null; silent?: boolean },
+): void {
+  remoteRuns.set(path, { op, branch: options?.branch ?? null, silent: options?.silent ?? false });
+  if (get().repoPath === path) set(remoteFieldsOf(path));
+}
+
+/** The run in `path` is over: its lock and meter go, and the screen follows when it shows `path`. */
+function endRemote(set: (fn: (s: RepoState) => Partial<RepoState>) => void, path: string): void {
+  remoteRuns.delete(path);
+  set((s) => ({
+    ...(s.repoPath === path ? remoteFieldsOf(path) : {}),
+    remoteProgress: clearRemoteProgress(s.remoteProgress, path),
+  }));
+}
+
+/** One more `busy` action in `path`; `busy` on screen when `path` is the repository shown. */
+function beginBusy(path: string | null): void {
+  if (path) busyRuns.set(path, (busyRuns.get(path) ?? 0) + 1);
+  if (!path || useRepoStore.getState().repoPath === path) useRepoStore.setState({ busy: true });
+}
+
+function endBusy(path: string | null): void {
+  if (path) {
+    const left = (busyRuns.get(path) ?? 1) - 1;
+    if (left > 0) busyRuns.set(path, left);
+    else busyRuns.delete(path);
+  }
+  const shown = useRepoStore.getState().repoPath;
+  if (!path || shown === path) useRepoStore.setState({ busy: busyOf(shown) });
+}
+
+function busyOf(path: string | null): boolean {
+  return path ? (busyRuns.get(path) ?? 0) > 0 : false;
+}
+
+/**
+ * A repository changed while another one was on screen: its row in the projects panel
+ * (`repoSummaryStore`) is told by event, since that store reads this one, and the snapshot kept for
+ * coming back to it is dropped — it predates the change, and showing it would put the old ahead/
+ * behind counts back on screen.
+ */
+function touchedElsewhere(path: string): void {
+  snapshots.delete(path);
+  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("cf:repo-touched", { detail: { path } }));
+}
 
 type PullOutcome = "pulled" | "failed" | "cancelled" | "conflicts";
 
@@ -708,7 +788,8 @@ async function runPull(
   run: () => Promise<void>,
   refresh: () => Promise<void>,
 ): Promise<PullOutcome> {
-  set({ busy: true, error: null });
+  beginBusy(repoPath);
+  set({ error: null });
   try {
     try {
       await run();
@@ -740,7 +821,7 @@ async function runPull(
     pushErrorToast(message);
     return "failed";
   } finally {
-    set({ busy: false });
+    endBusy(repoPath);
   }
 }
 
@@ -804,7 +885,10 @@ async function runPush(
     }
     if (!(await get().commitChanges("Initial commit"))) return "failed";
   }
-  set({ busy: true, error: null });
+  // No `busy`: a push writes nothing a stage, a commit or a checkout reads, and holding them for
+  // the length of a network round trip was half of what made a push feel like it froze the app.
+  // Fetch, pull and another push are still held — by `remoteRuns`.
+  set({ error: null });
   try {
     try {
       await api.gitPush(repoPath, setUpstream);
@@ -836,7 +920,10 @@ async function runPush(
         throw e;
       }
     }
-    await Promise.all([get().refreshBranches(), get().refreshUnpushedCommits()]);
+    // The lists on screen are the shown repository's: a push that lands after a switch updates the
+    // row of the one it was for instead of re-reading the wrong one.
+    if (get().repoPath === repoPath) await Promise.all([get().refreshBranches(), get().refreshUnpushedCommits()]);
+    else touchedElsewhere(repoPath);
     return "pushed";
   } catch (e) {
     if (e === PUBLISH_CANCELLED) return "cancelled";
@@ -848,8 +935,6 @@ async function runPush(
     set({ error: message });
     pushErrorToast(message);
     return "failed";
-  } finally {
-    set({ busy: false });
   }
 }
 
@@ -976,6 +1061,9 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     set({
       repoPath: path,
       ...(kept ?? UNREAD),
+      // The lock and the spinners are the new repository's own — see `remoteRuns`.
+      ...remoteFieldsOf(path),
+      busy: busyOf(path),
       projectLoading: Boolean(path) && !kept,
       // The repository being left owned these; whatever it still had in flight lands nowhere now.
       commitsLoading: false,
@@ -1239,7 +1327,8 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   continueOperation: async (message) => {
     const { repoPath } = get();
     if (!repoPath) return;
-    set({ busy: true, error: null });
+    beginBusy(repoPath);
+    set({ error: null });
     try {
       try {
         await api.continueOperation(repoPath, message);
@@ -1260,7 +1349,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
         if (!reportCommitFailure(e)) pushErrorToast(text);
       }
     } finally {
-      set({ busy: false });
+      endBusy(repoPath);
     }
     // Either way: a continue that failed half-way (a rebase) has still moved things.
     await get().refreshAll().catch(reportReadFailure);
@@ -1464,7 +1553,8 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     // Not `guarded`: that swallows the outcome, and the caller clears the message box on it — a
     // commit that failed used to take the message down with it.
     let committed = false;
-    set({ busy: true, error: null });
+    beginBusy(repoPath);
+    set({ error: null });
     try {
       const run = () => (opts?.amend ? api.amendCommit(repoPath, message) : api.commitChanges(repoPath, message));
       try {
@@ -1488,7 +1578,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       if (get().repoPath === repoPath) await get().refreshAll();
       // Another repository's row in the projects panel (`repoSummaryStore`) — told by event, since
       // that store reads this one.
-      else window.dispatchEvent(new CustomEvent("cf:repo-touched", { detail: { path: repoPath } }));
+      else touchedElsewhere(repoPath);
       return true;
     } catch (e) {
       const text = describeError(e);
@@ -1499,7 +1589,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       // A refresh that failed after the commit landed still means the commit landed.
       return committed;
     } finally {
-      set({ busy: false });
+      endBusy(repoPath);
     }
   },
 
@@ -1748,10 +1838,10 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   },
 
   fetch: async (options) => {
-    const { repoPath, remoteOp } = get();
-    if (!repoPath || remoteOp) return;
+    const { repoPath } = get();
+    if (!repoPath || remoteRunning(repoPath)) return;
     // `auto` is the timer's fetch: silent, so no progress UI and nothing for the stop button.
-    set({ remoteOp: "fetch", remoteOpSilent: !!options?.auto });
+    beginRemote(set, get, repoPath, "fetch", { silent: !!options?.auto });
     // Captured before the work: a fetch is the one remote op that also runs on a timer, so by the
     // time it lands the user may well be looking at a different repository than the one it was for
     // — and, just as often, at a different workspace.
@@ -1762,7 +1852,8 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       // Only the fetch somebody asked for: the timed one is `silentFetch` and would drown the rest.
       trackUsage("git", "fetch", {}, workspaceId, repoFromArgs({ repoPath }));
       autoFetchFailing.delete(repoPath);
-      await get().refreshBranches();
+      if (get().repoPath === repoPath) await get().refreshBranches();
+      else touchedElsewhere(repoPath);
       notify({ source: "git", titleKey: "notifications.gitFetched", status: "success", detail: where, workspaceId });
     } catch (e) {
       if (wasCancelled(e)) {
@@ -1778,7 +1869,7 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       pushErrorToast(message);
       notify({ source: "git", titleKey: "notifications.gitFetchFailed", status: "error", detail: where, workspaceId });
     } finally {
-      set((s) => settledRemote(s, repoPath));
+      endRemote(set, repoPath);
     }
   },
 
@@ -1788,14 +1879,14 @@ export const useRepoStore = create<RepoState>((set, get) => ({
     if (silentFetchStartedAt !== null && Date.now() - silentFetchStartedAt < SILENT_FETCH_LOCK_MS) {
       return;
     }
-    const { repoPath, remoteOp } = get();
-    if (!repoPath || remoteOp) return;
+    const { repoPath } = get();
+    if (!repoPath || remoteRunning(repoPath)) return;
     silentFetchStartedAt = Date.now();
     // Through the same `remoteOp` mutex as the other three rather than around it. Two `git`
     // processes on one working copy contend for the same ref lockfiles, and the one that would
     // lose that race here is a pull the user is watching — so a background fetch waits its turn
     // exactly like the timed one already does, and what makes it *silent* is everything below.
-    set({ remoteOp: "fetch", remoteOpSilent: true });
+    beginRemote(set, get, repoPath, "fetch", { silent: true });
 
     // …but it does not get to hold that turn forever. `git fetch` against a host that is neither
     // reachable nor refusing — a VPN that dropped, a server behind a black hole — sits in a TCP
@@ -1815,7 +1906,8 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       // clearing that would re-enable the buttons underneath their own running operation.
       if (released) return;
       released = true;
-      if (get().remoteOp === "fetch") set({ remoteOp: null, remoteOpSilent: false });
+      const run = remoteRuns.get(repoPath);
+      if (run?.op === "fetch" && run.silent) endRemote(set, repoPath);
     };
     const watchdog = setTimeout(release, SILENT_FETCH_LOCK_MS);
 
@@ -1848,13 +1940,16 @@ export const useRepoStore = create<RepoState>((set, get) => ({
   },
 
   pull: async () => {
-    const { repoPath, remoteOp } = get();
-    if (!repoPath || remoteOp) return;
-    set({ remoteOp: "pull", remoteOpSilent: false });
+    const { repoPath } = get();
+    if (!repoPath || remoteRunning(repoPath)) return;
+    beginRemote(set, get, repoPath, "pull");
     const where = notificationDetail(get());
     const workspaceId = repoWorkspaceId(get());
     try {
-      const outcome = await runPull(set, get, repoPath, () => api.gitPull(repoPath), () => get().refreshAll());
+      const outcome = await runPull(set, get, repoPath, () => api.gitPull(repoPath), () =>
+        // A pull that lands after a switch re-reads the repository it was for, not the one shown.
+        get().repoPath === repoPath ? get().refreshAll() : Promise.resolve(touchedElsewhere(repoPath)),
+      );
       // A cancelled choice and a stop on conflicts are not a finished pull, nor a failed one — the
       // dialog and the banner already said what happened.
       if (outcome === "pulled" || outcome === "failed") {
@@ -1868,19 +1963,20 @@ export const useRepoStore = create<RepoState>((set, get) => ({
         });
       }
     } finally {
-      set((s) => settledRemote(s, repoPath));
+      endRemote(set, repoPath);
     }
   },
 
   fetchBranch: async (name) => {
-    const { repoPath, remoteOp } = get();
-    if (!repoPath || remoteOp) return;
-    set({ remoteOp: "fetch", remoteOpBranch: name, remoteOpSilent: false });
+    const { repoPath } = get();
+    if (!repoPath || remoteRunning(repoPath)) return;
+    beginRemote(set, get, repoPath, "fetch", { branch: name });
     const detail = branchNotificationDetail(get(), name);
     const workspaceId = repoWorkspaceId(get());
     try {
       await api.gitFetchBranch(repoPath, name);
-      await get().refreshBranches();
+      if (get().repoPath === repoPath) await get().refreshBranches();
+      else touchedElsewhere(repoPath);
       notify({ source: "git", titleKey: "notifications.gitFetched", status: "success", detail, workspaceId });
     } catch (e) {
       if (wasCancelled(e)) {
@@ -1892,17 +1988,17 @@ export const useRepoStore = create<RepoState>((set, get) => ({
       pushErrorToast(message);
       notify({ source: "git", titleKey: "notifications.gitFetchFailed", status: "error", detail, workspaceId });
     } finally {
-      set((s) => settledRemote(s, repoPath, { remoteOpBranch: null }));
+      endRemote(set, repoPath);
     }
   },
 
   pullBranch: async (name) => {
-    const { repoPath, remoteOp } = get();
-    if (!repoPath || remoteOp) return;
+    const { repoPath } = get();
+    if (!repoPath || remoteRunning(repoPath)) return;
     // Read before the work, because the answer decides how much has to be reloaded afterwards and
     // the pull itself can change it.
     const isHead = get().branches.some((b) => b.name === name && b.is_head);
-    set({ remoteOp: "pull", remoteOpBranch: name, remoteOpSilent: false });
+    beginRemote(set, get, repoPath, "pull", { branch: name });
     const detail = branchNotificationDetail(get(), name);
     const workspaceId = repoWorkspaceId(get());
     try {
@@ -1913,7 +2009,12 @@ export const useRepoStore = create<RepoState>((set, get) => ({
         () => api.gitPullBranch(repoPath, name),
         // Pulling the branch you are standing on rewrites the working tree, so everything the
         // screen shows is stale. Any other branch only moved a ref: the list is the whole change.
-        () => (isHead ? get().refreshAll() : get().refreshBranches()),
+        () =>
+          get().repoPath !== repoPath
+            ? Promise.resolve(touchedElsewhere(repoPath))
+            : isHead
+              ? get().refreshAll()
+              : get().refreshBranches(),
       );
       if (outcome === "pulled" || outcome === "failed") {
         const ok = outcome === "pulled";
@@ -1926,18 +2027,18 @@ export const useRepoStore = create<RepoState>((set, get) => ({
         });
       }
     } finally {
-      set((s) => settledRemote(s, repoPath, { remoteOpBranch: null }));
+      endRemote(set, repoPath);
     }
   },
 
   push: async (setUpstream = false, opts) => {
-    const { repoPath, remoteOp } = get();
+    const { repoPath } = get();
     if (opts?.repoPath && opts.repoPath !== repoPath) {
       pushErrorToast(translate("changes.pushCancelledRepo", { repo: repoDisplayName(opts.repoPath) }));
       return;
     }
-    if (!repoPath || remoteOp) return;
-    set({ remoteOp: "push", remoteOpSilent: false });
+    if (!repoPath || remoteRunning(repoPath)) return;
+    beginRemote(set, get, repoPath, "push");
     const where = notificationDetail(get());
     const workspaceId = repoWorkspaceId(get());
     try {
@@ -1961,16 +2062,22 @@ export const useRepoStore = create<RepoState>((set, get) => ({
         workspaceId,
       });
     } finally {
-      set((s) => settledRemote(s, repoPath));
+      endRemote(set, repoPath);
     }
   },
 
   applyRemoteProgress: (event) => {
-    if (get().remoteOpSilent) return;
+    // Silent or not is the run's own, in the repository the meter is for — not whatever the
+    // repository on screen happens to be doing.
+    const run = remoteRuns.get(event.repoPath);
+    const silent = run ? run.silent : event.repoPath === get().repoPath && get().remoteOpSilent;
+    if (silent) return;
     set((s) => ({ remoteProgress: reduceRemoteProgress(s.remoteProgress, event) }));
   },
 
   cancelRemoteOp: async () => {
+    // The store's fields are the shown repository's run (see `remoteRuns`), which is the one the
+    // stop button is drawn for.
     const { repoPath, remoteOp, remoteOpSilent } = get();
     if (!repoPath || !remoteOp || remoteOpSilent) return;
     // Rejects the running call with `GIT_REMOTE: cancelled`, which its own catch settles quietly.

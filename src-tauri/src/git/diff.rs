@@ -897,7 +897,7 @@ pub fn commit(
     // meanwhile into an error. This one is milliseconds, and without the lock a checkout or a
     // stage from another window could land between reading the index and finishing a merge's
     // state, which libgit2 does in several steps.
-    let _write = super::write_lock();
+    let _write = super::write_lock(path);
     let repo = open(path)?;
 
     let sig = match (author_name, author_email) {

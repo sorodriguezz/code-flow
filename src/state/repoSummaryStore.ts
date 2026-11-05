@@ -5,6 +5,7 @@ import { onRepoFsChanged } from "../lib/tauri/events";
 import type { Project } from "../types/domain";
 import { saving } from "./powerSaveStore";
 import { useRepoStore } from "./repoStore";
+import { useAiRunStore } from "./aiRunStore";
 
 /**
  * What the projects panel says about the repositories that are *not* open: the branch, how many
@@ -37,6 +38,9 @@ const SUMMARY_EVERY_MS = 60_000;
 const PRS_EVERY_MS = 5 * 60_000;
 /** A window brought forward twice within this is not asked twice. */
 const FOCUS_SETTLE_MS = 15_000;
+/** How long after an AI run settles its repositories are re-read — enough for a push it started
+ *  as its last step to have written its refs, short enough to read as immediate. */
+const AFTER_RUN_MS = 800;
 
 export interface OpenPrs {
   count: number;
@@ -231,8 +235,29 @@ export function useRepoSummaryPolling(projects: Project[], skip: (project: Proje
       const mirrored = summaryFromLive(now.repoPath, now.status, now.branches);
       useRepoSummaryStore.setState((s) => ({ byPath: { ...s.byPath, [mirrored.path]: mirrored } }));
     });
+    // An AI run that ended — a chat turn, an agent, a team — may have committed, pushed or pulled
+    // in any of these repositories, and nothing above hears it: the watcher follows only the open
+    // repository and ignores `refs/remotes` (every fetch rewrites them), so a push an agent made
+    // left the ↑ count beside the repository's name for the next minute's tick (user, 2026-11-05:
+    // «el símbolo de commits pendientes por subir o bajar no se actualizan inmediatamente»). One
+    // summary read for all of them, a beat after the last run settles; and the open repository's
+    // branches too, which feed the status bar's counts.
+    let afterRun: number | undefined;
+    const stopRuns = useAiRunStore.subscribe((now, before) => {
+      if (now.active === before.active) return;
+      const ended = Object.keys(before.active).some((id) => before.active[id] && !now.active[id]);
+      if (!ended) return;
+      window.clearTimeout(afterRun);
+      afterRun = window.setTimeout(() => {
+        summaries();
+        const repo = useRepoStore.getState();
+        if (repo.repoPath) void Promise.all([repo.refreshBranches(), repo.refreshUnpushedCommits()]).catch(() => {});
+      }, AFTER_RUN_MS);
+    });
     return () => {
       gone = true;
+      window.clearTimeout(afterRun);
+      stopRuns();
       window.clearInterval(summaryTimer);
       window.clearInterval(prTimer);
       window.removeEventListener("focus", onFocus);

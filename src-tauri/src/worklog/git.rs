@@ -177,6 +177,23 @@ pub fn commits(path: &str, identity: &Identity, period: &Period, max: usize) -> 
 }
 
 /// Files changed, lines added and removed against the first parent (the root commit against nothing).
+/// Files changed in the working copy and not committed — how many, and the first `max` of them.
+/// Untracked folders count once rather than file by file, so a fresh `node_modules` someone forgot
+/// to ignore does not turn into ten thousand lines of «sin commitear».
+pub fn uncommitted(path: &str, max: usize) -> Result<(usize, Vec<String>), String> {
+    let repo = Repository::open(path).map_err(|e| e.message().to_string())?;
+    let mut options = git2::StatusOptions::new();
+    options.include_untracked(true).recurse_untracked_dirs(false).include_ignored(false).exclude_submodules(true);
+    let statuses = repo.statuses(Some(&mut options)).map_err(|e| e.message().to_string())?;
+    let paths: Vec<String> = statuses
+        .iter()
+        .filter(|entry| entry.status() != git2::Status::CURRENT && !entry.status().is_ignored())
+        .filter_map(|entry| entry.path().map(str::to_string))
+        .collect();
+    let count = paths.len();
+    Ok((count, paths.into_iter().take(max).collect()))
+}
+
 fn stats(repo: &Repository, commit: &git2::Commit) -> (usize, usize, usize) {
     let Ok(tree) = commit.tree() else { return (0, 0, 0) };
     let parent = commit.parent(0).ok().and_then(|p| p.tree().ok());
@@ -229,6 +246,22 @@ pub(crate) mod tests {
 
     const ME: (&str, &str) = ("Me", "me@example.com");
     const OTHER: (&str, &str) = ("Other", "other@example.com");
+
+    #[test]
+    fn uncommitted_files_are_counted_and_capped() {
+        let (dir, repo) = temp_repo();
+        commit(&repo, ("Me", "me@example.com"), at("2026-10-23", 10), "a.txt", "first");
+        std::fs::write(dir.join("a.txt"), "changed").unwrap();
+        std::fs::write(dir.join("b.txt"), "new").unwrap();
+        std::fs::create_dir_all(dir.join("lots")).unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.join("lots").join(format!("{i}.txt")), "x").unwrap();
+        }
+        let (count, shown) = uncommitted(dir.to_str().unwrap(), 2).unwrap();
+        assert_eq!(count, 3, "a.txt, b.txt and the untracked folder once: {shown:?}");
+        assert_eq!(shown.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn only_my_commits_of_the_period_count_merges_left_out() {

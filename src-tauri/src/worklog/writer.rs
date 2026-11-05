@@ -19,15 +19,20 @@ use crate::db::Db;
 pub fn system_prompt(lang: &str) -> &'static str {
     if lang == "en" {
         "You write a software developer's work summary from a list of facts (commits, pull requests, reviews, \
-meetings, tickets). Rules: use only the facts given; never invent tasks, names, numbers or blockers; when a \
+meetings, tickets, and work done with AI assistants — chats and agents on their repositories, with what was asked \
+and how it ended, and changes not committed yet). Rules: use only the facts given; never invent tasks, names, numbers or blockers; when a \
 section has no facts, write «None.». First person, concise, Markdown, no preamble and no closing line. A pull \
-request with a url is written as [#id title](url). Group commits by what they were about instead of listing each."
+request with a url is written as [#id title](url). Group commits by what they were about instead of listing each. \
+Work done with AI counts as my work: describe it by what was done (what was asked and its result), not as «I talked \
+to the AI»."
     } else {
         "Redactas el resumen de trabajo de una persona desarrolladora a partir de una lista de hechos (commits, \
-pull requests, revisiones, reuniones, tickets). Reglas: usa solo los hechos dados; nunca inventes tareas, \
+pull requests, revisiones, reuniones, tickets, y el trabajo hecho con asistentes de IA — chats y agentes sobre \
+sus repositorios, con lo que se pidió y cómo terminó, y cambios aún sin commitear). Reglas: usa solo los hechos dados; nunca inventes tareas, \
 nombres, cifras ni bloqueos; si una sección no tiene hechos, escribe «Ninguno.». Primera persona, conciso, \
 Markdown, sin preámbulo ni cierre. Un pull request con url se escribe [#id título](url). Agrupa los commits por \
-tema en vez de listar cada uno."
+tema en vez de listar cada uno. El trabajo con IA cuenta como trabajo mío: descríbelo por lo que se hizo (lo pedido \
+y su resultado), no como «hablé con la IA»."
     }
 }
 
@@ -36,7 +41,7 @@ pub fn ask(log: &WorkLog, lang: &str) -> String {
     match (log.format, lang == "en") {
         (Format::Daily, false) => format!(
             "Escribe el daily con exactamente tres secciones: {}. Lo hecho: lo que muestran los hechos, agrupado. \
-{}: solo lo que se infiere de mis PRs abiertos, ramas sin mergear, revisiones que me pidieron y tickets en curso. \
+{}: solo lo que se infiere de mis PRs abiertos, ramas sin mergear, cambios sin commitear, revisiones que me pidieron y tickets en curso. \
 `## Bloqueos`: checks fallando y PRs míos esperando revisión o con cambios pedidos; si no hay, «Ninguno.». \
 Máximo 12 viñetas en total.",
             if today_period { "`## Hoy`, `## Siguiente`, `## Bloqueos`" } else { "`## Ayer`, `## Hoy`, `## Bloqueos`" },
@@ -44,17 +49,19 @@ Máximo 12 viñetas en total.",
         ),
         (Format::Daily, true) => format!(
             "Write the standup with exactly three sections: {}. What was done: what the facts show, grouped. {}: only \
-what follows from my open PRs, unmerged branches, reviews asked of me and tickets in progress. `## Blockers`: failing \
+what follows from my open PRs, unmerged branches, uncommitted changes, reviews asked of me and tickets in progress. `## Blockers`: failing \
 checks and my PRs waiting for review or with changes requested; if there are none, «None.». At most 12 bullets in all.",
             if today_period { "`## Today`, `## Next`, `## Blockers`" } else { "`## Yesterday`, `## Today`, `## Blockers`" },
             if today_period { "`## Next`" } else { "`## Today`" }
         ),
         (Format::Weekly, false) => "Escribe el informe semanal: `## Resumen` (dos o tres frases con las cifras), `## Por proyecto` con un \
-`### nombre del repositorio` por cada repositorio con actividad (lo destacado y sus cifras), `## Reuniones` si hubo, y \
+`### nombre del repositorio` por cada repositorio con actividad (lo destacado y sus cifras, incluido el trabajo con IA \
+hecho en él), `## Trabajo con IA` para el que no tiene un solo repositorio (si hubo), `## Reuniones` si hubo, y \
 `## Pendiente y bloqueos` (si no hay, «Ninguno.»)."
             .into(),
         (Format::Weekly, true) => "Write the weekly report: `## Summary` (two or three sentences with the numbers), `## By project` with \
-one `### repository name` per repository with activity (highlights and numbers), `## Meetings` if there were any, and \
+one `### repository name` per repository with activity (highlights and numbers, including the work done with AI in \
+it), `## Work with AI` for work not tied to one repository (if any), `## Meetings` if there were any, and \
 `## Pending and blockers` (if none, «None.»)."
             .into(),
     }

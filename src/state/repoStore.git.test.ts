@@ -433,3 +433,51 @@ describe("cancelling a remote operation", () => {
     expect(called("git_cancel_remote_op")[0].args.repoPath).toBe("/repo");
   });
 });
+
+describe("a remote op belongs to its repository", () => {
+  it("a push in one repository leaves another free, and comes back locked to its own", async () => {
+    let finish: () => void = () => {};
+    handlers.git_push = () => new Promise<void>((resolve) => (finish = resolve));
+    const touched: string[] = [];
+    const onTouched = (e: Event) => touched.push((e as CustomEvent<{ path: string }>).detail.path);
+    // Node has no `window`; an EventTarget is all `touchedElsewhere` needs.
+    vi.stubGlobal("window", new EventTarget());
+    window.addEventListener("cf:repo-touched", onTouched);
+
+    const pushing = useRepoStore.getState().push(false);
+    await until(() => called("git_push").length > 0);
+    expect(useRepoStore.getState().remoteOp).toBe("push");
+
+    // Switch away mid-push: the other repository is not locked by it.
+    await useRepoStore.getState().setRepoPath("/other");
+    expect(useRepoStore.getState().remoteOp).toBeNull();
+    expect(useRepoStore.getState().busy).toBe(false);
+
+    // Back: the push is still this repository's.
+    await useRepoStore.getState().setRepoPath("/repo");
+    expect(useRepoStore.getState().remoteOp).toBe("push");
+
+    // Away again when it lands: the shown repository is untouched, the pushed one is told.
+    await useRepoStore.getState().setRepoPath("/other");
+    finish();
+    await pushing;
+    expect(useRepoStore.getState().remoteOp).toBeNull();
+    expect(touched).toContain("/repo");
+    await useRepoStore.getState().setRepoPath("/repo");
+    expect(useRepoStore.getState().remoteOp).toBeNull();
+    vi.unstubAllGlobals();
+  });
+
+  it("a commit in one repository does not grey out another's", async () => {
+    let finish: () => void = () => {};
+    handlers.commit = () => new Promise<string>((resolve) => (finish = () => resolve("oid")));
+    const committing = useRepoStore.getState().commitChanges("msg");
+    await until(() => called("commit").length > 0);
+    expect(useRepoStore.getState().busy).toBe(true);
+    await useRepoStore.getState().setRepoPath("/other");
+    expect(useRepoStore.getState().busy).toBe(false);
+    finish();
+    await committing;
+    expect(useRepoStore.getState().busy).toBe(false);
+  });
+});

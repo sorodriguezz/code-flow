@@ -225,6 +225,35 @@ pub struct TicketItem {
     pub at: String,
 }
 
+/// Work done through the AI in the period: one conversation of a repository's chat, the workspace
+/// chat or an agent task, or one team run — see [`sources::ai_work`].
+///
+/// A day spent asking the assistant to change several repositories used to come out as «Ninguno»
+/// when nothing was committed yet (user, 2026-11-05: «lo que hizo la IA/agente sobre los
+/// repositorios no lo tomó»): commits were the only trace of work the summary could see.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiWorkItem {
+    /// `chat` (a repository's chat) · `workspaceChat` · `agent` · `team`.
+    pub kind: String,
+    pub title: String,
+    /// The repository it ran in, or the team's repositories; empty for a workspace chat.
+    #[serde(default)]
+    pub repo: String,
+    #[serde(default)]
+    pub workspace: String,
+    /// When its first message of the period was written.
+    pub at: String,
+    /// Exchanges in the period.
+    pub turns: usize,
+    /// What the user asked, each one short — the first and the last when there were many.
+    #[serde(default)]
+    pub asks: Vec<String>,
+    /// How its last answer of the period starts, as prose; a team's status and last reason.
+    #[serde(default)]
+    pub outcome: String,
+}
+
 /// One repository's share of the period.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -245,6 +274,13 @@ pub struct RepoLog {
     pub reviews: Vec<ReviewItem>,
     /// Branches other than the default with the user's commits of the period — not merged yet.
     pub open_branches: Vec<String>,
+    /// Files changed and not committed in the working copy now — only read for a period that
+    /// reaches the last working day, since it says nothing about an older one.
+    #[serde(default)]
+    pub uncommitted_count: usize,
+    /// The first few of them.
+    #[serde(default)]
+    pub uncommitted: Vec<String>,
 }
 
 impl RepoLog {
@@ -270,6 +306,9 @@ pub struct WorkLog {
     pub repos: Vec<RepoLog>,
     pub meetings: Vec<MeetingItem>,
     pub tickets: Vec<TicketItem>,
+    /// Chats, agents and teams of the period.
+    #[serde(default)]
+    pub ai_work: Vec<AiWorkItem>,
     /// What could not be read («github.com: no token») — said in the note, never hidden.
     pub notices: Vec<String>,
 }
@@ -284,7 +323,11 @@ impl WorkLog {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.active_repos().next().is_none() && self.meetings.is_empty() && self.tickets.is_empty()
+        self.active_repos().next().is_none()
+            && self.meetings.is_empty()
+            && self.tickets.is_empty()
+            && self.ai_work.is_empty()
+            && self.repos.iter().all(|r| r.uncommitted_count == 0)
     }
 }
 

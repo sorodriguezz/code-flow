@@ -1545,7 +1545,7 @@ async fn integrate(db: &Db, run: &Run, work: Item) -> Result<(), String> {
     let (integ, branch) = (repo.integration_path.clone(), work.branch.clone());
     let message = format!("Merge «{}» ({})", work.title, work.member_name);
     let merged = blocking(move || {
-        let _git = crate::git::write_lock();
+        let _git = crate::git::write_lock(&integ);
         gitops::merge_into_integration(&integ, &branch, &message)
     })
     .await?;
@@ -1920,7 +1920,7 @@ async fn land_all(db: &Db, run: &Run) -> Result<(), String> {
         );
         let message = gitops::commit_message(&run.policy.commit_style, "", &run.title);
         let landed = blocking(move || {
-            let _git = crate::git::write_lock();
+            let _git = crate::git::write_lock(&r);
             gitops::land(&r, &t, &p, &b, &mode, &message, push)
         })
         .await?;
@@ -2250,7 +2250,7 @@ async fn tidy_run(db: &Db, run_id: &str) -> Result<(), String> {
         branches.dedup();
         let (r, target, integration) = (repo.local_path.clone(), repo.target_branch.clone(), repo.integration_branch.clone());
         let _ = blocking(move || {
-            let _git = crate::git::write_lock();
+            let _git = crate::git::write_lock(&r);
             for p in &paths {
                 gitops::remove_worktree(&r, p);
             }

@@ -30,7 +30,7 @@ pub fn ai_checkpoint_changed_paths(repo_path: String, checkpoint_id: String) -> 
 /// paths it touched, so the UI can report what it undid instead of a bare "done".
 #[tauri::command(async)]
 pub fn restore_ai_checkpoint(repo_path: String, checkpoint_id: String) -> Result<Vec<String>, String> {
-    let _write = crate::git::write_lock();
+    let _write = crate::git::write_lock(&repo_path);
     let restored = checkpoint::restore(&repo_path, &checkpoint_id)?;
     record_revert(&repo_path, &checkpoint_id, &restored);
     Ok(restored)
@@ -53,7 +53,7 @@ fn record_revert(repo_path: &str, checkpoint_id: &str, paths: &[String]) {
 
 #[tauri::command(async)]
 pub fn delete_ai_checkpoint(repo_path: String, checkpoint_id: String) -> Result<(), String> {
-    let _write = crate::git::write_lock();
+    let _write = crate::git::write_lock(&repo_path);
     checkpoint::remove(&repo_path, &checkpoint_id)
 }
 
@@ -87,7 +87,7 @@ pub fn ai_checkpoint_file(repo_path: String, checkpoint_id: String, path: String
 /// review. Sync, like [`restore_ai_checkpoint`]: a write.
 #[tauri::command(async)]
 pub fn restore_ai_checkpoint_paths(repo_path: String, checkpoint_id: String, edits: Vec<checkpoint::ReviewedEdit>) -> Result<Vec<String>, String> {
-    let _write = crate::git::write_lock();
+    let _write = crate::git::write_lock(&repo_path);
     let restored = checkpoint::restore_reviewed(&repo_path, &checkpoint_id, &edits)?;
     record_revert(&repo_path, &checkpoint_id, &restored);
     Ok(restored)

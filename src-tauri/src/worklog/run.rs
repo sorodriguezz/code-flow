@@ -19,6 +19,8 @@ const MAX_REPOS: usize = 40;
 const MAX_COMMITS: usize = 200;
 /// Repositories whose host is asked at once.
 const AT_ONCE: usize = 6;
+/// Uncommitted files named per repository; the rest is a count.
+const MAX_UNCOMMITTED_SHOWN: usize = 6;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -55,7 +57,7 @@ pub async fn collect(app: &AppHandle, request: &Request) -> Result<WorkLog, Stri
     let today = chrono::Local::now().date_naive();
     let period = super::period(request.period, today, date(&request.from), date(&request.to))?;
     let format = request.format.unwrap_or_else(|| Format::for_period(request.period));
-    let (repos, extra, meetings, tickets) = {
+    let (repos, extra, meetings, tickets, ai_work) = {
         let db = app.state::<Db>();
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let workspace = request.workspace_id.as_deref().filter(|w| !w.trim().is_empty());
@@ -64,8 +66,12 @@ pub async fn collect(app: &AppHandle, request: &Request) -> Result<WorkLog, Stri
             sources::extra_emails(&conn),
             sources::meetings(&conn, workspace, &period).map_err(|e| e.to_string())?,
             sources::tickets_moved(&conn, workspace, &period),
+            sources::ai_work(&conn, workspace, &period),
         )
     };
+    // The working copy as it is now says something about the last working day and today, nothing
+    // about a week that ended before them.
+    let reaches_now = period.to >= super::previous_workday(today);
     let mut notices: Vec<String> = Vec::new();
     if repos.len() > MAX_REPOS {
         notices.push(format!("{} repositories; the first {MAX_REPOS} were read", repos.len()));
@@ -91,6 +97,16 @@ pub async fn collect(app: &AppHandle, request: &Request) -> Result<WorkLog, Stri
                 (Vec::new(), Vec::new())
             }
         };
+        let (uncommitted_count, uncommitted) = if reaches_now {
+            let path = repo.path.clone();
+            tauri::async_runtime::spawn_blocking(move || wgit::uncommitted(&path, MAX_UNCOMMITTED_SHOWN))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default()
+        } else {
+            (0, Vec::new())
+        };
         let reviews = {
             let db = app.state::<Db>();
             let conn = db.0.lock().map_err(|e| e.to_string())?;
@@ -104,6 +120,8 @@ pub async fn collect(app: &AppHandle, request: &Request) -> Result<WorkLog, Stri
             commits,
             reviews,
             open_branches,
+            uncommitted_count,
+            uncommitted,
             ..Default::default()
         });
     }
@@ -142,8 +160,8 @@ pub async fn collect(app: &AppHandle, request: &Request) -> Result<WorkLog, Stri
             }
         }
     }
-    logs.retain(|log| !log.is_empty() || !log.open_branches.is_empty());
-    Ok(WorkLog { period, format, identity: identity.emails, repos: logs, meetings, tickets, notices })
+    logs.retain(|log| !log.is_empty() || !log.open_branches.is_empty() || log.uncommitted_count > 0);
+    Ok(WorkLog { period, format, identity: identity.emails, repos: logs, meetings, tickets, ai_work, notices })
 }
 
 /// The PRs behind the reviews CodeFlow ran, once each, with the host's facts when it was read.
@@ -260,9 +278,11 @@ pub async fn flow_op(app: &AppHandle, workspace_id: &str, args: &serde_json::Val
             "reviews": sum(|r| r.reviews.len()),
             "meetings": log.meetings.len(),
             "tickets": log.tickets.len(),
+            "aiWork": log.ai_work.len(),
+            "uncommittedRepos": log.repos.iter().filter(|r| r.uncommitted_count > 0).count(),
         },
         "empty": log.is_empty(),
-        "items": { "repos": log.repos, "meetings": log.meetings, "tickets": log.tickets, "notices": log.notices },
+        "items": { "repos": log.repos, "meetings": log.meetings, "tickets": log.tickets, "aiWork": log.ai_work, "notices": log.notices },
         "noteId": outcome.note.as_ref().map(|n| n.id.clone()),
         "noteTitle": outcome.note.as_ref().map(|n| n.title.clone()),
     }))

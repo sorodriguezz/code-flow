@@ -9,7 +9,7 @@
 use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
 
-use super::{CommitItem, Format, PeriodKind, PrItem, RepoLog, WorkLog};
+use super::{AiWorkItem, CommitItem, Format, PeriodKind, PrItem, RepoLog, WorkLog};
 
 /// What a summary was asked for — kept in the note so «Regenerar» asks the same again.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -64,6 +64,14 @@ struct Words {
     in_word: &'static str,
     daily: &'static str,
     weekly: &'static str,
+    ai_chat: &'static str,
+    ai_workspace_chat: &'static str,
+    ai_agent: &'static str,
+    ai_team: &'static str,
+    ai_work: &'static str,
+    uncommitted_in: &'static str,
+    files: &'static str,
+    turns: &'static str,
 }
 
 const ES: Words = Words {
@@ -99,6 +107,14 @@ const ES: Words = Words {
     in_word: "en",
     daily: "Daily",
     weekly: "Semanal",
+    ai_chat: "Con IA",
+    ai_workspace_chat: "Con IA en el workspace",
+    ai_agent: "Agente",
+    ai_team: "Equipo de agentes",
+    ai_work: "Trabajo con IA",
+    uncommitted_in: "Sin commitear en",
+    files: "archivos",
+    turns: "turnos",
 };
 
 const EN: Words = Words {
@@ -134,6 +150,14 @@ const EN: Words = Words {
     in_word: "in",
     daily: "Daily",
     weekly: "Weekly",
+    ai_chat: "With AI",
+    ai_workspace_chat: "With AI in the workspace",
+    ai_agent: "Agent",
+    ai_team: "Agent team",
+    ai_work: "Work with AI",
+    uncommitted_in: "Uncommitted in",
+    files: "files",
+    turns: "turns",
 };
 
 fn words(lang: &str) -> &'static Words {
@@ -204,6 +228,33 @@ fn count(n: usize, w: &Words) -> String {
     format!("{n} {}", if n == 1 { w.commit_one } else { w.commits })
 }
 
+fn ai_label(item: &AiWorkItem, w: &Words) -> &'static str {
+    match item.kind.as_str() {
+        "agent" => w.ai_agent,
+        "team" => w.ai_team,
+        "workspaceChat" => w.ai_workspace_chat,
+        _ => w.ai_chat,
+    }
+}
+
+/// «Con IA: Cuotas (api-pagos) — Agrega cuotas… · Ajusta los tests».
+fn ai_line(item: &AiWorkItem, w: &Words) -> String {
+    let repo = if item.repo.is_empty() { String::new() } else { format!(" ({})", item.repo) };
+    // The title is usually the first ask (an untitled thread is named after it): said once.
+    let asks: Vec<&str> = item.asks.iter().map(String::as_str).filter(|a| *a != item.title).collect();
+    let asks = if asks.is_empty() { String::new() } else { format!(" — {}", asks.join(" · ")) };
+    format!("{}: {}{repo}{asks}", ai_label(item, w), item.title)
+}
+
+/// «Sin commitear en **api-pagos**: 3 archivos (a.rs, b.rs, …)».
+fn uncommitted_line(repo: &RepoLog, w: &Words) -> Option<String> {
+    if repo.uncommitted_count == 0 {
+        return None;
+    }
+    let more = if repo.uncommitted_count > repo.uncommitted.len() { ", …" } else { "" };
+    Some(format!("{} **{}**: {} {} ({}{more})", w.uncommitted_in, repo.repo, repo.uncommitted_count, w.files, repo.uncommitted.join(", ")))
+}
+
 /// What was done: the standup's first section, one line per fact.
 fn done_lines(log: &WorkLog, w: &Words) -> Vec<String> {
     let mut lines = Vec::new();
@@ -229,6 +280,9 @@ fn done_lines(log: &WorkLog, w: &Words) -> Vec<String> {
     for ticket in &log.tickets {
         let state = if ticket.state.is_empty() { String::new() } else { format!(" → {}", ticket.state) };
         lines.push(format!("{}: {} {}{state}", w.ticket, ticket.key, ticket.title));
+    }
+    for item in &log.ai_work {
+        lines.push(ai_line(item, w));
     }
     lines
 }
@@ -264,6 +318,8 @@ fn next_lines(log: &WorkLog, w: &Words) -> Vec<String> {
         for pr in &repo.prs_awaiting_my_review {
             lines.push(format!("{}: {} ({})", w.review_asked, pr_link(pr), repo.repo));
         }
+        // Work the AI (or the user) left in the working copy: what «Hoy» picks up first.
+        lines.extend(uncommitted_line(repo, w));
     }
     lines
 }
@@ -360,6 +416,10 @@ pub fn fallback(log: &WorkLog, lang: &str) -> String {
         if !tickets.is_empty() {
             section(&mut out, w.tickets, &tickets, w.none);
         }
+        let ai: Vec<String> = log.ai_work.iter().map(|item| ai_line(item, w)).collect();
+        if !ai.is_empty() {
+            section(&mut out, w.ai_work, &ai, w.none);
+        }
         let mut pending = next_lines(log, w);
         pending.extend(blocker_lines(log, w));
         section(&mut out, w.pending, &pending, w.none);
@@ -410,6 +470,16 @@ pub fn sources(log: &WorkLog, lang: &str) -> String {
         any = true;
         out.push_str(&format!("- {}: [[{}]] · {} · {} min\n", w.meeting, meeting.title, meeting.started_at, meeting.minutes));
     }
+    for item in &log.ai_work {
+        any = true;
+        let repo = if item.repo.is_empty() { String::new() } else { format!(" · {}", item.repo) };
+        let turns = if item.turns > 0 { format!(" · {} {}", item.turns, w.turns) } else { String::new() };
+        out.push_str(&format!("- {}: {}{repo} · {}{turns}\n", ai_label(item, w), item.title, item.at));
+    }
+    for repo in log.repos.iter().filter(|r| r.uncommitted_count > 0) {
+        any = true;
+        out.push_str(&format!("- {}\n", uncommitted_line(repo, w).unwrap_or_default()));
+    }
     for ticket in &log.tickets {
         any = true;
         let title = if ticket.url.is_empty() { format!("{} {}", ticket.key, ticket.title) } else { format!("[{} {}]({})", ticket.key, ticket.title, ticket.url) };
@@ -456,7 +526,7 @@ pub fn facts(log: &WorkLog, lang: &str) -> String {
         log.period.from, log.period.to, log.period.kind, log.format
     );
     for repo in &log.repos {
-        if repo.is_empty() && repo.open_branches.is_empty() {
+        if repo.is_empty() && repo.open_branches.is_empty() && repo.uncommitted_count == 0 {
             continue;
         }
         out.push_str(&format!("\nREPO {} (workspace {})\n", repo.repo, repo.workspace));
@@ -481,12 +551,30 @@ pub fn facts(log: &WorkLog, lang: &str) -> String {
         for b in &repo.open_branches {
             out.push_str(&format!("  UNMERGED_BRANCH_WITH_MY_COMMITS {b}\n"));
         }
+        if repo.uncommitted_count > 0 {
+            out.push_str(&format!("  UNCOMMITTED_CHANGES_NOW files={}: {}\n", repo.uncommitted_count, repo.uncommitted.join(", ")));
+        }
     }
     for m in &log.meetings {
         out.push_str(&format!("\nMEETING \"{}\" at {} ({} min): {}\n", m.title, m.started_at, m.minutes, m.summary));
     }
     for t in &log.tickets {
         out.push_str(&format!("\nTICKET {} \"{}\" state={} branch={} at {}\n", t.key, t.title, t.state, t.branch, t.at));
+    }
+    for a in &log.ai_work {
+        let kind = match a.kind.as_str() {
+            "agent" => "AI_AGENT_TASK",
+            "team" => "AI_AGENT_TEAM_RUN",
+            "workspaceChat" => "AI_WORKSPACE_CHAT",
+            _ => "AI_REPO_CHAT",
+        };
+        out.push_str(&format!("\n{kind} \"{}\" repo={} workspace={} turns={} at {}\n", a.title, a.repo, a.workspace, a.turns, a.at));
+        for ask in &a.asks {
+            out.push_str(&format!("  I_ASKED: {ask}\n"));
+        }
+        if !a.outcome.is_empty() {
+            out.push_str(&format!("  RESULT: {}\n", a.outcome));
+        }
     }
     if log.is_empty() {
         out.push_str("\n(NO ACTIVITY RECORDED)\n");
@@ -502,6 +590,7 @@ pub fn spoken(log: &WorkLog, lang: &str) -> String {
     let merged: usize = log.repos.iter().map(|r| r.prs_merged.len()).sum();
     let reviews: usize = log.repos.iter().map(|r| r.reviews.len()).sum();
     let meetings = log.meetings.len();
+    let ai = log.ai_work.len();
     let failing = log.repos.iter().flat_map(|r| &r.prs_in_progress).filter(|p| !p.failing_checks.is_empty()).count();
     let es = lang != "en";
     let when = match (log.period.kind, es) {
@@ -538,6 +627,13 @@ pub fn spoken(log: &WorkLog, lang: &str) -> String {
     }
     if meetings > 0 {
         parts.push(if es { format!("{meetings} {}", if meetings == 1 { "reunión" } else { "reuniones" }) } else { format!("{meetings} {}", if meetings == 1 { "meeting" } else { "meetings" }) });
+    }
+    if ai > 0 {
+        parts.push(if es {
+            format!("{ai} {} con IA", if ai == 1 { "trabajo" } else { "trabajos" })
+        } else {
+            format!("{ai} {} with AI", if ai == 1 { "piece of work" } else { "pieces of work" })
+        });
     }
     let and = if es { " y " } else { " and " };
     let list = match parts.as_slice() {
@@ -598,9 +694,12 @@ pub(crate) mod tests {
                 prs_awaiting_my_review: vec![pr(4, "Login", "open", "feature/login")],
                 reviews: vec![ReviewItem { run_id: "r1".into(), pr_id: 4, pr_title: "Login".into(), url: "https://example.com/pr/4".into(), author: "ana".into(), level: "standard".into(), findings: 2, at: "2026-10-23T14:00:00+00:00".into() }],
                 open_branches: vec!["feature/pay".into()],
+                uncommitted_count: 0,
+                uncommitted: vec![],
             }],
             meetings: vec![MeetingItem { meeting_id: "m1".into(), note_id: "n1".into(), title: "Planning".into(), started_at: "2026-10-23T15:00:00+00:00".into(), minutes: 30, summary: "Lanzamos el viernes".into() }],
             tickets: vec![],
+            ai_work: vec![],
             notices: vec![],
         }
     }
@@ -663,6 +762,43 @@ pub(crate) mod tests {
             spoken(&sample(Format::Daily), "es"),
             "Ayer: 1 commit en 1 repositorio, 1 PR abiertos, 1 revisiones y 1 reunión. Ojo: 1 PR con checks fallando. Te dejé el resumen en Notas."
         );
+    }
+
+    fn with_ai_work_only() -> WorkLog {
+        let mut log = sample(Format::Daily);
+        log.repos[0].commits.clear();
+        log.repos[0].prs_opened.clear();
+        log.repos[0].prs_in_progress.clear();
+        log.repos[0].prs_awaiting_my_review.clear();
+        log.repos[0].reviews.clear();
+        log.repos[0].open_branches.clear();
+        log.repos[0].uncommitted_count = 8;
+        log.repos[0].uncommitted = vec!["src/a.rs".into(), "src/b.rs".into()];
+        log.meetings.clear();
+        log.ai_work = vec![
+            AiWorkItem { kind: "workspaceChat".into(), title: "Configura los adaptadores".into(), repo: String::new(), workspace: "Clientes".into(), at: "2026-10-23T11:00:00+00:00".into(), turns: 2, asks: vec!["Configura los adaptadores".into(), "Agrega Redis".into()], outcome: "Adaptadores listos".into() },
+            AiWorkItem { kind: "agent".into(), title: "Migrar login (Backend)".into(), repo: "api-pagos".into(), workspace: "Clientes".into(), at: "2026-10-23T13:00:00+00:00".into(), turns: 1, asks: vec!["Migra el login a OAuth".into()], outcome: String::new() },
+        ];
+        log
+    }
+
+    #[test]
+    fn a_day_of_ai_work_without_commits_is_not_empty() {
+        let log = with_ai_work_only();
+        assert!(!log.is_empty());
+        let text = fallback(&log, "es");
+        assert!(text.contains("## Ayer\n\n- Con IA en el workspace: Configura los adaptadores — Agrega Redis\n- Agente: Migrar login (Backend) (api-pagos) — Migra el login a OAuth\n"), "{text}");
+        assert!(text.contains("## Hoy\n\n- Sin commitear en **api-pagos**: 8 archivos (src/a.rs, src/b.rs, …)"), "{text}");
+        let facts = facts(&log, "es");
+        assert!(facts.contains("AI_WORKSPACE_CHAT \"Configura los adaptadores\""));
+        assert!(facts.contains("  I_ASKED: Agrega Redis"));
+        assert!(facts.contains("  RESULT: Adaptadores listos"));
+        assert!(facts.contains("UNCOMMITTED_CHANGES_NOW files=8"));
+        assert!(!facts.contains("NO ACTIVITY"));
+        assert!(sources(&log, "es").contains("- Agente: Migrar login (Backend) · api-pagos · 2026-10-23T13:00:00+00:00 · 1 turnos"));
+        assert_eq!(spoken(&log, "es"), "Ayer: 2 trabajos con IA. Te dejé el resumen en Notas.");
+        let weekly = fallback(&WorkLog { format: Format::Weekly, ..log }, "en");
+        assert!(weekly.contains("## Work with AI\n\n- With AI in the workspace: Configura los adaptadores"), "{weekly}");
     }
 
     #[test]

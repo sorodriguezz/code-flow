@@ -72,6 +72,21 @@ export interface WorklogRepo {
   prsAwaitingMyReview: WorklogPr[];
   reviews: WorklogReview[];
   openBranches: string[];
+  /** Files changed and not committed now — read only for a period reaching the last working day. */
+  uncommittedCount: number;
+  uncommitted: string[];
+}
+
+/** A chat, agent task or team run of the period — see `worklog::AiWorkItem`. */
+export interface WorklogAiWork {
+  kind: "chat" | "workspaceChat" | "agent" | "team";
+  title: string;
+  repo: string;
+  workspace: string;
+  at: string;
+  turns: number;
+  asks: string[];
+  outcome: string;
 }
 
 export interface WorklogMeeting {
@@ -99,6 +114,7 @@ export interface WorkLog {
   repos: WorklogRepo[];
   meetings: WorklogMeeting[];
   tickets: WorklogTicket[];
+  aiWork: WorklogAiWork[];
   notices: string[];
 }
 

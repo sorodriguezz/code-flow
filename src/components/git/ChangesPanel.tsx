@@ -89,7 +89,8 @@ import { FileHistoryModal } from "./FileHistoryModal";
 import { fileStatusColor, fileStatusLabelKey, fileStatusLetter } from "../../lib/fileStatus";
 import { buildFileTree, type FileTreeNode } from "../../lib/buildFileTree";
 import { splitPath } from "../../lib/splitPath";
-import { useT } from "../../state/languageStore";
+import { translate, useT } from "../../state/languageStore";
+import { notify } from "../../state/notificationStore";
 import { ConflictsBanner } from "./ConflictsBanner";
 import { SecretScanModal } from "./SecretScanModal";
 import { useUiStore } from "../../state/uiStore";
@@ -1142,9 +1143,13 @@ export function ChangesPanel({
       const full = await getStagedDiff(target);
       const text = await generateCommitMessage(diffToText(full), runId, workspaceId);
       patch(target, { message: text });
+      announceCommitMessage(target, workspaceId, "success");
     } catch (e) {
       // Stopped from the status bar: a decision, not a failure — the box keeps what it had.
-      if (!isCancellation(e)) patch(target, { aiError: parseClaudeError(String(e)) });
+      if (!isCancellation(e)) {
+        patch(target, { aiError: parseClaudeError(String(e)) });
+        announceCommitMessage(target, workspaceId, "error");
+      }
     } finally {
       useAiRunStore.getState().finish(runId);
       patch(target, { aiBusy: false });
@@ -1869,6 +1874,47 @@ export function ChangesPanel({
 }
 
 /** The workspace and project a repository path is registered as, if it is one. */
+/**
+ * A generated commit message landed — said where the user is, not only where the box is.
+ *
+ * It used to say nothing: the message appeared in the box of the repository it was for, which is
+ * exactly the one the user had left while the model thought (user, 2026-11-05: «al generar commit
+ * con IA y me pongo en otro repositorio no avisa»). So it is filed in the notification centre —
+ * which leads back to that repository's Changes — and, when another repository is on screen, also
+ * said as a toast with the way back. On the repository itself the box filling in is the news.
+ */
+function announceCommitMessage(repoPath: string, workspaceId: string | null, status: "success" | "error"): void {
+  const repo = repoDisplayName(repoPath);
+  const where = projectAt(repoPath);
+  notify({
+    source: "changes",
+    titleKey: status === "success" ? "notifications.commitMessageReady" : "notifications.commitMessageFailed",
+    status,
+    detail: repo,
+    workspaceId: where?.workspaceId ?? workspaceId,
+    target: where ? { projectId: where.projectId, view: "changes" } : undefined,
+  });
+  if (useRepoStore.getState().repoPath === repoPath) return;
+  useToastStore.getState().pushToast(
+    translate(status === "success" ? "changes.commitMessageReadyIn" : "changes.commitMessageFailedIn", { repo }),
+    status === "success" ? "success" : "error",
+    where
+      ? {
+          action: {
+            label: translate("changes.backToRepo", { repo }),
+            run: () => {
+              void useWorkspaceStore
+                .getState()
+                .focusProject(where.workspaceId, where.projectId)
+                .then(() => useUiStore.getState().setActiveView("changes"));
+            },
+          },
+          lifetimeMs: 10_000,
+        }
+      : undefined,
+  );
+}
+
 function projectAt(repoPath: string): { workspaceId: string; projectId: string } | null {
   const normal = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
   for (const [workspaceId, projects] of Object.entries(useWorkspaceStore.getState().projectsByWorkspace)) {
