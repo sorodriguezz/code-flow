@@ -46,6 +46,7 @@ interface KnowledgeStore {
 let subscribed = false;
 
 export const useKnowledgeStore = create<KnowledgeStore>((set, get) => {
+  let latestLoad = 0;
   const again = async () => {
     const ws = get().workspaceId;
     if (ws) await get().load(ws);
@@ -65,6 +66,7 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => {
     progress: {},
 
     load: async (workspaceId) => {
+      const request = ++latestLoad;
       if (!subscribed) {
         subscribed = true;
         void onLocalAiDownload((event) => {
@@ -75,9 +77,9 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => {
       set((s) => (s.workspaceId === workspaceId ? {} : { workspaceId, overview: null }));
       try {
         const overview = await knowledgeOverview(workspaceId);
-        if (get().workspaceId === workspaceId) set({ overview });
+        if (request === latestLoad && get().workspaceId === workspaceId) set({ overview });
       } catch (e) {
-        pushErrorToast(String(e));
+        if (request === latestLoad) pushErrorToast(String(e));
       }
     },
 

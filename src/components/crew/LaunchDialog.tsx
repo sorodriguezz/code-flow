@@ -5,17 +5,19 @@ import { useAgentsStore } from "../../state/agentsStore";
 import { useChainStore } from "../../state/chainStore";
 import { useTeamStore } from "../../state/teamStore";
 import { useBacklogStore } from "../../state/backlogStore";
+import { useT } from "../../state/languageStore";
 import { useActiveProjects, useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { LaunchError, launch, planLaunch, type LaunchInput, type LaunchMode } from "../../lib/agents/launch";
 import { repoColorVar } from "../../lib/agents/agentColors";
+import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
 import { composeGoal } from "../../lib/backlog/status";
 import { emptyBacklogItem, type BacklogItem, type BacklogMode } from "../../types/crew";
 import type { PolicyPreset } from "../../types/team";
 import { AgentAvatar, TeamAvatar } from "./kit/Avatar";
 import { Btn, Label, Modal, SPRING, SelectBox, Switch, ToggleChip, field } from "./kit/ui";
 import { listBranches } from "../../lib/tauri/commands";
-import type { BranchInfo } from "../../types/domain";
+import type { BranchInfo, WorkspaceAgent } from "../../types/domain";
 import { GoalFilesBar, useDropRef, useGoalFiles, withFiles } from "./kit/GoalFiles";
 import { useCrewStore, useL } from "./state";
 
@@ -47,6 +49,7 @@ const ERRORS: Record<string, [string, string]> = {
 
 export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: string; assignee?: Who; cardId?: string }) {
   const l = useL();
+  const t = useT();
   const close = useCrewStore((s) => s.close);
   const crew = useCrewStore();
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
@@ -56,6 +59,15 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
   const templates = useChainStore((s) => s.templates);
   const card = useBacklogStore((s) => (cardId ? s.items.find((i) => i.id === cardId) ?? null : null));
   const runnable = roster.filter((a) => a.enabled && a.provider && a.model);
+  const execution = (a: WorkspaceAgent) => {
+    if (!a.provider.trim() || !a.model.trim()) return l("Falta proveedor o modelo", "Missing provider or model");
+    const effort = a.effort?.trim() || l("por defecto", "default");
+    return [
+      providerDisplayLabel(a.provider, t),
+      modelDisplayLabel(a.provider, a.model, t),
+      l(`Esfuerzo ${effort}`, `Effort ${effort}`),
+    ].join(" · ");
+  };
 
   const [goal, setGoal] = useState(initialGoal ?? "");
   const filesBox = useDropRef();
@@ -165,8 +177,8 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
       if (saved) for (const link of result.links) await useBacklogStore.getState().link(saved.id, link.kind, link.refId);
       close();
       if (result.open?.kind === "team_run") {
+        void useTeamStore.getState().select(null);
         crew.setSpace("en-vivo");
-        void useTeamStore.getState().select(result.open.id);
       } else if (result.open?.kind === "task") {
         crew.open({ kind: "task", id: result.open.id });
       } else if (result.open?.kind === "chain") {
@@ -210,21 +222,43 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
       </div>
       <div className="flex flex-col gap-1.5">
         <Label>{l("Quién", "Who")}</Label>
-        <div className="flex flex-wrap gap-2">
-          {runnable.map((a) => (
-            <Pick key={a.id} title={l(`${a.name} hace la tarea`, `${a.name} does the task`)} on={who?.kind === "agent" && who.id === a.id} onClick={() => { setWho({ kind: "agent", id: a.id }); if (mode === "team") setMode("solo"); }}>
-              <AgentAvatar agent={a} size={24} />
-              <span>{a.name}</span>
-            </Pick>
-          ))}
-          {teams.map((t) => (
-            <Pick key={t.id} title={l(`El equipo ${t.name} la planifica y reparte`, `Team ${t.name} plans and splits it`)} on={who?.kind === "team" && who.id === t.id} onClick={() => { setWho({ kind: "team", id: t.id }); setMode("team"); }}>
-              <TeamAvatar size={24} />
-              <span>{t.name}</span>
-            </Pick>
-          ))}
-          {runnable.length === 0 && teams.length === 0 && <span className="text-[12px] text-[var(--cf-text-muted)]">{l("Aún no hay agentes: créalos en «Agentes».", "No agents yet: create them in «Agents».")}</span>}
-        </div>
+        {runnable.length > 0 && (
+          <div role="group" aria-label={l("Agentes", "Agents")} className="flex flex-col gap-1.5">
+            <span className="text-[11.5px] font-medium text-[var(--cf-text-muted)]">{l("Agentes", "Agents")}</span>
+            <div className="flex flex-wrap gap-2">
+              {runnable.map((a) => (
+                <Pick key={a.id} title={`${a.name}\n${execution(a)}`} on={who?.kind === "agent" && who.id === a.id} onClick={() => { setWho({ kind: "agent", id: a.id }); if (mode === "team") setMode("solo"); }}>
+                  <AgentAvatar agent={a} size={24} />
+                  <span>{a.name}</span>
+                </Pick>
+              ))}
+            </div>
+          </div>
+        )}
+        {teams.length > 0 && (
+          <div role="group" aria-label={l("Equipos", "Teams")} className="mt-1.5 flex flex-col gap-1.5">
+            <span className="text-[11.5px] font-medium text-[var(--cf-text-muted)]">{l("Equipos", "Teams")}</span>
+            <div className="flex flex-wrap gap-2">
+              {teams.map((team) => {
+                const members = [...team.members].sort((a, b) => Number(b.id === team.lead) - Number(a.id === team.lead));
+                const routes = members.map((member) => {
+                  const a = roster.find((entry) => entry.id === member.agent_id);
+                  const name = member.name || a?.name || l("Miembro", "Member");
+                  const role = member.id === team.lead ? l(" (líder)", " (lead)") : "";
+                  return `${name}${role} — ${a ? execution(a) : l("Agente no disponible", "Agent unavailable")}`;
+                });
+                const title = [team.name, ...(routes.length ? routes : [l("Sin miembros todavía", "No members yet")])].join("\n");
+                return (
+                  <Pick key={team.id} title={title} on={who?.kind === "team" && who.id === team.id} onClick={() => { setWho({ kind: "team", id: team.id }); setMode("team"); }}>
+                    <TeamAvatar size={24} />
+                    <span>{team.name}</span>
+                  </Pick>
+                );
+              })}
+            </div>
+          </div>
+        )}
+        {runnable.length === 0 && teams.length === 0 && <span className="text-[12px] text-[var(--cf-text-muted)]">{l("Aún no hay agentes: créalos en «Agentes».", "No agents yet: create them in «Agents».")}</span>}
       </div>
       <div className="flex flex-col gap-2">
         <Label>{l("Cómo", "How")}</Label>
@@ -263,7 +297,7 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
             <Label>{l("Compiten además", "Also racing")}</Label>
             <div className="flex flex-wrap gap-2">
               {runnable.filter((a) => a.id !== who?.id && (a.edits ?? true)).map((a) => (
-                <Pick key={a.id} title={l(`${a.name} compite con el mismo objetivo`, `${a.name} races on the same goal`)} on={racers.includes(a.id)} onClick={() => setRacers((r) => (r.includes(a.id) ? r.filter((x) => x !== a.id) : [...r, a.id].slice(0, 4)))}>
+                <Pick key={a.id} title={`${a.name}\n${execution(a)}`} on={racers.includes(a.id)} onClick={() => setRacers((r) => (r.includes(a.id) ? r.filter((x) => x !== a.id) : [...r, a.id].slice(0, 4)))}>
                   <AgentAvatar agent={a} size={22} />
                   <span>{a.name}</span>
                 </Pick>

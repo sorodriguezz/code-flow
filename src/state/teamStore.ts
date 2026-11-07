@@ -145,7 +145,7 @@ export const useTeamStore = create<TeamState>((set, get) => ({
       recap ? `Lo que se hizo e integró:\n${recap}` : "",
       "Ese trabajo ya está en la rama destino: parte desde ahí.",
     ].filter(Boolean).join("\n");
-    return get().start({
+    const next = await get().start({
       teamId: run.team_id,
       goal,
       title: firstLines(message, 1).slice(0, 60),
@@ -153,6 +153,8 @@ export const useTeamStore = create<TeamState>((set, get) => ({
       policy: run.policy,
       agentProjectId: run.agent_project_id || undefined,
     });
+    if (next) await get().select(next);
+    return next;
   },
 
   start: async (input) => {
@@ -161,7 +163,6 @@ export const useTeamStore = create<TeamState>((set, get) => ({
     try {
       const state = await teamStart({ workspaceId, ...input });
       set((s) => ({ states: { ...s.states, [state.run.id]: state }, runs: upsertRun(s.runs, state.run) }));
-      await get().select(state.run.id);
       void get().pump(state.run.id);
       return state.run.id;
     } catch (e) {

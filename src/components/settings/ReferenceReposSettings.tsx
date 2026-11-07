@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { GitBranch, Loader2, Pencil, Plus, RefreshCw, ScanSearch, Trash2 } from "lucide-react";
+import { FolderOpen, GitBranch, Loader2, Pencil, Plus, RefreshCw, ScanSearch, Trash2 } from "lucide-react";
 import { buttonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
@@ -8,10 +8,11 @@ import { RailSection, PaneBlock } from "./settingsNav";
 import { useT } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useConfirmStore } from "../../state/confirmStore";
+import { useUiStore } from "../../state/uiStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { describeGitError } from "../../lib/gitErrors";
 import { formatBytes } from "../../lib/tauri/backupCommands";
-import { getSetting, setSetting } from "../../lib/tauri/commands";
+import { getSetting, revealInFileManager, setSetting } from "../../lib/tauri/commands";
 import {
   REFREPOS_KNOWLEDGE_KEY,
   REFREPOS_REVIEW_KEY,
@@ -27,6 +28,7 @@ import {
   referenceReposList,
   type RefRepoPatch,
   type RefRepoView,
+  type RefReposView,
   type RemoteBranches,
 } from "../../lib/tauri/refreposCommands";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -77,15 +79,15 @@ export function ReferenceReposSettings() {
 
 function ReposPane() {
   const t = useT();
-  const [repos, setRepos] = useState<RefRepoView[] | null>(null);
+  const [overview, setOverview] = useState<RefReposView | null>();
   const [adding, setAdding] = useState(false);
 
   const reload = useCallback(async () => {
     try {
-      setRepos(await referenceReposList());
+      setOverview(await referenceReposList());
     } catch (e) {
       pushErrorToast(String(e));
-      setRepos([]);
+      setOverview(null);
     }
   }, []);
 
@@ -97,10 +99,26 @@ function ReposPane() {
     };
   }, [reload]);
 
-  if (!repos) return <Loader2 size={14} className="animate-spin text-[var(--cf-text-muted)]" />;
+  if (overview === undefined) return <Loader2 size={14} className="animate-spin text-[var(--cf-text-muted)]" />;
+  const repos = overview?.repos ?? [];
 
   return (
     <div className="flex flex-col gap-4">
+      {overview && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 py-2">
+          <div className="min-w-0 flex-1">
+            <b className="block text-[12px] text-[var(--cf-text)]">
+              {overview.embeddingModel ? t("knowledge.embeddingModel", { model: overview.embeddingModel }) : t("knowledge.embeddingTextOnly")}
+            </b>
+            <span className="block text-[11px] leading-snug text-[var(--cf-text-muted)]">
+              {t(overview.embeddingModel ? "refrepos.embeddingShared" : "refrepos.embeddingInactive")}
+            </span>
+          </div>
+          <button type="button" onClick={() => useUiStore.getState().openSettingsAt("claude", "knowledge")} className={buttonClass({ variant: "secondary", size: "sm" })}>
+            {t("refrepos.embeddingSettings")}
+          </button>
+        </div>
+      )}
       {repos.length > 0 && (
         <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
           {repos.map((repo) => (
@@ -321,6 +339,8 @@ function RepoRow({ repo }: { repo: RefRepoView }) {
   const ask = useConfirmStore((s) => s.ask);
   const [editing, setEditing] = useState(false);
   const busy = repo.busy !== null;
+  const clonePath = repo.localPath;
+  const openFolder = t("refrepos.openFolder");
 
   const run = (action: () => Promise<unknown>) => {
     void action().catch((e) => pushErrorToast(String(e)));
@@ -357,6 +377,16 @@ function RepoRow({ repo }: { repo: RefRepoView }) {
           </span>
         )}
         <span className="flex-1" />
+        <button
+          type="button"
+          disabled={busy || !clonePath}
+          aria-label={openFolder}
+          title={clonePath ? `${openFolder}\n${clonePath}` : t("refrepos.openFolderMissing")}
+          onClick={() => { if (clonePath) run(() => revealInFileManager(clonePath)); }}
+          className={buttonClass({ variant: "ghost", size: "sm" })}
+        >
+          <FolderOpen size={13} />
+        </button>
         <button
           type="button"
           disabled={busy}

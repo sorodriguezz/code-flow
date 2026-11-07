@@ -41,6 +41,8 @@ export interface KnowledgeOverview {
   embedModels: EmbedRow[];
   embedSetting: string | null;
   space: string | null;
+  embeddingModel: string | null;
+  pendingVectors: number;
   repos: { projectId: string; name: string; status: KnowledgeStatus }[];
   folders: { collection: KnowledgeCollection; status: KnowledgeStatus }[];
   /** The workspace's own content indexed beside the repositories: notes, meetings, generated docs,
@@ -72,6 +74,12 @@ export interface KnowledgeRefreshed {
   chunks: number;
 }
 
+export interface KnowledgeSearchResult {
+  found: KnowledgeFound[];
+  /** Set only when the search actually queried the vector index. */
+  embeddingModel: string | null;
+}
+
 export const knowledgeOverview = (workspaceId: string) => invoke<KnowledgeOverview>("knowledge_overview", { workspaceId });
 export const knowledgeAddFolder = (workspaceId: string, path: string, localOnly: boolean) =>
   invoke<KnowledgeCollection>("knowledge_add_folder", { workspaceId, path, name: null, localOnly });
@@ -86,12 +94,13 @@ export const knowledgeReindex = (workspaceId: string) => invoke<[string, Knowled
 /** Empties the workspace's part of the index (rebuilt by the next search); resolves to the collections removed. */
 export const knowledgeClear = (workspaceId: string) => invoke<number>("knowledge_clear", { workspaceId });
 export const knowledgeSearch = (workspaceId: string, query: string, limit?: number) =>
-  invoke<KnowledgeFound[]>("knowledge_search", { workspaceId, query, limit: limit ?? null });
+  invoke<KnowledgeSearchResult>("knowledge_search", { workspaceId, query, limit: limit ?? null });
 /** Downloads an embedding model; with a workspace, its vectors start as soon as it is in. */
 export const knowledgeDownloadModel = (modelId: string, workspaceId: string | null) =>
   invoke<void>("knowledge_download_model", { modelId, workspaceId });
 /** A vectorizing pass under way (`knowledge::Vectorizing`). */
 export interface KnowledgeVectorizing {
+  workspaceId: string | null;
   /** `<model>@<digest>`. */
   space: string;
   done: number;

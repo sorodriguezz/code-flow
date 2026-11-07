@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { FolderPlus, Loader2, RefreshCw, Search, Trash2 } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { buttonClass } from "../common/Button";
@@ -15,15 +15,8 @@ import { useChatContextModeStore, type ChatContextMode } from "../../state/chatC
 import { useUiStore } from "../../state/uiStore";
 import { useConfirmStore } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
-import { knowledgeSearch, type KnowledgeFound, type KnowledgeOverview, type KnowledgeStatus } from "../../lib/tauri/knowledgeCommands";
+import { knowledgeSearch, type KnowledgeOverview, type KnowledgeSearchResult, type KnowledgeStatus } from "../../lib/tauri/knowledgeCommands";
 import type { TranslationKey } from "../../lib/i18n/translations";
-
-/** The sources beside repositories and folders, as `knowledge_overview` sums them (`SourceKnowledge`). */
-type SourceKind = "note" | "meeting" | "doc" | "story" | "review" | "commit";
-interface KnowledgeSource {
-  kind: SourceKind;
-  status: KnowledgeStatus;
-}
 
 /** What a result's or a source's chip says, by its `source`. */
 const KIND_LABEL: Record<string, TranslationKey> = {
@@ -98,17 +91,14 @@ export function AiKnowledgeSettings() {
   const t = useT();
   const ask = useConfirmStore((s) => s.ask);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const { overview, reindexing, progress, load, reindex, clear, setCloud, addFolder, updateFolder, removeFolder, useModel, download, cancelDownload, removeModel } =
+  const { workspaceId: loadedWorkspaceId, overview, reindexing, progress, load, reindex, clear, setCloud, addFolder, updateFolder, removeFolder, useModel, download, cancelDownload, removeModel } =
     useKnowledgeStore();
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<KnowledgeFound[] | null>(null);
-  const [searching, setSearching] = useState(false);
 
   useEffect(() => {
     if (workspaceId) void load(workspaceId);
   }, [workspaceId, load]);
 
-  if (!workspaceId || !overview) {
+  if (!workspaceId || loadedWorkspaceId !== workspaceId || !overview) {
     return (
       <div className="flex flex-col gap-4">
         <ChatContextModePicker />
@@ -117,22 +107,8 @@ export function AiKnowledgeSettings() {
     );
   }
 
-  const activeModel = overview.embedSetting ?? overview.embedModels.find((m) => m.installed)?.id ?? null;
-  // Notes, meetings, generated docs, stories, review findings and commits — only the ones that hold
-  // something: an empty kind is a row that says nothing.
-  const sources = ((overview as KnowledgeOverview & { sources?: KnowledgeSource[] }).sources ?? []).filter((s) => s.status.files > 0);
-
-  const search = async () => {
-    if (!query.trim()) return;
-    setSearching(true);
-    try {
-      setResults(await knowledgeSearch(workspaceId, query.trim(), 8));
-    } catch (e) {
-      pushErrorToast(String(e));
-    } finally {
-      setSearching(false);
-    }
-  };
+  const activeModel = overview.embedModels.find((model) => overview.space?.startsWith(`${model.id}@`));
+  const sources = (overview.sources ?? []).filter((s) => s.status.files > 0);
 
   const pickFolder = async (localOnly: boolean) => {
     const chosen = await openDialog({ directory: true, multiple: false });
@@ -152,6 +128,7 @@ export function AiKnowledgeSettings() {
 
       <div className="flex flex-col gap-1.5">
         <span className="text-[12px] text-[var(--cf-text-muted)]">{t("knowledge.semantic")}</span>
+        <EmbeddingStatus key={workspaceId} workspaceId={workspaceId} overview={overview} />
         <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
           {overview.embedModels.map((model) => (
             <ModelDownloadRow
@@ -167,7 +144,7 @@ export function AiKnowledgeSettings() {
                 installed: model.installed,
                 partial_bytes: model.partialBytes,
               }}
-              active={model.installed && model.id === activeModel}
+              active={model.installed && model.id === activeModel?.id}
               progress={progress[model.id]}
               note={<span>{t("knowledge.dims", { n: String(model.dims) })}</span>}
               onDownload={() => void download(model.id)}
@@ -177,16 +154,12 @@ export function AiKnowledgeSettings() {
             />
           ))}
         </div>
-        <span className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
-          {overview.space ? t("knowledge.semanticOn") : t("knowledge.semanticOff")}
-        </span>
-        <VectorizingNow onDone={() => void load(workspaceId)} />
       </div>
 
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center gap-2">
           <span className="text-[12px] text-[var(--cf-text-muted)]">{t("knowledge.sources")}</span>
-          <button type="button" disabled={reindexing} onClick={() => void reindex()} className={buttonClass({ variant: "ghost", size: "sm" })}>
+          <button type="button" disabled={reindexing} title={t("knowledge.reindexHint")} onClick={() => void reindex()} className={buttonClass({ variant: "ghost", size: "sm" })}>
             {reindexing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
             {t("knowledge.reindex")}
           </button>
@@ -275,75 +248,135 @@ export function AiKnowledgeSettings() {
         </div>
       </div>
 
-      <div className="flex flex-col gap-1.5">
-        <span className="text-[12px] text-[var(--cf-text-muted)]">{t("knowledge.try")}</span>
-        <div className="flex max-w-[520px] items-center gap-2">
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && void search()}
-            placeholder={t("knowledge.tryPlaceholder")}
-            aria-label={t("knowledge.try")}
-            className={fieldClass({ size: "sm", className: "flex-1" })}
-          />
-          <button type="button" disabled={!query.trim() || searching} onClick={() => void search()} className={buttonClass({ variant: "secondary", size: "sm" })}>
-            {searching ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
-            {t("knowledge.search")}
-          </button>
-        </div>
-        {results && results.length === 0 && <span className="text-[12px] text-[var(--cf-text-muted)]">{t("knowledge.noResults")}</span>}
-        {results && results.length > 0 && (
-          <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
-            {results.map((found, index) => (
-              <div key={`${found.path}-${index}`} className="border-b border-[var(--cf-border)] px-3 py-1.5 last:border-b-0">
-                <div className="flex items-center gap-2">
-                  <span className={chipClass("neutral")}>{KIND_LABEL[found.source] ? t(KIND_LABEL[found.source]) : found.source}</span>
-                  {found.source === "repo" || found.source === "symbol" ? (
-                    <button
-                      type="button"
-                      onClick={() => useUiStore.getState().openInEditor(found.path, found.startLine || undefined)}
-                      className="min-w-0 truncate font-mono text-[11px] text-[var(--cf-text)] hover:underline"
-                    >
-                      {found.path}
-                      {found.startLine > 0 && `:${found.startLine}-${found.endLine}`}
-                    </button>
-                  ) : (
-                    <span className="min-w-0 truncate font-mono text-[11px] text-[var(--cf-text)]">{found.label || found.path}</span>
-                  )}
-                  {found.heading && <span className="truncate text-[11px] text-[var(--cf-text-muted)]">{found.heading}</span>}
-                </div>
-                <p className="mt-0.5 line-clamp-3 whitespace-pre-wrap text-[11px] leading-snug text-[var(--cf-text-muted)]">{found.snippet}</p>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      <KnowledgeSearch key={workspaceId} workspaceId={workspaceId} />
     </div>
   );
 }
 
-/**
- * The vectorizing pass under way, under the models — what used to go on unseen for minutes after
- * Reindexar had already answered (2026-10-22). When it ends, `onDone` re-reads the counts.
- */
-function VectorizingNow({ onDone }: { onDone: () => void }) {
+function KnowledgeSearch({ workspaceId }: { workspaceId: string }) {
+  const t = useT();
+  const [query, setQuery] = useState("");
+  const [result, setResult] = useState<KnowledgeSearchResult | null>(null);
+  const [searching, setSearching] = useState(false);
+  const search = async () => {
+    if (!query.trim() || searching) return;
+    setSearching(true);
+    setResult(null);
+    try {
+      setResult(await knowledgeSearch(workspaceId, query.trim(), 8));
+      const store = useKnowledgeStore.getState();
+      if (store.workspaceId === workspaceId) void store.load(workspaceId);
+    } catch (e) {
+      pushErrorToast(String(e));
+    } finally {
+      setSearching(false);
+    }
+  };
+  const results = result?.found;
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-[12px] text-[var(--cf-text-muted)]">{t("knowledge.try")}</span>
+      <div className="flex max-w-[520px] items-center gap-2">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && void search()}
+          placeholder={t("knowledge.tryPlaceholder")}
+          aria-label={t("knowledge.try")}
+          className={fieldClass({ size: "sm", className: "flex-1" })}
+        />
+        <button type="button" disabled={!query.trim() || searching} onClick={() => void search()} className={buttonClass({ variant: "secondary", size: "sm" })}>
+          {searching ? <Loader2 size={13} className="animate-spin" /> : <Search size={13} />}
+          {t("knowledge.search")}
+        </button>
+      </div>
+      {result && (
+        <div role="status" className="flex">
+          <span className={chipClass(result.embeddingModel ? "accent" : "neutral")}>
+            {result.embeddingModel
+              ? t("knowledge.embeddingQueryUsed", { model: result.embeddingModel })
+              : t("knowledge.embeddingQueryText")}
+          </span>
+        </div>
+      )}
+      {results && results.length === 0 && <span className="text-[12px] text-[var(--cf-text-muted)]">{t("knowledge.noResults")}</span>}
+      {results && results.length > 0 && (
+        <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
+          {results.map((found, index) => (
+            <div key={`${found.path}-${index}`} className="border-b border-[var(--cf-border)] px-3 py-1.5 last:border-b-0">
+              <div className="flex items-center gap-2">
+                <span className={chipClass("neutral")}>{KIND_LABEL[found.source] ? t(KIND_LABEL[found.source]) : found.source}</span>
+                {found.source === "repo" || found.source === "symbol" ? (
+                  <button
+                    type="button"
+                    onClick={() => useUiStore.getState().openInEditor(found.path, found.startLine || undefined)}
+                    className="min-w-0 truncate font-mono text-[11px] text-[var(--cf-text)] hover:underline"
+                  >
+                    {found.path}
+                    {found.startLine > 0 && `:${found.startLine}-${found.endLine}`}
+                  </button>
+                ) : (
+                  <span className="min-w-0 truncate font-mono text-[11px] text-[var(--cf-text)]">{found.label || found.path}</span>
+                )}
+                {found.heading && <span className="truncate text-[11px] text-[var(--cf-text-muted)]">{found.heading}</span>}
+              </div>
+              <p className="mt-0.5 line-clamp-3 whitespace-pre-wrap text-[11px] leading-snug text-[var(--cf-text-muted)]">{found.snippet}</p>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The configured engine and the vector index available to this workspace. */
+function EmbeddingStatus({ workspaceId, overview }: { workspaceId: string; overview: KnowledgeOverview }) {
   const t = useT();
   const watch = useBackgroundStore((s) => s.watch);
-  const vectorizing = useBackgroundStore((s) => s.status?.vectorizing ?? null);
-  const [was, setWas] = useState(false);
+  const load = useKnowledgeStore((s) => s.load);
+  const vectorizing = useBackgroundStore((s) => {
+    const progress = s.status?.vectorizing;
+    return progress?.workspaceId === workspaceId && progress.space === overview.space ? progress : null;
+  });
+  const running = vectorizing !== null;
+  const wasRunning = useRef(false);
   useEffect(() => watch(), [watch]);
   useEffect(() => {
-    if (vectorizing) setWas(true);
-    else if (was) {
-      setWas(false);
-      onDone();
-    }
-  }, [vectorizing, was, onDone]);
-  if (!vectorizing) return null;
+    if (!running && wasRunning.current) void load(workspaceId);
+    wasRunning.current = running;
+  }, [running, load, workspaceId]);
+
+  const { embeddingModel, pendingVectors } = overview;
+  const indexed = [...overview.repos, ...overview.folders.filter(({ collection }) => collection.enabled), ...(overview.sources ?? [])]
+    .reduce((sum, source) => sum + source.status.vectors, 0);
+  const state = running ? "knowledge.embeddingIndexing"
+    : indexed > 0 ? "knowledge.embeddingReady"
+      : pendingVectors > 0 ? "knowledge.embeddingPending"
+        : "knowledge.embeddingEmpty";
+  const unavailable = overview.embedModels.find((model) => model.id === overview.embedSetting)?.label ?? overview.embedSetting;
+
   return (
-    <div className="rounded-md border border-[var(--cf-border)] px-2.5 py-2">
-      <span className="text-[11.5px] font-medium text-[var(--cf-text)]">{t("knowledge.vectorizing")}</span>
-      <VectorizingLine done={vectorizing.done} total={vectorizing.total} etaSecs={vectorizing.etaSecs} />
+    <div className="flex flex-col gap-1 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 py-2">
+      <div role="status" className="flex flex-wrap items-center gap-2">
+        <span className="text-[12px] font-semibold text-[var(--cf-text)]">
+          {embeddingModel ? t("knowledge.embeddingModel", { model: embeddingModel }) : t("knowledge.embeddingTextOnly")}
+        </span>
+        {embeddingModel && <span className={chipClass(running ? "accent" : indexed > 0 ? "ok" : "neutral")}>{t(state)}</span>}
+      </div>
+      {vectorizing ? (
+        <VectorizingLine done={vectorizing.done} total={vectorizing.total} etaSecs={vectorizing.etaSecs} />
+      ) : embeddingModel ? (
+        <span className="text-[11px] text-[var(--cf-text-muted)]">
+          {t("knowledge.embeddingIndexed", { n: indexed })}
+          {pendingVectors > 0 && ` · ${t("knowledge.embeddingRemaining", { n: pendingVectors })}`}
+        </span>
+      ) : (
+        <span className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
+          {unavailable ? t("knowledge.embeddingUnavailable", { model: unavailable }) : t("knowledge.semanticOff")}
+          {overview.embedModels.some((model) => model.installed) && ` ${t("knowledge.embeddingSelect")}`}
+        </span>
+      )}
     </div>
   );
 }

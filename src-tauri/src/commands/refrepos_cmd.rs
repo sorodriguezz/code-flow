@@ -16,8 +16,16 @@ pub struct RefRepoView {
     /// `cloning` · `pulling` · `switching` · `indexing`, while one runs.
     pub busy: Option<&'static str>,
     pub cloned: bool,
+    pub local_path: Option<String>,
     /// Files, passages and vectors in its knowledge collection; `None` before its first index.
     pub index: Option<index::CollectionStatus>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefReposView {
+    pub repos: Vec<RefRepoView>,
+    pub embedding_model: Option<String>,
 }
 
 fn changed(app: &AppHandle, id: &str) {
@@ -25,7 +33,7 @@ fn changed(app: &AppHandle, id: &str) {
 }
 
 #[tauri::command]
-pub async fn reference_repos_list(db: State<'_, Db>) -> Result<Vec<RefRepoView>, String> {
+pub async fn reference_repos_list(db: State<'_, Db>) -> Result<RefReposView, String> {
     let (repos, setting, ollama_url) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         (
@@ -37,17 +45,22 @@ pub async fn reference_repos_list(db: State<'_, Db>) -> Result<Vec<RefRepoView>,
                 .unwrap_or_else(|| "http://127.0.0.1:11434".to_string()),
         )
     };
-    let space = embed::Space::resolve(setting.as_deref(), &ollama_url).await.map(|s| s.name);
+    let space = embed::Space::resolve(setting.as_deref(), &ollama_url).await;
+    let embedding_model = space.as_ref().map(embed::Space::model_label);
+    let space_name = space.map(|s| s.name);
     tokio::task::spawn_blocking(move || {
         let index = index::global().ok();
-        repos
+        let repos = repos
             .into_iter()
             .map(|repo| {
                 let key = crate::knowledge::repo_key(&repo.knowledge_id());
-                let status = index.as_ref().and_then(|index| index::status(index, &key, space.as_deref()).ok()).filter(|s| s.files > 0);
-                RefRepoView { busy: refrepos::busy_with(&repo.id), cloned: repo.cloned(), index: status, repo }
+                let status = index.as_ref().and_then(|index| index::status(index, &key, space_name.as_deref()).ok()).filter(|s| s.files > 0);
+                let cloned = repo.cloned();
+                let local_path = cloned.then(|| repo.path().to_string_lossy().into_owned());
+                RefRepoView { busy: refrepos::busy_with(&repo.id), cloned, local_path, index: status, repo }
             })
-            .collect()
+            .collect();
+        RefReposView { repos, embedding_model }
     })
     .await
     .map_err(|e| e.to_string())

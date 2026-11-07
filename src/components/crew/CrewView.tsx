@@ -166,7 +166,15 @@ export function CrewView() {
     <div ref={setHost} className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
       <div className="relative flex shrink-0 items-center gap-3 border-b border-[var(--cf-border)] px-3.5 py-2.5">
         {/* The work on the left; who does it — teams and agents — on the right. */}
-        <Seg value={space} onChange={setSpace} options={spaces.filter((o) => !CAST.includes(o.value))} className="min-w-0 shrink" />
+        <Seg
+          value={space}
+          onChange={(next) => {
+            if (next === "en-vivo") void useTeamStore.getState().select(null);
+            setSpace(next);
+          }}
+          options={spaces.filter((o) => !CAST.includes(o.value))}
+          className="min-w-0 shrink"
+        />
         <span className="flex-1" />
         <AnimatePresence>
           {needsYou > 0 && (

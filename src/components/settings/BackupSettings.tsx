@@ -294,14 +294,7 @@ function PassphraseGroup({ has, onChanged }: { has: boolean; onChanged: () => vo
         <Field type="password" value={confirm} onChange={setConfirm} />
       </Row>
       {mismatch && <Note tone="warning">{t("backup.passwordMismatch")}</Note>}
-      <Actions>
-        {/* Solid, not ghost. This is the one action the whole section is gated on, and as a ghost
-            button it was grey text on the panel background — indistinguishable from the labels
-            around it until you happened to hover it. `PrimaryButton` is the shape the app already
-            uses for a primary action; Cancel stays a ghost so the pair reads as one choice. */}
-        <PrimaryButton onClick={() => void save()} disabled={!canSave || busy}>
-          {t("common.save")}
-        </PrimaryButton>
+      <div className="flex flex-wrap items-center justify-end gap-1.5">
         {has && (
           <GhostButton
             onClick={() => {
@@ -312,7 +305,10 @@ function PassphraseGroup({ has, onChanged }: { has: boolean; onChanged: () => vo
             {t("common.cancel")}
           </GhostButton>
         )}
-      </Actions>
+        <PrimaryButton onClick={() => void save()} disabled={!canSave || busy}>
+          {t("common.save")}
+        </PrimaryButton>
+      </div>
     </>
   );
 }

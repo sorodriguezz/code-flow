@@ -117,6 +117,13 @@ impl Space {
         Self { name: format!("{}@{}", entry.spec.id, &entry.spec.sha256[..12]), provider: Provider::Bundled(entry) }
     }
 
+    pub fn model_label(&self) -> String {
+        match &self.provider {
+            Provider::Bundled(entry) => entry.spec.label.to_string(),
+            Provider::Ollama { model, .. } => format!("{model} (Ollama)"),
+        }
+    }
+
     fn prefixes(&self) -> (&str, &str) {
         match &self.provider {
             Provider::Bundled(entry) => (entry.query_prefix, entry.doc_prefix),

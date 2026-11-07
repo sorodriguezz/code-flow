@@ -34,7 +34,13 @@ export type RefRepoBusy = "cloning" | "pulling" | "switching" | "indexing";
 export interface RefRepoView extends RefRepo {
   busy: RefRepoBusy | null;
   cloned: boolean;
+  localPath: string | null;
   index: KnowledgeStatus | null;
+}
+
+export interface RefReposView {
+  repos: RefRepoView[];
+  embeddingModel: string | null;
 }
 
 export interface RemoteBranches {
@@ -67,7 +73,7 @@ export interface RefRepoPatch {
 export const REFREPOS_KNOWLEDGE_KEY = "refrepos_knowledge";
 export const REFREPOS_REVIEW_KEY = "refrepos_review";
 
-export const referenceReposList = () => invoke<RefRepoView[]>("reference_repos_list");
+export const referenceReposList = () => invoke<RefReposView>("reference_repos_list");
 export const referenceReposBranches = (url: string) => invoke<RemoteBranches>("reference_repos_branches", { url });
 export const referenceRepoAdd = (input: NewRefRepo) => invoke<RefRepo>("reference_repo_add", { input });
 export const referenceRepoUpdate = (id: string, patch: RefRepoPatch) => invoke<RefRepo>("reference_repo_update", { id, patch });

@@ -1,20 +1,18 @@
 /**
- * «En vivo»: the team runs as they happen. Pick a run on top; the middle shows its work three ways
+ * «En vivo»: the team runs as they happen. Pick a run from the list to see its work three ways
  * (the graph that grows, the hierarchy with messages travelling it, the members' lanes) and the
  * side keeps the channel and the run's numbers. Everything here only watches and sends orders —
  * the runs move in the backend, so this page is the same in the main window and in an island.
  */
 import { useEffect, useMemo, useState } from "react";
-import { motion } from "framer-motion";
-import { Activity, BarChart3, GitBranch, Kanban, MessagesSquare, Network, Pause, Pin, PinOff, Play, Square, Trash2, Users, WandSparkles } from "lucide-react";
+import { Activity, ArrowLeft, BarChart3, GitBranch, Hand, Kanban, MessagesSquare, Network, Pause, Pin, PinOff, Play, Search, Square, Trash2, Users, WandSparkles } from "lucide-react";
 import { useTeamStore } from "../../../state/teamStore";
 import { useBacklogStore } from "../../../state/backlogStore";
 import { useT } from "../../../state/languageStore";
 import { confirmAction } from "../../../state/confirmStore";
 import { runIsLive, type TeamRun, type TeamRunState } from "../../../types/team";
-import { ChipRow } from "../kit/ChipRow";
 import { TeamAvatar } from "../kit/Avatar";
-import { Btn, Chip, Empty, Seg, SPRING } from "../kit/ui";
+import { Btn, Chip, Empty, Seg, field } from "../kit/ui";
 import { money, useCrewStore, useL } from "../state";
 import { RUN_STATUS } from "./look";
 import { WorkGraph } from "./WorkGraph";
@@ -35,24 +33,61 @@ function useWide(query = "(min-width: 1180px)") {
   return wide;
 }
 
-function RunChip({ run, on, onPick }: { run: TeamRun; on: boolean; onPick: () => void }) {
+function waitingQuestions(state: TeamRunState | undefined): number {
+  return state?.messages.filter((m) => m.kind === "question" && m.to_id === "user" && !m.answered_at).length ?? 0;
+}
+
+function RunList({ runs, states }: { runs: TeamRun[]; states: Record<string, TeamRunState> }) {
   const l = useL();
-  const state = useTeamStore((s) => s.states[run.id]);
-  const [es, en, tone] = RUN_STATUS[run.status];
-  const working = state?.items.some((i) => i.status === "running");
-  const asks = state?.messages.filter((m) => m.kind === "question" && m.to_id === "user" && !m.answered_at).length ?? 0;
+  const [query, setQuery] = useState("");
+  const entries = useMemo(() => runs
+    .map((run) => ({ run, pending: waitingQuestions(states[run.id]) + Number(run.status === "gated") }))
+    .sort((a, b) => Number(b.pending > 0) - Number(a.pending > 0)
+      || Number(runIsLive(b.run)) - Number(runIsLive(a.run))
+      || Number(b.run.pinned) - Number(a.run.pinned)
+      || b.run.updated_at.localeCompare(a.run.updated_at)), [runs, states]);
+  const q = query.trim().toLowerCase();
+  const shown = entries.filter(({ run }) => `${run.title} ${run.goal} ${run.team_name}`.toLowerCase().includes(q));
+
   return (
-    <button type="button" data-chip={run.id} title={l("Muestra esta corrida en vivo", "Shows this run live")} onClick={onPick} className={`relative flex h-[38px] max-w-[280px] shrink-0 items-center gap-2 rounded-[11px] border pl-1.5 pr-2.5 text-left ${on ? "border-[var(--cf-accent-line)]" : "border-[var(--cf-border)] hover:border-[var(--cf-border-strong)]"}`}>
-      {on && <motion.span layoutId="crew-run-pill" transition={SPRING} className="absolute inset-0 rounded-[11px] bg-[var(--cf-accent-soft)]" />}
-      <span className="relative"><TeamAvatar size={26} state={working ? "thinking" : "idle"} /></span>
-      <span className="relative min-w-0">
-        <b className="block truncate text-[12px]">{run.title || run.goal}</b>
-        <span className="block truncate text-[10.5px] text-[var(--cf-text-muted)]">{run.team_name}</span>
-      </span>
-      <span className="relative flex items-center gap-1">
-        {asks + (run.status === "gated" ? 1 : 0) > 0 ? <Chip tone="warn" title={l("Preguntas o aprobaciones que esperan por ti", "Questions or approvals waiting for you")}>{asks + (run.status === "gated" ? 1 : 0)}</Chip> : <Chip tone={tone} title={l("Estado de la corrida", "Run status")}>{l(es, en)}</Chip>}
-      </span>
-    </button>
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3.5 py-2.5">
+        <label className="relative w-[240px]">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--cf-text-faint)]" />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} aria-label={l("Buscar corrida o equipo", "Search run or team")} placeholder={l("Buscar corrida o equipo", "Search run or team")} className={`${field} h-[30px] pl-8`} />
+        </label>
+        <span className="text-[11.5px] text-[var(--cf-text-faint)]">
+          {runs.length === 1 ? l("1 corrida", "1 run") : l(`${runs.length} corridas`, `${runs.length} runs`)}
+        </span>
+      </div>
+      <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-[repeat(auto-fill,minmax(min(300px,100%),1fr))] gap-3 overflow-y-auto p-3.5">
+        {shown.map(({ run, pending }) => {
+          const [es, en, tone] = RUN_STATUS[run.status];
+          const working = states[run.id]?.items.some((i) => i.status === "running");
+          return (
+            <button key={run.id} type="button" onClick={() => void useTeamStore.getState().select(run.id)} className="flex min-w-0 flex-col gap-2.5 rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3.5 text-left transition-colors hover:border-[var(--cf-accent-line)]">
+              <span className="flex w-full items-center gap-2.5">
+                <TeamAvatar size={36} state={working ? "thinking" : "idle"} />
+                <span className="min-w-0 flex-1">
+                  <b className="block truncate text-[13.5px]">{run.title || run.goal}</b>
+                  <span className="block truncate text-[11.5px] text-[var(--cf-text-muted)]">{run.team_name}</span>
+                </span>
+                {run.pinned && <Pin aria-label={l("Fijada", "Pinned")} className="h-3.5 w-3.5 shrink-0 text-[var(--cf-text-muted)]" />}
+              </span>
+              <span className="flex flex-wrap gap-1.5">
+                <Chip tone={tone}>{l(es, en)}</Chip>
+                {pending > 0 && (
+                  <Chip tone="warn" icon={Hand} title={l("Preguntas o aprobaciones que esperan por ti", "Questions or approvals waiting for you")}>
+                    {pending === 1 ? l("1 aviso pendiente", "1 pending notice") : l(`${pending} avisos pendientes`, `${pending} pending notices`)}
+                  </Chip>
+                )}
+              </span>
+            </button>
+          );
+        })}
+        {shown.length === 0 && <p className="col-span-full m-0 p-6 text-center text-[12.5px] text-[var(--cf-text-muted)]">{l("Ninguna corrida coincide.", "No run matches.")}</p>}
+      </div>
+    </div>
   );
 }
 
@@ -130,7 +165,7 @@ function RunPage({ state }: { state: TeamRunState }) {
   const [selected, setSelected] = useState<string | null>(null);
   const [rail, setRail] = useState<"canal" | "panel">("canal");
   const item = state.items.find((i) => i.id === selected) ?? null;
-  const asks = state.messages.filter((m) => m.kind === "question" && m.to_id === "user" && !m.answered_at).length;
+  const asks = waitingQuestions(state);
   const view = !wide && (tab === "canal" || tab === "panel") ? tab : tab === "canal" || tab === "panel" ? "tareas" : tab;
 
   useEffect(() => setSelected(null), [state.run.id]);
@@ -194,26 +229,27 @@ export function LiveSpace() {
   const runs = useTeamStore((s) => s.runs);
   const states = useTeamStore((s) => s.states);
   const selectedRunId = useTeamStore((s) => s.selectedRunId);
-  const ordered = useMemo(() => {
-    const live = runs.filter(runIsLive).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-    const pinned = runs.filter((r) => !runIsLive(r) && r.pinned);
-    const rest = runs.filter((r) => !runIsLive(r) && !r.pinned).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-    // The row keeps the twelve latest past runs; an older one picked from the list joins it.
-    const older = rest.slice(12).filter((r) => r.id === selectedRunId);
-    return [...live, ...pinned, ...rest.slice(0, 12), ...older];
-  }, [runs, selectedRunId]);
-  const everyRun = useMemo(() => {
-    const live = runs.filter(runIsLive).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-    return [...live, ...runs.filter((r) => !runIsLive(r)).sort((a, b) => b.updated_at.localeCompare(a.updated_at))];
-  }, [runs]);
-  const current = ordered.find((r) => r.id === selectedRunId) ?? ordered[0] ?? null;
-  const state = current ? states[current.id] : undefined;
+  const loading = useTeamStore((s) => s.loading);
 
-  useEffect(() => {
-    if (current && !states[current.id]) void useTeamStore.getState().refresh(current.id);
-  }, [current, states]);
+  if (selectedRunId) {
+    const state = states[selectedRunId];
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
+          <Btn small kind="ghost" icon={ArrowLeft} title={l("Vuelve a la lista de corridas", "Back to the run list")} onClick={() => void useTeamStore.getState().select(null)}>
+            {l("Corridas", "Runs")}
+          </Btn>
+        </div>
+        {state ? <RunPage key={selectedRunId} state={state} /> : <div className="grid flex-1 place-items-center text-[12px] text-[var(--cf-text-muted)]">{l("Cargando corrida…", "Loading run…")}</div>}
+      </div>
+    );
+  }
 
-  if (!current) {
+  if (loading && runs.length === 0) {
+    return <div className="grid flex-1 place-items-center text-[12px] text-[var(--cf-text-muted)]">{l("Cargando corridas…", "Loading runs…")}</div>;
+  }
+
+  if (runs.length === 0) {
     return (
       <Empty icon={Activity} title={l("Nada en marcha", "Nothing running")} hint={l("Cuando un equipo trabaje, aquí lo verás crecer: el plan, quién hace qué en paralelo, lo que se dicen y lo que cuesta.", "When a team works, you will see it grow here: the plan, who does what in parallel, what they tell each other and what it costs.")}>
         <Btn kind="primary" icon={WandSparkles} title={l("Abre el lanzador para asignar una tarea a un equipo", "Opens the launcher to assign a task to a team")} onClick={() => crew.open({ kind: "launch" })}>{l("Dale una tarea a un equipo", "Hand a team a task")}</Btn>
@@ -221,24 +257,5 @@ export function LiveSpace() {
     );
   }
 
-  return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 border-b border-[var(--cf-border)] px-3 py-2">
-        <ChipRow
-          active={current.id}
-          noun={["corridas", "runs"]}
-          onPick={(id) => void useTeamStore.getState().select(id)}
-          entries={everyRun.map((r) => {
-            const [es, en, tone] = RUN_STATUS[r.status];
-            return { key: r.id, label: r.title || r.goal, sub: r.team_name, leading: <TeamAvatar size={24} />, aside: <Chip tone={tone}>{l(es, en)}</Chip> };
-          })}
-        >
-          {ordered.map((r) => (
-            <RunChip key={r.id} run={r} on={r.id === current.id} onPick={() => void useTeamStore.getState().select(r.id)} />
-          ))}
-        </ChipRow>
-      </div>
-      {state ? <RunPage key={current.id} state={state} /> : <div className="grid flex-1 place-items-center text-[12px] text-[var(--cf-text-muted)]">…</div>}
-    </div>
-  );
+  return <RunList runs={runs} states={states} />;
 }

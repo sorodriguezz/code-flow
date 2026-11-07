@@ -66,6 +66,8 @@ export function useDragSource(payload: DragPayload, ghost: () => ReactNode) {
     if (e.button !== 0) return;
     const target = e.target as HTMLElement;
     if (target.closest("input,textarea,select,[data-no-drag]")) return;
+    // A drop outside the source may never deliver a click to suppress. A new press starts fresh.
+    suppressClick.current = false;
     const touch = e.pointerType === "touch";
     start.current = { x: e.clientX, y: e.clientY, touch, timer: null, on: false };
     if (touch) start.current.timer = window.setTimeout(() => begin(e.clientX, e.clientY), 260);
@@ -115,6 +117,7 @@ export function useDragSource(payload: DragPayload, ghost: () => ReactNode) {
   const onClickCapture = (e: React.MouseEvent) => {
     if (suppressClick.current) {
       suppressClick.current = false;
+      if (e.detail === 0) return; // Keyboard activation is a separate action from the drag.
       e.stopPropagation();
       e.preventDefault();
     }

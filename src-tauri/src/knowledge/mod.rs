@@ -825,7 +825,7 @@ async fn vectorize_pass(scope: &Scope, space: &embed::Space) {
         if pending.is_empty() {
             return;
         }
-        set_progress(Some(Vectorizing::now(&space.name, done, done + left, started.elapsed())));
+        set_progress(Some(Vectorizing::now(scope.workspace_id.as_deref(), &space.name, done, done + left, started.elapsed())));
         let texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
         let Ok(vectors) = space.embed_documents(&texts).await else { return };
         let items: Vec<(i64, Vec<f32>)> = pending.iter().map(|(id, _)| *id).zip(vectors).collect();
@@ -842,6 +842,7 @@ async fn vectorize_pass(scope: &Scope, space: &embed::Space) {
 #[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Vectorizing {
+    pub workspace_id: Option<String>,
     /// The embedding space: `<model>@<digest>`.
     pub space: String,
     pub done: usize,
@@ -851,9 +852,9 @@ pub struct Vectorizing {
 }
 
 impl Vectorizing {
-    fn now(space: &str, done: usize, total: usize, elapsed: Duration) -> Self {
+    fn now(workspace_id: Option<&str>, space: &str, done: usize, total: usize, elapsed: Duration) -> Self {
         let eta_secs = (done > 0).then(|| (elapsed.as_secs_f64() / done as f64 * total.saturating_sub(done) as f64).round() as u64);
-        Vectorizing { space: space.to_string(), done, total, eta_secs }
+        Vectorizing { workspace_id: workspace_id.map(str::to_string), space: space.to_string(), done, total, eta_secs }
     }
 }
 
@@ -1130,6 +1131,8 @@ fn drop_unshareable(main: &Connection, found: &[Found], cloud: bool) -> Vec<Foun
 #[serde(rename_all = "camelCase")]
 pub struct Answer {
     pub found: Vec<Found>,
+    /// The model that searched the vector index, even if there were no relevant matches.
+    pub embedding_model: Option<String>,
     /// The repositories and folders still being indexed when the search answered: the results may
     /// miss them.
     pub partial: Vec<String>,
@@ -1177,17 +1180,21 @@ pub async fn search_indexed(scope: &Scope, question: &str, limit: usize) -> Resu
         let question = question.to_string();
         tokio::task::spawn_blocking(move || lexical(&scope, &question, limit * 3, MapUse::Build)).await.map_err(|e| e.to_string())?
     };
-    let semantic = match space {
-        Some(space) => semantic(scope, question, &space).await,
-        None => Vec::new(),
+    let (semantic_hits, embedding_model) = match space {
+        Some(space) => match semantic(scope, question, &space).await {
+            Some(hits) => (hits, Some(space.model_label())),
+            None => (Vec::new(), None),
+        },
+        None => (Vec::new(), None),
     };
-    let found = fuse(vec![lexical_hits, semantic], limit);
-    Ok(Answer { found, partial: partial(scope), via_main_checkout: scope.via_main_checkout.clone(), searched: scope.searched() })
+    let found = fuse(vec![lexical_hits, semantic_hits], limit);
+    Ok(Answer { found, embedding_model, partial: partial(scope), via_main_checkout: scope.via_main_checkout.clone(), searched: scope.searched() })
 }
 
 /// The semantic retriever: a few pending prose chunks embedded first, then the question's nearest
 /// chunks above [`COSINE_FLOOR`] — private ones only for a local model.
-async fn semantic(scope: &Scope, question: &str, space: &embed::Space) -> Vec<Found> {
+/// `None` means vector search did not run successfully, distinct from a search with no matches.
+async fn semantic(scope: &Scope, question: &str, space: &embed::Space) -> Option<Vec<Found>> {
     let keys = scope.keys();
     // A handful of prose chunks without vectors (a new folder, a small project) are embedded now,
     // before searching: a few seconds, and the question is the one that needed them — a Spanish
@@ -1206,14 +1213,14 @@ async fn semantic(scope: &Scope, question: &str, space: &embed::Space) -> Vec<Fo
         vectorize_in_background(scope.clone(), space.clone());
     }
     if !index::global().is_ok_and(|index| index::has_vectors(&index, &space.name, &keys)) {
-        return Vec::new();
+        return None;
     }
-    let Ok(query) = space.embed_query(question).await else { return Vec::new() };
-    let Ok(index) = index::global() else { return Vec::new() };
-    let hits = index::search_vectors_scoped(&index, &space.name, &keys, &query, 20, !scope.cloud).unwrap_or_default();
+    let query = space.embed_query(question).await.ok()?;
+    let index = index::global().ok()?;
+    let hits = index::search_vectors_scoped(&index, &space.name, &keys, &query, 20, !scope.cloud).ok()?;
     let metas = metas(&index, &keys);
     drop(index);
-    hits.into_iter().filter(|(_, score)| *score > COSINE_FLOOR).map(|(hit, _)| found_of(scope, &metas, hit)).collect()
+    Some(hits.into_iter().filter(|(_, score)| *score > COSINE_FLOOR).map(|(hit, _)| found_of(scope, &metas, hit)).collect())
 }
 
 /// The repositories and folders of `scope` an index is still being built for, or that have never
@@ -1617,7 +1624,7 @@ mod tests {
         assert!(text.contains("1. docs/adr.md:3-9 — Storage [api @ 3f2a1c9e04 · indexed 2025-10-21 12:00 UTC]"), "{text}");
         assert!(text.contains("2. note:n1 — Retención de pedidos › Política [note in «Diseño»]"), "a document is cited by its id: {text}");
         assert!(text.contains("3. commit:abc123 — fix: sum prices [commit message · api]"), "{text}");
-        let answer = Answer { found: vec![found("a.md", 1, 2, "repo")], partial: vec!["web".into()], via_main_checkout: Some("/src/api".into()), searched: Vec::new() };
+        let answer = Answer { found: vec![found("a.md", 1, 2, "repo")], partial: vec!["web".into()], via_main_checkout: Some("/src/api".into()), ..Answer::default() };
         let rendered = render(&answer);
         assert!(rendered.starts_with("These results come from the index of the project's main checkout (/src/api)"));
         assert!(rendered.contains("open the file to confirm"));
