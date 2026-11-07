@@ -4,9 +4,11 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { ArrowRight, GitMerge, Send } from "lucide-react";
+import { ArrowRight, Bookmark, GitMerge, Send } from "lucide-react";
 import { useTeamStore } from "../../../state/teamStore";
 import { useAgentsStore } from "../../../state/agentsStore";
+import { teamAmend, teamRemember } from "../../../lib/tauri/teamCommands";
+import { pushErrorToast } from "../../../state/toastStore";
 import type { TeamMessage, TeamRunState } from "../../../types/team";
 import { AgentAvatar } from "../kit/Avatar";
 import { SelectBox, Btn, Chip, ToggleChip, field } from "../kit/ui";
@@ -19,6 +21,24 @@ function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; c
   const l = useL();
   const roster = useAgentsStore((s) => s.roster);
   const [answer, setAnswer] = useState("");
+  const [memoryRepo, setMemoryRepo] = useState("");
+  const [saving, setSaving] = useState(false);
+  const itemRepo = state.items.find((item) => item.id === m.item_id)?.project_id;
+  const targetRepo = itemRepo ?? (state.repos.length === 1 ? state.repos[0].project_id : memoryRepo);
+  const remembered = state.memories?.some((memory) => memory.message_id === m.id && memory.project_id === targetRepo) ?? false;
+  const canRemember = m.from_id !== "system" && (m.kind === "decision" || m.kind === "note" || (m.kind === "question" && Boolean(m.answered_at)));
+  const remember = async () => {
+    if (!targetRepo) return;
+    setSaving(true);
+    try {
+      await teamRemember(m.run_id, m.id, targetRepo, !remembered);
+      await useTeamStore.getState().refresh(m.run_id);
+    } catch (error) {
+      pushErrorToast(String(error));
+    } finally {
+      setSaving(false);
+    }
+  };
   const member = state.run.members.find((x) => x.id === m.from_id);
   const agent = roster.find((a) => a.id === member?.agent_id);
   const asking = m.kind === "question" && m.to_id === "user" && !m.answered_at;
@@ -56,6 +76,19 @@ function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; c
         </div>
         <Markdown source={readableTeamText(m.body)} className={`cf-markdown-chat cf-crew-msg mt-0.5 select-text break-words text-[12.5px] ${compact ? "line-clamp-6" : ""}`} />
         {m.answer && <p className="m-0 mt-1 border-l-2 border-[var(--cf-accent)] pl-2 text-[12px] text-[var(--cf-text-muted)]">{l("Respondida", "Answered")}: {m.answer}</p>}
+        {canRemember && (
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            {!itemRepo && state.repos.length > 1 && (
+              <SelectBox value={memoryRepo} onChange={setMemoryRepo} ariaLabel={l("Repositorio de la memoria", "Memory repository")}>
+                <option value="">{l("Elige repositorio", "Choose repository")}</option>
+                {state.repos.map((repo) => <option key={repo.project_id} value={repo.project_id}>{repo.name}</option>)}
+              </SelectBox>
+            )}
+            <Btn small icon={Bookmark} disabled={!targetRepo || saving} title={l("Este equipo puede usar el acuerdo en otras corridas de ese repositorio", "This team can reuse the agreement in later runs of this repository")} onClick={() => void remember()}>
+              {remembered ? l("Quitar de memoria", "Remove from memory") : l("Recordar acuerdo", "Remember agreement")}
+            </Btn>
+          </div>
+        )}
         {asking && (
           <div className="mt-1.5 flex flex-col gap-1.5">
             {m.options.length > 0 && (
@@ -106,6 +139,22 @@ export function Channel({ state, memberId, compact }: { state: TeamRunState; mem
   };
   const live = run.status === "running" || run.status === "gated" || run.status === "paused";
   const [asking, setAsking] = useState(false);
+  const canAmend = !memberId && !!run.lead && (run.status === "running" || run.gate === "merge")
+    && state.items.some((item) => item.kind === "plan" && item.status === "done")
+    && !state.items.some((item) => item.kind === "amend" && ["pending", "running", "waiting", "gated"].includes(item.status));
+  const amend = async () => {
+    if (!body.trim() || asking) return;
+    setAsking(true);
+    try {
+      await teamAmend(run.id, body.trim());
+      setBody("");
+      await useTeamStore.getState().refresh(run.id);
+    } catch (error) {
+      pushErrorToast(String(error));
+    } finally {
+      setAsking(false);
+    }
+  };
   const followUp = async () => {
     if (!body.trim() || asking) return;
     setAsking(true);
@@ -136,7 +185,7 @@ export function Channel({ state, memberId, compact }: { state: TeamRunState; mem
         <div ref={end} />
       </div>
       {live && (
-        <div className="flex shrink-0 items-center gap-1.5 border-t border-[var(--cf-border)] p-2">
+        <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-[var(--cf-border)] p-2">
           {!memberId && (
             <SelectBox value={to} onChange={(v) => setTo(v)} ariaLabel={l("Para", "To")} title={l("Elige quién recibe tu nota", "Choose who receives your note")} className="w-[120px] shrink-0">
               <option value="all">{l("Todos", "Everyone")}</option>
@@ -146,10 +195,12 @@ export function Channel({ state, memberId, compact }: { state: TeamRunState; mem
               ))}
             </SelectBox>
           )}
-          <input value={body} onChange={(e) => setBody(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={memberId ? l("Una nota para este miembro…", "A note for this member…") : l("Una nota para el equipo…", "A note for the team…")} className={`${field} h-[30px]`} />
+          <input value={body} onChange={(e) => setBody(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send()} placeholder={memberId ? l("Una nota para este miembro…", "A note for this member…") : l("Escribe una nota o un cambio al encargo…", "Write a note or a change to the request…")} className={`${field} h-[30px] min-w-[90px] flex-1`} />
           <button type="button" title={l("Envía la nota al equipo", "Sends the note to the team")} aria-label={l("Enviar", "Send")} disabled={!body.trim()} onClick={send} className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-[8px] bg-[var(--cf-accent)] text-[var(--cf-on-accent)] disabled:opacity-40">
             <Send className="h-3.5 w-3.5" />
           </button>
+          {canAmend && <Btn small disabled={!body.trim() || asking} onClick={() => void amend()}
+            title={l("Pide al líder un ajuste revisable de esta corrida", "Ask the lead for a reviewable change to this run")}>{l("Ajustar plan", "Amend plan")}</Btn>}
         </div>
       )}
       {!live && !memberId && (

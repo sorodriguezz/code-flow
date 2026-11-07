@@ -48,6 +48,8 @@ pub struct Message {
     pub trace_id: Option<String>,
     pub response_time_ms: i64,
     pub created_at: String,
+    #[serde(default)]
+    pub suggest_run: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -118,6 +120,7 @@ fn append(
     text: &str,
     elapsed: i64,
     trace: Option<String>,
+    suggest_run: bool,
 ) -> Result<(), String> {
     if text.trim().is_empty() {
         return Ok(());
@@ -133,6 +136,7 @@ fn append(
         trace_id: trace,
         response_time_ms: elapsed,
         created_at: queries::now(),
+        suggest_run,
     };
     conn.execute(
         "INSERT INTO agent_team_chat_messages (id, chat_id, data) VALUES (?1, ?2, ?3)",
@@ -205,6 +209,7 @@ fn prompt(chat: &Chat, member: &MemberSnap) -> String {
 Responde tú mismo si conoces la respuesta; usa herramientas y realiza el trabajo directamente si tus permisos lo permiten.
 Cuando haga falta otra especialidad, delega solo las partes necesarias a miembros reales del listado. No inventes miembros, respuestas ni acciones ejecutadas.
 No conviertas una pregunta sencilla en un plan ni consultes a todo el equipo por rutina.
+Si el encargo necesita varios pasos dependientes o revisión formal, ofrece convertirlo en corrida. Resume el objetivo y los criterios acordados, termina con un bloque equipo-chat con `{\"suggest_run\":true,\"delegate\":[]}` y espera a que el usuario elija. Si pide expresamente que lo resuelvas en este chat, sigue aquí.
 Para delegar termina tu respuesta con este bloque JSON (no lo expliques al usuario):
 ```equipo-chat
 {\"delegate\":[{\"member\":\"ID_DEL_MIEMBRO\",\"kind\":\"answer\",\"instruction\":\"Pregunta o trabajo concreto con el contexto necesario\"}]}
@@ -393,6 +398,7 @@ struct Plan {
     text: String,
     delegate: Vec<Delegation>,
     errors: Vec<String>,
+    suggest_run: bool,
 }
 
 fn plan(text: &str, chat: &Chat) -> Plan {
@@ -419,15 +425,21 @@ fn plan(text: &str, chat: &Chat) -> Plan {
         } else {
             None
         };
+        let suggests_run = parsed.as_ref().and_then(|p| p.get("suggest_run")).and_then(|v| v.as_bool()).unwrap_or(false);
         let Some(values) = parsed
             .as_ref()
             .and_then(|p| p.get("delegate"))
             .and_then(|p| p.as_array())
         else {
+            if suggests_run && parsed.as_ref().is_some_and(|p| p.get("delegate").is_none()) {
+                out.suggest_run = true;
+                continue;
+            }
             out.errors
                 .push("Formato de delegación inválido; usa delegate como una lista JSON.".into());
             continue;
         };
+        out.suggest_run |= suggests_run;
         for value in values {
             let who = value.get("member").and_then(|v| v.as_str()).unwrap_or("");
             let instruction = value
@@ -468,6 +480,7 @@ fn plan(text: &str, chat: &Chat) -> Plan {
             });
         }
     }
+    out.suggest_run &= out.delegate.is_empty() && out.errors.is_empty();
     out.text = out.text.trim().to_string();
     out
 }
@@ -658,6 +671,7 @@ async fn drive_with<R: tauri::Runtime>(
                 &parsed.text,
                 elapsed,
                 trace,
+                parsed.suggest_run,
             )
         })?;
         changed(app, &chat.id);
@@ -704,6 +718,7 @@ async fn drive_with<R: tauri::Runtime>(
                     &text,
                     elapsed,
                     trace,
+                    false,
                 )
             })?;
             changed(app, &chat.id);
@@ -805,6 +820,59 @@ pub fn team_chat_state(db: State<'_, Db>, chat_id: String) -> Result<ChatState, 
     state(&conn, &chat_id)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatDraft {
+    pub team_id: String,
+    pub project_id: String,
+    pub goal: String,
+    pub attachments: Vec<crate::commands::chat_attach::ChatAttachment>,
+}
+
+#[tauri::command]
+pub async fn team_chat_draft(db: State<'_, Db>, chat_id: String) -> Result<ChatDraft, String> {
+    let state = {
+        let conn = db.0.lock().map_err(e2s)?;
+        state(&conn, &chat_id)?
+    };
+    if matches!(state.chat.status.as_str(), "running" | "cancelling") {
+        return Err("Espera a que termine el turno antes de convertirlo en tarea.".into());
+    }
+    let note = crate::ai::attachment_note(&[]);
+    let user_text = |message: &Message| message.content.split_once(note.as_str()).map_or(message.content.as_str(), |(text, _)| text).to_string();
+    let last_request = state.messages.iter().rfind(|message| message.role == "user").map(&user_text)
+        .ok_or("El chat todavía no tiene un pedido.")?;
+    let recent = &state.messages[state.messages.len().saturating_sub(20)..];
+    let context: Vec<_> = recent.iter().map(|message| {
+        let (name, body) = if message.role == "user" {
+            ("Usuario", user_text(message))
+        } else {
+            (message.member_name.as_str(), message.content.clone())
+        };
+        format!("**{name}**\n{}", body.chars().take(2500).collect::<String>())
+    }).collect();
+    let conversation_id = state.task.conversation_id;
+    let mentioned: Vec<_> = state.messages.into_iter().filter(|message| message.role == "user").map(|message| message.content).collect();
+    let attachments = tokio::task::spawn_blocking(move || {
+        crate::commands::chat_attach::repo_conversation_attachments(&conversation_id).into_iter()
+            .filter(|file| {
+                let reference = format!("({})", file.path);
+                mentioned.iter().any(|message| message.split_once(note.as_str()).is_some_and(|(_, files)| files.contains(&reference)))
+            })
+            .map(|file| {
+                let mut copied = crate::commands::chat_attach::crew_attach_file(file.path)?;
+                copied.name = file.name;
+                Ok(copied)
+            }).collect::<Result<Vec<_>, String>>()
+    }).await.map_err(e2s)??;
+    Ok(ChatDraft {
+        team_id: state.chat.team_id,
+        project_id: state.chat.project_id,
+        goal: format!("{}\n\n## Contexto del chat\nUsa los acuerdos y criterios de esta conversación para planificar el encargo.\n\n{}", last_request.trim(), context.join("\n\n")),
+        attachments,
+    })
+}
+
 #[tauri::command]
 pub fn team_chat_send(
     app: AppHandle,
@@ -860,6 +928,7 @@ pub fn team_chat_send(
             &format!("{}{note}", message.trim()),
             0,
             None,
+            false,
         )?;
         save(&tx, &mut chat)?;
         tx.commit().map_err(e2s)?;

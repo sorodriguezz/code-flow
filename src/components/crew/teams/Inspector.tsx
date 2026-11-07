@@ -203,6 +203,14 @@ export function TeamInspector({ team, update }: { team: Team; update: Update }) 
           </>
         )}
         <Switch checked={p.lead_final_check} onChange={(lead_final_check) => set({ lead_final_check })} label={l("El líder revisa al final", "The lead checks at the end")} />
+        <Switch checked={p.auto_checks ?? false} onChange={(auto_checks) => set({ auto_checks })} label={l("Detectar y ejecutar las pruebas del repositorio", "Detect and run repository tests")} hint={l("Si el repositorio ya tiene verificaciones configuradas para el equipo, se usan esas.", "The team uses its configured checks when the repository already has them.")} />
+        <Switch checked={p.impact_approval ?? false} onChange={(impact_approval) => set({ impact_approval })}
+          label={l("Revisar cambios de impacto", "Review high-impact changes")}
+          hint={l("Pide aprobación para migraciones y contratos de API antes de integrarlos.", "Ask for approval before integrating migrations and API contracts.")} />
+        {p.impact_approval && <textarea rows={2} className={fieldClass()} value={(p.impact_paths ?? []).join("\n")}
+          onChange={(event) => set({ impact_paths: event.target.value.split("\n") })}
+          aria-label={l("Rutas adicionales que requieren aprobación", "Additional paths requiring approval")}
+          placeholder={l("Una ruta adicional por línea, relativa al repositorio", "One additional repository-relative path per line")} />}
       </Panel>
 
       <Panel title={l("Recursos y presupuesto", "Resources and budget")} icon={Coins} open={panels.is("budget")} onToggle={() => panels.toggle("budget")}>

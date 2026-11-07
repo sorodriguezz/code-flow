@@ -2269,23 +2269,9 @@ export function planFor(template: Template, ctx: TemplateContext): Plan {
   };
 }
 
-/** The git steps every plan ends with. `commit` is optional-tolerant: a machine with no git identity
- *  still gets a repository, just without the first commit, and is told so in the terminal.
- *
- *  `empty` (`Plan.emptyCommit`) is for a folder with nothing to add. It is never the default: a
- *  generator that commits its own work (Expo does) would get an empty twin of that commit. */
-export function gitSteps(root: string, label: (key: TranslationKey) => string, commit: boolean, empty = false): Step[] {
-  const steps: Step[] = [{ title: label("scaffold.step.git"), cwd: root, argv: ["git", "init", "-q"] }];
-  const allow = empty ? " --allow-empty" : "";
-  if (commit)
-    steps.push({
-      title: label("scaffold.step.commit"),
-      cwd: root,
-      optional: true,
-      sh: `git add -A && git commit -q${allow} -m 'Initial commit'`,
-      ps: `git add -A; Cf-Check; git commit -q${allow} -m 'Initial commit'; Cf-Check`,
-    });
-  return steps;
+/** Every generated project is a Git repository, regardless of whether a commit was requested. */
+export function gitInitStep(root: string, label: (key: TranslationKey) => string): Step {
+  return { title: label("scaffold.step.git"), cwd: root, argv: ["git", "init", "-q"] };
 }
 
 /** npm's name rules, beyond what a folder allows: lowercase, no spaces, nothing a URL would mangle. */

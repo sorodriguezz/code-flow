@@ -20,8 +20,8 @@ export function withFiles(goal: string, files: readonly ChatAttachment[]): strin
   return `${goal.trimEnd()}\n\n${NOTE}\n${files.map((f) => `- ${f.name} (${f.path})`).join("\n")}`;
 }
 
-export function useGoalFiles(dropTarget: RefObject<HTMLElement | null>) {
-  const [files, setFiles] = useState<ChatAttachment[]>([]);
+export function useGoalFiles(dropTarget: RefObject<HTMLElement | null>, initialFiles: ChatAttachment[] = []) {
+  const [files, setFiles] = useState<ChatAttachment[]>(initialFiles);
   const add = async (job: Promise<ChatAttachment>) => {
     try {
       const file = await job;

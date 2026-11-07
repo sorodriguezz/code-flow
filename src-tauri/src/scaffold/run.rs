@@ -140,26 +140,76 @@ pub fn discard(root: &Path) -> Result<(), String> {
 pub struct DestCheck {
     /// `parent` joined with `name`, with the platform's separator.
     pub path: String,
-    /// `None` when the name is usable; otherwise why not, as a sentence.
+    /// `None` when the destination is usable; otherwise why not, as a sentence.
     pub problem: Option<String>,
+    pub problem_field: Option<DestField>,
     /// Whether the parent folder exists yet. It does not have to — it is created — but the form says
     /// so rather than letting a typo in the location quietly become a new folder tree.
     pub parent_exists: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DestField {
+    Name,
+    Parent,
+    Destination,
+}
+
 pub fn check_dest(parent: &str, name: &str) -> DestCheck {
     let parent_path = PathBuf::from(parent);
     let root = parent_path.join(name);
-    let problem = if parent.trim().is_empty() || !parent_path.is_absolute() {
-        Some("Choose where the project goes".to_string())
+    let parent_exists = parent_path.is_dir();
+    let (problem, problem_field) = if let Err(problem) = validate_folder_name(name) {
+        (Some(problem), Some(DestField::Name))
+    } else if !parent_path.is_absolute() {
+        (Some("Choose an absolute path for the base folder".into()), Some(DestField::Parent))
+    } else if parent_path.exists() && !parent_exists {
+        (Some(format!("{} is not a folder", parent_path.display())), Some(DestField::Destination))
     } else {
-        validate_folder_name(name).err().or_else(|| ensure_free(&root).err())
+        match ensure_free(&root) {
+            Ok(()) => (None, None),
+            Err(problem) => (Some(problem), Some(DestField::Destination)),
+        }
     };
     DestCheck {
         path: root.to_string_lossy().into_owned(),
         problem,
-        parent_exists: parent_path.is_dir(),
+        problem_field,
+        parent_exists,
     }
+}
+
+/// Stages the generated files and attempts the optional commit with the initializer's fresh PATH.
+pub fn initial_commit(root: &str, allow_empty: bool) -> Result<(), String> {
+    use crate::git::cli::run_in;
+
+    let path = Path::new(root);
+    if !claims().lock().map_err(|e| e.to_string())?.contains_key(path) || !path.join(".git").exists() {
+        return Err("The project repository has not been created".into());
+    }
+    let search_path = super::tools::current_path(false);
+    let env = [("PATH", search_path.as_str())];
+    let check = |out: crate::git::cli::Output| -> Result<(), String> {
+        if out.success {
+            Ok(())
+        } else if out.timed_out {
+            Err("Git timed out".into())
+        } else {
+            let details = out.combined();
+            Err(if details.is_empty() { "Git exited with an error".into() } else { details })
+        }
+    };
+    check(run_in(root, &["add", "-A"], &env)?)?;
+    // Some generators already make the first commit. Leave it alone if nothing else was staged.
+    if !allow_empty && run_in(root, &["diff", "--cached", "--quiet", "HEAD", "--"], &env)?.success {
+        return Ok(());
+    }
+    let mut args = vec!["commit", "-q", "-m", "Initial commit"];
+    if allow_empty {
+        args.push("--allow-empty");
+    }
+    check(run_in(root, &args, &env)?)
 }
 
 /// A file a template writes itself — the boilerplate of the templates that have no generator of their
@@ -292,9 +342,34 @@ mod tests {
         let parent = base.to_string_lossy().into_owned();
         assert!(check_dest(&parent, "fresh").problem.is_none());
         assert!(check_dest(&parent, "empty").problem.is_none());
-        assert!(check_dest(&parent, "taken").problem.is_some());
-        assert!(check_dest("relative/dir", "fresh").problem.is_some());
+        assert_eq!(check_dest(&parent, "taken").problem_field, Some(DestField::Destination));
+        assert_eq!(check_dest(&parent, "../bad").problem_field, Some(DestField::Name));
+        assert_eq!(check_dest("relative/dir", "fresh").problem_field, Some(DestField::Parent));
         std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn an_initial_commit_reports_a_git_failure_and_preserves_the_repository() {
+        let root = std::env::temp_dir().join(format!("cf-initial-commit-{}", uuid::Uuid::new_v4()));
+        claim(&root).unwrap();
+        let repo = git2::Repository::init(&root).unwrap();
+        let mut config = repo.config().unwrap();
+        config.set_str("user.name", "CodeFlow Test").unwrap();
+        config.set_str("user.email", "test@example.com").unwrap();
+        config.set_str("core.hooksPath", "missing-hooks").unwrap();
+        config.set_bool("commit.gpgsign", false).unwrap();
+
+        let path = root.to_str().unwrap();
+        assert!(!initial_commit(path, false).unwrap_err().is_empty());
+        assert!(repo.head().is_err());
+        initial_commit(path, true).unwrap();
+        let first = repo.head().unwrap().peel_to_commit().unwrap().id();
+        initial_commit(path, false).unwrap();
+        assert_eq!(repo.head().unwrap().peel_to_commit().unwrap().id(), first);
+
+        drop(config);
+        drop(repo);
+        discard(&root).unwrap();
     }
 
     /// A real script in a real pty: it runs from `cwd`, its exit code reaches `terminal:exit`, and

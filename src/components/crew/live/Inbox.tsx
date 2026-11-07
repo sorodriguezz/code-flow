@@ -7,11 +7,13 @@ import { motion } from "framer-motion";
 import { CheckCircle2, ExternalLink, Hand, MessageCircleQuestion, Workflow } from "lucide-react";
 import { useTeamStore } from "../../../state/teamStore";
 import { useChainStore } from "../../../state/chainStore";
-import type { TeamMessage, TeamRun } from "../../../types/team";
+import { recoveryNeedsUser, runIsLive, type TeamMessage, type TeamRun } from "../../../types/team";
 import { Btn, field } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
 
 function gateTitle(run: TeamRun, l: (es: string, en: string) => string): string {
+  if (run.gate.startsWith("impact:")) return l("Revisar cambios de impacto", "Review high-impact changes");
+  if (run.gate.startsWith("amend:") || run.gate.startsWith("amend_failed:")) return l("Revisar ajuste del plan", "Review plan amendment");
   if (run.gate === "plan") return l("Aprobar el plan", "Approve the plan");
   if (run.gate === "merge") return l("Listo para integrar", "Ready to merge");
   if (run.gate === "budget") return l("Llegó al presupuesto", "Budget reached");
@@ -71,12 +73,16 @@ export function Inbox({ onClose }: { onClose: () => void }) {
   const gated = runs.filter((r) => r.status === "gated");
   const questions = runs.flatMap((r) => (states[r.id]?.messages ?? []).filter((m) => m.kind === "question" && m.to_id === "user" && !m.answered_at).map((m) => ({ run: r, m })));
   const flows = chains.filter((c) => c.status === "gated");
+  const recoveries = runs.filter(runIsLive).flatMap((run) => {
+    const [first, ...others] = recoveryNeedsUser(states[run.id]);
+    return first ? [{ run, first, count: 1 + others.length }] : [];
+  });
   const open = (runId: string) => {
     crew.setSpace("en-vivo");
     void useTeamStore.getState().select(runId);
     onClose();
   };
-  const empty = gated.length + questions.length + flows.length === 0;
+  const empty = gated.length + questions.length + flows.length + recoveries.length === 0;
 
   return (
     <motion.div
@@ -95,6 +101,7 @@ export function Inbox({ onClose }: { onClose: () => void }) {
         {empty && <p className="m-0 p-3 text-center text-[12px] text-[var(--cf-text-muted)]">{l("Nada pendiente.", "Nothing pending.")}</p>}
         {gated.map((run) => {
           const note = states[run.id]?.run.gate_note ?? run.gate_note;
+          const requiresReview = /^(impact|amend|amend_failed):/.test(run.gate);
           return (
             <section key={`g:${run.id}`} className="flex flex-col gap-1.5 rounded-[10px] border border-[var(--cf-warning)] bg-[color-mix(in_oklab,var(--cf-warning)_6%,var(--cf-surface))] p-2.5">
               <div className="flex items-center gap-1.5 text-[11.5px] text-[var(--cf-text-muted)]">
@@ -102,11 +109,13 @@ export function Inbox({ onClose }: { onClose: () => void }) {
                 <button type="button" title={l("Abre la corrida", "Opens the run")} onClick={() => open(run.id)} className="grid h-6 w-6 place-items-center rounded-md hover:bg-[var(--cf-hover)]"><ExternalLink className="h-3.5 w-3.5" /></button>
               </div>
               {note && <p className="m-0 line-clamp-4 whitespace-pre-wrap text-[12px]">{note}</p>}
-              <input value={comment[run.id] ?? ""} onChange={(e) => setComment((c) => ({ ...c, [run.id]: e.target.value }))} placeholder={l("Comentario (opcional)", "Comment (optional)")} className={`${field} h-[28px]`} />
-              <div className="flex justify-end gap-1.5">
-                <Btn small kind="ghost" title={l("No aprueba; el equipo recibe tu comentario", "Doesn't approve; the team gets your comment")} onClick={() => void useTeamStore.getState().decide(run.id, false, comment[run.id] ?? "")}>{l("No", "No")}</Btn>
-                <Btn small kind="primary" icon={CheckCircle2} title={l("Aprueba y el equipo sigue", "Approves and the team carries on")} onClick={() => void useTeamStore.getState().decide(run.id, true, comment[run.id] ?? "")}>{l("Aprobar", "Approve")}</Btn>
-              </div>
+              {requiresReview ? <Btn small onClick={() => open(run.id)}>{l("Revisar en la corrida", "Review in the run")}</Btn> : <>
+                <input value={comment[run.id] ?? ""} onChange={(e) => setComment((c) => ({ ...c, [run.id]: e.target.value }))} placeholder={l("Comentario (opcional)", "Comment (optional)")} className={`${field} h-[28px]`} />
+                <div className="flex justify-end gap-1.5">
+                  <Btn small kind="ghost" onClick={() => void useTeamStore.getState().decide(run.id, false, comment[run.id] ?? "", run.gate)}>{l("No", "No")}</Btn>
+                  <Btn small kind="primary" icon={CheckCircle2} onClick={() => void useTeamStore.getState().decide(run.id, true, comment[run.id] ?? "", run.gate)}>{l("Aprobar", "Approve")}</Btn>
+                </div>
+              </>}
             </section>
           );
         })}
@@ -118,6 +127,16 @@ export function Inbox({ onClose }: { onClose: () => void }) {
               <button type="button" title={l("Abre la corrida", "Opens the run")} onClick={() => open(run.id)} className="grid h-6 w-6 place-items-center rounded-md hover:bg-[var(--cf-hover)]"><ExternalLink className="h-3.5 w-3.5" /></button>
             </div>
             <Question m={m} />
+          </section>
+        ))}
+        {recoveries.map(({ run, first, count }) => (
+          <section key={`provider:${run.id}`} className="flex flex-col gap-1.5 rounded-[10px] border border-[var(--cf-warning)] p-2.5">
+            <b className="text-[12.5px]">{run.title} · {l("Tareas esperando a un motor", "Tasks waiting on an engine")} ({count})</b>
+            <p className="m-0 line-clamp-3 text-[12px]">{first.last_error}</p>
+            <div className="flex justify-end gap-1">
+              <Btn small onClick={() => open(run.id)}>{l("Ver corrida", "View run")}</Btn>
+              {run.status === "running" && <Btn small onClick={() => void useTeamStore.getState().control(run.id, `retry:${first.id}`)}>{l("Reintentar", "Retry")}</Btn>}
+            </div>
           </section>
         ))}
         {flows.map((c) => (

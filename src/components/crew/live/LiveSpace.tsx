@@ -10,7 +10,7 @@ import { useTeamStore } from "../../../state/teamStore";
 import { useBacklogStore } from "../../../state/backlogStore";
 import { useT } from "../../../state/languageStore";
 import { confirmAction } from "../../../state/confirmStore";
-import { runIsLive, type TeamRun, type TeamRunState } from "../../../types/team";
+import { recoveryNeedsUser, runIsLive, type TeamRun, type TeamRunState } from "../../../types/team";
 import { TeamAvatar } from "../kit/Avatar";
 import { Btn, Chip, Empty, Seg, field } from "../kit/ui";
 import { money, useCrewStore, useL } from "../state";
@@ -41,7 +41,11 @@ function RunList({ runs, states }: { runs: TeamRun[]; states: Record<string, Tea
   const l = useL();
   const [query, setQuery] = useState("");
   const entries = useMemo(() => runs
-    .map((run) => ({ run, pending: waitingQuestions(states[run.id]) + Number(run.status === "gated") }))
+    .map((run) => ({
+      run,
+      pending: waitingQuestions(states[run.id]) + Number(run.status === "gated")
+        + Number(runIsLive(run) && recoveryNeedsUser(states[run.id]).length > 0),
+    }))
     .sort((a, b) => Number(b.pending > 0) - Number(a.pending > 0)
       || Number(runIsLive(b.run)) - Number(runIsLive(a.run))
       || Number(b.run.pinned) - Number(a.run.pinned)

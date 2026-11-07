@@ -5,8 +5,8 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { AlertTriangle, Brain, Coins, Gauge, Lightbulb, MessagesSquare, Repeat, Snail, TrendingUp } from "lucide-react";
-import { teamRunMetrics, teamRunPolicy } from "../../../lib/tauri/teamCommands";
+import { AlertTriangle, Bookmark, Brain, Coins, Gauge, Lightbulb, MessagesSquare, Repeat, Snail, TrendingUp } from "lucide-react";
+import { teamRemember, teamRunMetrics, teamRunPolicy } from "../../../lib/tauri/teamCommands";
 import { decisionsForRun } from "../../../lib/tauri/crewCommands";
 import { useTeamStore } from "../../../state/teamStore";
 import { pushErrorToast } from "../../../state/toastStore";
@@ -16,6 +16,7 @@ import { AgentAvatar } from "../kit/Avatar";
 import { useSlots } from "../kit/slots";
 import { Btn, Chip, Label, Meter, Panel } from "../kit/ui";
 import { compact, money, useCrewStore, useL } from "../state";
+import { CoordinationPanels } from "./CoordinationPanels";
 
 /** Re-read when the run moves, at most every 1.5 s. */
 function useThrottled<T>(load: () => Promise<T>, stamp: string): T | null {
@@ -134,10 +135,12 @@ export function Insights({ state, onOpenItem }: { state: TeamRunState; onOpenIte
   const advisor = state.run.members.find((m) => m.advisor);
   const advice = useMemo(() => state.messages.filter((m) => m.kind === "advice"), [state.messages]);
   const adviseItems = state.items.filter((i) => i.kind === "advise");
+  const providerWaits = state.items.filter((item) => item.status === "waiting" && item.intelligence?.recovery);
   const saved = decisions.filter((d) => d.sharp).reduce((sum, d) => sum + d.saved_tokens, 0);
 
   return (
     <div className="flex flex-col gap-2 p-2.5">
+      <CoordinationPanels key={state.run.id} state={state} onOpenItem={onOpenItem} />
       <Panel title={l("Costo y recursos", "Cost and resources")} icon={Gauge} open={open.has("cost")} onToggle={() => toggle("cost")}>
         {metrics ? (
           <>
@@ -170,11 +173,37 @@ export function Insights({ state, onOpenItem }: { state: TeamRunState; onOpenIte
       </Panel>
 
       <Panel title={<span className="inline-flex items-center gap-2">{l("Vigilancia", "Watch")}{metrics && metrics.alerts.length > 0 && <Chip tone="warn" title={l("Alertas activas en esta corrida", "Active alerts in this run")}>{metrics.alerts.length}</Chip>}</span>} icon={AlertTriangle} open={open.has("watch")} onToggle={() => toggle("watch")}>
+        {providerWaits.map((item) => (
+          <Btn key={item.id} small icon={AlertTriangle} onClick={() => onOpenItem(item.id)} title={l("Ver la recuperación de esta tarea", "View this task's recovery")}>
+            {item.title} · {item.intelligence?.recovery?.provider}
+          </Btn>
+        ))}
         {metrics && metrics.alerts.length > 0 ? metrics.alerts.map((a, i) => (
           <div key={`${a.kind}-${i}`} onClick={() => a.item_id && onOpenItem(a.item_id)} className={a.item_id ? "cursor-pointer" : ""}>
             <AlertRow alert={a} state={state} />
           </div>
-        )) : <span className="text-[12px] text-[var(--cf-text-muted)]">{l("Todo en orden: sin bucles, sin atascos, dentro del presupuesto.", "All in order: no loops, nothing stuck, within budget.")}</span>}
+        )) : providerWaits.length === 0 && <span className="text-[12px] text-[var(--cf-text-muted)]">{l("Todo en orden: sin bucles, sin atascos, dentro del presupuesto.", "All in order: no loops, nothing stuck, within budget.")}</span>}
+      </Panel>
+
+      <Panel title={l("Memoria del equipo", "Team memory")} icon={Bookmark} open={open.has("memory")} onToggle={() => toggle("memory")}>
+        {!state.memories?.length && <span className="text-[12px] text-[var(--cf-text-muted)]">{l("Guarda acuerdos desde el canal para reutilizarlos en otras corridas del repositorio.", "Save agreements from the channel to reuse in later runs of the repository.")}</span>}
+        {state.memories?.map((memory) => {
+          const origin = useTeamStore.getState().runs.find((run) => run.id === memory.run_id);
+          const repo = state.repos.find((repo) => repo.project_id === memory.project_id);
+          return (
+            <div key={`${memory.message_id}:${memory.project_id}`} className="rounded-lg border border-[var(--cf-border)] p-2 text-[12px]">
+              <b>{repo?.name}</b>
+              <p className="whitespace-pre-wrap break-words">{memory.body}</p>
+              <div className="flex flex-wrap gap-1">
+                {origin && origin.id !== state.run.id && <Btn small onClick={() => void useTeamStore.getState().select(origin.id)}>{l("Ver corrida de origen", "View source run")}</Btn>}
+                <Btn small onClick={() => void teamRemember(state.run.id, memory.message_id, memory.project_id, false)
+                  .then(() => useTeamStore.getState().refresh(state.run.id)).catch((error) => pushErrorToast(String(error)))}>
+                  {l("Quitar de memoria", "Remove from memory")}
+                </Btn>
+              </div>
+            </div>
+          );
+        })}
       </Panel>
 
       <Panel title={<span className="inline-flex items-center gap-2">{l("Decisiones", "Decisions")}{saved > 0 && <Chip tone="ok" icon={TrendingUp} title={l("Tokens que no gastaste gracias a decisiones automáticas", "Tokens saved by automatic decisions")}>{l(`~${compact(saved)} tokens ahorrados`, `~${compact(saved)} tokens saved`)}</Chip>}</span>} icon={Brain} open={open.has("decisions")} onToggle={() => toggle("decisions")}>

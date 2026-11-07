@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::db::{models::AgentTask, queries, Db};
-use crate::team::{self, gitops, hierarchy, protocol, Item, MemberSnap, Policy, Run, RunRepo, RunState};
+use crate::team::{self, coordination, gitops, hierarchy, intelligence, protocol, Item, MemberSnap, Policy, Run, RunRepo, RunState};
 
 static RUN_LOCKS: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> = LazyLock::new(Default::default);
 
@@ -534,6 +534,7 @@ pub struct Dispatch {
     pub provider: String,
     pub model: String,
     pub effort: String,
+    pub account_id: Option<String>,
     pub title: String,
 }
 
@@ -568,13 +569,18 @@ fn session_base_key(run_id: &str) -> String {
 async fn plan_windows(db: &Db, run_id: &str) -> Vec<(String, f64, String)> {
     let engines = with(db, |c| {
         let Some(run) = team::get_run(c, run_id).map_err(e2s)? else { return Ok(Vec::new()) };
+        if run.policy.max_session_pct <= 0 {
+            return Ok(Vec::new());
+        }
         let mut seen: Vec<String> = Vec::new();
         let mut out = Vec::new();
         for m in &run.members {
             if !crate::ai_quota::QUOTA_PROVIDERS.contains(&m.provider.as_str()) {
                 continue;
             }
-            let key = m.account_id.as_ref().map(|id| format!("{}|{id}", m.provider)).unwrap_or_else(|| m.provider.clone());
+            let account = crate::ai_accounts::resolve(c, &m.provider, Some("chat"), Some(&run.workspace_id),
+                crate::ai_accounts::Choice::parse(m.account_id.as_deref()));
+            let key = account.key();
             if seen.contains(&key) {
                 continue;
             }
@@ -586,7 +592,7 @@ async fn plan_windows(db: &Db, run_id: &str) -> Vec<(String, f64, String)> {
             let configured = queries::get_setting(c, &format!("{}_binary_path", m.provider)).ok().flatten().filter(|p| !p.trim().is_empty());
             let binary = configured.unwrap_or_else(|| crate::ai::engine_for(&m.provider).default_binary().to_string());
             let Some(binary) = crate::ai::find_on_path(&binary) else { continue };
-            let account = m.account_id.as_ref().filter(|_| crate::ai_accounts::supports_accounts(&m.provider)).map(|id| crate::ai_accounts::AccountEnv::for_account(&m.provider, id));
+            let account = account.account_id.is_some().then_some(account);
             out.push((key, Some(crate::ai_quota::QuotaEngine { provider: m.provider.clone(), account, binary })));
         }
         Ok(out)
@@ -722,7 +728,24 @@ async fn claim_limited(db: &Db, run_id: &str, limit: Option<usize>) -> Result<Ve
         if run.status != "running" {
             return Ok((Some(run), Vec::new()));
         }
-        let items = team::list_items(c, run_id).map_err(e2s)?;
+        let mut items = team::list_items(c, run_id).map_err(e2s)?;
+        let now = chrono::Utc::now().timestamp();
+        for item in &mut items {
+            if item.status == "waiting" && item.intelligence.recovery.as_ref().and_then(|r| r.resume_at).is_some_and(|at| at <= now) {
+                item.status = "pending".into();
+                item.intelligence.recovery = None;
+                team::update_item(c, item).map_err(e2s)?;
+            }
+        }
+        let blocked: Vec<_> = items.iter().filter(|i| i.status == "waiting" && i.intelligence.recovery.is_some()).cloned().collect();
+        for item in items.iter_mut().filter(|i| i.status == "pending") {
+            if let Some(waiting) = blocked.iter().find(|other| other.intelligence.recovery.as_ref().is_some_and(|recovery| intelligence::blocked_by(c, &run, item, recovery))) {
+                item.status = "waiting".into();
+                item.intelligence.recovery = waiting.intelligence.recovery.clone();
+                item.last_error.clone_from(&waiting.last_error);
+                team::update_item(c, item).map_err(e2s)?;
+            }
+        }
         let repos = team::list_repos(c, run_id).map_err(e2s)?;
         // Budgets: past any of them nothing new starts; what runs finishes.
         let spend = team::metrics::spend(c, run_id).map_err(e2s)?;
@@ -775,10 +798,14 @@ async fn claim_limited(db: &Db, run_id: &str, limit: Option<usize>) -> Result<Ve
             let branch = format!("codeflow/team-{run_slug}-{}", p.item.key);
             let path = wt_dir(&p.repo.name, &format!("team-{run_slug}-{}", p.item.key)).to_string_lossy().into_owned();
             let (r, t, b, s) = (p.repo.local_path.clone(), path.clone(), branch.clone(), p.repo.integration_branch.clone());
-            match blocking(move || gitops::add_worktree(&r, &t, &b, &s)).await? {
-                Ok(()) => {
+            match blocking(move || {
+                gitops::add_worktree(&r, &t, &b, &s)?;
+                Ok::<_, String>(gitops::head_sha(&t).unwrap_or_default())
+            }).await? {
+                Ok(base_sha) => {
                     p.item.worktree_path = path;
                     p.item.branch = branch;
+                    p.item.intelligence.base_sha = base_sha;
                 }
                 Err(e) => {
                     p.item.status = "pending".into();
@@ -796,6 +823,13 @@ async fn claim_limited(db: &Db, run_id: &str, limit: Option<usize>) -> Result<Ve
         let items = team::list_items(c, run_id).map_err(e2s)?;
         let repos = team::list_repos(c, run_id).map_err(e2s)?;
         let messages = team::list_messages(c, run_id).map_err(e2s)?;
+        let memories = intelligence::memories(c, &run).map_err(e2s)?;
+        let contracts = coordination::latest_contracts(&items);
+        let recommendations = if ready.iter().any(|picked| picked.item.is_lead()) {
+            coordination::recommendations(c, &run, &repos).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         let mut out = Vec::new();
         for Picked { mut item, repo } in ready {
             let Some(m) = member(&run, &item.member_id).cloned() else {
@@ -806,21 +840,57 @@ async fn claim_limited(db: &Db, run_id: &str, limit: Option<usize>) -> Result<Ve
             };
             let cwd = cwd_of(&item, &items, &repo);
             team::artifacts::mirror_into(run_id, std::slice::from_ref(&cwd));
-            let (message, delivered) = compose(&run, &repos, &items, &messages, &item, &m, &cwd);
+            let (mut message, delivered) = compose(&run, &repos, &items, &messages, &item, &m, &cwd);
+            item.intelligence.used_contracts.clear();
+            for name in &item.intelligence.requires_contracts {
+                let Some((_, contract)) = contracts.get(name.as_str()) else { continue };
+                let reference = match team::artifacts::mirror_contract(run_id, &cwd, contract) {
+                    Ok(path) => format!("Léelo completo en `{path}`."),
+                    Err(_) => format!("Contenido exacto del contrato:\n{}", contract.text),
+                };
+                message.push_str(&format!("\n\nContrato «{}» · versión {}. {reference}\n", name, contract.version));
+                item.intelligence.used_contracts.insert(name.clone(), contract.version.clone());
+            }
+            if item.is_lead() && !recommendations.is_empty() {
+                message.push_str("\n\n## Experiencia del equipo en estos repositorios\nUsa estas muestras al elegir miembros disponibles. Mantén los permisos y el modelo configurado de cada agente.\n");
+                for row in recommendations.iter().take(6) {
+                    let repo = repos.iter().find(|repo| repo.project_id == row.project_id).map(|repo| repo.name.as_str()).unwrap_or("");
+                    message.push_str(&format!("- {repo} · {} · {} / {} / {} · {}/{} al primer intento; mediana {} s.\n",
+                        row.role, row.route.provider, row.route.model, row.route.effort, row.first_pass, row.attempted, row.median_seconds));
+                }
+            }
+            let applicable: Vec<_> = memories.iter().rev()
+                .filter(|memory| memory.run_id != run.id && (memory.project_id == item.project_id
+                    || (item.is_lead() && repos.iter().any(|repo| repo.project_id == memory.project_id)
+                        && (m.member.repos.is_empty() || m.member.repos.contains(&memory.project_id)))))
+                .take(8).collect();
+            if !applicable.is_empty() {
+                message.push_str("\n\n## Acuerdos aprobados de corridas anteriores\nÚsalos como contexto del repositorio. El encargo actual tiene prioridad.\n");
+                for memory in applicable {
+                    let repo = repos.iter().find(|repo| repo.project_id == memory.project_id).map(|repo| repo.name.as_str()).unwrap_or("");
+                    message.push_str(&format!("\n- {repo} · corrida {} · {}\n", memory.run_id, memory.body));
+                }
+            }
             team::mark_delivered(c, &delivered).map_err(e2s)?;
             let task = if item.run_in == "terminal" {
                 None
             } else {
                 Some(task_for(c, &run, &mut item, &items, &m, &cwd)?)
             };
+            let execution = intelligence::executor(&run, &item).unwrap_or(&m);
+            let route = coordination::Execution {
+                provider: execution.provider.clone(), model: intelligence::model(execution, &item).to_string(), effort: execution.effort.clone(),
+            };
+            item.intelligence.execution = Some(route.clone());
             team::update_item(c, &item).map_err(e2s)?;
             team::post(c, run_id, &item.id, (&m.member.id, &m.member.name), ("all", "Equipo"), "status", &format!("empezó «{}»", item.title), &[])
                 .map_err(e2s)?;
             out.push(Dispatch {
                 title: format!("{} · {}", m.member.name, item.title),
-                provider: m.provider.clone(),
-                model: if item.model.is_empty() { m.model.clone() } else { item.model.clone() },
-                effort: m.effort.clone(),
+                provider: route.provider,
+                model: route.model,
+                effort: route.effort,
+                account_id: execution.account_id.clone(),
                 run_in: item.run_in.clone(),
                 cwd,
                 message,
@@ -840,6 +910,33 @@ fn cwd_of(item: &Item, items: &[Item], repo: &RunRepo) -> String {
         "review" => items.iter().find(|i| i.id == item.ref_item).map(|i| i.worktree_path.clone()).filter(|p| !p.is_empty()).unwrap_or_else(|| repo.integration_path.clone()),
         _ => repo.integration_path.clone(),
     }
+}
+
+fn planned_items(run: &Run, existing: &[Item], planner: &Item, plans: &[protocol::PlannedItem]) -> Vec<Item> {
+    let mut key_to_id: HashMap<_, _> = existing.iter().map(|item| (item.key.clone(), item.id.clone())).collect();
+    let mut fresh = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let member = member(run, &plan.member_id);
+        let kind = if delegates(run, &plan.member_id, &planner.member_id) { "delegate" } else { &plan.kind };
+        let mut item = team::new_item(run, &plan.key, member, &plan.project_id, kind, &plan.title, &plan.instruction);
+        item.intelligence.criteria.clone_from(&plan.criteria);
+        item.intelligence.paths.clone_from(&plan.paths);
+        item.intelligence.contract_specs.clone_from(&plan.publishes);
+        item.intelligence.requires_contracts.clone_from(&plan.requires);
+        item.round = planner.round;
+        if kind == "delegate" {
+            item.run_in = "headless".into();
+        }
+        if planner.member_id != run.lead && !run.lead.is_empty() {
+            item.parent = planner.id.clone();
+        }
+        key_to_id.insert(plan.key.clone(), item.id.clone());
+        fresh.push(item);
+    }
+    for (item, plan) in fresh.iter_mut().zip(plans) {
+        item.depends_on = plan.depends_on.iter().filter_map(|key| key_to_id.get(key).cloned()).collect();
+    }
+    fresh
 }
 
 /// The task an item runs as: the work it continues (a fix after review), the lead's single
@@ -902,6 +999,12 @@ fn compose(run: &Run, repos: &[RunRepo], items: &[Item], messages: &[team::Messa
     let repo = repos.iter().find(|r| r.project_id == item.project_id);
     out.push_str(&format!("# Equipo «{}»\n\n## Objetivo del equipo\n{}\n\n", run.team_name, run.goal));
     out.push_str(&format!("Eres **{}**{}.\n\n", m.member.name, if m.member.role.trim().is_empty() { String::new() } else { format!(" — {}", m.member.role.trim()) }));
+    if item.kind == "amend" {
+        out.push_str("## Ajuste solicitado para esta corrida\nPropón solo las diferencias. Resume qué conservas, qué cambia y qué pruebas se deben repetir. En un ítem nuevo, usa `reemplaza` con la clave de la tarea anterior si la corrige o sustituye; la app actualizará las dependencias. Usa `cancelar` solo para trabajo pendiente que ya no se necesite. La propuesta se revisará antes de aplicarse.\n\n");
+    }
+    for contract in &item.intelligence.contract_specs {
+        out.push_str(&format!("Publica el contrato «{}» en `{}` para las tareas que lo consumen.\n", contract.name, contract.path));
+    }
 
     let inbox: Vec<&team::Message> = messages
         .iter()
@@ -941,15 +1044,22 @@ fn compose(run: &Run, repos: &[RunRepo], items: &[Item], messages: &[team::Messa
                 // delegate is an org chart line, not a route the lead must take.
                 place = format!(" · en el área de {}", boss.member.name);
             }
+            let active = items.iter().filter(|task| task.status == "running" && task.id != item.id
+                && intelligence::executor(run, task).is_some_and(|m| m.member.id == mm.member.id)).count();
+            let queued = items.iter().filter(|task| task.status == "pending" && task.member_id == mm.member.id).count();
+            let unavailable = items.iter().any(|task| task.status == "waiting" && task.intelligence.recovery.is_some()
+                && intelligence::executor(run, task).is_some_and(|m| m.member.id == mm.member.id));
             out.push_str(&format!(
-                "- **{}** — {} · {} · {}{} · {}{}\n",
+                "- **{}** — {} · {} · {} / {}{} · {}{} · {active}/{} en curso, {queued} en cola{}\n",
                 mm.member.name,
                 if mm.member.role.trim().is_empty() { "sin rol descrito" } else { mm.member.role.trim() },
                 if mm.member.edits { "escribe código" } else { "solo lectura" },
-                mm.model,
+                mm.provider, mm.model,
                 if mm.effort.is_empty() { String::new() } else { format!(" ({})", mm.effort) },
                 repos_of,
-                place
+                place,
+                mm.member.max_parallel,
+                if unavailable { " · motor a la espera" } else { "" },
             ));
         }
         out.push_str("\n## Repositorios\n");
@@ -1024,6 +1134,13 @@ fn compose(run: &Run, repos: &[RunRepo], items: &[Item], messages: &[team::Messa
                 out.push('\n');
             }
         }
+    }
+    if !item.intelligence.criteria.is_empty() {
+        out.push_str("\n\n## Criterios de aceptación\n");
+        for (index, criterion) in item.intelligence.criteria.iter().enumerate() {
+            out.push_str(&format!("{}. {}\n", index + 1, criterion));
+        }
+        out.push_str("Al terminar, incluye un bloque equipo con `{\"verificacion\":[{\"criterio\":1,\"evidencia\":\"archivo, prueba o resultado observado\"}]}`. Declara solo lo que comprobaste.\n");
     }
     if !inbox.is_empty() {
         out.push_str("## Mensajes para ti\n");
@@ -1103,19 +1220,98 @@ pub async fn settle_core(db: &Db, item_id: &str, outcome: &str, text: &str, erro
             })?;
         }
         "ok" => on_ok(db, &run, item, text).await?,
-        _ => on_failure(db, &run, item, if error.is_empty() { "falló sin decir por qué" } else { error }, "error").await?,
+        _ => {
+            use crate::ai::AiFailureKind;
+            let failure = crate::ai::classify_failure(error);
+            let external = matches!(failure.kind, AiFailureKind::Quota | AiFailureKind::AuthRequired | AiFailureKind::CliMissing);
+            let transient = matches!(failure.kind, AiFailureKind::CliBusy | AiFailureKind::Overloaded) && item.attempts < run.policy.max_attempts;
+            if item.run_in == "headless" && (external || transient) {
+                with(db, |c| park_provider_error(c, &run, item, failure))?;
+            } else {
+                on_failure(db, &run, item, if error.is_empty() { "falló sin decir por qué" } else { error }, "error").await?;
+            }
+        }
     }
     advance(db, &run_id).await?;
     state_of(db, &run_id)
+}
+
+fn park_provider_error(conn: &Connection, run: &Run, mut item: Item, failure: crate::ai::AiFailure) -> Result<(), String> {
+    use crate::ai::AiFailureKind;
+    let active = intelligence::executor(run, &item).ok_or("El miembro de la tarea ya no existe.")?;
+    let route_model = intelligence::model(active, &item).to_string();
+    let now = chrono::Utc::now().timestamp();
+    let account_key = intelligence::account_key(conn, run, active);
+    let (reset, shared_quota) = if failure.kind == AiFailureKind::Quota {
+        intelligence::quota_reset(&account_key, &active.provider, &route_model, now)
+    } else {
+        (None, false)
+    };
+    let transient = matches!(failure.kind, AiFailureKind::CliBusy | AiFailureKind::Overloaded);
+    let resume_at = if transient {
+        let delay = if failure.kind == AiFailureKind::CliBusy { 15 } else { 30 };
+        Some(now + delay * item.attempts.clamp(1, 6))
+    } else {
+        intelligence::stated_reset(&failure, now).max(reset).map(|at| at.saturating_add(5))
+    };
+    let recovery = intelligence::Recovery { kind: failure.kind, provider: active.provider.clone(), model: route_model, resume_at, account_key, shared_quota };
+    if failure.kind == AiFailureKind::Quota && item.intelligence.quota_events.len() < 32 {
+        item.intelligence.quota_events.push(coordination::Execution {
+            provider: active.provider.clone(), model: recovery.model.clone(), effort: active.effort.clone(),
+        });
+    }
+    item.last_error = trim_chars(&failure.message, 2000);
+    if !transient {
+        item.attempts = (item.attempts - 1).max(0);
+    }
+    let fallback = if transient { None } else { intelligence::substitute(conn, run, &item, &recovery) };
+    let note = if let Some(next) = fallback {
+        item.status = "pending".into();
+        item.intelligence.substitute = Some(next.member.id.clone());
+        item.model.clear();
+        item.feedback = format!("Retoma el trabajo existente desde la misma carpeta. El motor anterior se detuvo: {}. Inspecciona el diff y los archivos pendientes antes de editar.", item.last_error);
+        format!("«{}» sigue con {} · {} · {}{}.", item.title, next.member.name, next.provider, next.model,
+            if next.effort.is_empty() { String::new() } else { format!(" · {}", next.effort) })
+    } else {
+        item.status = "waiting".into();
+        item.intelligence.recovery = Some(recovery);
+        let reason = match failure.kind {
+            AiFailureKind::Quota => "cuota agotada",
+            AiFailureKind::AuthRequired => "sesión por renovar",
+            AiFailureKind::Overloaded => "proveedor saturado",
+            AiFailureKind::CliBusy => "motor ocupado",
+            _ => "motor por instalar",
+        };
+        format!("«{}» espera a {} ({reason}). {}", item.title, active.provider, item.last_error)
+    };
+    let tx = conn.unchecked_transaction().map_err(e2s)?;
+    team::update_item(&tx, &item).map_err(e2s)?;
+    // A provider refusal is not a completed agent turn and should not spend the team's retry budget.
+    if !transient {
+        tx.execute("UPDATE agent_team_runs SET dispatches = MAX(0, dispatches - 1) WHERE id = ?1", [&run.id]).map_err(e2s)?;
+    }
+    team::post(&tx, &run.id, &item.id, ("system", "CodeFlow"), ("all", "Equipo"), "status", &note, &[]).map_err(e2s)?;
+    tx.commit().map_err(e2s)
 }
 
 /// A turn that did not get its job done. Retried while attempts remain (with the reason in front of
 /// it), then handed to the member's escalation, then to the lead, then to the user.
 async fn on_failure(db: &Db, run: &Run, mut item: Item, reason: &str, kind: &str) -> Result<(), String> {
     let repeated = !item.last_error.is_empty() && first_line(&item.last_error, 200) == first_line(reason, 200);
+    let progress = if item.worktree_path.is_empty() {
+        Some(String::new())
+    } else {
+        let cwd = item.worktree_path.clone();
+        let base = item.intelligence.base_sha.clone();
+        blocking(move || gitops::work_fingerprint(&cwd, &base)).await?.ok()
+    };
+    let signature = progress.as_deref().map(|progress| coordination::fingerprint(&[kind, &first_line(reason, 400), progress])).unwrap_or_default();
+    let stalled = item.attempts >= 2 && !signature.is_empty() && item.intelligence.failure_fingerprint == signature;
+    item.intelligence.failure_fingerprint = signature;
     // Before paying for another attempt: is retrying it even the right call? The decision layer
     // answers when it is sure; when it is not, the policy's own order (retry, then escalate) stands.
-    let escalate_to = member(run, &item.member_id).map(|m| m.member.escalate_to.clone()).filter(|e| !e.is_empty());
+    let escalate_to = member(run, &item.member_id).map(|m| m.member.escalate_to.clone())
+        .filter(|e| !e.is_empty() && item.intelligence.substitute.as_ref() != Some(e));
     let mut options: Vec<String> = vec!["reintentar".into()];
     if escalate_to.is_some() {
         options.push("escalar".into());
@@ -1123,7 +1319,7 @@ async fn on_failure(db: &Db, run: &Run, mut item: Item, reason: &str, kind: &str
     if !run.lead.is_empty() && !item.is_lead() {
         options.push("replanificar".into());
     }
-    let verdict = if run.policy.decider && item.attempts < run.policy.max_attempts && options.len() > 1 {
+    let verdict = if !stalled && run.policy.decider && item.attempts < run.policy.max_attempts && options.len() > 1 {
         let context = format!(
             "Tarea `{}` de {} ({}): {}\nIntento {} de {}. Tipo de fallo: {kind}.{}\nError:\n{}",
             item.key,
@@ -1158,7 +1354,12 @@ async fn on_failure(db: &Db, run: &Run, mut item: Item, reason: &str, kind: &str
         if let (Some(v), Some(choice)) = (verdict.as_ref(), sharp_choice.as_deref()) {
             team::post(c, &run.id, &item.id, ("system", "Decisor"), ("all", "Equipo"), "decision", &format!("«{}» falló: {choice} (p = {:.2}, {})", item.title, v.p, v.source), &[]).map_err(e2s)?;
         }
-        let decided_stop = matches!(sharp_choice.as_deref(), Some("escalar") | Some("replanificar"));
+        if stalled {
+            let change = if progress.as_deref() == Some("") { "sin cambios en los archivos" } else { "sin cambios nuevos en los archivos" };
+            team::post(c, &run.id, &item.id, ("system", "CodeFlow"), ("all", "Equipo"), "finding",
+                &format!("«{}» repitió el fallo {change}. {}. Cambia el enfoque o pide ayuda antes de otro intento.", item.title, first_line(reason, 400)), &[]).map_err(e2s)?;
+        }
+        let decided_stop = stalled || matches!(sharp_choice.as_deref(), Some("escalar") | Some("replanificar"));
         item.last_error = reason.to_string();
         if item.attempts < run.policy.max_attempts && !decided_stop {
             // The same error twice: the advisor looks before the third try, which waits for it.
@@ -1170,7 +1371,7 @@ async fn on_failure(db: &Db, run: &Run, mut item: Item, reason: &str, kind: &str
                 }
             }
             // A retry climbs the member's model ladder, cheapest first, one step per failure.
-            if let Some(m) = member(run, &item.member_id) {
+            if let Some(m) = intelligence::executor(run, &item) {
                 let ladder = &m.member.model_ladder;
                 if !ladder.is_empty() {
                     let step = ((item.attempts - 1).max(0) as usize).min(ladder.len() - 1);
@@ -1197,6 +1398,10 @@ async fn on_failure(db: &Db, run: &Run, mut item: Item, reason: &str, kind: &str
                 let mut again = team::new_item(run, &team::free_key(&items, &format!("{}-esc", item.key)), Some(&next), &item.project_id, &item.kind, &item.title, &item.instruction);
                 again.depends_on = item.depends_on.clone();
                 again.ref_item = item.ref_item.clone();
+                again.intelligence.criteria.clone_from(&item.intelligence.criteria);
+                again.intelligence.paths.clone_from(&item.intelligence.paths);
+                again.intelligence.contract_specs.clone_from(&item.intelligence.contract_specs);
+                again.intelligence.requires_contracts.clone_from(&item.intelligence.requires_contracts);
                 again.feedback = format!("{} no pudo con esto ({}). Te toca a ti.", item.member_name, first_line(reason, 400));
                 team::insert_item(c, &again).map_err(e2s)?;
                 // Whatever waited on the failed item waits on its replacement.
@@ -1219,12 +1424,33 @@ async fn on_failure(db: &Db, run: &Run, mut item: Item, reason: &str, kind: &str
             }
             return Ok(());
         }
-        team::set_run_status(c, &run.id, "gated", &format!("stuck:{}", item.id), &format!("«{}» falló: {}", item.title, first_line(reason, 300))).map_err(e2s)
+        let gate = if item.kind == "amend" { "amend_failed" } else { "stuck" };
+        team::set_run_status(c, &run.id, "gated", &format!("{gate}:{}", item.id), &format!("«{}» falló: {}", item.title, first_line(reason, 300))).map_err(e2s)
     })
 }
 
 async fn on_ok(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String> {
     item.output_text = text.to_string();
+    item.intelligence.evidence = intelligence::reported_evidence(&item.intelligence.criteria, text);
+    if !item.intelligence.used_contracts.is_empty() {
+        let items = with(db, |c| team::list_items(c, &run.id).map_err(e2s))?;
+        let latest = coordination::latest_contracts(&items);
+        let outdated = coordination::outdated_contracts(&item, &latest);
+        if !outdated.is_empty() {
+            let changed = outdated.join(", ");
+            item.status = "pending".into();
+            item.feedback = format!("Cambió el contrato {changed} mientras trabajabas. Adapta lo ya hecho y repite las pruebas afectadas con la nueva versión.");
+            return with(db, |c| {
+                team::update_item(c, &item).map_err(e2s)?;
+                team::post(c, &run.id, &item.id, ("system", "CodeFlow"), ("all", "Equipo"), "finding", &item.feedback, &[]).map(|_| ()).map_err(e2s)
+            });
+        }
+    }
+    match gate_impact(db, run, &mut item).await {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(reason) => return on_failure(db, run, item, &reason, "impacto").await,
+    }
     // What the answer carried as artifacts becomes files the next members open (`team::artifacts`).
     let filed = with(db, |c| Ok(team::artifacts::file_item(c, run, &item, text)))?;
     if !filed.is_empty() {
@@ -1249,6 +1475,11 @@ async fn on_ok(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), Str
         return with(db, |c| on_advice(c, run, item, text));
     }
     let repo = with(db, |c| team::list_repos(c, &run.id).map_err(e2s))?.into_iter().find(|r| r.project_id == item.project_id);
+    if item.kind != "work" {
+        if let Err(reason) = load_contracts(&mut item, repo.as_ref()).await {
+            return on_failure(db, run, item, &reason, "contrato").await;
+        }
+    }
     match item.kind.as_str() {
         "review" => on_review(db, run, item, text).await,
         "integrate" => {
@@ -1274,18 +1505,36 @@ async fn on_ok(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), Str
         }
         "work" => {
             // Checks the policy runs after each piece of work, in its own folder.
-            let checks: Vec<String> = run
+            let mut checks: Vec<String> = run
                 .policy
                 .checks
                 .iter()
                 .filter(|c| c.when == "item" && (c.repo == "*" || c.repo == item.project_id))
                 .map(|c| c.command.clone())
                 .collect();
-            for command in checks {
-                let (passed, output) = crate::commands::agents_cmd::run_shell_check(&command, &item.worktree_path).await;
-                if !passed {
-                    return on_failure(db, run, item, &format!("`{command}` falló:\n{}", trim_chars(&output, 6000)), "check").await;
+            if checks.is_empty() && run.policy.auto_checks
+                && !run.policy.checks.iter().any(|c| c.repo == "*" || c.repo == item.project_id)
+            {
+                if let Some(command) = intelligence::repository_check(std::path::Path::new(&item.worktree_path)) {
+                    checks.push(command.to_string());
                 }
+            }
+            for command in checks {
+                let evidence = verify_check(&command, &item.worktree_path, repo.as_ref(), &item.intelligence.base_sha).await;
+                let failed = evidence.result != "passed";
+                let reason = failed.then(|| format!("`{command}` · {}\n{}", check_description(&evidence.result), evidence.detail));
+                item.intelligence.evidence.push(evidence);
+                if let Some(reason) = reason {
+                    return on_failure(db, run, item, &reason, "check").await;
+                }
+            }
+            match gate_impact(db, run, &mut item).await {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(reason) => return on_failure(db, run, item, &reason, "impacto").await,
+            }
+            if let Err(reason) = load_contracts(&mut item, repo.as_ref()).await {
+                return on_failure(db, run, item, &reason, "contrato").await;
             }
             let path = item.worktree_path.clone();
             let message = gitops::commit_message(&run.policy.commit_style, &item.key, &item.title);
@@ -1330,6 +1579,68 @@ async fn on_ok(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), Str
             Ok(())
         }
     }
+}
+
+async fn gate_impact(db: &Db, run: &Run, item: &mut Item) -> Result<bool, String> {
+    if !item.writes() || !run.policy.impact_approval || item.worktree_path.is_empty() {
+        return Ok(false);
+    }
+    let (path, base, rules) = (item.worktree_path.clone(), item.intelligence.base_sha.clone(), run.policy.impact_paths.clone());
+    let impact = blocking(move || gitops::inspect_impact(&path, &base, &rules)).await??
+        .filter(|impact| impact.version != item.intelligence.approved_impact);
+    item.intelligence.impact = impact;
+    if item.intelligence.impact.is_some() {
+        item.status = "gated".into();
+        with(db, |c| team::update_item(c, item).map_err(e2s))?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+async fn load_contracts(item: &mut Item, repo: Option<&RunRepo>) -> Result<(), String> {
+    if item.intelligence.contract_specs.is_empty() {
+        return Ok(());
+    }
+    let root = if item.worktree_path.is_empty() {
+        repo.map(|repo| repo.integration_path.clone()).unwrap_or_default()
+    } else {
+        item.worktree_path.clone()
+    };
+    let specs = item.intelligence.contract_specs.clone();
+    item.intelligence.published_contracts = blocking(move || coordination::publish_contracts(&root, &specs)).await??;
+    Ok(())
+}
+
+fn check_description(result: &str) -> &'static str {
+    match result {
+        "passed" => "pasó",
+        "regression" => "falló después del cambio; la base pasó",
+        "preexisting" => "repitió el mismo fallo de la base",
+        _ => "falló; sin comparación concluyente con la base",
+    }
+}
+
+async fn verify_check(command: &str, cwd: &str, repo: Option<&RunRepo>, base: &str) -> intelligence::Evidence {
+    let (passed, output) = crate::commands::agents_cmd::run_shell_check(command, cwd).await;
+    let mut result = if passed { "passed" } else { "failed" };
+    if let Some(repo) = repo.filter(|_| !passed && !base.is_empty()) {
+        let root = repo.local_path.clone();
+        let path = wt_dir(&repo.name, &format!("check-{}", uuid::Uuid::new_v4())).to_string_lossy().into_owned();
+        let start = base.to_string();
+        let (r, p) = (root.clone(), path.clone());
+        if blocking(move || gitops::add_detached(&r, &p, &start)).await.is_ok_and(|made| made.is_ok()) {
+            let (base_passed, base_output) = crate::commands::agents_cmd::run_shell_check(command, &path).await;
+            let cleaned = |output: &str, path: &str| output.replace(path, "<repo>").trim().to_string();
+            if base_passed {
+                result = "regression";
+            } else if !output.trim().is_empty() && cleaned(&output, cwd) == cleaned(&base_output, &path) {
+                result = "preexisting";
+            }
+            // Only this fresh detached baseline is disposable, including files made by its checks.
+            let _ = blocking(move || crate::git::worktree::remove(&root, &path, true)).await;
+        }
+    }
+    intelligence::Evidence { label: command.into(), result: result.into(), detail: trim_chars(&output, 6000) }
 }
 
 /// The advisor answered: its advice goes to the lead and to you, and into whatever it was asked
@@ -1468,6 +1779,7 @@ fn new_review(conn: &Connection, run: &Run, work: &Item) -> Result<(), String> {
     let lap = items.iter().filter(|i| i.kind == "review" && items.iter().any(|w| w.id == i.ref_item && w.branch == work.branch)).count() as i64 + 1;
     let mut review = team::new_item(run, &team::free_key(&items, &format!("{}-rev", work.key)), Some(reviewer), &work.project_id, "review", &format!("Revisar «{}»", work.title), &work.instruction);
     review.ref_item = work.id.clone();
+    review.intelligence.requires_contracts.clone_from(&work.intelligence.requires_contracts);
     review.lap = lap;
     review.run_in = "headless".into();
     team::insert_item(conn, &review).map_err(e2s)?;
@@ -1527,6 +1839,12 @@ async fn on_review(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(),
         fix.task_id = target.task_id.clone();
         fix.worktree_path = target.worktree_path.clone();
         fix.branch = target.branch.clone();
+        fix.intelligence.criteria.clone_from(&target.intelligence.criteria);
+        fix.intelligence.paths.clone_from(&target.intelligence.paths);
+        fix.intelligence.contract_specs.clone_from(&target.intelligence.contract_specs);
+        fix.intelligence.requires_contracts.clone_from(&target.intelligence.requires_contracts);
+        fix.intelligence.base_sha.clone_from(&target.intelligence.base_sha);
+        fix.intelligence.substitute.clone_from(&target.intelligence.substitute);
         fix.run_in = target.run_in.clone();
         fix.approved = true;
         fix.lap = item.lap;
@@ -1642,7 +1960,8 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
                 }
             }
         } else if !reply.message.is_empty() {
-            team::post(c, &run.id, &item.id, from, ("all", "Equipo"), "decision", &reply.message, &[]).map_err(e2s)?;
+            let kind = if item.kind == "amend" { "plan" } else { "decision" };
+            team::post(c, &run.id, &item.id, from, ("all", "Equipo"), kind, &reply.message, &[]).map_err(e2s)?;
         }
         if !reply.rejected.is_empty() {
             team::post(c, &run.id, &item.id, ("system", "CodeFlow"), ("lead", &lead.1), "error", &format!("se descartó parte del plan:\n- {}", reply.rejected.join("\n- ")), &[])
@@ -1691,32 +2010,33 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
             }
         }
 
-        // Cancellations: only what has not started.
-        for key in &reply.cancel {
-            let slug = protocol::key_slug(key);
-            for mut i in items.iter().filter(|i| i.key == slug && matches!(i.status.as_str(), "pending" | "gated")).cloned() {
-                i.status = "skipped".into();
-                team::update_item(c, &i).map_err(e2s)?;
-                team::post(c, &run.id, &i.id, from, (&i.member_id, &i.member_name), "decision", &format!("canceló «{}»", i.title), &[]).map_err(e2s)?;
+        let mut fresh = planned_items(run, &items, &item, &reply.items);
+        if item.kind == "amend" {
+            let mut projected = items.clone();
+            let valid = if reply.rejected.is_empty() && (!reply.message.is_empty() || !reply.items.is_empty() || !reply.cancel.is_empty()) {
+                coordination::amendment_changes(&mut projected, &reply.items, &mut fresh, &reply.cancel)
+            } else {
+                Err(if reply.rejected.is_empty() { "Falta una propuesta concreta.".into() } else { reply.rejected.join("\n") })
+            };
+            if let Err(reason) = valid {
+                return retry_plan(c, run, item, &reason);
             }
+            item.intelligence.amendment = Some(coordination::Amendment { summary: reply.message, cancel: reply.cancel, items: reply.items });
+            item.status = "gated".into();
+            team::update_item(c, &item).map_err(e2s)?;
+            return team::set_run_status(c, &run.id, "gated", &format!("amend:{}", item.id), "Revisa el ajuste antes de aplicarlo.").map_err(e2s);
         }
-
-        // New items, their dependencies resolved from keys to ids (this plan's and the run's).
-        let mut key_to_id: HashMap<String, String> = items.iter().map(|i| (i.key.clone(), i.id.clone())).collect();
-        let mut fresh = Vec::new();
-        for p in &reply.items {
-            let m = member(run, &p.member_id);
-            let kind = if delegates(run, &p.member_id, &planner) { "delegate" } else { p.kind.as_str() };
-            let mut new = team::new_item(run, &p.key, m, &p.project_id, kind, &p.title, &p.instruction);
-            new.round = item.round;
-            if kind == "delegate" {
-                new.run_in = "headless".into();
-            }
-            if sub_lead {
-                new.parent = item.id.clone();
-            }
-            key_to_id.insert(p.key.clone(), new.id.clone());
-            fresh.push((new, p.depends_on.clone()));
+        let canceled: std::collections::HashSet<_> = reply.cancel.iter().map(|key| protocol::key_slug(key)).collect();
+        let mut active = items.clone();
+        for retired in active.iter_mut().filter(|old| canceled.contains(&old.key) && matches!(old.status.as_str(), "pending" | "gated")) {
+            retired.status = "skipped".into();
+        }
+        if let Err(reason) = coordination::wire_contracts(&active, &mut fresh) {
+            return retry_plan(c, run, item, &reason);
+        }
+        for (old, updated) in items.iter().zip(&active).filter(|(old, updated)| old.status != updated.status) {
+            team::update_item(c, updated).map_err(e2s)?;
+            team::post(c, &run.id, &old.id, from, (&old.member_id, &old.member_name), "decision", &format!("canceló «{}»", old.title), &[]).map_err(e2s)?;
         }
         let added = fresh.len();
         // The first plan of the lead is read by the advisor before anything in it starts.
@@ -1724,7 +2044,7 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
         // A small request — one member, at most one piece of work per repository — skips the
         // ceremony: no advisor on the plan, and no last look of the lead's (nor the advisor's) once
         // it is delivered. Checks and integration still run.
-        let small = first_plan_now && reply.small && is_small(&fresh.iter().map(|(new, _)| new.clone()).collect::<Vec<_>>());
+        let small = first_plan_now && reply.small && is_small(&fresh);
         if first_plan_now && reply.small && !small {
             team::post(c, &run.id, "", ("system", "CodeFlow"), ("all", "Equipo"), "status", "el líder lo marcó como chico, pero su plan reparte trabajo entre varios: sigue como tarea normal", &[]).map_err(e2s)?;
         }
@@ -1734,8 +2054,7 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
         } else {
             None
         };
-        for (mut new, deps) in fresh {
-            new.depends_on = deps.iter().filter_map(|k| key_to_id.get(k).cloned()).collect();
+        for mut new in fresh {
             if let Some(a) = &advice {
                 new.depends_on.push(a.id.clone());
             }
@@ -1786,6 +2105,19 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
     })
 }
 
+fn retry_plan(conn: &Connection, run: &Run, mut item: Item, reason: &str) -> Result<(), String> {
+    item.last_error = reason.to_string();
+    item.feedback = format!("Corrige la propuesta. {reason}");
+    if item.attempts < run.policy.max_attempts {
+        item.status = "pending".into();
+        return team::update_item(conn, &item).map_err(e2s);
+    }
+    item.status = "error".into();
+    team::update_item(conn, &item).map_err(e2s)?;
+    let gate = if item.kind == "amend" { "amend_failed" } else { "stuck" };
+    team::set_run_status(conn, &run.id, "gated", &format!("{gate}:{}", item.id), reason).map_err(e2s)
+}
+
 // ---------------------------------------------------------------- advance & finish
 
 /// After any change: if nothing is moving any more, decide what happens next — a blocked graph goes
@@ -1797,6 +2129,13 @@ async fn advance(db: &Db, run_id: &str) -> Result<(), String> {
     })?;
     if run.status != "running" {
         return Ok(());
+    }
+    if !items.iter().any(|item| item.status == "running") {
+        if let Some((item, impact)) = items.iter().filter(|item| item.status == "gated")
+            .find_map(|item| item.intelligence.impact.as_ref().map(|impact| (item, impact)))
+        {
+            return with(db, |c| team::set_run_status(c, run_id, "gated", &format!("impact:{}:{}", item.id, impact.version), "Revisa los cambios de impacto antes de integrarlos.").map_err(e2s));
+        }
     }
     // A sub-lead's branch whose work has all closed hands its summary up, and stops being open.
     let closed_branches = with(db, |c| {
@@ -1868,9 +2207,13 @@ async fn advance(db: &Db, run_id: &str) -> Result<(), String> {
     // Final checks, in each integration tree.
     for repo in repos.iter().filter(|r| r.status == "ready") {
         for check in run.policy.checks.iter().filter(|c| c.when == "final" && (c.repo == "*" || c.repo == repo.project_id)) {
-            let (passed, output) = crate::commands::agents_cmd::run_shell_check(&check.command, &repo.integration_path).await;
+            let base = items.iter().find(|item| item.project_id == repo.project_id && !item.intelligence.base_sha.is_empty())
+                .map(|item| item.intelligence.base_sha.as_str()).unwrap_or_default();
+            let evidence = verify_check(&check.command, &repo.integration_path, Some(repo), base).await;
+            let passed = evidence.result == "passed";
+            let description = check_description(&evidence.result);
             with(db, |c| {
-                team::post(c, run_id, "", ("system", "CodeFlow"), ("all", "Equipo"), if passed { "status" } else { "error" }, &format!("{} · `{}` {}", repo.name, check.command, if passed { "pasó" } else { "falló" }), &[])
+                team::post(c, run_id, "", ("system", "CodeFlow"), ("all", "Equipo"), if passed { "status" } else { "error" }, &format!("{} · `{}` {description}", repo.name, check.command), &[])
                     .map(|_| ())
                     .map_err(e2s)
             })?;
@@ -1878,13 +2221,13 @@ async fn advance(db: &Db, run_id: &str) -> Result<(), String> {
                 return with(db, |c| {
                     if !run.lead.is_empty() {
                         team::set_lead_done(c, run_id, false).map_err(e2s)?;
-                        let instruction = format!("En {} la verificación `{}` falló con todo integrado:\n{}\nAsigna quién lo arregla.", repo.name, check.command, trim_chars(&output, 6000));
+                        let instruction = format!("En {} la verificación `{}` {description} con todo integrado:\n{}\nDecide cómo tratar el fallo.", repo.name, check.command, evidence.detail);
                         if new_lead_item(c, &run, "plan", &instruction, "")?.is_some() {
                             return Ok(());
                         }
                         return Ok(());
                     }
-                    team::set_run_status(c, run_id, "gated", "stuck:", &format!("`{}` falló en {}:\n{}", check.command, repo.name, trim_chars(&output, 2000))).map_err(e2s)
+                    team::set_run_status(c, run_id, "gated", "stuck:", &format!("`{}` en {} {description}:\n{}", check.command, repo.name, trim_chars(&evidence.detail, 2000))).map_err(e2s)
                 });
             }
         }
@@ -2036,16 +2379,119 @@ pub fn team_note(app: AppHandle, db: State<'_, Db>, run_id: String, to_id: Strin
     state_of(&db, &run_id)
 }
 
+#[tauri::command]
+pub async fn team_amend(app: AppHandle, db: State<'_, Db>, run_id: String, body: String) -> Result<RunState, String> {
+    request_amendment(&db, &run_id, &body).await?;
+    changed(&app, &run_id);
+    state_of(&db, &run_id)
+}
+
+async fn request_amendment(db: &Db, run_id: &str, body: &str) -> Result<(), String> {
+    let body = trim_chars(body.trim(), 6000);
+    if body.is_empty() {
+        return Err("Describe qué quieres cambiar del encargo.".into());
+    }
+    let lock = run_lock(run_id);
+    let _guard = lock.lock().await;
+    with(db, |c| {
+        let run = team::get_run(c, run_id).map_err(e2s)?.ok_or("La corrida ya no existe.")?;
+        let lead = member(&run, &run.lead).ok_or("Una corrida con plan fijo necesita un líder para replantear el trabajo.")?;
+        if run.status != "running" && !(run.status == "gated" && run.gate == "merge") {
+            return Err("El ajuste está disponible durante el trabajo o antes de integrar.".into());
+        }
+        let items = team::list_items(c, run_id).map_err(e2s)?;
+        if items.iter().any(|item| item.kind == "amend" && matches!(item.status.as_str(), "pending" | "running" | "waiting" | "gated")) {
+            return Err("Ya hay un ajuste del plan en curso.".into());
+        }
+        if !items.iter().any(|item| item.kind == "plan" && item.status == "done") {
+            return Err("Espera a que el líder termine el primer plan.".into());
+        }
+        let repo = team::list_repos(c, run_id).map_err(e2s)?.into_iter().next().ok_or("La corrida ya no tiene repositorios.")?;
+        let tx = c.unchecked_transaction().map_err(e2s)?;
+        let mut item = team::new_item(&run, &team::free_key(&items, "ajuste"), Some(lead), &repo.project_id, "amend", "Ajustar el plan", &body);
+        item.run_in = "headless".into();
+        team::insert_item(&tx, &item).map_err(e2s)?;
+        team::post(&tx, run_id, &item.id, ("user", "Tú"), ("lead", &lead.member.name), "plan", &body, &[]).map_err(e2s)?;
+        team::set_run_status(&tx, run_id, "running", "", "").map_err(e2s)?;
+        tx.commit().map_err(e2s)
+    })
+}
+
+fn settle_amendment(conn: &Connection, run: &Run, id: &str, approve: bool, comment: &str) -> Result<(), String> {
+    let mut item = team::get_item(conn, id).map_err(e2s)?
+        .filter(|item| item.run_id == run.id && item.kind == "amend").ok_or("El ajuste ya no existe.")?;
+    let tx = conn.unchecked_transaction().map_err(e2s)?;
+    if approve {
+        if let Some(amendment) = item.intelligence.amendment.as_ref() {
+            let current = team::list_items(&tx, &run.id).map_err(e2s)?;
+            let mut projected = current.clone();
+            let mut fresh = planned_items(run, &current, &item, &amendment.items);
+            coordination::amendment_changes(&mut projected, &amendment.items, &mut fresh, &amendment.cancel)?;
+            for (_, updated) in current.iter().zip(&projected).filter(|(old, updated)| old.status != updated.status || old.depends_on != updated.depends_on) {
+                team::update_item(&tx, updated).map_err(e2s)?;
+            }
+            for new in fresh {
+                team::insert_item(&tx, &new).map_err(e2s)?;
+            }
+            let goal = format!("{}\n\n## Ajuste aprobado\n{}", run.goal, item.instruction);
+            tx.execute("UPDATE agent_team_runs SET goal = ?2, lead_done = 0 WHERE id = ?1", rusqlite::params![run.id, goal]).map_err(e2s)?;
+            item.status = "done".into();
+            item.finished_at = queries::now();
+            team::post(&tx, &run.id, &item.id, ("system", "CodeFlow"), ("all", "Equipo"), "decision", "Se aplicó el ajuste a esta corrida.", &[]).map_err(e2s)?;
+        } else {
+            item.status = "pending".into();
+            item.attempts = 0;
+            item.intelligence.failure_fingerprint.clear();
+            if !comment.is_empty() {
+                item.feedback = comment.to_string();
+            }
+        }
+    } else {
+        item.status = "skipped".into();
+        team::post(&tx, &run.id, &item.id, ("system", "CodeFlow"), ("all", "Equipo"), "status", "Se descartó el ajuste y sigue el plan anterior.", &[]).map_err(e2s)?;
+    }
+    team::update_item(&tx, &item).map_err(e2s)?;
+    team::set_run_status(&tx, &run.id, "running", "", "").map_err(e2s)?;
+    tx.commit().map_err(e2s)
+}
+
+#[tauri::command]
+pub fn team_remember(app: AppHandle, db: State<'_, Db>, run_id: String, message_id: String, project_id: String, keep: bool) -> Result<RunState, String> {
+    with(&db, |c| {
+        let run = team::get_run(c, &run_id).map_err(e2s)?.ok_or("La corrida ya no existe.")?;
+        let repo = team::list_repos(c, &run_id).map_err(e2s)?.into_iter().find(|repo| repo.project_id == project_id)
+            .ok_or("Ese repositorio no está en la corrida.")?;
+        let body = if keep {
+            let message = team::get_message(c, &message_id).map_err(e2s)?
+                .filter(|message| message.run_id == run.id && message.from_id != "system"
+                    && (matches!(message.kind.as_str(), "decision" | "note") || message.kind == "question" && !message.answered_at.is_empty()))
+                .ok_or("Elige un acuerdo o una nota de esta corrida.")?;
+            let worktree = team::get_item(c, &message.item_id).map_err(e2s)?.map(|item| item.worktree_path).unwrap_or_default();
+            let text = if message.answer.trim().is_empty() { message.body } else { format!("{}\nAcuerdo: {}", message.body, message.answer) };
+            trim_chars(&intelligence::portable_text(&protocol::prose(&text), &[&repo.local_path, &repo.integration_path, &worktree]), 1600)
+        } else {
+            String::new()
+        };
+        intelligence::set_memory(c, &run, intelligence::Memory { message_id, run_id: run.id.clone(), project_id, body }, keep).map_err(e2s)
+    })?;
+    let _ = app.emit("team:changed", serde_json::json!({ "runId": run_id }));
+    state_of(&db, &run_id)
+}
+
 /// Answers whatever a gated run waits for. `approve` false is "no": the plan goes back to the lead
 /// (with `comment`), an item is skipped, the merge is left for later, a stuck run fails.
 #[tauri::command]
-pub async fn team_decide(app: AppHandle, db: State<'_, Db>, run_id: String, approve: bool, comment: Option<String>) -> Result<RunState, String> {
-    let state = decide(&db, &run_id, approve, comment.as_deref().unwrap_or_default()).await?;
+pub async fn team_decide(app: AppHandle, db: State<'_, Db>, run_id: String, approve: bool, comment: Option<String>, expected_gate: Option<String>) -> Result<RunState, String> {
+    let state = decide_for_gate(&db, &run_id, approve, comment.as_deref().unwrap_or_default(), expected_gate.as_deref()).await?;
     changed(&app, &run_id);
     Ok(state)
 }
 
 pub async fn decide(db: &Db, run_id: &str, approve: bool, comment: &str) -> Result<RunState, String> {
+    decide_for_gate(db, run_id, approve, comment, None).await
+}
+
+async fn decide_for_gate(db: &Db, run_id: &str, approve: bool, comment: &str, expected_gate: Option<&str>) -> Result<RunState, String> {
     let run_id = run_id.to_string();
     let lock = run_lock(&run_id);
     let _guard = lock.lock().await;
@@ -2054,10 +2500,51 @@ pub async fn decide(db: &Db, run_id: &str, approve: bool, comment: &str) -> Resu
     if run.status != "gated" {
         return state_of(db, &run_id);
     }
+    if expected_gate.is_some_and(|gate| gate != run.gate) {
+        return Err("La decisión pendiente cambió. Revisa la corrida antes de responder.".into());
+    }
+    if expected_gate.is_none() && (run.gate.starts_with("amend:") || run.gate.starts_with("amend_failed:") || run.gate.starts_with("impact:")) {
+        return Err("Abre la corrida para revisar el ajuste o el diff antes de decidir.".into());
+    }
     if !comment.is_empty() {
         with(db, |c| team::post(c, &run_id, "", ("user", "Tú"), ("all", "Equipo"), "note", &comment, &[]).map(|_| ()).map_err(e2s))?;
     }
     let gate = run.gate.clone();
+    if let Some(id) = gate.strip_prefix("amend:").or_else(|| gate.strip_prefix("amend_failed:")) {
+        with(db, |c| settle_amendment(c, &run, id, approve, &comment))?;
+        advance(db, &run_id).await?;
+        return state_of(db, &run_id);
+    }
+    if let Some((id, version)) = gate.strip_prefix("impact:").and_then(|gate| gate.split_once(':')) {
+        let item = with(db, |c| {
+            let mut item = team::get_item(c, id).map_err(e2s)?
+                .filter(|item| item.run_id == run_id && item.status == "gated").ok_or("La revisión de impacto ya no está pendiente.")?;
+            let impact = item.intelligence.impact.take().filter(|impact| impact.version == version)
+                .ok_or("La revisión de impacto cambió.")?;
+            let tx = c.unchecked_transaction().map_err(e2s)?;
+            if approve {
+                item.status = "running".into();
+                item.intelligence.approved_impact = impact.version;
+            } else {
+                item.status = "error".into();
+                item.last_error = "El usuario rechazó el cambio de impacto.".into();
+                item.finished_at = queries::now();
+            }
+            team::update_item(&tx, &item).map_err(e2s)?;
+            let decision = if approve { "aprobó" } else { "rechazó" };
+            team::post(&tx, &run_id, &item.id, ("user", "Tú"), ("all", "Equipo"), "decision",
+                &format!("{decision} los cambios de impacto de «{}» · {}", item.title, impact.files.join(", ")), &[]).map_err(e2s)?;
+            team::set_run_status(&tx, &run_id, "running", "", "").map_err(e2s)?;
+            tx.commit().map_err(e2s)?;
+            Ok(item)
+        })?;
+        if approve {
+            let output = item.output_text.clone();
+            on_ok(db, &run, item, &output).await?;
+        }
+        advance(db, &run_id).await?;
+        return state_of(db, &run_id);
+    }
     let mut land = false;
     with(db, |c| {
         if gate == "plan" {
@@ -2192,6 +2679,7 @@ pub async fn team_control(app: AppHandle, db: State<'_, Db>, run_id: String, act
             "abort" => {
                 for mut i in items.into_iter().filter(|i| matches!(i.status.as_str(), "pending" | "gated" | "running" | "waiting")) {
                     i.status = "cancelled".into();
+                    i.intelligence.recovery = None;
                     team::update_item(c, &i).map_err(e2s)?;
                 }
                 team::set_run_status(c, &run_id, "aborted", "", "").map_err(e2s)?;
@@ -2200,16 +2688,30 @@ pub async fn team_control(app: AppHandle, db: State<'_, Db>, run_id: String, act
             other => {
                 if let Some(id) = other.strip_prefix("retry:") {
                     if let Some(mut i) = team::get_item(c, id).map_err(e2s)? {
-                        if matches!(i.status.as_str(), "error" | "cancelled" | "skipped") {
+                        if i.run_id == run_id && (matches!(i.status.as_str(), "error" | "cancelled" | "skipped")
+                            || (i.status == "waiting" && i.intelligence.recovery.is_some())) {
+                            if let Some(recovery) = i.intelligence.recovery.as_ref() {
+                                if let Some(run) = team::get_run(c, &run_id).map_err(e2s)? {
+                                    for mut waiting in items.iter().filter(|other| other.id != i.id && other.status == "waiting"
+                                        && other.intelligence.recovery.as_ref().is_some_and(|other_recovery| other_recovery.kind == recovery.kind
+                                            && intelligence::blocked_by(c, &run, other, recovery))).cloned() {
+                                        waiting.status = "pending".into();
+                                        waiting.intelligence.recovery = None;
+                                        team::update_item(c, &waiting).map_err(e2s)?;
+                                    }
+                                }
+                            }
                             i.status = "pending".into();
                             i.attempts = 0;
+                            i.intelligence.recovery = None;
                             team::update_item(c, &i).map_err(e2s)?;
                         }
                     }
                 } else if let Some(id) = other.strip_prefix("skip:") {
                     if let Some(mut i) = team::get_item(c, id).map_err(e2s)? {
-                        if matches!(i.status.as_str(), "pending" | "gated" | "error" | "waiting") {
+                        if i.run_id == run_id && matches!(i.status.as_str(), "pending" | "gated" | "error" | "waiting") {
                             i.status = "skipped".into();
+                            i.intelligence.recovery = None;
                             team::update_item(c, &i).map_err(e2s)?;
                         }
                     }
@@ -2326,6 +2828,79 @@ pub fn team_run_metrics(db: State<'_, Db>, run_id: String) -> Result<team::metri
     })
 }
 
+#[tauri::command]
+pub fn team_recommendations(db: State<'_, Db>, run_id: String) -> Result<Vec<coordination::Recommendation>, String> {
+    with(&db, |c| {
+        let run = team::get_run(c, &run_id).map_err(e2s)?.ok_or("La corrida ya no existe.")?;
+        let repos = team::list_repos(c, &run_id).map_err(e2s)?;
+        coordination::recommendations(c, &run, &repos).map_err(e2s)
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrDraft {
+    pub title: String,
+    pub body: String,
+    pub source: String,
+    pub target: String,
+}
+
+#[tauri::command]
+pub async fn team_pr_draft(db: State<'_, Db>, run_id: String, project_id: String, spanish: bool) -> Result<PrDraft, String> {
+    let state = state_of(&db, &run_id)?;
+    let repo = state.repos.iter().find(|repo| repo.project_id == project_id).ok_or("El repositorio no está en la corrida.")?;
+    if !(state.run.status == "gated" && state.run.gate == "merge" && repo.status == "ready"
+        || state.run.status == "done" && repo.status == "left")
+    {
+        return Err("El borrador requiere una entrega lista en la rama del equipo.".into());
+    }
+    let (root, target, source) = (repo.local_path.clone(), repo.target_branch.clone(), repo.integration_branch.clone());
+    let commits = blocking(move || gitops::pr_commits(&root, &target, &source)).await??;
+    if commits.is_empty() {
+        return Err("La rama del equipo no tiene commits para un pull request.".into());
+    }
+    Ok(pr_draft(&state, repo, &commits, spanish))
+}
+
+fn pr_draft(state: &RunState, repo: &RunRepo, commits: &str, spanish: bool) -> PrDraft {
+    let label = |es: &'static str, en: &'static str| if spanish { es } else { en };
+    let goal = state.run.goal.split("\n\n## Contexto del chat").next().unwrap_or_default();
+    let goal = goal.split("\n\nArchivos adjuntos a este mensaje").next().unwrap_or_default();
+    let goal = intelligence::portable_text(goal, &[&repo.local_path, &repo.integration_path]);
+    let mut body = format!("## {}\n{}\n\n## Commits\n", label("Objetivo", "Goal"), trim_chars(&goal, 2000));
+    for commit in commits.lines() {
+        body.push_str(&format!("- {commit}\n"));
+    }
+    body.push_str(&format!("\n## {}\n", label("Verificación y pendientes", "Verification and open items")));
+    let latest = coordination::latest_contracts(&state.items);
+    for item in state.items.iter().filter(|item| item.project_id == repo.project_id && !item.is_lead()) {
+        let checked = item.status == "done" && coordination::outdated_contracts(item, &latest).is_empty()
+            && item.intelligence.evidence.iter().all(|evidence| matches!(evidence.result.as_str(), "reported" | "passed"));
+        body.push_str(&format!("- [{}] {}\n", if checked { "x" } else { " " }, item.title));
+        for evidence in &item.intelligence.evidence {
+            let status = match evidence.result.as_str() {
+                "passed" => label("pasó", "passed"),
+                "reported" => label("reportado por el agente", "reported by the agent"),
+                "unverified" => label("sin evidencia", "no evidence"),
+                "preexisting" => label("fallo de base", "baseline failure"),
+                "regression" => label("regresión", "regression"),
+                _ => label("falló", "failed"),
+            };
+            body.push_str(&format!("  - {} · {status}\n", evidence.label));
+        }
+        let outdated = coordination::outdated_contracts(item, &latest);
+        if !outdated.is_empty() {
+            body.push_str(&format!("  - {} · {}\n", label("Revalidar contratos", "Revalidate contracts"), outdated.join(", ")));
+        }
+    }
+    let prefix = format!("{} · `", repo.name);
+    for check in state.messages.iter().filter(|message| message.item_id.is_empty() && message.from_id == "system" && message.body.starts_with(&prefix)).take(20) {
+        body.push_str(&format!("- {}\n", check.body));
+    }
+    PrDraft { title: state.run.title.clone(), body, source: repo.integration_branch.clone(), target: repo.target_branch.clone() }
+}
+
 /// Records the terminal session an item runs in (so the view can open it).
 #[tauri::command]
 pub fn team_item_terminal(db: State<'_, Db>, item_id: String, session_id: String) -> Result<(), String> {
@@ -2426,6 +3001,179 @@ mod tests {
 
     fn item_of<'a>(state: &'a RunState, key: &str) -> &'a Item {
         state.items.iter().find(|i| i.key == key).unwrap_or_else(|| panic!("no item {key}: {:?}", state.items.iter().map(|i| &i.key).collect::<Vec<_>>()))
+    }
+
+    #[tokio::test]
+    async fn an_amendment_keeps_completed_work_and_rewires_pending_tasks_only_after_approval() {
+        let (_serial, _dir, db, ws, project, [lead_id, dev_id, _]) = fixture();
+        let make = |id: &str, agent_id: String| MemberSnap {
+            member: team::Member { id: id.into(), name: id.into(), agent_id, ..Default::default() },
+            provider: "claude".into(), model: "sonnet".into(), ..Default::default()
+        };
+        let run = Run {
+            id: "amend-test".into(), workspace_id: ws, status: "running".into(), lead: "lead".into(),
+            goal: "Build endpoint".into(), members: vec![make("lead", lead_id), make("dev", dev_id)],
+            policy: Policy { max_session_pct: 0, ..Default::default() }, ..Default::default()
+        };
+        let mut initial = team::new_item(&run, "plan", run.members.first(), &project, "plan", "Initial plan", "");
+        initial.status = "done".into();
+        let mut finished = team::new_item(&run, "finished", run.members.get(1), &project, "investigate", "Finished", "");
+        finished.status = "done".into();
+        let worker = team::new_item(&run, "old", run.members.get(1), &project, "work", "Old rule", "");
+        let mut downstream = team::new_item(&run, "next", run.members.get(1), &project, "work", "Tests", "");
+        downstream.depends_on.push(worker.id.clone());
+        with(&db, |conn| {
+            team::insert_run(conn, &run).map_err(e2s)?;
+            let root = queries::get_project(conn, &project).map_err(e2s)?.unwrap().local_path;
+            team::insert_repo(conn, &RunRepo { run_id: run.id.clone(), project_id: project.clone(), name: "web".into(), integration_path: root, ..Default::default() }).map_err(e2s)?;
+            for item in [&initial, &finished, &worker, &downstream] {
+                team::insert_item(conn, item).map_err(e2s)?;
+            }
+            Ok(())
+        }).unwrap();
+        request_amendment(&db, &run.id, "Guests now receive 403").await.unwrap();
+        let dispatch = claim(&db, &run.id).await.unwrap();
+        assert_eq!(dispatch.len(), 1);
+        assert_eq!(dispatch[0].item.kind, "amend");
+        let proposal = r#"Se conserva la investigación y se ajusta el trabajo pendiente.
+```equipo
+{"mensaje":"Repetir las pruebas de acceso","items":[{"id":"new","miembro":"dev","repo":"web","tarea":"Guests receive 403","reemplaza":"old"}]}
+```"#;
+        let proposed = settle_core(&db, &dispatch[0].item.id, "ok", proposal, "").await.unwrap();
+        assert!(proposed.run.gate.starts_with("amend:"));
+        assert_eq!(item_of(&proposed, "old").status, "pending");
+        assert_eq!(item_of(&proposed, "next").depends_on, vec![worker.id]);
+        assert!(decide_for_gate(&db, &run.id, true, "", Some("merge")).await.is_err());
+        let rejected = decide_for_gate(&db, &run.id, false, "", Some(&proposed.run.gate)).await.unwrap();
+        assert_eq!(item_of(&rejected, "old").status, "pending");
+        assert_eq!(rejected.run.goal, run.goal);
+        request_amendment(&db, &run.id, "Guests now receive 403").await.unwrap();
+        let dispatch = claim(&db, &run.id).await.unwrap();
+        let proposed = settle_core(&db, &dispatch[0].item.id, "ok", proposal, "").await.unwrap();
+        let approved = decide_for_gate(&db, &run.id, true, "", Some(&proposed.run.gate)).await.unwrap();
+        assert_eq!(item_of(&approved, "finished").status, "done");
+        assert_eq!(item_of(&approved, "old").status, "skipped");
+        assert_eq!(item_of(&approved, "next").depends_on, vec![item_of(&approved, "new").id.clone()]);
+        assert!(approved.run.goal.contains("Guests now receive 403"));
+    }
+
+    #[test]
+    fn impact_fingerprints_include_untracked_migrations_and_the_pr_uses_real_commits() {
+        let (_serial, _dir, db, _, project, _) = fixture();
+        let root = with(&db, |conn| Ok(queries::get_project(conn, &project).map_err(e2s)?.unwrap().local_path)).unwrap();
+        let base = gitops::head_sha(&root).unwrap();
+        assert!(gitops::inspect_impact(&root, &base, &[]).unwrap().is_none());
+        sh(&root, &["checkout", "-qb", "team-draft"]);
+        std::fs::create_dir(std::path::Path::new(&root).join("migrations")).unwrap();
+        let migration = std::path::Path::new(&root).join("migrations/001.sql");
+        std::fs::write(&migration, "CREATE TABLE sample (id INT);\n").unwrap();
+        let first = gitops::inspect_impact(&root, &base, &[]).unwrap().unwrap();
+        let first_work = gitops::work_fingerprint(&root, &base).unwrap();
+        assert_eq!(first.files, vec!["migrations/001.sql"]);
+        assert!(first.diff.contains("CREATE TABLE"));
+        std::fs::write(&migration, "CREATE TABLE sample (id BIGINT);\n").unwrap();
+        assert_ne!(gitops::inspect_impact(&root, &base, &[]).unwrap().unwrap().version, first.version);
+        assert_ne!(gitops::work_fingerprint(&root, &base).unwrap(), first_work);
+        sh(&root, &["add", "-A"]);
+        sh(&root, &["commit", "-qm", "Add migration"]);
+        assert!(gitops::pr_commits(&root, "main", "team-draft").unwrap().contains("Add migration"));
+        assert!(gitops::pr_commits(&root, "main", "main").unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_impact_approval_cannot_be_reused_for_an_edited_diff() {
+        let (_serial, _dir, db, ws, project, _) = fixture();
+        let root = with(&db, |conn| Ok(queries::get_project(conn, &project).map_err(e2s)?.unwrap().local_path)).unwrap();
+        let base = gitops::head_sha(&root).unwrap();
+        let run = Run {
+            id: "impact-test".into(), workspace_id: ws, status: "running".into(),
+            policy: Policy { impact_approval: true, ..Default::default() }, ..Default::default()
+        };
+        let mut item = team::new_item(&run, "impact", None, &project, "work", "Migration", "");
+        item.status = "running".into();
+        item.worktree_path = root.clone();
+        item.intelligence.base_sha = base.clone();
+        with(&db, |conn| {
+            team::insert_run(conn, &run).map_err(e2s)?;
+            team::insert_repo(conn, &RunRepo { run_id: run.id.clone(), project_id: project, status: "ready".into(), integration_path: root.clone(), ..Default::default() }).map_err(e2s)?;
+            team::insert_item(conn, &item).map_err(e2s)
+        }).unwrap();
+        let migration = std::path::Path::new(&root).join("migrations/001.sql");
+        std::fs::create_dir(migration.parent().unwrap()).unwrap();
+        std::fs::write(&migration, "CREATE TABLE sample (id INT);\n").unwrap();
+        let initial = settle_core(&db, &item.id, "ok", "Migration ready", "").await.unwrap();
+        assert!(initial.run.gate.starts_with("impact:"));
+        assert_eq!(gitops::head_sha(&root).unwrap(), base);
+        std::fs::write(&migration, "CREATE TABLE sample (id BIGINT);\n").unwrap();
+        let changed = decide_for_gate(&db, &run.id, true, "", Some(&initial.run.gate)).await.unwrap();
+        assert!(changed.run.gate.starts_with("impact:"));
+        assert_ne!(changed.run.gate, initial.run.gate);
+        assert!(decide_for_gate(&db, &run.id, true, "", Some(&initial.run.gate)).await.is_err());
+        assert_eq!(gitops::head_sha(&root).unwrap(), base);
+    }
+
+    #[tokio::test]
+    async fn provider_quota_parks_only_the_matching_route_and_preserves_the_run() {
+        let (_serial, _dir, db, ws, project, _) = fixture();
+        let make = |id: &str, provider: &str, model: &str| MemberSnap {
+            member: team::Member { id: id.into(), name: id.into(), ..Default::default() },
+            provider: provider.into(), model: model.into(), ..Default::default()
+        };
+        let run = Run {
+            id: "quota-test".into(), workspace_id: ws, status: "running".into(), dispatches: 1,
+            policy: Policy { max_session_pct: 0, ..Default::default() },
+            members: vec![make("first", "claude", "sonnet"), make("second", "codex", "gpt"), make("third", "claude", "sonnet")],
+            ..Default::default()
+        };
+        let mut first = team::new_item(&run, "first", run.members.first(), &project, "investigate", "First", "Read");
+        first.status = "running".into();
+        first.attempts = 1;
+        let second = team::new_item(&run, "second", run.members.get(1), &project, "investigate", "Second", "Read");
+        let third = team::new_item(&run, "third", run.members.get(2), &project, "investigate", "Third", "Read");
+        with(&db, |conn| {
+            team::insert_run(conn, &run).map_err(e2s)?;
+            let project_row = queries::get_project(conn, &project).map_err(e2s)?.unwrap();
+            team::insert_repo(conn, &RunRepo {
+                run_id: run.id.clone(), project_id: project.clone(), integration_path: project_row.local_path,
+                ..Default::default()
+            }).map_err(e2s)?;
+            for item in [&first, &second, &third] {
+                team::insert_item(conn, item).map_err(e2s)?;
+            }
+            Ok(())
+        }).unwrap();
+        let until = chrono::Utc::now().timestamp() + 600;
+        let state = settle_core(&db, &first.id, "error", "", &format!("QUOTA_EXCEEDED::Claude AI usage limit reached|{until}")).await.unwrap();
+        assert_eq!(state.run.status, "running");
+        assert_eq!(state.run.dispatches, 0);
+        assert_eq!(item_of(&state, "first").intelligence.recovery.as_ref().unwrap().resume_at, Some(until + 5));
+        let dispatches = claim(&db, &run.id).await.unwrap();
+        assert_eq!(dispatches.iter().map(|dispatch| dispatch.item.key.as_str()).collect::<Vec<_>>(), vec!["second"]);
+        with(&db, |conn| {
+            for id in [&first.id, &third.id] {
+                let mut item = team::get_item(conn, id).map_err(e2s)?.unwrap();
+                assert_eq!(item.status, "waiting");
+                item.intelligence.recovery.as_mut().unwrap().resume_at = Some(until - 601);
+                team::update_item(conn, &item).map_err(e2s)?;
+            }
+            Ok(())
+        }).unwrap();
+        let resumed = claim(&db, &run.id).await.unwrap();
+        assert_eq!(resumed.iter().map(|dispatch| dispatch.item.key.as_str()).collect::<Vec<_>>(), vec!["first", "third"]);
+        assert_eq!(resumed[0].item.attempts, 1);
+    }
+
+    #[tokio::test]
+    async fn checks_distinguish_regressions_from_the_same_baseline_failure() {
+        let (_serial, _dir, db, _, project, _) = fixture();
+        let root = with(&db, |conn| Ok(queries::get_project(conn, &project).map_err(e2s)?.unwrap().local_path)).unwrap();
+        let base = gitops::head_sha(&root).unwrap();
+        let repo = RunRepo { local_path: root.clone(), name: "web".into(), ..Default::default() };
+        std::fs::write(std::path::Path::new(&root).join("README.md"), "changed").unwrap();
+        let regression = verify_check("git diff --exit-code -- README.md", &root, Some(&repo), &base).await;
+        assert_eq!(regression.result, "regression", "{}", regression.detail);
+        let existing = verify_check("git rev-parse --verify refs/heads/codeflow-test-absent", &root, Some(&repo), &base).await;
+        assert_eq!(existing.result, "preexisting", "{}", existing.detail);
     }
 
     #[tokio::test]

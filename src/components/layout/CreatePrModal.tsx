@@ -22,6 +22,7 @@ const PREFERRED_TARGETS = ["main", "master", "develop", "development"];
 
 interface CreatePrModalProps {
   project: Project;
+  initial?: { title: string; body: string; source: string; target: string };
   onClose: () => void;
   /** The pull request just opened — its caller puts it on screen in the assistant. */
   onCreated: (pr: PullRequestSummary) => void;
@@ -32,16 +33,16 @@ interface CreatePrModalProps {
  * disk (so it works for any linked project, not only the active one); "Generate with AI" drafts a
  * title + description from the diff between the chosen branches and prefills the form.
  */
-export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProps) {
+export function CreatePrModal({ project, initial, onClose, onCreated }: CreatePrModalProps) {
   const t = useT();
   const createPr = usePrStore((s) => s.createPr);
 
   const [branches, setBranches] = useState<BranchInfo[] | null>(null);
-  const [source, setSource] = useState("");
-  const [target, setTarget] = useState("");
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [draft, setDraft] = useState(false);
+  const [source, setSource] = useState(initial?.source ?? "");
+  const [target, setTarget] = useState(initial?.target ?? "");
+  const [title, setTitle] = useState(initial?.title ?? "");
+  const [description, setDescription] = useState(initial?.body ?? "");
+  const [draft, setDraft] = useState(Boolean(initial));
   /**
    * Azure DevOps work items to link. Empty everywhere else — the picker is not drawn at all for a
    * GitHub or GitLab project, because a work item is not a thing those hosts have.
@@ -81,6 +82,11 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
         if (cancelled) return;
         setBranches(list);
         const local = list.filter((b) => !b.is_remote);
+        if (initial) {
+          setSource(local.some((branch) => branch.name === initial.source) ? initial.source : "");
+          setTarget(local.some((branch) => branch.name === initial.target) ? initial.target : "");
+          return;
+        }
         const head = local.find((b) => b.is_head);
         const src = head?.name ?? local[0]?.name ?? "";
         const tgt =
@@ -99,7 +105,7 @@ export function CreatePrModal({ project, onClose, onCreated }: CreatePrModalProp
     return () => {
       cancelled = true;
     };
-  }, [project.local_path]);
+  }, [project.local_path, initial]);
 
   const sameBranch = source !== "" && source === target;
   /** The ticket this branch was started from («Tickets» › «Empezar»): its reference goes into the

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, MessageSquare, MessageSquarePlus, X } from "lucide-react";
+import { ListPlus, Loader2, MessageSquare, MessageSquarePlus, X } from "lucide-react";
 import { useTeamChatStore, teamChatBusy } from "../../../state/teamChatStore";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
 import { pushErrorToast } from "../../../state/toastStore";
@@ -8,9 +8,9 @@ import { ChatMessageBubble } from "../../chat/ChatMessageBubble";
 import { AiRunLog } from "../../ai/AiRunLog";
 import { iconButtonClass } from "../../common/Button";
 import { Select } from "../../common/Select";
-import { teamChatHistory, type TeamChatSummary } from "../../../lib/tauri/teamCommands";
+import { teamChatDraft, teamChatHistory, type TeamChatSummary } from "../../../lib/tauri/teamCommands";
 import { AgentAvatar, TeamAvatar } from "../kit/Avatar";
-import { Drawer } from "../kit/ui";
+import { Btn, Drawer } from "../kit/ui";
 import { lNow, useCrewStore, useL } from "../state";
 import { scrollBehavior } from "../../../lib/motion";
 import type { ChatAttachment } from "../../../lib/tauri/chatCommands";
@@ -38,6 +38,7 @@ export function TeamChatContent({ chatId, onClose }: { chatId: string; onClose?:
   const state = useTeamChatStore((s) => s.states[chatId]);
   const [loading, setLoading] = useState(!state);
   const [history, setHistory] = useState<TeamChatSummary[]>([]);
+  const [preparing, setPreparing] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
   const busy = teamChatBusy(state);
   useEffect(() => {
@@ -57,6 +58,23 @@ export function TeamChatContent({ chatId, onClose }: { chatId: string; onClose?:
   }, [state?.messages.length, state?.chat.activeRunId]);
   const send = useCallback((text: string, files?: ChatAttachment[]) => useTeamChatStore.getState().send(chatId, text, files), [chatId]);
   const stop = useCallback(() => void useTeamChatStore.getState().cancel(chatId), [chatId]);
+  const convert = async () => {
+    setPreparing(true);
+    try {
+      const draft = await teamChatDraft(chatId);
+      useCrewStore.getState().open({
+        kind: "launch",
+        goal: draft.goal,
+        assignee: { kind: "team", id: draft.teamId },
+        projectId: draft.projectId,
+        attachments: draft.attachments,
+      });
+    } catch (error) {
+      pushErrorToast(String(error));
+    } finally {
+      setPreparing(false);
+    }
+  };
 
   const chat = state?.chat;
   const lead = chat?.members.find((m) => m.id === chat.leadId);
@@ -76,6 +94,11 @@ export function TeamChatContent({ chatId, onClose }: { chatId: string; onClose?:
           {chat && <span className="block truncate text-[11.5px] text-[var(--cf-text-muted)]">{chat.projectName} · {l(`Lidera ${lead?.name ?? ""}`, `Led by ${lead?.name ?? ""}`)}</span>}
         </div>
         {history.length > 1 && <Select value={chatId} size="sm" ariaLabel={l("Historial de chats del equipo", "Team chat history")} className="max-w-[120px] sm:max-w-[200px]" onChange={(id) => useCrewStore.getState().open({ kind: "teamChat", id })} options={history.map((item) => ({ value: item.id, label: item.title || new Date(item.createdAt).toLocaleString() }))} />}
+        {state?.messages.some((message) => message.role === "user") && (
+          <Btn small icon={ListPlus} disabled={busy || preparing} title={l("Abre el lanzador con el pedido, el contexto y los adjuntos del chat", "Opens the launcher with the request, chat context and attachments")} onClick={() => void convert()}>
+            {l("Convertir en tarea", "Convert to task")}
+          </Btn>
+        )}
         {chat && <button type="button" disabled={busy} onClick={() => void chatWithTeam(chat.teamId, true, chat.projectId)} title={l("Nueva conversación con el equipo", "New conversation with the team")} className={iconButtonClass({ size: "sm" })}><MessageSquarePlus className="h-4 w-4" /></button>}
         {onClose && <button type="button" onClick={onClose} title={l("Cerrar", "Close")} aria-label={l("Cerrar chat del equipo", "Close team chat")} className={iconButtonClass({ size: "sm" })}><X className="h-4 w-4" /></button>}
       </div>
@@ -103,6 +126,14 @@ export function TeamChatContent({ chatId, onClose }: { chatId: string; onClose?:
                     stamp="compact"
                     actions={!busy && index === state.messages.length - 1 && message.role === "assistant" ? { onAnswer: send } : undefined}
                   />
+                  {message.suggestRun && index === state.messages.length - 1 && (
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+                      {l("El líder propone llevar este encargo a una corrida.", "The lead suggests turning this request into a run.")}
+                      <Btn small icon={ListPlus} disabled={busy || preparing} onClick={() => void convert()}>
+                        {l("Revisar borrador de tarea", "Review task draft")}
+                      </Btn>
+                    </div>
+                  )}
                 </div>;
               })}
               {busy && <div className="flex items-center gap-2 text-[12px] text-[var(--cf-text-muted)]"><Loader2 className="h-3.5 w-3.5 animate-spin" />{chat?.status === "cancelling" ? l("Deteniendo al equipo…", "Stopping the team…") : active ? l(`${active.name} está trabajando…`, `${active.name} is working…`) : l("El líder está coordinando…", "The lead is coordinating…")}</div>}

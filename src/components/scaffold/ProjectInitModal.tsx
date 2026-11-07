@@ -20,6 +20,7 @@ import {
   claimRoot,
   discardRoot,
   fetchVersions,
+  initialCommit,
   quarkusGenerate,
   runScript,
   springGenerate,
@@ -33,7 +34,7 @@ import {
   FIRST_TEMPLATE,
   TEMPLATES,
   enginesFor,
-  gitSteps,
+  gitInitStep,
   npmNameProblem,
   planFor,
   templateName,
@@ -48,7 +49,6 @@ import { buildScript, shellFor } from "../../lib/scaffold/script";
 import { pickLine, satisfies } from "../../lib/scaffold/semver";
 import { VALID_JAVA_PACKAGE, springPackage } from "../../lib/scaffold/spring";
 import { TOOLS, recipesFor, type ToolId } from "../../lib/scaffold/tools";
-import type { TranslationKey } from "../../lib/i18n/translations";
 import { Button, buttonClass, iconButtonClass, Kbd } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
@@ -76,6 +76,7 @@ type Phase =
       code: number | null;
       stage: string | null;
       error: string | null;
+      commitProblem?: string | null;
       /** Set once a project exists: where it is and what to do with it. */
       result?: { root: string; workspace: string | null; run: string | null };
       /** A failed generation left something at the project's folder — which "delete and retry"
@@ -164,7 +165,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
   const [target, setTarget] = useState<string>(activeWorkspaceId ?? NO_IMPORT);
   const [newWorkspace, setNewWorkspace] = useState("");
   const [commit, setCommit] = useState(true);
-  const [dest, setDest] = useState<DestCheck | null>(null);
+  const [destination, setDestination] = useState<{ parent: string; name: string; value: DestCheck | string } | null>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "form" });
 
   const template = TEMPLATES.find((candidate) => candidate.id === templateId) ?? FIRST_TEMPLATE;
@@ -298,18 +299,19 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       : undefined;
 
   // ── Where it goes ──
-  const trimmedParent = parent.replace(/[\\/]+$/, "");
-  const root = trimmedParent && name ? `${trimmedParent}${sep}${name}` : "";
+  const destinationValue = destination?.parent === parent && destination.name === name ? destination.value : null;
+  const dest = typeof destinationValue === "string" ? null : destinationValue;
+  const root = dest?.path ?? "";
   useEffect(() => {
-    if (!parent || !name) {
-      setDest(null);
-      return;
-    }
+    if (phase.kind !== "form" || !parent.trim() || !name) return;
     let cancelled = false;
+    const accept = (value: DestCheck | string) => {
+      if (!cancelled) setDestination({ parent, name, value });
+    };
     const timer = window.setTimeout(() => {
       void checkDest(parent, name)
-        .then((check) => !cancelled && setDest(check))
-        .catch(() => {});
+        .then(accept)
+        .catch((e) => accept(String(e)));
     }, 180);
     return () => {
       cancelled = true;
@@ -319,7 +321,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
 
   const ctx: TemplateContext = {
     name,
-    parent: trimmedParent,
+    parent,
     root,
     sep,
     platform,
@@ -390,11 +392,20 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
   }
 
   // ── What is wrong with the form ──
+  const npmProblem = template.npmName ? npmNameProblem(name) : null;
   const nameProblem: string | null = !name
     ? t("scaffold.err.name")
-    : template.npmName && npmNameProblem(name)
-      ? t(npmNameProblem(name) as TranslationKey)
-      : dest?.problem ?? null;
+    : npmProblem
+      ? t(npmProblem)
+      : dest?.problemField === "name" ? dest.problem : null;
+  const destinationProblem = (ready && !parent.trim()) || dest?.problemField === "parent"
+    ? t("scaffold.err.baseFolder")
+    : typeof destinationValue === "string"
+      ? t("scaffold.err.checkDestination", { error: destinationValue })
+      : dest?.problemField === "destination" ? dest.problem : null;
+  const destinationPreview = root && !nameProblem && dest?.problemField !== "parent"
+    ? t("scaffold.destination", { path: root })
+    : null;
   const textProblems: Record<string, string | null> = {};
   for (const option of template.options) {
     if (option.kind === "text" && option.validate) {
@@ -407,7 +418,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
   const blockers = [
     !ready && "loading",
     !!nameProblem && "name",
-    !dest && "dest",
+    (!dest || !!destinationProblem) && "dest",
     Object.values(textProblems).some(Boolean) && "options",
     !!packageProblem && "package",
     template.spring && !springRequest && "spring",
@@ -531,7 +542,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
   const generate = async () => {
     const plan = planFor(template, ctx);
     savePrefs({
-      parent: trimmedParent,
+      parent,
       pm: effectivePm,
       commit,
       options: {
@@ -572,27 +583,37 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       await claimRoot(root);
       if (plan.spring) {
         patchRun({ stage: t("scaffold.run.spring") });
-        await springGenerate(plan.spring, trimmedParent, name);
+        await springGenerate(plan.spring, parent, name);
       }
       if (plan.quarkus) {
         patchRun({ stage: t("scaffold.run.quarkus") });
-        await quarkusGenerate(plan.quarkus, trimmedParent, name);
+        await quarkusGenerate(plan.quarkus, parent, name);
       }
       // Writing makes the folder, so a plan with no files at all (the empty template) still has one.
       if (plan.files) {
         if (plan.files.length > 0) patchRun({ stage: t("scaffold.run.files") });
         await writeFiles(root, plan.files);
       }
-      const script = buildScript(shellFor(platform), [...plan.steps, ...gitSteps(root, (key) => t(key), commit, plan.emptyCommit)], labels);
-      const code = await runShell(trimmedParent, script);
+      const script = buildScript(shellFor(platform), [...plan.steps, gitInitStep(root, (key) => t(key))], labels);
+      const code = await runShell(parent, script);
       if (code !== 0) {
         await failed({ code });
         return;
       }
 
+      let commitProblem: string | null = null;
+      if (commit) {
+        patchRun({ status: "preparing", stage: t("scaffold.run.committing") });
+        try {
+          await initialCommit(root, plan.emptyCommit ?? false);
+        } catch (e) {
+          commitProblem = String(e);
+        }
+      }
+
       let workspace: string | null = null;
       if (target !== NO_IMPORT) {
-        patchRun({ stage: t("scaffold.run.importing") });
+        patchRun({ status: "preparing", stage: t("scaffold.run.importing") });
         let workspaceId = target;
         if (target === NEW_WORKSPACE) {
           const created = await addWorkspace(newWorkspace.trim(), "briefcase", "#6366f1");
@@ -617,7 +638,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
         });
         await focusProject(workspaceId, project.id);
       }
-      patchRun({ status: "ok", stage: null, result: { root, workspace, run: plan.run ?? null } });
+      patchRun({ status: "ok", stage: null, commitProblem, result: { root, workspace, run: plan.run ?? null } });
     } catch (e) {
       await failed({ error: String(e) });
     }
@@ -645,7 +666,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
   const backToForm = () => {
     setPhase({ kind: "form" });
     // Whatever just ran may have created the folder, or installed the tool; look again.
-    setDest(null);
+    setDestination(null);
   };
 
   const another = () => {
@@ -695,7 +716,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       ? t("scaffold.blocked.env")
       : nameProblem
         ? nameProblem
-        : Object.values(textProblems).find(Boolean) ?? packageProblem ?? (target === NEW_WORKSPACE && !newWorkspace.trim() ? t("scaffold.blocked.workspace") : null);
+        : destinationProblem ?? Object.values(textProblems).find(Boolean) ?? packageProblem ?? (target === NEW_WORKSPACE && !newWorkspace.trim() ? t("scaffold.blocked.workspace") : null);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4">
@@ -717,9 +738,10 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
             code={phase.code}
             stage={phase.stage}
             error={phase.error}
+            commitProblem={phase.commitProblem}
             footer={
               running ? (
-                <Button variant="ghost" onClick={stop} disabled={!phase.sessionId}>
+                <Button variant="ghost" onClick={stop} disabled={phase.status !== "running" || !phase.sessionId}>
                   {t("scaffold.run.stop")}
                 </Button>
               ) : phase.status === "failed" ? (
@@ -805,12 +827,14 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
                   </div>
 
                   <div className="space-y-2.5">
-                    <Field label={t("scaffold.name")} error={nameProblem} hint={nameProblem ? null : root}>
+                    <Field label={t("scaffold.name")} error={nameProblem}>
                       <input
                         autoFocus
+                        aria-label={t("scaffold.name")}
+                        aria-invalid={!!nameProblem}
                         value={name}
                         onChange={(e) => {
-                          setName(e.target.value.trim());
+                          setName(e.target.value);
                           setNameEdited(true);
                         }}
                         onKeyDown={(e) => {
@@ -820,9 +844,16 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
                         className={fieldClass({ size: "sm", className: "w-full font-mono" })}
                       />
                     </Field>
-                    <Field label={t("scaffold.location")}>
+                    <Field label={t("scaffold.location")} hint={(destinationPreview || destinationProblem) && (
+                      <>
+                        {destinationPreview && <span className="block truncate" title={destinationPreview}>{destinationPreview}</span>}
+                        {destinationProblem && <span role="alert" className="block whitespace-normal font-sans text-[var(--cf-danger)]">{destinationProblem}</span>}
+                      </>
+                    )}>
                       <div className="flex min-w-0 gap-1.5">
                         <input
+                          aria-label={t("scaffold.location")}
+                          aria-invalid={!!destinationProblem}
                           value={parent}
                           onChange={(e) => setParent(e.target.value)}
                           spellCheck={false}
@@ -868,10 +899,12 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
                   <EnvironmentPanel rows={rows} platform={platform} onInstall={(request) => void install(request)} onInstallAll={() => void installAll()} />
                 </div>
 
-                <div className="flex h-14 shrink-0 items-center gap-3 border-t border-[var(--cf-border)] px-4">
-                  <span className="shrink-0 text-[12px] text-[var(--cf-text-muted)]">{t("scaffold.ws.label")}</span>
-                  <div className="w-[170px] shrink-0">
-                    <Select size="sm" value={target} onChange={setTarget} options={workspaceOptions} ariaLabel={t("scaffold.ws.label")} />
+                <div className="flex min-h-14 shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-t border-[var(--cf-border)] px-4 py-2">
+                  <div className="flex min-w-0 items-center gap-3">
+                    <span className="shrink-0 text-[12px] text-[var(--cf-text-muted)]">{t("scaffold.ws.label")}</span>
+                    <div className="w-[170px] min-w-0">
+                      <Select size="sm" value={target} onChange={setTarget} options={workspaceOptions} ariaLabel={t("scaffold.ws.label")} />
+                    </div>
                   </div>
                   {target === NEW_WORKSPACE && (
                     <input
@@ -887,18 +920,19 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
                       {t("scaffold.commit")}
                     </label>
                   </Tooltip>
-                  <span className="min-w-0 flex-1" />
-                  <Button variant="ghost" onClick={onClose}>
-                    {t("common.cancel")}
-                  </Button>
-                  <Tooltip label={canCreate ? t("scaffold.create") : (blockerHint ?? t("scaffold.create"))} side="top">
-                    <span className="inline-flex">
-                      <button type="button" disabled={!canCreate} onClick={() => void create()} className={buttonClass({ variant: "primary" })}>
-                        <Rocket size={13} />
-                        {t("scaffold.create")}
-                      </button>
-                    </span>
-                  </Tooltip>
+                  <div className="ml-auto flex items-center gap-3">
+                    <Button variant="ghost" onClick={onClose}>
+                      {t("common.cancel")}
+                    </Button>
+                    <Tooltip label={canCreate ? t("scaffold.create") : (blockerHint ?? t("scaffold.create"))} side="top">
+                      <span className="inline-flex">
+                        <button type="button" disabled={!canCreate} onClick={() => void create()} className={buttonClass({ variant: "primary" })}>
+                          <Rocket size={13} />
+                          {t("scaffold.create")}
+                        </button>
+                      </span>
+                    </Tooltip>
+                  </div>
                 </div>
               </div>
             </div>

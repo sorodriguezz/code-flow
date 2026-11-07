@@ -83,6 +83,11 @@ pub fn scaffold_check_dest(parent: String, name: String) -> run::DestCheck {
 }
 
 #[tauri::command(async)]
+pub fn scaffold_initial_commit(root: String, allow_empty: bool) -> Result<(), String> {
+    run::initial_commit(&root, allow_empty)
+}
+
+#[tauri::command(async)]
 pub fn scaffold_write_files(root: String, files: Vec<run::FileSpec>) -> Result<(), String> {
     let root = PathBuf::from(root);
     if !root.is_absolute() {

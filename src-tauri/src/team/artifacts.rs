@@ -138,6 +138,25 @@ pub fn mirror_into(run_id: &str, folders: &[String]) {
     chain_memory::mirror(&folder(run_id), folders);
 }
 
+pub fn mirror_contract(run_id: &str, cwd: &str, contract: &super::coordination::Contract) -> Result<String, String> {
+    let name = super::coordination::contract_name(&contract.name).ok_or("Nombre de contrato inválido.")?;
+    let version = contract.version.get(..12).filter(|version| version.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or("Versión de contrato inválida.")?;
+    let suffix = std::path::Path::new(&contract.path).extension().and_then(|value| value.to_str())
+        .filter(|value| value.len() <= 8 && value.bytes().all(|b| b.is_ascii_alphanumeric())).unwrap_or("txt");
+    let filename = format!("contract-{name}-{version}.{suffix}");
+    let dir = chain_memory::dir(&folder(run_id));
+    std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    std::fs::write(dir.join(&filename), &contract.text).map_err(|error| error.to_string())?;
+    mirror_into(run_id, &[cwd.to_string()]);
+    let relative = format!("{}/{filename}", relative_folder(run_id));
+    if std::path::Path::new(cwd).join(&relative).is_file() {
+        Ok(relative)
+    } else {
+        Err("No se pudo copiar el contrato a la carpeta de la tarea.".into())
+    }
+}
+
 pub fn forget(run_id: &str, folders: &[String]) {
     chain_memory::forget(&folder(run_id), folders);
 }

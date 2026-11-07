@@ -12,7 +12,7 @@ import type { ScaffoldPlatform } from "./api";
  *
  * Every step prints a banner before it runs, so the terminal reads as a list of what happened, and
  * the script stops at the first step that fails — except the ones marked `optional`, whose failure
- * is reported and stepped over (an initial commit on a machine with no git identity is the case).
+ * is reported and stepped over.
  */
 
 export type Shell = "sh" | "ps";

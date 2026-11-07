@@ -46,6 +46,88 @@ pub fn head_sha(path: &str) -> Result<String, String> {
     git_ok(path, &["rev-parse", "HEAD"])
 }
 
+pub fn handoff_diff(path: &str, base: &str) -> String {
+    let status = git_ok(path, &["status", "--short"]).unwrap_or_default();
+    let base = if base.is_empty() { "HEAD" } else { base };
+    let diff = git_ok(path, &["diff", "--no-ext-diff", base, "--"]).unwrap_or_default();
+    format!("{status}\n{diff}").trim().chars().take(12_000).collect()
+}
+
+pub fn inspect_impact(path: &str, base: &str, custom: &[String]) -> Result<Option<super::coordination::Impact>, String> {
+    inspect_changes(path, base, |file| super::coordination::impact_path(file, custom), true)
+}
+
+pub fn work_fingerprint(path: &str, base: &str) -> Result<String, String> {
+    Ok(inspect_changes(path, base, |_| true, false)?.map(|changes| changes.version).unwrap_or_default())
+}
+
+fn inspect_changes(
+    path: &str, base: &str, includes: impl Fn(&str) -> bool, preview: bool,
+) -> Result<Option<super::coordination::Impact>, String> {
+    let base = if base.is_empty() { "HEAD" } else { base };
+    let list = |args: &[&str]| {
+        let out = git(path, args)?;
+        if out.success { Ok(out.stdout) } else { Err(out.detail()) }
+    };
+    let changed = list(&["diff", "--no-renames", "--name-only", "-z", base, "--"])?;
+    let untracked = list(&["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let mut files = changed.split('\0').chain(untracked.split('\0'))
+        .filter(|file| !file.is_empty() && includes(file))
+        .map(str::to_string).collect::<Vec<_>>();
+    files.sort();
+    files.dedup();
+    if files.is_empty() {
+        return Ok(None);
+    }
+    if !preview && files.len() > 128 {
+        return Err("Demasiados archivos para comparar intentos.".into());
+    }
+    let root = Path::new(path).canonicalize().map_err(|error| error.to_string())?;
+    let mut identity = Vec::new();
+    let mut previews = Vec::new();
+    for file in &files {
+        let relative = super::intelligence::relative_path(file).ok_or("Git reportó una ruta inválida.")?;
+        let entry = root.join(&relative);
+        let hash = match std::fs::symlink_metadata(&entry) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let link = std::fs::read_link(&entry).map_err(|error| error.to_string())?;
+                super::coordination::fingerprint(&[&link.to_string_lossy()])
+            }
+            Ok(meta) if meta.is_file() && entry.canonicalize().is_ok_and(|resolved| resolved.starts_with(&root)) => {
+                git_ok(path, &["hash-object", "--no-filters", "--", &relative])?
+            }
+            Ok(_) => return Err(format!("El cambio en «{relative}» no es un archivo revisable.")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => "deleted".into(),
+            Err(error) => return Err(error.to_string()),
+        };
+        identity.extend([relative, hash]);
+        if preview && untracked.split('\0').any(|candidate| candidate == file) && entry.symlink_metadata().is_ok_and(|meta| meta.is_file()) {
+            use std::io::Read;
+            let mut text = Vec::new();
+            if std::fs::File::open(&entry).and_then(|source| source.take(4000).read_to_end(&mut text)).is_ok() {
+                previews.push(format!("+++ {file}\n{}", String::from_utf8_lossy(&text)));
+            }
+        }
+    }
+    let diff = if preview {
+        let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", base, "--"];
+        args.extend(files.iter().map(String::as_str));
+        format!("{}\n{}", list(&args)?, previews.join("\n\n")).chars().take(16_000).collect()
+    } else {
+        String::new()
+    };
+    let fingerprints = identity.iter().map(String::as_str).collect::<Vec<_>>();
+    Ok(Some(super::coordination::Impact {
+        files, diff,
+        version: super::coordination::fingerprint(&fingerprints),
+    }))
+}
+
+pub fn pr_commits(path: &str, target: &str, source: &str) -> Result<String, String> {
+    let range = format!("refs/heads/{target}..refs/heads/{source}");
+    git_ok(path, &["log", "--no-merges", "--max-count=60", "--format=%h %s", &range, "--"])
+}
+
 fn ensure_parent(target: &str) -> Result<(), String> {
     if let Some(parent) = Path::new(target).parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;

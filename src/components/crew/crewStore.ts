@@ -7,7 +7,7 @@ import { create } from "zustand";
 export type Space = "tablero" | "equipos" | "agentes" | "en-vivo" | "taller";
 
 export type Overlay =
-  | { kind: "launch"; goal?: string; assignee?: { kind: "agent" | "team"; id: string }; cardId?: string }
+  | { kind: "launch"; goal?: string; assignee?: { kind: "agent" | "team"; id: string }; cardId?: string; projectId?: string; attachments?: import("../../lib/tauri/chatCommands").ChatAttachment[] }
   | { kind: "wizard"; templateId?: string; agentId?: string }
   | { kind: "card"; id: string }
   | { kind: "chat"; runId: string; memberId: string; taskId?: string }

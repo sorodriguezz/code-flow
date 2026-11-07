@@ -26,7 +26,7 @@ import { useTicketStore } from "../../state/ticketStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
 import { EmptyState } from "../common/EmptyState";
-import { runIsLive } from "../../types/team";
+import { recoveryNeedsUser, runIsLive } from "../../types/team";
 import { TerminalBench } from "../agents/TerminalBench";
 import { DragLayer } from "./kit/drag";
 import { CrewHost, Seg, SOFT } from "./kit/ui";
@@ -134,6 +134,7 @@ export function CrewView() {
       if (run.status === "gated") n++;
       const state = states[run.id];
       if (state) n += state.messages.filter((m) => m.kind === "question" && m.to_id === "user" && !m.answered_at).length;
+      if (runIsLive(run)) n += Number(recoveryNeedsUser(state).length > 0);
     }
     n += chains.filter((c) => c.status === "gated").length;
     return n;
@@ -235,7 +236,7 @@ export function CrewView() {
       <Dock />
       <DragLayer />
 
-      {overlay?.kind === "launch" && <LaunchDialog goal={overlay.goal} assignee={overlay.assignee} cardId={overlay.cardId} />}
+      {overlay?.kind === "launch" && <LaunchDialog goal={overlay.goal} assignee={overlay.assignee} cardId={overlay.cardId} projectId={overlay.projectId} attachments={overlay.attachments} />}
       {overlay?.kind === "wizard" && <AgentWizard templateId={overlay.templateId} agentId={overlay.agentId} />}
       {overlay?.kind === "card" && <CardDrawer cardId={overlay.id} />}
       {overlay?.kind === "chat" && <MemberChat key={`${overlay.runId}:${overlay.memberId}:${overlay.taskId ?? ""}`} runId={overlay.runId} memberId={overlay.memberId} taskId={overlay.taskId} />}

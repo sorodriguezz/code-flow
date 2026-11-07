@@ -34,6 +34,7 @@ struct State {
     again: HashSet<String>,
     /// Turn run id (`ai_runs`) of every headless item in flight, by item id, with its team run.
     turns: HashMap<String, (String, String)>,
+    quota_wakes: HashMap<String, i64>,
 }
 
 static STATE: LazyLock<Mutex<State>> = LazyLock::new(Default::default);
@@ -75,12 +76,51 @@ pub fn kick(app: &AppHandle, run_id: &str) {
     tauri::async_runtime::spawn(async move {
         loop {
             pump_once(&app, &run_id).await;
+            schedule_quota_wake(&app, &run_id);
             let mut s = state();
             if s.again.remove(&run_id) {
                 continue;
             }
             s.pumping.remove(&run_id);
             break;
+        }
+    });
+}
+
+fn schedule_quota_wake(app: &AppHandle, run_id: &str) {
+    let now = chrono::Utc::now().timestamp();
+    let next = with_conn(app, |conn| {
+        let run = crate::team::get_run(conn, run_id).ok().flatten()?;
+        if run.status != "running" {
+            return None;
+        }
+        crate::team::list_items(conn, run_id).ok()?.iter()
+            .filter(|item| item.status == "waiting")
+            .filter_map(|item| item.intelligence.recovery.as_ref()?.resume_at)
+            .filter(|at| *at > now)
+            .min()
+    }).flatten();
+    {
+        let mut state = state();
+        if state.quota_wakes.get(run_id).copied() == next {
+            return;
+        }
+        state.quota_wakes.remove(run_id);
+        if let Some(at) = next {
+            state.quota_wakes.insert(run_id.to_string(), at);
+        }
+    }
+    let Some(at) = next else { return };
+    let app = app.clone();
+    let run_id = run_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs((at - now) as u64)).await;
+        let due = {
+            let mut state = state();
+            state.quota_wakes.get(&run_id) == Some(&at) && state.quota_wakes.remove(&run_id).is_some()
+        };
+        if due {
+            kick(&app, &run_id);
         }
     });
 }
@@ -104,9 +144,6 @@ async fn pump_once(app: &AppHandle, run_id: &str) {
             return;
         }
     };
-    if dispatches.is_empty() {
-        return;
-    }
     let _ = app.emit("team:changed", serde_json::json!({ "runId": run_id }));
     for dispatch in dispatches {
         if dispatch.run_in == "terminal" {
@@ -171,19 +208,30 @@ async fn run_headless(app: AppHandle, team_run_id: String, dispatch: Dispatch) {
     };
     emit("start", true, "");
     let session = with_conn(&app, |c| last_engine_session(c, &task.project_id, &task.conversation_id)).flatten();
+    let mut message = dispatch.message.clone();
+    if dispatch.item.intelligence.substitute.is_some() && !dispatch.item.worktree_path.is_empty() {
+        let cwd = dispatch.cwd.clone();
+        let base = dispatch.item.intelligence.base_sha.clone();
+        if let Ok(diff) = tokio::task::spawn_blocking(move || crate::team::gitops::handoff_diff(&cwd, &base)).await {
+            if !diff.is_empty() {
+                message.push_str("\n\n## Cambios del intento anterior\n");
+                message.push_str(&diff);
+            }
+        }
+    }
     with_conn(&app, |c| queries::update_agent_task_run(c, &task.id, "running", &task.model, task.turns, ""));
     let reply = crate::commands::claude_cmd::send_chat_message(
         app.clone(),
         app.state::<Db>(),
         task.project_id.clone(),
-        dispatch.message.clone(),
+        message,
         session,
         Some(task.conversation_id.clone()),
         Some(turn_id.clone()),
         Some(dispatch.provider.clone()),
         Some(if dispatch.model.is_empty() { task.model.clone() } else { dispatch.model.clone() }),
         Some(task.prompt.clone()),
-        task.account_id.clone(),
+        dispatch.account_id.clone(),
         None,
         None,
         None,

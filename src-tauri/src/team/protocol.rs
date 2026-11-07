@@ -40,7 +40,7 @@ pub struct Note {
 
 /// One item a lead asked for, already resolved: the member and repository are ids, and `depends_on`
 /// names keys (of items in this plan or already in the run).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PlannedItem {
     pub key: String,
     pub member_id: String,
@@ -50,6 +50,14 @@ pub struct PlannedItem {
     pub title: String,
     pub instruction: String,
     pub depends_on: Vec<String>,
+    pub criteria: Vec<String>,
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub publishes: Vec<super::coordination::ContractSpec>,
+    #[serde(default)]
+    pub requires: Vec<String>,
+    #[serde(default)]
+    pub replaces: String,
 }
 
 /// What a lead's turn decided.
@@ -344,6 +352,20 @@ pub fn lead_reply(text: &str, roster: &[RosterEntry], repos: &[RepoEntry], exist
             title,
             instruction,
             depends_on: strings_of(raw, &["depende_de", "depends_on", "dependencias"]).iter().map(|d| key_slug(d)).collect(),
+            criteria: strings_of(raw, &["criterios", "criteria"]).into_iter().take(12)
+                .map(|criterion| criterion.chars().take(400).collect()).collect(),
+            paths: strings_of(raw, &["archivos", "paths"]).iter().filter_map(|path| super::intelligence::relative_path(path)).take(24).collect(),
+            publishes: raw.get("publica").or_else(|| raw.get("publishes")).and_then(|v| v.as_array()).into_iter().flatten()
+                .filter_map(|entry| Some(super::coordination::ContractSpec {
+                    name: super::coordination::contract_name(&string_of(entry, &["nombre", "name"]))?,
+                    path: super::intelligence::relative_path(&string_of(entry, &["archivo", "path"]))?,
+                })).take(8).collect(),
+            requires: strings_of(raw, &["consume", "requires"]).iter()
+                .filter_map(|name| super::coordination::contract_name(name)).take(12).collect(),
+            replaces: {
+                let value = string_of(raw, &["reemplaza", "replaces"]);
+                if value.is_empty() { value } else { key_slug(&value) }
+            },
         });
     }
 
@@ -470,12 +492,13 @@ pub fn lead_protocol(can_ask_user: bool) -> String {
          Eres el líder: no escribes código, repartes el trabajo. Responde con un texto breve para el equipo y un bloque:\n\
          ```equipo\n\
          {{\"mensaje\": \"lo que el equipo debe saber del plan\",\n \
-         \"items\": [{{\"id\": \"api\", \"miembro\": \"<nombre o rol>\", \"repo\": \"<repositorio>\", \"tipo\": \"trabajo | investigar\", \"titulo\": \"...\", \"tarea\": \"qué tiene que hacer, concreto\", \"depende_de\": [\"otro-id\"]}}],\n \
+         \"items\": [{{\"id\": \"api\", \"miembro\": \"<nombre o rol>\", \"repo\": \"<repositorio>\", \"tipo\": \"trabajo | investigar\", \"titulo\": \"...\", \"tarea\": \"qué tiene que hacer, concreto\", \"depende_de\": [\"otro-id\"], \"archivos\": [\"ruta/relativa\"], \"criterios\": [\"resultado comprobable\"]}}],\n \
          \"cancelar\": [\"id de una tarea pendiente que ya no hace falta\"],\n \
          \"chico\": false,\n \
          \"terminar\": false}}\n\
          ```\n\
-         Reglas: cada tarea es de un miembro y un repositorio. Lo que no dependa de otra cosa corre en paralelo, así que divide para que varios trabajen a la vez sin tocar los mismos archivos. \
+         Reglas: cada tarea es de un miembro y un repositorio. Lo que no dependa de otra cosa corre en paralelo, así que divide para que varios trabajen a la vez sin tocar los mismos archivos. Indica archivos o carpetas relativos al repo cuando conozcas el alcance, y criterios observables que puedan verificarse. Considera la carga y la disponibilidad de cada miembro. \
+         Si varias tareas comparten un contrato, indica en el productor `\"publica\": [{{\"nombre\": \"api-v1\", \"archivo\": \"docs/openapi.json\"}}]` y en consumidores `\"consume\": [\"api-v1\"]`. El productor debe entregar ese archivo. Usa el mismo nombre al actualizar un contrato. \
          **Planifica lo mínimo.** Cada tarea arranca un agente completo y gasta la cuota del usuario: una tarea sencilla es una tarea por repositorio que de verdad cambia, nada más. \
          No crees tareas de investigar, revisar, coordinar o verificar si la tarea no lo exige, no metas a un miembro solo porque existe, y no partas en pasos lo que una persona haría de una vez. \
          Si dudas entre dos planes, el más corto. Si una entrega trae lo pedido, termina: no abras rondas para pulir. \

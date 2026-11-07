@@ -176,7 +176,7 @@ pub(crate) fn refusal_reply(text: &str, output_tokens: Option<i64>) -> bool {
 /// `snake_case` — `"quota"`, `"auth_required"`, `"cli_missing"`, `"cli_busy"`, `"overloaded"`, `"other"`. The
 /// frontend asks this same classifier through `claude_cmd::ai_classify_failure`
 /// (`aiClassifyFailure` in `lib/tauri/commands.ts`) rather than keeping a copy of it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AiFailureKind {
     /// The plan or the balance is used up: a window that reopens on a clock, or credit to top up.

@@ -47,7 +47,10 @@ const ERRORS: Record<string, [string, string]> = {
   "crew.launch.agentGone": ["Ese agente ya no está en el roster.", "That agent is no longer in the roster."],
 };
 
-export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: string; assignee?: Who; cardId?: string }) {
+export function LaunchDialog({ goal: initialGoal, assignee, cardId, projectId, attachments }: {
+  goal?: string; assignee?: Who; cardId?: string; projectId?: string;
+  attachments?: import("../../lib/tauri/chatCommands").ChatAttachment[];
+}) {
   const l = useL();
   const t = useT();
   const close = useCrewStore((s) => s.close);
@@ -71,7 +74,7 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
 
   const [goal, setGoal] = useState(initialGoal ?? "");
   const filesBox = useDropRef();
-  const goalFiles = useGoalFiles(filesBox);
+  const goalFiles = useGoalFiles(filesBox, attachments);
   const [who, setWho] = useState<Who>(assignee ?? (card?.assignee_kind ? { kind: card.assignee_kind, id: card.assignee_id } : null));
   const [mode, setMode] = useState<LaunchMode>(() => {
     const stored = card?.mode;
@@ -79,7 +82,7 @@ export function LaunchDialog({ goal: initialGoal, assignee, cardId }: { goal?: s
     return (assignee ?? (card?.assignee_kind ? { kind: card.assignee_kind } : null))?.kind === "team" ? "team" : "solo";
   });
   const [racers, setRacers] = useState<string[]>(card?.mode_config.racers ?? []);
-  const [repos, setRepos] = useState<string[]>(card?.repos.length ? card.repos : projects.slice(0, 1).map((p) => p.id));
+  const [repos, setRepos] = useState<string[]>(card?.repos.length ? card.repos : projectId ? [projectId] : projects.slice(0, 1).map((p) => p.id));
   const [branches, setBranches] = useState<Record<string, string>>(card?.mode_config.branches ?? {});
   const [worktree, setWorktree] = useState(card?.mode_config.worktree ?? true);
   const [preset, setPreset] = useState<PolicyPreset | undefined>(card?.mode_config.preset);

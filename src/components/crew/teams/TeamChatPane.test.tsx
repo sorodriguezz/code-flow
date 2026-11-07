@@ -12,16 +12,29 @@ let state: TeamChatState;
 let actions: ChatBubbleActions | undefined;
 let composer: { busy?: boolean; showModel?: boolean };
 const send = vi.fn(() => true);
+let convert: (() => void) | undefined;
+const open = vi.fn();
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: async () => null }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: async (command: string) => command === "team_chat_draft"
+  ? { teamId: "team", projectId: "repo", goal: "Agreed scope", attachments: [{ id: "file" }] } : null }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {}, emit: async () => {}, emitTo: async () => {} }));
 vi.mock("../../../state/teamChatStore", () => {
   const store = (selector: (s: unknown) => unknown) => selector({ states: { chat: state } });
   store.getState = () => ({ send, cancel: async () => {}, refresh: async () => {} });
   return { useTeamChatStore: store, teamChatBusy: (s: TeamChatState) => s.chat.status === "running" || s.chat.status === "cancelling" };
 });
-vi.mock("../state", () => ({ useL: () => (_es: string, en: string) => en, lNow: (_es: string, en: string) => en, useCrewStore: (selector: (s: unknown) => unknown) => selector({ close: () => {} }) }));
-vi.mock("../kit/ui", () => ({ Drawer: ({ children }: { children: ReactNode }) => <>{children}</> }));
+vi.mock("../state", () => {
+  const store = (selector: (s: unknown) => unknown) => selector({ close: () => {} });
+  store.getState = () => ({ open });
+  return { useL: () => (_es: string, en: string) => en, lNow: (_es: string, en: string) => en, useCrewStore: store };
+});
+vi.mock("../kit/ui", () => ({
+  Drawer: ({ children }: { children: ReactNode }) => <>{children}</>,
+  Btn: ({ children, onClick, disabled }: { children: ReactNode; onClick: () => void; disabled: boolean }) => {
+    if (children === "Convert to task" && !disabled) convert = onClick;
+    return <button disabled={disabled}>{children}</button>;
+  },
+}));
 vi.mock("../../agents/AgentTaskDetail", () => ({ AgentComposer: (props: typeof composer) => { composer = props; return <div>Composer</div>; } }));
 vi.mock("../../chat/ChatMessageBubble", () => ({
   ChatMessageBubble: (props: { message: ChatBubbleMessage; actions?: ChatBubbleActions }) => {
@@ -36,6 +49,8 @@ const render = () => renderToStaticMarkup(<TeamChatPane chatId="chat" />);
 
 beforeEach(() => {
   send.mockClear();
+  open.mockClear();
+  convert = undefined;
   actions = undefined;
   state = {
     chat: {
@@ -69,5 +84,16 @@ describe("team chat pane", () => {
     expect(render()).toContain("Arquitecto is working");
     expect(composer.busy).toBe(true);
     expect(actions?.onAnswer).toBeUndefined();
+  });
+
+  it("opens the normal team launcher with the original repository and attachments", async () => {
+    state.messages = [{ id: "user", role: "user", memberId: "", memberName: "", content: "Build the endpoint",
+      provider: "", model: "", traceId: null, responseTimeMs: 0, createdAt: "2026-11-06" }];
+    expect(render()).toContain("Convert to task");
+    convert?.();
+    await vi.waitFor(() => expect(open).toHaveBeenCalledWith({
+      kind: "launch", goal: "Agreed scope", assignee: { kind: "team", id: "team" },
+      projectId: "repo", attachments: [{ id: "file" }],
+    }));
   });
 });

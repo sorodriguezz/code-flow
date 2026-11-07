@@ -100,6 +100,7 @@ export interface QuarkusRequest {
 export interface DestCheck {
   path: string;
   problem: string | null;
+  problemField: "name" | "parent" | "destination" | null;
   parentExists: boolean;
 }
 
@@ -123,6 +124,9 @@ export const quarkusGenerate = (request: QuarkusRequest, parent: string, folder:
   invoke<string>("scaffold_quarkus_generate", { request, parent, folder });
 
 export const checkDest = (parent: string, name: string) => invoke<DestCheck>("scaffold_check_dest", { parent, name });
+
+export const initialCommit = (root: string, allowEmpty: boolean) =>
+  invoke<void>("scaffold_initial_commit", { root, allowEmpty });
 
 export const writeFiles = (root: string, files: FileSpec[]) =>
   invoke<void>("scaffold_write_files", { root, files });

@@ -32,6 +32,9 @@ export interface TeamPolicy {
   /** A member id, `author` or `user`. */
   conflicts: string;
   checks: TeamCheck[];
+  auto_checks?: boolean;
+  impact_approval?: boolean;
+  impact_paths?: string[];
   review: TeamReviewPolicy;
   max_parallel: number;
   max_attempts: number;
@@ -151,6 +154,7 @@ export interface TeamChatMessage {
   traceId: string | null;
   responseTimeMs: number;
   createdAt: string;
+  suggestRun?: boolean;
 }
 
 export interface TeamChatState {
@@ -205,7 +209,7 @@ export interface TeamRunRepo {
   position: number;
 }
 
-export type TeamItemKind = "plan" | "final" | "answer" | "work" | "investigate" | "review" | "integrate" | "delegate" | "advise";
+export type TeamItemKind = "plan" | "final" | "answer" | "work" | "investigate" | "review" | "integrate" | "delegate" | "advise" | "amend";
 export type TeamItemStatus = "pending" | "gated" | "running" | "waiting" | "done" | "error" | "cancelled" | "skipped" | "delegated";
 
 export interface TeamItem {
@@ -243,6 +247,22 @@ export interface TeamItem {
   parent: string;
   /** The model this attempt runs on when it is not the member's own. */
   model: string;
+  intelligence?: {
+    paths: string[];
+    criteria: string[];
+    evidence: { label: string; result: string; detail: string }[];
+    recovery: { kind: "quota" | "auth_required" | "cli_missing" | "cli_busy" | "overloaded"; provider: string; model: string; resume_at: number | null } | null;
+    substitute: string | null;
+    amendment?: {
+      summary: string;
+      cancel: string[];
+      items: { key: string; title: string; member_id: string; project_id: string; replaces: string; criteria: string[] }[];
+    } | null;
+    contract_specs?: { name: string; path: string }[];
+    published_contracts?: { name: string; path: string; version: string; text: string }[];
+    used_contracts?: Record<string, string>;
+    impact?: { files: string[]; diff: string; version: string } | null;
+  };
 }
 
 export type TeamMessageKind =
@@ -282,6 +302,34 @@ export interface TeamRunState {
   repos: TeamRunRepo[];
   items: TeamItem[];
   messages: TeamMessage[];
+  memories?: TeamMemory[];
+}
+
+export interface TeamMemory {
+  message_id: string;
+  run_id: string;
+  project_id: string;
+  body: string;
+}
+
+export interface TeamRecommendation {
+  project_id: string;
+  role: string;
+  kind: TeamItemKind;
+  route: { provider: string; model: string; effort: string };
+  completed: number;
+  attempted: number;
+  first_pass: number;
+  quota_blocks: number;
+  median_seconds: number;
+  run_ids: string[];
+}
+
+export interface TeamPrDraft {
+  title: string;
+  body: string;
+  source: string;
+  target: string;
 }
 
 export interface TeamDispatch {
@@ -316,6 +364,9 @@ export function defaultPolicy(): TeamPolicy {
     push: false,
     conflicts: "author",
     checks: [],
+    auto_checks: false,
+    impact_approval: false,
+    impact_paths: [],
     review: { enabled: false, reviewer: "", of: [], exigence: "correct", laps: 3 },
     max_parallel: 3,
     max_attempts: 3,
@@ -407,6 +458,10 @@ export function emptyTeam(workspaceId: string): Team {
 /** Whether a run still wants the user or is still working. */
 export function runIsLive(run: TeamRun): boolean {
   return run.status === "running" || run.status === "gated" || run.status === "paused";
+}
+
+export function recoveryNeedsUser(state: TeamRunState | undefined): TeamItem[] {
+  return state?.items.filter((item) => item.status === "waiting" && item.intelligence?.recovery?.resume_at === null) ?? [];
 }
 
 /** What the live view shows beyond the items — `team/metrics.rs`. */

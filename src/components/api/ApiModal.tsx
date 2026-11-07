@@ -19,6 +19,7 @@ import { buttonClass, iconButtonClass } from "../common/Button";
  * `dismissOnBackdrop` locks the same exit for a different reason: a modal whose body is a form the
  * user has been typing into has nothing to recover from a mis-click, so the ones that hold unsaved
  * input turn it off and keep the close button, Cancel and Escape as the only ways out.
+ * A dialog that requires an explicit dismissal can also turn off `dismissOnEscape`.
  *
  * **It portals to `document.body`, and it has to.** These modals are opened from inside the main
  * content area, which is `.cf-ambient-bg` — and that carries `isolation: isolate` so its ambient
@@ -48,6 +49,7 @@ export function ApiModal({
   height,
   busy = false,
   dismissOnBackdrop = true,
+  dismissOnEscape = true,
   raised = false,
   tourAnchor,
   onClose,
@@ -65,6 +67,8 @@ export function ApiModal({
   busy?: boolean;
   /** Whether a click on the backdrop closes the modal. Off for forms holding unsaved input. */
   dismissOnBackdrop?: boolean;
+  /** Whether Escape closes the modal. */
+  dismissOnEscape?: boolean;
   /** Set when the dialog is opened from *inside* a root overlay — Settings, chiefly — so it lands
    * above it instead of behind it. See the layer ladder above. */
   raised?: boolean;
@@ -83,7 +87,7 @@ export function ApiModal({
   const pressedBackdrop = useRef(false);
 
   useEffect(() => {
-    if (busy) return;
+    if (busy || !dismissOnEscape) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       // A popover open inside the dialog owns Escape first. Its own handler is a React one on the
@@ -94,7 +98,7 @@ export function ApiModal({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [busy, onClose]);
+  }, [busy, dismissOnEscape, onClose]);
 
   useFocusTrap(panelRef);
 

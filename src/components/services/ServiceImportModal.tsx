@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Container, LoaderCircle, Plus, Radar } from "lucide-react";
+import { ChevronRight, Container, LoaderCircle, Plus, Radar } from "lucide-react";
 import { ApiModal, GhostButton, PrimaryButton } from "../api/ApiModal";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
@@ -44,6 +44,7 @@ export function ServiceImportModal({
 
   const [found, setFound] = useState<ProjectCandidates[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [expandedRepos, setExpandedRepos] = useState<Set<string>>(() => new Set());
   const [names, setNames] = useState<Record<string, string>>({});
   const [target, setTarget] = useState<string>(groups.length ? groups[0].id : "__new__");
   const [groupName, setGroupName] = useState(workspace?.name ?? "");
@@ -133,6 +134,8 @@ export function ServiceImportModal({
       width="max-w-3xl"
       height="h-[70vh]"
       busy={saving}
+      dismissOnBackdrop={false}
+      dismissOnEscape={false}
       onClose={onClose}
       footer={
         <>
@@ -189,31 +192,50 @@ export function ServiceImportModal({
               .filter((c) => !exists(project.projectId, c))
               .map((c) => keyOf(project.projectId, c));
             const picked = keys.filter((k) => selected.has(k)).length;
+            const expanded = expandedRepos.has(project.projectId);
             return (
               <div key={project.projectId} className="border-b border-[var(--cf-border)] last:border-b-0">
-                <label className="sticky top-0 z-10 flex cursor-pointer items-center gap-2 bg-[var(--cf-surface)] px-4 py-2">
-                  <Checkbox
-                    checked={picked > 0 && picked === keys.length}
-                    indeterminate={picked > 0 && picked < keys.length}
-                    disabled={!keys.length}
-                    onChange={(on) =>
-                      setSelected((prev) => {
+                <div className="sticky top-0 z-10 flex items-center gap-2 bg-[var(--cf-surface)] px-4">
+                  <label className="inline-flex cursor-pointer">
+                    <span className="sr-only">{t("services.import.selectRepo", { repo: project.projectName })}</span>
+                    <Checkbox
+                      checked={picked > 0 && picked === keys.length}
+                      indeterminate={picked > 0 && picked < keys.length}
+                      disabled={!keys.length}
+                      onChange={(on) =>
+                        setSelected((prev) => {
+                          const next = new Set(prev);
+                          for (const key of keys) {
+                            if (on) next.add(key);
+                            else next.delete(key);
+                          }
+                          return next;
+                        })
+                      }
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    aria-expanded={expanded}
+                    className="flex min-w-0 flex-1 items-center gap-2 rounded py-2 text-left hover:bg-[var(--cf-hover)]"
+                    onClick={() =>
+                      setExpandedRepos((prev) => {
                         const next = new Set(prev);
-                        for (const key of keys) {
-                          if (on) next.add(key);
-                          else next.delete(key);
-                        }
+                        if (expanded) next.delete(project.projectId);
+                        else next.add(project.projectId);
                         return next;
                       })
                     }
-                  />
-                  <span className="text-[12px] font-semibold text-[var(--cf-text)]">{project.projectName}</span>
-                  <span className="min-w-0 truncate font-mono text-[10.5px] text-[var(--cf-text-muted)]">{project.path}</span>
-                  <span className="ml-auto shrink-0 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
-                    {picked}/{project.candidates.length}
-                  </span>
-                </label>
-                {project.candidates.map((candidate) => {
+                  >
+                    <ChevronRight size={13} aria-hidden className={`shrink-0 text-[var(--cf-text-muted)] transition-transform ${expanded ? "rotate-90" : ""}`} />
+                    <span className="text-[12px] font-semibold text-[var(--cf-text)]">{project.projectName}</span>
+                    <span className="min-w-0 truncate font-mono text-[10.5px] text-[var(--cf-text-muted)]">{project.path}</span>
+                    <span className="ml-auto shrink-0 pr-1 text-[10.5px] tabular-nums text-[var(--cf-text-muted)]">
+                      {picked}/{project.candidates.length}
+                    </span>
+                  </button>
+                </div>
+                {expanded && project.candidates.map((candidate) => {
                   const key = keyOf(project.projectId, candidate);
                   const already = exists(project.projectId, candidate);
                   const on = selected.has(key);

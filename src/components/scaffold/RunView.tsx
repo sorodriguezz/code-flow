@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Check, CircleX, Loader2 } from "lucide-react";
+import { Check, CircleX, Loader2, TriangleAlert } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { TerminalPane } from "../terminal/TerminalPane";
 import { chipClass } from "../common/recipes";
@@ -21,6 +21,7 @@ export function RunView({
   code,
   stage,
   error,
+  commitProblem,
   footer,
 }: {
   icon: ReactNode;
@@ -30,11 +31,17 @@ export function RunView({
   code: number | null;
   stage: string | null;
   error: string | null;
+  commitProblem?: string | null;
   footer: ReactNode;
 }) {
   const t = useT();
   const chip =
-    status === "ok" ? (
+    status === "ok" && commitProblem ? (
+      <span className={chipClass("warn")} role="status">
+        <TriangleAlert size={11} />
+        {t("scaffold.run.commitPending")}
+      </span>
+    ) : status === "ok" ? (
       <span className={chipClass("ok")}>
         <Check size={11} />
         {t("scaffold.run.ok")}
@@ -58,8 +65,8 @@ export function RunView({
         <h3 className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[var(--cf-text)]">{title}</h3>
         {chip}
       </div>
-      <div className="min-h-0 flex-1 p-3">
-        <div className="relative h-full overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-sunken)]">
+      <div className="flex min-h-0 flex-1 flex-col gap-2 p-3">
+        <div className="relative min-h-0 flex-1 overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-sunken)]">
           {sessionId ? (
             <TerminalPane sessionId={sessionId} visible quietExit autoFocus />
           ) : (
@@ -75,7 +82,12 @@ export function RunView({
             </div>
           )}
         </div>
-        {error && sessionId && <p className="mt-2 text-[12px] text-[var(--cf-danger)]">{error}</p>}
+        {error && sessionId && <p className="max-h-32 shrink-0 overflow-auto text-[12px] text-[var(--cf-danger)]">{error}</p>}
+        {commitProblem && (
+          <p className="max-h-32 shrink-0 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-[var(--cf-hover)] p-2 text-[12px] text-[var(--cf-warning)]">
+            {commitProblem}
+          </p>
+        )}
       </div>
       <div className="flex h-14 shrink-0 items-center justify-end gap-2 border-t border-[var(--cf-border)] px-4">{footer}</div>
     </div>

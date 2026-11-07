@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { useDialog } from "../../lib/useFocusTrap";
-import { GitBranchPlus, Loader2, X } from "lucide-react";
+import { isAbsolute } from "@tauri-apps/api/path";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { useFocusTrap } from "../../lib/useFocusTrap";
+import { FolderOpen, GitBranchPlus, Loader2, X } from "lucide-react";
 import { defaultCloneDir, findDuplicateProjects, gitClone } from "../../lib/tauri/commands";
 import type { DuplicateProject } from "../../lib/tauri/commands";
 import { onGitProgress } from "../../lib/tauri/events";
@@ -8,9 +10,10 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { describeGitError } from "../../lib/gitErrors";
+import { currentPlatform } from "../../lib/platform";
 import type { Project } from "../../types/domain";
 import { DEFAULT_WORKSPACE_COLOR } from "../../lib/workspaceColors";
-import { buttonClass } from "../common/Button";
+import { buttonClass, iconButtonClass } from "../common/Button";
 import { fieldClass } from "../common/recipes";
 
 function deriveName(url: string): string {
@@ -40,7 +43,9 @@ export function CloneRepoModal({
    *  cosmetic: this used to build the destination as `${baseDir}/${name}`, a forward slash onto a
    *  root that on Windows is `C:\\CodeFlow\\repos`, and the mixed path it produced went on to live
    *  in `projects.local_path` for the life of the project. */
-  const [base, setBase] = useState({ root: "", separator: "/" });
+  const [base, setBase] = useState({ root: "", separator: currentPlatform() === "windows" ? "\\" : "/" });
+  const [folder, setFolder] = useState<string | null>(null);
+  const [folderError, setFolderError] = useState<string | null>(null);
   const [url, setUrl] = useState(initialUrl ?? "");
   const [name, setName] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
@@ -52,21 +57,40 @@ export function CloneRepoModal({
   const [duplicate, setDuplicate] = useState<DuplicateProject | null>(null);
 
   useEffect(() => {
-    void defaultCloneDir().then(setBase);
+    void defaultCloneDir().then(setBase).catch((e) => pushErrorToast(String(e)));
   }, []);
 
   useEffect(() => {
     if (!nameEdited && url.trim()) setName(deriveName(url));
   }, [url, nameEdited]);
 
-  // A refusal is about the URL that earned it. Typing a different one clears it rather than
-  // leaving a message that now points at nothing.
-  useEffect(() => setDuplicate(null), [url]);
+  // A refusal belongs to the URL and destination that were checked.
+  useEffect(() => setDuplicate(null), [url, folder, name]);
 
   // Falls back to the repo's own name whenever the field is left blank — whether the
   // user never touched it, or cleared it out on purpose — rather than blocking Clone.
   const effectiveName = name.trim() || deriveName(url);
-  const dest = base.root && effectiveName ? `${base.root}${base.separator}${effectiveName}` : "";
+  const windows = base.separator === "\\";
+  const folderInput = folder ?? base.root;
+  const parent = !folderInput.trim() ? "" : windows ? folderInput.replace(/\//g, "\\") : folderInput;
+  const endsInSeparator = parent.endsWith(base.separator);
+  const invalidName = effectiveName === "." || effectiveName === ".." || effectiveName.includes("/") ||
+    (windows && /[\\:]/.test(effectiveName));
+  const dest = parent && !invalidName ? `${parent}${endsInSeparator ? "" : base.separator}${effectiveName}` : "";
+
+  const changeFolder = (path: string) => {
+    setFolder(path);
+    setFolderError(null);
+  };
+
+  const browse = async () => {
+    try {
+      const picked = await openDialog({ directory: true, multiple: false, defaultPath: parent || undefined, title: t("clone.destination") });
+      if (typeof picked === "string") changeFolder(picked);
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
 
   const clone = async () => {
     if (!url.trim() || !dest) return;
@@ -78,6 +102,11 @@ export function CloneRepoModal({
     // caught this. Finding out afterwards would mean a finished download in a folder nobody wanted
     // and a project that can't be registered anyway.
     try {
+      if (!(await isAbsolute(parent))) {
+        setFolderError(t("clone.absoluteFolder"));
+        setCloning(false);
+        return;
+      }
       const [existing] = await findDuplicateProjects(workspaceId, [
         { path: dest, remote_url: url.trim() },
       ]);
@@ -91,10 +120,11 @@ export function CloneRepoModal({
       setCloning(false);
       return;
     }
-    const unlistenProgress = await onGitProgress((e) => {
-      if (e.op === "clone") setLines((prev) => [...prev.slice(-200), e.line]);
-    });
+    let unlistenProgress: (() => void) | undefined;
     try {
+      unlistenProgress = await onGitProgress((e) => {
+        if (e.op === "clone") setLines((prev) => [...prev.slice(-200), e.line]);
+      });
       await gitClone(url.trim(), dest);
       const project = await addProject({
         workspace_id: workspaceId,
@@ -109,8 +139,8 @@ export function CloneRepoModal({
         github_owner: null,
         github_repo: null,
         github_host: null,
-      gitlab_project: null,
-      gitlab_host: null,
+        gitlab_project: null,
+        gitlab_host: null,
       });
       onCloned?.(project);
       onClose();
@@ -120,24 +150,24 @@ export function CloneRepoModal({
       pushErrorToast(describeGitError(e, t));
     } finally {
       setCloning(false);
-      void unlistenProgress();
+      unlistenProgress?.();
     }
   };
 
-  // A dialog's keyboard contract: Tab stays inside, and Escape closes it while it is the top
-  // layer, and not while cloning. It had neither — Tab walked into the app behind the backdrop.
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
-  useDialog(panelRef, true, cloning ? null : onClose);
+  const urlId = useId();
+  const nameId = useId();
+  const folderId = useId();
+  useFocusTrap(panelRef, true);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={cloning ? undefined : onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 p-4" onClick={(e) => e.stopPropagation()}>
       <div
         ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        onClick={(e) => e.stopPropagation()}
         className="w-[460px] rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 shadow-[var(--cf-shadow-modal)]"
       >
         <div className="mb-3 flex items-center justify-between">
@@ -152,8 +182,9 @@ export function CloneRepoModal({
           )}
         </div>
 
-        <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">{t("clone.url")}</label>
+        <label htmlFor={urlId} className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">{t("clone.url")}</label>
         <input
+          id={urlId}
           autoFocus
           disabled={cloning}
           value={url}
@@ -162,8 +193,10 @@ export function CloneRepoModal({
           className={fieldClass({ className: "mb-3 w-full overflow-x-auto font-mono" })}
         />
 
-        <label className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">{t("clone.folderName")}</label>
+        <label htmlFor={nameId} className="mb-1 block text-[12px] font-medium text-[var(--cf-text-muted)]">{t("clone.folderName")}</label>
         <input
+          id={nameId}
+          aria-invalid={invalidName}
           disabled={cloning}
           value={name}
           onChange={(e) => {
@@ -173,8 +206,28 @@ export function CloneRepoModal({
           placeholder={deriveName(url) || "repo"}
           className={fieldClass({ className: "mb-1 w-full" })}
         />
-        <p className="mb-3 truncate font-mono text-[11px] text-[var(--cf-text-muted)]" title={dest}>
-          {dest || "…"}
+        {invalidName && <p role="alert" className="text-[11px] text-[var(--cf-danger)]">{t("clone.invalidFolderName")}</p>}
+
+        <label htmlFor={folderId} className="mb-1 mt-2 block text-[12px] font-medium text-[var(--cf-text-muted)]">{t("clone.destination")}</label>
+        <div className="mb-1 flex items-center gap-1.5">
+          <input
+            id={folderId}
+            required
+            disabled={cloning}
+            value={folderInput}
+            onChange={(e) => changeFolder(e.target.value)}
+            aria-invalid={!!folderError}
+            aria-describedby={`${folderId}-hint`}
+            spellCheck={false}
+            className={fieldClass({ className: "min-w-0 flex-1 font-mono" })}
+          />
+          <button type="button" disabled={cloning} onClick={() => void browse()} aria-label={t("scaffold.browse")} title={t("scaffold.browse")} className={iconButtonClass()}>
+            <FolderOpen size={14} />
+          </button>
+        </div>
+        {folderError && <p role="alert" className="mb-1 text-[11px] text-[var(--cf-danger)]">{folderError}</p>}
+        <p id={`${folderId}-hint`} className="mb-3 truncate font-mono text-[11px] text-[var(--cf-text-muted)]" title={dest}>
+          {dest ? t("clone.finalPath", { path: dest }) : "…"}
         </p>
 
         {duplicate && (
@@ -202,7 +255,7 @@ export function CloneRepoModal({
             {t("common.cancel")}
           </button>
           <button
-            disabled={cloning || !url.trim()}
+            disabled={cloning || !url.trim() || !dest || !!folderError}
             onClick={clone}
             className={buttonClass({ variant: "primary" })}
           >

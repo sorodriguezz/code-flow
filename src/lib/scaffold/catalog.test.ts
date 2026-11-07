@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { FIRST_TEMPLATE, TEMPLATES, enginesFor, gitSteps, planFor, type Options, type PackageManager, type TemplateContext } from "./catalog";
+import { FIRST_TEMPLATE, TEMPLATES, enginesFor, gitInitStep, planFor, type Options, type PackageManager, type TemplateContext } from "./catalog";
 import { SCAFFOLD_LOGOS } from "./logos";
 import { buildScript } from "./script";
 import { translations } from "../i18n/translations";
@@ -479,19 +479,17 @@ describe("Hono", () => {
 });
 
 describe("Empty", () => {
-  /** As the runner does it: the folder made by writing no files at all, then the script — which is
-   *  git's steps alone. Isolated from the machine's git config, so a signing or hook setting there
-   *  cannot fail it. */
-  it("leaves a folder holding a repository and nothing else, with a first commit to branch from", () => {
+  it("creates an empty repository and allows the optional first commit to be empty", () => {
     const parent = mkdtempSync(join(tmpdir(), "scaffold-empty-"));
     const root = join(parent, "new-project");
     try {
       const plan = template("empty").plan(context({}, { name: "new-project", parent, root }));
       expect(plan.files).toEqual([]);
       expect(plan.steps).toEqual([]);
+      expect(plan.emptyCommit).toBe(true);
       expect(template("empty").requirements(context({}))).toEqual([]);
       mkdirSync(root); // `scaffold_write_files` with an empty list
-      const script = buildScript("sh", [...plan.steps, ...gitSteps(root, (key) => key, true, plan.emptyCommit)], {
+      const script = buildScript("sh", [...plan.steps, gitInitStep(root, (key) => key)], {
         skipped: "skipped",
         done: "done",
       });
@@ -499,28 +497,13 @@ describe("Empty", () => {
         ...process.env,
         GIT_CONFIG_GLOBAL: "/dev/null",
         GIT_CONFIG_NOSYSTEM: "1",
-        GIT_AUTHOR_NAME: "Test",
-        GIT_AUTHOR_EMAIL: "test@example.com",
-        GIT_COMMITTER_NAME: "Test",
-        GIT_COMMITTER_EMAIL: "test@example.com",
       };
-      const output = execFileSync("sh", ["-c", script], { cwd: parent, env, encoding: "utf8" });
-      expect(output).not.toContain("skipped");
+      execFileSync("sh", ["-c", script], { cwd: parent, env });
       expect(readdirSync(root)).toEqual([".git"]);
-      expect(execFileSync("git", ["log", "--format=%s"], { cwd: root, env, encoding: "utf8" }).trim()).toBe("Initial commit");
+      expect(execFileSync("git", ["status", "--porcelain"], { cwd: root, env, encoding: "utf8" })).toBe("");
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
-  });
-
-  it("commits empty only when the plan asks: a generator's own commit (Expo's) gets no empty twin", () => {
-    const label = (key: string) => key;
-    expect(gitSteps("/p", label, true)[1].sh).toBe("git add -A && git commit -q -m 'Initial commit'");
-    const [, empty] = gitSteps("/p", label, true, true);
-    expect(empty.sh).toBe("git add -A && git commit -q --allow-empty -m 'Initial commit'");
-    expect(empty.ps).toContain("git commit -q --allow-empty -m 'Initial commit'");
-    // Unticked, it stays a bare `git init`.
-    expect(gitSteps("/p", label, false, true).map((step) => step.argv)).toEqual([["git", "init", "-q"]]);
   });
 
   it("is the top of the list, where the dialog opens", () => {

@@ -22,6 +22,8 @@
 pub mod artifacts;
 pub mod chat;
 pub mod gitops;
+pub mod coordination;
+pub mod intelligence;
 pub mod hierarchy;
 pub mod metrics;
 pub mod protocol;
@@ -105,6 +107,9 @@ pub struct Policy {
     /// Member id that resolves merge conflicts, `author` (the item's own member) or `user`.
     pub conflicts: String,
     pub checks: Vec<Check>,
+    pub auto_checks: bool,
+    pub impact_approval: bool,
+    pub impact_paths: Vec<String>,
     pub review: ReviewPolicy,
     pub max_parallel: i64,
     pub max_attempts: i64,
@@ -161,6 +166,9 @@ impl Default for Policy {
             push: false,
             conflicts: "author".into(),
             checks: Vec::new(),
+            auto_checks: false,
+            impact_approval: false,
+            impact_paths: Vec::new(),
             review: ReviewPolicy::default(),
             max_parallel: 3,
             max_attempts: 3,
@@ -188,6 +196,7 @@ impl Policy {
     /// The policy with every number inside its ceiling and every enum one of its values, so nothing
     /// downstream has to defend against a hand-edited row.
     pub fn sane(mut self) -> Self {
+        self.impact_paths = self.impact_paths.iter().filter_map(|path| intelligence::relative_path(path)).take(32).collect();
         self.max_parallel = self.max_parallel.clamp(1, MAX_PARALLEL_CAP);
         self.max_attempts = self.max_attempts.clamp(1, 6);
         self.max_dispatches = self.max_dispatches.clamp(1, MAX_DISPATCHES_CAP);
@@ -410,6 +419,8 @@ pub struct Item {
     pub parent: String,
     /// The model this attempt runs on when it is not the member's own — a step up its ladder.
     pub model: String,
+    #[serde(default)]
+    pub intelligence: intelligence::ItemIntelligence,
 }
 
 impl Item {
@@ -418,7 +429,7 @@ impl Item {
     }
     /// A planning turn: the lead's plan, last look and answers, and a sub-lead's `delegate`.
     pub fn is_lead(&self) -> bool {
-        matches!(self.kind.as_str(), "plan" | "final" | "answer" | "delegate")
+        matches!(self.kind.as_str(), "plan" | "final" | "answer" | "delegate" | "amend")
     }
 }
 
@@ -447,6 +458,7 @@ pub struct RunState {
     pub repos: Vec<RunRepo>,
     pub items: Vec<Item>,
     pub messages: Vec<Message>,
+    pub memories: Vec<intelligence::Memory>,
 }
 
 // ---------------------------------------------------------------- schema
@@ -555,7 +567,11 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     )?;
     // Hierarchy (2026-11): the delegate a sub-lead planned an item under, and the model a retry
     // climbed to. Old rows read as empty: planned by the lead, on the member's own model.
-    for (column, definition) in [("parent", "TEXT NOT NULL DEFAULT ''"), ("model", "TEXT NOT NULL DEFAULT ''")] {
+    for (column, definition) in [
+        ("parent", "TEXT NOT NULL DEFAULT ''"),
+        ("model", "TEXT NOT NULL DEFAULT ''"),
+        ("intelligence", "TEXT NOT NULL DEFAULT '{}'"),
+    ] {
         let present: bool = conn
             .prepare("SELECT 1 FROM pragma_table_info('agent_team_items') WHERE name = ?1")?
             .exists(params![column])?;
@@ -836,7 +852,7 @@ pub fn set_repo_status(conn: &Connection, run_id: &str, project_id: &str, status
 
 const ITEM_COLUMNS: &str = "id, run_id, key, member_id, member_name, project_id, kind, title, instruction, depends_on, status, \
     approved, task_id, worktree_path, branch, commit_sha, merged, output_text, attempts, last_error, feedback, round, lap, \
-    ref_item, run_in, terminal_session, created_at, updated_at, started_at, finished_at, parent, model";
+    ref_item, run_in, terminal_session, created_at, updated_at, started_at, finished_at, parent, model, intelligence";
 
 fn map_item(row: &rusqlite::Row) -> rusqlite::Result<Item> {
     Ok(Item {
@@ -872,6 +888,7 @@ fn map_item(row: &rusqlite::Row) -> rusqlite::Result<Item> {
         finished_at: row.get(29)?,
         parent: row.get(30)?,
         model: row.get(31)?,
+        intelligence: parse(&row.get::<_, String>(32)?),
     })
 }
 
@@ -889,14 +906,14 @@ pub fn insert_item(conn: &Connection, item: &Item) -> rusqlite::Result<()> {
     conn.execute(
         &format!(
             "INSERT INTO agent_team_items ({ITEM_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15,
-             ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32)"
+             ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33)"
         ),
         params![
             item.id, item.run_id, item.key, item.member_id, item.member_name, item.project_id, item.kind, item.title,
             item.instruction, json(&item.depends_on), item.status, item.approved, item.task_id, item.worktree_path, item.branch,
             item.commit_sha, item.merged, item.output_text, item.attempts, item.last_error, item.feedback, item.round, item.lap,
             item.ref_item, item.run_in, item.terminal_session, item.created_at, item.updated_at, item.started_at, item.finished_at,
-            item.parent, item.model
+            item.parent, item.model, json(&item.intelligence)
         ],
     )?;
     Ok(())
@@ -908,12 +925,13 @@ pub fn update_item(conn: &Connection, item: &Item) -> rusqlite::Result<()> {
         "UPDATE agent_team_items SET status = ?2, approved = ?3, task_id = ?4, worktree_path = ?5, branch = ?6, commit_sha = ?7,
             merged = ?8, output_text = ?9, attempts = ?10, last_error = ?11, feedback = ?12, terminal_session = ?13,
             updated_at = ?14, started_at = ?15, finished_at = ?16, depends_on = ?17, instruction = ?18, member_id = ?19,
-            member_name = ?20, run_in = ?21, model = ?22
+            member_name = ?20, run_in = ?21, model = ?22, intelligence = ?23
          WHERE id = ?1",
         params![
             item.id, item.status, item.approved, item.task_id, item.worktree_path, item.branch, item.commit_sha, item.merged,
             item.output_text, item.attempts, item.last_error, item.feedback, item.terminal_session, now(), item.started_at,
-            item.finished_at, json(&item.depends_on), item.instruction, item.member_id, item.member_name, item.run_in, item.model
+            item.finished_at, json(&item.depends_on), item.instruction, item.member_id, item.member_name, item.run_in, item.model,
+            json(&item.intelligence)
         ],
     )?;
     Ok(())
@@ -1040,7 +1058,10 @@ pub fn mark_delivered(conn: &Connection, ids: &[String]) -> rusqlite::Result<()>
 
 pub fn state(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<RunState>> {
     let Some(run) = get_run(conn, run_id)? else { return Ok(None) };
-    Ok(Some(RunState { repos: list_repos(conn, run_id)?, items: list_items(conn, run_id)?, messages: list_messages(conn, run_id)?, run }))
+    let repos = list_repos(conn, run_id)?;
+    let memories = intelligence::memories(conn, &run)?.into_iter()
+        .filter(|memory| repos.iter().any(|repo| repo.project_id == memory.project_id)).collect();
+    Ok(Some(RunState { repos, memories, items: list_items(conn, run_id)?, messages: list_messages(conn, run_id)?, run }))
 }
 
 // ---------------------------------------------------------------- scheduling
@@ -1055,34 +1076,57 @@ pub fn deps_ready(item: &Item, items: &[Item]) -> bool {
     })
 }
 
-/// The items that may start now, in creation order, within the run's and each member's parallel
+/// The items that may start now, prioritizing work that unblocks other tasks, within the run's and each member's parallel
 /// caps. Pure: [`claim_ready`] does the writing.
 pub fn ready_items<'a>(run: &Run, items: &'a [Item]) -> Vec<&'a Item> {
     let running: Vec<&Item> = items.iter().filter(|i| i.status == "running").collect();
+    if items.iter().any(|item| item.status == "gated" && item.intelligence.impact.is_some()) {
+        return Vec::new();
+    }
+    if let Some(amend) = items.iter().find(|item| item.kind == "amend" && matches!(item.status.as_str(), "pending" | "waiting" | "running" | "gated")) {
+        if amend.status == "pending" && running.is_empty() {
+            return vec![amend];
+        }
+        return Vec::new();
+    }
     let mut free = (run.policy.max_parallel - running.len() as i64).max(0);
     let mut per_member: std::collections::HashMap<&str, i64> = std::collections::HashMap::new();
+    let member_id = |item: &'a Item| item.intelligence.substitute.as_deref().unwrap_or(&item.member_id);
     for i in &running {
-        *per_member.entry(i.member_id.as_str()).or_default() += 1;
+        *per_member.entry(member_id(i)).or_default() += 1;
     }
     // A worktree shared by a fix and its review must not have both at once.
-    let busy_trees: Vec<&str> = running.iter().map(|i| i.worktree_path.as_str()).filter(|p| !p.is_empty()).collect();
+    let mut busy_trees: std::collections::HashSet<&str> = running.iter().map(|i| i.worktree_path.as_str()).filter(|p| !p.is_empty()).collect();
     let mut out = Vec::new();
-    for item in items.iter().filter(|i| i.status == "pending") {
+    let downstream = intelligence::downstream(items);
+    let contracts = coordination::latest_contracts(items);
+    let mut pending: Vec<_> = items.iter().filter(|i| i.status == "pending").collect();
+    pending.sort_by_cached_key(|i| std::cmp::Reverse(downstream.get(i.id.as_str()).copied().unwrap_or_default()));
+    for item in pending {
         if free == 0 {
             break;
         }
         if !deps_ready(item, items) {
             continue;
         }
-        let cap = run.members.iter().find(|m| m.member.id == item.member_id).map(|m| m.member.max_parallel).unwrap_or(1).max(1);
-        let used = per_member.get(item.member_id.as_str()).copied().unwrap_or(0);
+        if item.intelligence.requires_contracts.iter().any(|name| !contracts.contains_key(name.as_str())) {
+            continue;
+        }
+        let cap = intelligence::executor(run, item).map(|m| m.member.max_parallel).unwrap_or(1).max(1);
+        let used = per_member.get(member_id(item)).copied().unwrap_or(0);
         if used >= cap {
             continue;
         }
         if !item.worktree_path.is_empty() && busy_trees.contains(&item.worktree_path.as_str()) {
             continue;
         }
-        *per_member.entry(item.member_id.as_str()).or_default() += 1;
+        if running.iter().chain(&out).any(|other| intelligence::overlaps(item, other)) {
+            continue;
+        }
+        *per_member.entry(member_id(item)).or_default() += 1;
+        if !item.worktree_path.is_empty() {
+            busy_trees.insert(&item.worktree_path);
+        }
         free -= 1;
         out.push(item);
     }
@@ -1096,7 +1140,7 @@ pub fn needs_code_approval(run: &Run, item: &Item, items: &[Item]) -> bool {
     }
     match run.policy.approve_code.as_str() {
         "each" => true,
-        "first" => !items.iter().any(|i| i.kind == "work" && i.id != item.id && (i.approved || i.status != "pending")),
+        "first" => !items.iter().any(|i| i.kind == "work" && i.id != item.id && (i.approved || !i.started_at.is_empty())),
         _ => false,
     }
 }
@@ -1220,6 +1264,16 @@ mod tests {
         assert_eq!(ready, vec!["1", "2", "4"]);
         let ready: Vec<&str> = ready_items(&run(1), &items).iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ready, vec!["1"]);
+    }
+
+    #[test]
+    fn prioritizes_dependency_roots_and_serializes_overlapping_writes() {
+        let mut other = item("1", "b", "pending", &[]);
+        other.intelligence.paths = vec!["src/API/routes.ts".into()];
+        let mut root = item("2", "a", "pending", &[]);
+        root.intelligence.paths = vec!["src/api".into()];
+        let items = vec![other, root, item("3", "a", "pending", &["2"]), item("4", "b", "pending", &["3"])];
+        assert_eq!(ready_items(&run(3), &items).iter().map(|i| i.id.as_str()).collect::<Vec<_>>(), vec!["2"]);
     }
 
     #[test]

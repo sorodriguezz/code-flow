@@ -21,6 +21,7 @@ export const ITEM_STATUS: Record<TeamItemStatus, [string, string, Tone]> = {
 };
 
 export const ITEM_KIND: Record<TeamItemKind, [string, string]> = {
+  amend: ["Ajuste del plan", "Plan amendment"],
   plan: ["Plan", "Plan"],
   final: ["Cierre", "Wrap-up"],
   answer: ["Respuesta", "Answer"],

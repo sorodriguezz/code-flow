@@ -59,7 +59,7 @@ interface TeamState {
   followUp: (runId: string, message: string) => Promise<string | null>;
   answer: (runId: string, messageId: string, answer: string) => Promise<void>;
   note: (runId: string, toId: string, body: string) => Promise<void>;
-  decide: (runId: string, approve: boolean, comment?: string) => Promise<void>;
+  decide: (runId: string, approve: boolean, comment?: string, expectedGate?: string) => Promise<void>;
   control: (runId: string, action: string) => Promise<void>;
   /** A terminal member says it is done — the same as `cf done` from its shell. */
   finishTerminalItem: (runId: string, itemId: string, text: string) => Promise<void>;
@@ -186,8 +186,8 @@ export const useTeamStore = create<TeamState>((set, get) => ({
     await get().refresh(runId);
   },
 
-  decide: async (runId, approve, comment) => {
-    await teamDecide(runId, approve, comment).catch((e: unknown) => pushErrorToast(String(e)));
+  decide: async (runId, approve, comment, expectedGate) => {
+    await teamDecide(runId, approve, comment, expectedGate).catch((e: unknown) => pushErrorToast(String(e)));
     await get().refresh(runId);
     void get().pump(runId);
   },

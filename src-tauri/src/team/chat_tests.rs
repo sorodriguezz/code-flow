@@ -77,6 +77,7 @@ fn persists_chats_and_keeps_new_conversations_separate() {
         "Añade un endpoint",
         0,
         None,
+        false,
     )
     .unwrap();
     let second = open(&conn, team.clone(), &project, true).unwrap();
@@ -91,6 +92,19 @@ fn persists_chats_and_keeps_new_conversations_separate() {
     assert!(history
         .iter()
         .any(|entry| entry.title == "Añade un endpoint"));
+}
+
+#[test]
+fn a_lead_can_suggest_a_formal_run_without_starting_delegates() {
+    let (conn, team, project) = fixture();
+    let chat = open(&conn, team, &project, false).unwrap().chat;
+    let result = plan(
+        "Propongo una corrida con los criterios acordados.\n```equipo-chat\n{\"suggest_run\":true,\"delegate\":[]}\n```",
+        &chat,
+    );
+    assert!(result.suggest_run);
+    assert!(result.delegate.is_empty() && result.errors.is_empty());
+    assert_eq!(result.text, "Propongo una corrida con los criterios acordados.");
 }
 
 #[test]
@@ -209,7 +223,7 @@ fn cli_write_permissions_follow_the_active_member_and_the_kind_of_turn() {
 fn interrupted_chats_keep_history_and_stop_claiming_to_run_after_restart() {
     let (conn, team, project) = fixture();
     let mut chat = open(&conn, team, &project, false).unwrap().chat;
-    append(&conn, &chat, "user", None, "Continúa", 0, None).unwrap();
+    append(&conn, &chat, "user", None, "Continúa", 0, None, false).unwrap();
     chat.status = "running".into();
     chat.active_run_id = "old-process".into();
     save(&conn, &mut chat).unwrap();
