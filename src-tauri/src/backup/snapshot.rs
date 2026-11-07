@@ -48,6 +48,9 @@ pub const TABLES: &[&str] = &[
     "workspaces",
     "app_settings",
     "projects",
+    // The user's statistics follow the installation, including their historical project IDs.
+    "usage_daily",
+    "usage_hourly",
     // The AI accounts the user added — names only. What makes an account *signed in* lives in its
     // CLI's own directory or keychain item and never travels: a restored account signs in again.
     "ai_accounts",
@@ -198,6 +201,8 @@ pub const TABLES: &[&str] = &[
     "chat_artifacts",
     "review_runs",
     "agent_tasks",
+    "agent_team_chats",
+    "agent_team_chat_messages",
     "agent_chains",
     "agent_chain_repos",
     "agent_chain_steps",
@@ -315,11 +320,6 @@ pub const NEVER_BACKED_UP: &[&str] = &[
     // What Codi remembers across sessions: its own notes, forgettable with one button, and not a
     // thing a restore should bring back after the user cleared them.
     "codi_recollections",
-    // Estadísticas' counters: how *this* machine was used, keyed by repository paths on its disk. A
-    // restore onto another computer would credit it with days it never saw, and a restore onto the
-    // same one would roll its counts back to the backup's — either way the chart stops being true.
-    "usage_daily",
-    "usage_hourly",
 ];
 
 // ---------------------------------------------------------------------------
@@ -344,6 +344,8 @@ pub const CORE_TABLES: &[&str] = &[
     "workspaces",
     "app_settings",
     "projects",
+    "usage_daily",
+    "usage_hourly",
     "ai_accounts",
     "review_contexts",
     "workspace_prompts",
@@ -497,6 +499,8 @@ pub const GROUPS: &[Group] = &[
         key: "agentWork",
         tables: &[
             "agent_tasks",
+            "agent_team_chats",
+            "agent_team_chat_messages",
             "agent_chains",
             "agent_chain_repos",
             "agent_chain_steps",
@@ -667,6 +671,9 @@ pub struct SecretEntry {
 pub struct Snapshot {
     pub tables: Vec<TableDump>,
     pub secrets: Vec<SecretEntry>,
+    /// Version 1 files carried database rows only and remain readable.
+    #[serde(default)]
+    pub repositories: Vec<super::repositories::RepositoryArchive>,
 }
 
 /// What a restore changed, per table, plus the two things worth warning about afterwards.
@@ -844,11 +851,18 @@ fn write_table(conn: &Connection, dump: &TableDump, summary: &mut RestoreSummary
     // is the one form that needs to know none of it. Its usual danger — REPLACE deletes the
     // conflicting row first, firing every ON DELETE CASCADE hanging off it — is why the caller runs
     // this with `PRAGMA foreign_keys = OFF`.
-    let sql = format!(
-        "INSERT OR REPLACE INTO {} ({}) VALUES ({placeholders})",
-        dump.name,
-        names.join(", ")
-    );
+    // MAX keeps a merge from rolling counters backwards or double-counting a repeated import.
+    let counters: &[&str] = match dump.name.as_str() {
+        "usage_daily" => &["count", "seconds", "tokens", "cost_usd"],
+        "usage_hourly" => &["seconds", "events"],
+        _ => &[],
+    };
+    let sql = if counters.is_empty() {
+        format!("INSERT OR REPLACE INTO {} ({}) VALUES ({placeholders})", dump.name, names.join(", "))
+    } else {
+        let updates = counters.iter().map(|column| format!("{column} = MAX({column}, excluded.{column})")).collect::<Vec<_>>().join(", ");
+        format!("INSERT INTO {} ({}) VALUES ({placeholders}) ON CONFLICT DO UPDATE SET {updates}", dump.name, names.join(", "))
+    };
     let mut statement = conn.prepare(&sql)?;
 
     let mut written = 0i64;
@@ -1074,6 +1088,37 @@ mod tests {
         apply(&mut target, &tables, RestoreMode::Replace).unwrap();
         assert_eq!(scalar(&target, "SELECT COUNT(*) FROM api_history WHERE id = 'h1'"), 1);
         assert_eq!(scalar(&target, "SELECT COUNT(*) FROM api_cookies WHERE id = 'k1'"), 1);
+    }
+
+    #[test]
+    fn usage_statistics_travel_and_merging_is_idempotent_without_lowering_local_counters() {
+        let source = seeded();
+        source.execute_batch(
+            "INSERT INTO usage_daily (day, workspace_id, repo, kind, key, count, seconds, tokens, cost_usd)
+             VALUES ('2026-11-06', 'w1', 'p1', 'ai', 'chat', 8, 90, 500, 0.5);
+             INSERT INTO usage_hourly (day, hour, workspace_id, seconds, events)
+             VALUES ('2026-11-06', 10, 'w1', 90, 8);",
+        ).unwrap();
+        let tables = export(&source, &Selection::default()).unwrap();
+        let mut target = empty();
+        apply(&mut target, &tables, RestoreMode::Replace).unwrap();
+        assert_eq!(scalar(&target, "SELECT tokens FROM usage_daily"), 500);
+        assert_eq!(scalar(&target, "SELECT seconds FROM usage_hourly"), 90);
+        target.execute_batch("UPDATE usage_daily SET count = 12; UPDATE usage_hourly SET events = 12;").unwrap();
+        apply(&mut target, &tables, RestoreMode::Merge).unwrap();
+        apply(&mut target, &tables, RestoreMode::Merge).unwrap();
+        assert_eq!(scalar(&target, "SELECT count FROM usage_daily"), 12);
+        assert_eq!(scalar(&target, "SELECT tokens FROM usage_daily"), 500);
+        assert_eq!(scalar(&target, "SELECT events FROM usage_hourly"), 12);
+        assert_eq!(scalar(&target, "SELECT COUNT(*) FROM usage_daily"), 1);
+        assert!(CORE_TABLES.contains(&"usage_daily"));
+        assert!(CORE_TABLES.contains(&"usage_hourly"));
+    }
+
+    #[test]
+    fn reads_older_database_only_snapshots() {
+        let snapshot: Snapshot = serde_json::from_str(r#"{"tables":[],"secrets":[]}"#).unwrap();
+        assert!(snapshot.repositories.is_empty());
     }
 
     /// The rule a partial backup lives or dies by: `Replace` may empty a table the file can refill,

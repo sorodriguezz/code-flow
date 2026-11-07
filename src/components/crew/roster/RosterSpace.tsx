@@ -170,21 +170,24 @@ function AgentCard({ agent, index, onSync }: { agent: WorkspaceAgent; index: num
         drop.over ? "border-[var(--cf-accent)]" : focused ? "border-[var(--cf-accent)] shadow-[0_0_0_4px_var(--cf-accent-soft)]" : "border-[var(--cf-border)]"
       }`}
     >
-      <div {...drag} title={l("Arrastra para reordenar el dock", "Drag to reorder the dock")} className="flex cursor-grab touch-none flex-col items-center gap-2 px-4 pb-3 pt-5 text-center active:cursor-grabbing">
+      <div {...drag} title={l("Arrastra para reordenar el dock", "Drag to reorder the dock")} className="flex flex-1 cursor-grab touch-none flex-col items-center gap-2 px-4 pb-3 pt-5 text-center active:cursor-grabbing">
         <AgentAvatar agent={agent} size={64} state={state} />
         <div className="min-w-0 max-w-full">
           <b className="block truncate text-[14px]">{agent.name}</b>
-          <span className="line-clamp-2 block min-h-[32px] text-[12px] text-[var(--cf-text-muted)]">{agent.role || l("Sin papel", "No role")}</span>
+          <span title={agent.role || undefined} className="line-clamp-3 min-h-[32px] text-[12px] text-[var(--cf-text-muted)]">{agent.role || l("Sin papel", "No role")}</span>
         </div>
-        <div className="flex flex-wrap justify-center gap-1">
-          <Chip title={l("Modelo", "Model")}><ProviderGlyph providerId={agent.provider} size={11} />{agent.model || "—"}</Chip>
+        <div className="mt-auto flex w-full flex-wrap justify-center gap-1">
+          <Chip className="max-w-full" title={`${l("Modelo", "Model")}: ${agent.model || "—"}`}>
+            <ProviderGlyph providerId={agent.provider} size={11} />
+            <span className="truncate">{agent.model || "—"}</span>
+          </Chip>
           {agent.effort && <Chip tone="violet" title={l("Esfuerzo de razonamiento", "Reasoning effort")}>{agent.effort}</Chip>}
           {agent.edits === false && <Chip icon={Eye} title={l("Solo lee: no edita archivos", "Read-only: never edits files")}>{l("lee", "reads")}</Chip>}
           {agent.run_in === "terminal" && <Chip icon={SquareTerminal} title={l("Trabaja en una terminal visible", "Works in a visible terminal")}>term</Chip>}
           {(agent.repos?.length ?? 0) > 0 && <Chip icon={FolderGit2} title={l(`Limitado a ${agent.repos?.length} repositorios`, `Limited to ${agent.repos?.length} repositories`)}>{agent.repos?.length}</Chip>}
         </div>
       </div>
-      <div className="mt-auto flex items-center gap-2 border-t border-[var(--cf-border)] px-3 py-2 text-[11.5px] text-[var(--cf-text-muted)]">
+      <div className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-3 py-2 text-[11.5px] text-[var(--cf-text-muted)]">
         <span>{mine.length === 1 ? l("1 tarea", "1 task") : l(`${mine.length} tareas`, `${mine.length} tasks`)}</span>
         {spent > 0 && <span>· {money(spent)}</span>}
         {inTeams.length > 0 && <span className="inline-flex items-center gap-0.5">· <Users className="h-3 w-3" />{inTeams.length}</span>}
@@ -237,7 +240,7 @@ export function RosterSpace() {
             </Empty>
           ) : (
             <div className="min-h-0 flex-1 overflow-auto p-4">
-              <div className="mx-auto grid max-w-[1300px] grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-3">
+              <div className="mx-auto grid max-w-[1300px] auto-rows-fr grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-3">
                 {shown.map((agent, index) => (
                   <AgentCard key={agent.id} agent={agent} index={index} onSync={(template) => setSync({ agent, template })} />
                 ))}

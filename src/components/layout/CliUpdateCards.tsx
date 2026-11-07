@@ -40,16 +40,22 @@ export function CliUpdateCards() {
 
   return (
     <NoticeStack kind="popups" placement={PLACEMENT}>
-      {waiting.length > 1 && (
-        <button type="button" onClick={() => void installAll()} className={`${buttonClass({ variant: "secondary", size: "sm" })} pointer-events-auto`}>
-          {t("cliUpdates.installAll", { count: waiting.length })}
-        </button>
-      )}
-      {/* The dock hangs from the top and runs its column the other way round (newest nearest the edge,
-          which is right for notices). These are a list, so the first one is drawn first. */}
-      {[...list].reverse().map((card) => (
-        <Card key={card.update.provider} card={card} />
-      ))}
+      <div className="cf-cli-update-stack pointer-events-auto w-[min(340px,calc(100vw-1.5rem))]" data-stacked={list.length > 1 || undefined}>
+        {list.map((card) => (
+          <div key={card.update.provider}>
+            <div><Card card={card} /></div>
+          </div>
+        ))}
+        {waiting.length > 1 && (
+          <div>
+            <div className="text-right">
+              <button type="button" onClick={() => void installAll()} className={buttonClass({ variant: "secondary", size: "sm" })}>
+                {t("cliUpdates.installAll", { count: waiting.length })}
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </NoticeStack>
   );
 }
@@ -86,7 +92,7 @@ function Card({ card }: { card: CliUpdateCard }) {
   return (
     <div
       role="status"
-      className="pointer-events-auto w-[340px] rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 shadow-[var(--cf-toast-shadow)]"
+      className="rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 shadow-[var(--cf-toast-shadow)]"
     >
       <div className="flex items-start gap-2.5">
         <span className="mt-0.5 shrink-0">

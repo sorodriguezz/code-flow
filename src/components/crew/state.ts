@@ -5,6 +5,7 @@
 import { useLanguageStore } from "../../state/languageStore";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useTeamStore } from "../../state/teamStore";
+import { useTeamChatStore, teamChatBusy } from "../../state/teamChatStore";
 import type { AgentState } from "./kit/Avatar";
 import type { TeamRunState } from "../../types/team";
 
@@ -27,6 +28,7 @@ export function useAgentStates(): Map<string, AgentState> {
   const tasks = useAgentsStore((s) => s.tasks);
   const live = useAgentsStore((s) => s.live);
   const states = useTeamStore((s) => s.states);
+  const chats = useTeamChatStore((s) => s.states);
   const map = new Map<string, AgentState>();
   for (const task of tasks) {
     if (!task.agent_id) continue;
@@ -40,6 +42,11 @@ export function useAgentStates(): Map<string, AgentState> {
       if (item.status === "running") map.set(member.agent_id, "thinking");
       else if (item.status === "waiting" && map.get(member.agent_id) !== "thinking") map.set(member.agent_id, "waiting");
     }
+  }
+  for (const chat of Object.values(chats)) {
+    if (!teamChatBusy(chat)) continue;
+    const member = chat.chat.members.find((m) => m.id === chat.chat.activeMemberId);
+    if (member) map.set(member.agent_id, "thinking");
   }
   return map;
 }

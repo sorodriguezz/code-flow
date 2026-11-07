@@ -4,7 +4,7 @@
  */
 import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { ArrowLeft, Copy, FlaskConical, LayoutTemplate, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, Search, Trash2, WandSparkles, Workflow } from "lucide-react";
+import { ArrowLeft, Copy, FlaskConical, LayoutTemplate, MessageSquare, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Plus, Search, Trash2, WandSparkles, Workflow } from "lucide-react";
 import { ResizeHandle } from "../../common/ResizeHandle";
 import { iconButtonClass } from "../../common/Button";
 import { useTeamStore } from "../../../state/teamStore";
@@ -24,6 +24,7 @@ import { useTeamDraft } from "./teamDraft";
 import { OrgCanvas } from "./OrgCanvas";
 import { MemberInspector, TeamInspector } from "./Inspector";
 import { ChecksTab, FlowTab } from "./FlowTab";
+import { chatWithTeam } from "./TeamChatPane";
 
 function PaletteAgent({ agent, inTeam }: { agent: WorkspaceAgent; inTeam: number }) {
   const l = useL();
@@ -190,6 +191,7 @@ function TeamEditor({ teamId }: { teamId: string }) {
           />
           {/* One group, pinned right: on a narrow window it wraps whole, with the panel toggle last. */}
           <div className="ml-auto flex shrink-0 items-center gap-2">
+          <Btn small icon={MessageSquare} disabled={!team.lead} title={team.lead ? l("Conversa con el equipo: el líder responde o delega a sus miembros", "Chat with the team: the lead answers or delegates to its members") : l("Elige un líder para conversar con el equipo", "Choose a lead to chat with the team")} onClick={() => void chatWithTeam(team.id)}>{l("Chat", "Chat")}</Btn>
           <span className="hidden text-[11.5px] text-[var(--cf-text-faint)] 2xl:inline">
             {l(`${team.members.filter((m) => !m.advisor).length} miembros`, `${team.members.filter((m) => !m.advisor).length} members`)}
             {team.members.some((m) => m.leads) ? l(" · con sub-líderes", " · with sub-leads") : ""}
@@ -368,7 +370,7 @@ function TeamList({ teams, actions, onDuplicate, onRemove }: { teams: Team[]; ac
               role="button"
               tabIndex={0}
               onClick={() => open(t.id)}
-              onKeyDown={(e) => e.key === "Enter" && open(t.id)}
+              onKeyDown={(e) => e.target === e.currentTarget && e.key === "Enter" && open(t.id)}
               title={l("Abre el equipo para editarlo", "Opens the team to edit it")}
               className="group flex cursor-pointer flex-col gap-2.5 rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3.5 text-left transition-colors hover:border-[var(--cf-accent-line)]"
             >
@@ -391,13 +393,14 @@ function TeamList({ teams, actions, onDuplicate, onRemove }: { teams: Team[]; ac
                 {t.members.length > 7 && <span className="ml-1.5 text-[11px] text-[var(--cf-text-faint)]">+{t.members.length - 7}</span>}
                 {t.members.length === 0 && <span className="text-[11.5px] text-[var(--cf-text-faint)]">{l("Sin miembros todavía", "No members yet")}</span>}
               </div>
-              <div className="flex items-center gap-2 text-[11px] text-[var(--cf-text-faint)]">
+              <div className="flex flex-wrap items-center gap-2 text-[11px] text-[var(--cf-text-faint)]">
                 <span>{l(`${t.members.filter((m) => !m.advisor).length} miembros`, `${t.members.filter((m) => !m.advisor).length} members`)}</span>
                 {t.members.some((m) => m.leads) && <span>· {l("sub-líderes", "sub-leads")}</span>}
                 {t.members.some((m) => m.advisor) && <span>· {l("asesor", "advisor")}</span>}
                 <span>· {live ? l(`${live} en marcha`, `${live} running`) : l(`${total} corridas`, `${total} runs`)}</span>
                 <span className="flex-1" />
-                <span className="flex gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100" onClick={(e) => e.stopPropagation()}>
+                <span className="flex shrink-0 gap-0.5 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100" onClick={(e) => e.stopPropagation()}>
+                  <button type="button" title={t.lead ? l("Chat con el equipo", "Chat with the team") : l("Elige un líder para conversar con el equipo", "Choose a lead to chat with the team")} aria-label={l(`Chat con ${t.name}`, `Chat with ${t.name}`)} disabled={!t.lead} onClick={() => void chatWithTeam(t.id)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-accent)] hover:bg-[var(--cf-hover)] disabled:opacity-40"><MessageSquare className="h-3.5 w-3.5" /></button>
                   <button type="button" title={l("Darle una tarea", "Hand it a task")} disabled={t.members.length === 0} onClick={() => crew.open({ kind: "launch", assignee: { kind: "team", id: t.id } })} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-accent)] hover:bg-[var(--cf-hover)] disabled:opacity-40"><WandSparkles className="h-3.5 w-3.5" /></button>
                   <button type="button" title={l("Duplicar", "Duplicate")} onClick={() => onDuplicate(t)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"><Copy className="h-3.5 w-3.5" /></button>
                   <button type="button" title={l("Borrar", "Delete")} onClick={() => onRemove(t)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"><Trash2 className="h-3.5 w-3.5" /></button>

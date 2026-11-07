@@ -611,6 +611,13 @@ core-foundation = "0.10"
 git2 = { version = "0.19", features = ["vendored-openssl"] }
 
 
+# Full debug info makes this crate's Windows rlib exceed the COFF archive's 4 GiB
+# offset range (measured: 4.35 GiB), so MSVC rejects it with LNK4003/LNK1120.
+# Keep file/line backtraces and module info without type/variable debug data.
+# Scope this to the app so dependencies keep their cached build profiles.
+[profile.dev.package.codeflow]
+debug = 1
+
 # QuickJS, optimised in debug builds too. Flujos evaluates an expression per item per node, and the
 # unoptimised C interpreter made a dev build — `tauri dev` and `cargo test` alike — twice as slow on
 # a 10,000-item run as an optimised one (measured: 47 s against 24 s for 50 nodes). Release builds

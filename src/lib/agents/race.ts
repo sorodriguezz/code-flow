@@ -20,7 +20,7 @@ import type { AgentTask, AgentTaskStatus } from "../../types/domain";
 export function raceIdOf(task: Pick<AgentTask, "batch_id">): string {
   const id = (task.batch_id ?? "").trim();
   // A team run's items share a batch too (`team:<run>`), but they split one goal, not race for it.
-  return id.startsWith("team:") ? "" : id;
+  return id.startsWith("team:") || id.startsWith("team-chat:") ? "" : id;
 }
 
 /**

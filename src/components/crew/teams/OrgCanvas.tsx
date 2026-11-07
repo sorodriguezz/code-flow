@@ -255,7 +255,7 @@ export function OrgCanvas({ team, update, selected, onSelect }: { team: Team; up
                       transition={SPRING}
                       className="pointer-events-none absolute left-0 top-0 rounded-[18px] border border-dashed border-[var(--cf-accent-line)] bg-[color-mix(in_oklab,var(--cf-accent)_4%,transparent)]"
                     >
-                      <span className="absolute bottom-1.5 right-3 text-[10.5px] font-semibold text-[var(--cf-accent)]">
+                      <span className="absolute bottom-1.5 left-3 right-3 truncate text-right text-[10.5px] font-semibold leading-4 text-[var(--cf-accent)]">
                         {l(`Rama de ${m?.name ?? ""}`, `${m?.name ?? ""}'s branch`)}
                       </span>
                     </motion.div>

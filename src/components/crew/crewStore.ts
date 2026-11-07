@@ -12,6 +12,7 @@ export type Overlay =
   | { kind: "card"; id: string }
   | { kind: "chat"; runId: string; memberId: string; taskId?: string }
   | { kind: "task"; id: string }
+  | { kind: "teamChat"; id: string }
   | { kind: "chain"; id: string }
   | { kind: "teamTemplates" }
   | { kind: "decider" }

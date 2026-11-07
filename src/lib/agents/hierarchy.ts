@@ -110,7 +110,7 @@ export interface OrgLayout {
   height: number;
 }
 
-/** Extra room each side of a framed branch, past the frame's own padding. */
+/** Horizontal padding reserved for every framed branch, including each nested level. */
 const BRANCH_ROOM = 14;
 
 /**
@@ -173,18 +173,23 @@ export function layoutOrg(members: M[], lead: string, size: { w: number; h: numb
 
   const frames: OrgLayout["frames"] = [];
   const pad = 14;
-  for (const m of inTree) {
-    if (!m.leads || m.id === lead) continue;
+  // `place` adds descendants before their parents, so inner frames are available when sizing an outer one.
+  for (const node of nodes) {
+    const m = inTree.find((member) => member.id === node.id);
+    if (!m?.leads || m.id === lead) continue;
     const ids = [m.id, ...subtree(inTree, lead, m.id)];
     if (ids.length < 2) continue;
     const boxes = nodes.filter((n) => ids.includes(n.id));
-    const x0 = Math.min(...boxes.map((b) => b.x)) - pad;
-    const y0 = Math.min(...boxes.map((b) => b.y)) - pad - 12;
-    const x1 = Math.max(...boxes.map((b) => b.x + w)) + pad;
-    // Room under the last row for the branch's name, written inside the frame.
-    const y1 = Math.max(...boxes.map((b) => b.y + h)) + pad + 16;
+    const inner = frames.filter((f) => ids.includes(f.id));
+    const x0 = Math.min(...boxes.map((b) => b.x), ...inner.map((f) => f.x)) - pad;
+    const y0 = Math.min(...boxes.map((b) => b.y), ...inner.map((f) => f.y)) - pad - 12;
+    const x1 = Math.max(...boxes.map((b) => b.x + w), ...inner.map((f) => f.x + f.w)) + pad;
+    // Reserve a separate footer below both cards and nested frames for this branch's name.
+    const y1 = Math.max(...boxes.map((b) => b.y + h), ...inner.map((f) => f.y + f.h)) + pad + 16;
     frames.push({ id: m.id, x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
   }
+  // Paint outer frames first so their backgrounds do not cover the inner borders or labels.
+  frames.reverse();
 
   const minX = Math.min(0, ...nodes.map((n) => n.x), ...frames.map((f) => f.x));
   const minY = Math.min(0, ...frames.map((f) => f.y));

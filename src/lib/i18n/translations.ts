@@ -1903,7 +1903,7 @@ const en = {
   // ---- Backup (whole install, encrypted) ----
   "backup.title": "Backup",
   "backup.subtitle":
-    "One encrypted file that turns another computer into this one — settings, projects, collections, database connections and every saved credential.",
+    "One encrypted file with your repositories and Git history, statistics, settings, collections, database connections and saved credentials.",
   "backup.tabContent": "What to include",
   "backup.tabContentHint":
     "Workspaces, repositories, prompts, agents and settings always travel. Choose what goes with them.",
@@ -1921,10 +1921,10 @@ const en = {
   "backup.tabGuides": "Destination guides",
   "backup.tabGuidesHint":
     "Both cloud destinations are bring-your-own: a Google Cloud project for Drive, an app registration for OneDrive. A synced folder needs neither, and is the shortest route.",
-  "backup.include.core": "Workspaces and settings",
+  "backup.include.core": "Repositories, statistics and settings",
   "backup.include.coreAlways": "Always included",
   "backup.include.coreHint":
-    "Always included, and the only part with no switch — everything below hangs off it, and a backup without it restores into nothing. Workspaces and the repositories in them, prompts, agents and MCP servers, and every app setting: theme and accent, AI routing, terminal profiles, your keyboard shortcuts and your file-icon rules.",
+    "Both automatic and manual backups include workspaces, usage statistics, repositories with their .git directory and uncommitted changes, plus prompts, agents, MCP servers and settings. Regenerable dependencies, caches and build output from Node, Rust, PHP, Java and Python are excluded. On import, repositories are extracted into CodeFlow's local repository folder and their paths are adapted to Windows or macOS; an existing folder is kept and a separate copy is created.",
   "backup.include.credentials": "Credentials",
   "backup.include.credentialsHint":
     "Every token, key and password this app keeps in the operating system's credential store: Azure DevOps PATs, GitHub, GitLab and Bitbucket tokens, AI provider keys, database passwords and cloud grants. Without these the other machine gets every repository and connection in place and cannot authenticate with any of them — you would type each one in again by hand. Turn it off only if the file will sit somewhere you would not put a password.",
@@ -2372,12 +2372,13 @@ const en = {
 
   "backup.restoredTitle": "Backup restored",
   "backup.restoredCounts": "{rows} records and {secrets} credentials restored.",
+  "backup.restoredRepositories": "Restored {n} repositories with paths adapted to this computer. Existing folders were kept.",
   "backup.restartHint":
     "Restart to load it. Until then the app is still showing what was here before the restore.",
   "backup.restartNow": "Restart now",
   "backup.later": "Later",
   "backup.missingPaths":
-    "{n} project folder(s) don't exist on this computer — open each project and point it at its folder here.",
+    "{n} project folder(s) are unavailable. Older backups do not contain repository files: clone them or copy their folders and update each project's location.",
   "backup.failedSecrets":
     "{n} credential(s) could not be written to the credential store. On macOS this is usually a dismissed keychain prompt — restore again to retry.",
 

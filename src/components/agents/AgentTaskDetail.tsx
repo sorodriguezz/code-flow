@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
   Paperclip,
@@ -27,7 +27,7 @@ import { ChainStrip } from "./ChainStrip";
 import { ContinueWithModal } from "./ContinueWithModal";
 import { RacePanel } from "./RacePanel";
 import { raceIdOf } from "../../lib/agents/race";
-import { isTeamTask } from "../../types/team";
+import { isTeamTask, teamChatIdOf } from "../../types/team";
 import { Markdown } from "../common/Markdown";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AttachmentBar } from "../chat/AttachmentBar";
@@ -39,7 +39,7 @@ import { TaskReviewPanel } from "./TaskReviewPanel";
 import { useChainStore } from "../../state/chainStore";
 import { AiRunLog } from "../ai/AiRunLog";
 import { CheckpointsModal } from "../ai/CheckpointsModal";
-import { ChatMessageBubble } from "../chat/ChatMessageBubble";
+import { ChatMessageBubble, type ChatBubbleActions } from "../chat/ChatMessageBubble";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { fieldClass, toolbarClass } from "../common/recipes";
@@ -61,6 +61,14 @@ import { revealInFileManager } from "../../lib/tauri/commands";
 import { openPathAsProject, worktreeProjectName } from "../../lib/openAsProject";
 
 const NO_FILES: ChatAttachment[] = [];
+const TeamChatContent = lazy(() => import("../crew/teams/TeamChatPane").then((m) => ({ default: m.TeamChatContent })));
+
+/** A chain owns the step's next turn until it stops, for both the composer and question cards. */
+function useTaskChainLocked(taskId: string): boolean {
+  return useChainStore((s) => s.chains.some((chain) =>
+    chain.status === "running" && (s.stepsByChain[chain.id] ?? []).some((step) => step.task_id === taskId),
+  ));
+}
 
 /**
  * One task, open: who is doing it, where, what has been said so far, and the box to say the next
@@ -392,12 +400,20 @@ export function TaskConversation({ taskId }: { taskId: string }) {
   const team = task ? isTeamTask(task) : false;
   const messages = live?.messages ?? [];
   const sending = live?.sending ?? false;
+  const chainLocked = useTaskChainLocked(taskId);
+  const canAnswer = !sending && !repoTaken && !chainLocked && task?.provider !== "local-exec" && live?.loaded !== false;
+  const answerQuestion = useCallback((text: string) => {
+    useAgentsStore.getState().send(taskId, text);
+  }, [taskId]);
+  const questionActions = useMemo<ChatBubbleActions>(() => ({ onAnswer: answerQuestion }), [answerQuestion]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: scrollBehavior() });
   }, [messages.length, sending, taskId]);
 
   if (!task) return null;
+  const teamChatId = teamChatIdOf(task);
+  if (teamChatId) return <div data-team-chat={teamChatId} className="flex min-h-0 flex-1 flex-col"><Suspense fallback={null}><TeamChatContent chatId={teamChatId} /></Suspense></div>;
 
   return (
     <>
@@ -434,7 +450,12 @@ export function TaskConversation({ taskId }: { taskId: string }) {
             team && message.role === "user" && message.content.startsWith("# Equipo") ? (
               <TeamBrief key={i} text={message.content} />
             ) : (
-              <ChatMessageBubble key={i} message={message} stamp="compact" />
+              <ChatMessageBubble
+                key={i}
+                message={message}
+                stamp="compact"
+                actions={canAnswer && i === messages.length - 1 && message.role === "assistant" ? questionActions : undefined}
+              />
             )
           ))}
           {sending && live?.runId && (
@@ -473,15 +494,24 @@ function TeamBrief({ text }: { text: string }) {
 }
 
 /** Enter sends, Shift+Enter breaks the line — the same contract as the AI panel's chat box. */
-function AgentComposer({ taskId }: { taskId: string }) {
+export function AgentComposer({ taskId, onSend, busy, stopping = false, activeRunId, onStop, showModel = true }: {
+  taskId: string;
+  onSend?: (text: string, files?: ChatAttachment[]) => boolean;
+  busy?: boolean;
+  stopping?: boolean;
+  activeRunId?: string | null;
+  onStop?: () => void;
+  showModel?: boolean;
+}) {
   const t = useT();
   const task = useAgentsStore((s) => s.tasks.find((candidate) => candidate.id === taskId) ?? null);
   // A hybrid run's execute step: this app runs it from the chain, against the local model, and there
   // is no engine here anyone could follow up with — so the box and the model menu are not offered.
   const localExec = task?.provider === "local-exec";
   const live = useAgentsStore((s) => s.live[taskId]);
-  const runId = live?.runId ?? null;
-  const cancelling = useAiRunStore((s) => (runId ? (s.cancelling[runId] ?? false) : false));
+  const runId = activeRunId !== undefined ? activeRunId : live?.runId ?? null;
+  const runCancelling = useAiRunStore((s) => (runId ? (s.cancelling[runId] ?? false) : false));
+  const cancelling = stopping || runCancelling;
   // Subscribed rather than read once: another task in the same repository can start at any moment,
   // and the send button has to go dead when it does. A primitive, so the selector stays stable.
   const blockedBy = useAgentsStore((s) => {
@@ -501,13 +531,7 @@ function AgentComposer({ taskId }: { taskId: string }) {
   // A chain step's answer is what gets handed to the next agent, so a follow-up typed here while
   // the chain is mid-step would silently not be the thing that carries forward. The box locks; the
   // Stop button below does not, because it is the only way to halt an agent that is editing files.
-  const chainLocked = useChainStore((s) => {
-    for (const chain of s.chains) {
-      if (chain.status !== "running") continue;
-      if ((s.stepsByChain[chain.id] ?? []).some((step) => step.task_id === taskId)) return true;
-    }
-    return false;
-  });
+  const chainLocked = useTaskChainLocked(taskId);
   // Always starts empty. The goal is already on screen — as the dashed block above while nothing
   // has run, and as the user's own bubble the moment the first turn is sent — so a copy down here
   // was duplicate text that read as an unsent draft sitting under a turn already in flight.
@@ -518,7 +542,7 @@ function AgentComposer({ taskId }: { taskId: string }) {
   // seed to serve either — `NewTaskModal` sends the goal as it creates the task, and no code path
   // produces `status: "draft"`, so there is no such thing as a task waiting to be sent.
   const [input, setInput] = useState("");
-  const sending = live?.sending ?? false;
+  const sending = busy ?? live?.sending ?? false;
   // A follow-up the backend turned away (another turn took the repository first) comes back here,
   // unless something new has been typed since — that is the user's newer thought, and wins.
   const bounced = useAgentsStore((s) => s.bounced[taskId]);
@@ -562,7 +586,7 @@ function AgentComposer({ taskId }: { taskId: string }) {
     if (!input.trim() || sending || blockedBy || chainLocked || localExec) return;
     // Cleared only for a send the store took: its guards are read fresh and can refuse one that
     // `blockedBy` — a render behind — waved through, and emptying the box then lost the message.
-    if (useAgentsStore.getState().send(taskId, input, staged.length ? staged : undefined)) {
+    if ((onSend ?? ((text, files) => useAgentsStore.getState().send(taskId, text, files)))(input, staged.length ? staged : undefined)) {
       setInput("");
       // Sent with the turn: the files stay on disk for the engine, the chips leave the box.
       if (staged.length) useChatStore.setState((s) => ({ attachments: { ...s.attachments, [conversationId]: [] } }));
@@ -614,7 +638,7 @@ function AgentComposer({ taskId }: { taskId: string }) {
           </div>
         ) : (
         <div className="mt-1.5 flex items-center gap-2">
-          {!localExec && <AgentModelMenu taskId={taskId} />}
+          {!localExec && showModel && <AgentModelMenu taskId={taskId} />}
           {!(chainLocked || localExec) && (
             <Tooltip label={t("chat.attach")}>
               <button
@@ -635,7 +659,7 @@ function AgentComposer({ taskId }: { taskId: string }) {
           {sending ? (
             <button
               type="button"
-              onClick={() => void useAgentsStore.getState().stop(taskId)}
+              onClick={() => onStop ? onStop() : void useAgentsStore.getState().stop(taskId)}
               disabled={cancelling}
               className={buttonClass({ variant: "secondary", size: "sm", className: "ml-auto" })}
             >

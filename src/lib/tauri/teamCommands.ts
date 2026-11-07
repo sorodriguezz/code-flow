@@ -1,8 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { TeamChatState } from "../../types/team";
 import type {
   TeamRunMetrics, Team, TeamDispatch, TeamPolicy, TeamRun, TeamRunState } from "../../types/team";
 
 export const teamList = (workspaceId: string) => invoke<Team[]>("team_list", { workspaceId });
+export const teamChatOpen = (teamId: string, projectId: string, fresh = false) => invoke<TeamChatState>("team_chat_open", { teamId, projectId, fresh });
+export const teamChatState = (chatId: string) => invoke<TeamChatState>("team_chat_state", { chatId });
+export interface TeamChatSummary { id: string; title: string; createdAt: string }
+export const teamChatHistory = (teamId: string, projectId: string) => invoke<TeamChatSummary[]>("team_chat_history", { teamId, projectId });
+export const teamChatSend = (chatId: string, message: string, attachments?: string[]) => invoke<TeamChatState>("team_chat_send", { chatId, message, attachments: attachments ?? null });
+export const teamChatCancel = (chatId: string) => invoke<void>("team_chat_cancel", { chatId });
 export const teamSave = (team: Team) => invoke<Team>("team_save", { team });
 export const teamDelete = (id: string) => invoke<void>("team_delete", { id });
 export const teamRuns = (workspaceId: string) => invoke<TeamRun[]>("team_runs", { workspaceId });

@@ -33,6 +33,11 @@ describe("raceIdOf", () => {
     expect(raceIdOf({})).toBe("");
   });
 
+  it("keeps team chats and team work out of races", () => {
+    expect(raceIdOf({ batch_id: "team-chat:chat:lead" })).toBe("");
+    expect(raceIdOf({ batch_id: "team:run" })).toBe("");
+  });
+
   it("ignores the whitespace a hand-edited row could carry", () => {
     expect(raceIdOf({ batch_id: "  race-1 " })).toBe("race-1");
   });

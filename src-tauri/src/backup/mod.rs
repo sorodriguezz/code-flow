@@ -1,8 +1,8 @@
 //! The whole-install backup: one encrypted file that turns another computer into this one.
 //!
 //! What it is for, in the user's own words: import the file on a different machine and pick up
-//! where the first one left off — everything except the repositories themselves, which are git's
-//! job and not this module's. So this moves the whole database and every stored credential:
+//! where the first one left off, including repositories and their Git history, without generated
+//! dependencies or build caches. This moves the whole database and every stored credential:
 //! configuration, authored content, history, conversations and agent work alike. The only fields
 //! held back are the ones naming *this* computer — see [`snapshot`] for that list and its reasoning.
 //!
@@ -23,6 +23,7 @@
 pub mod auto;
 pub mod destination;
 pub mod envelope;
+pub mod repositories;
 pub mod snapshot;
 pub mod vault;
 
@@ -286,6 +287,7 @@ pub struct BackupContents {
     pub rows: i64,
     pub secrets: i64,
     pub tables: i64,
+    pub repositories: usize,
     /// Size of the sealed file, so "1.2 MB in Drive" is answerable without stat-ing it.
     pub bytes: u64,
 }
@@ -293,19 +295,19 @@ pub struct BackupContents {
 /// The payload before it is sealed, plus the digest that lets an unchanged configuration skip the
 /// whole rest of the pipeline.
 ///
-/// Built and sealed in two steps rather than one so the scheduler can do the first under the
-/// database lock and the second — Argon2, which is expensive by design — without it.
+/// Database rows are collected first; reading repositories, digesting and sealing happen after
+/// releasing the database lock.
 pub struct Payload {
     pub bytes: Vec<u8>,
     pub hash: String,
     pub contents: BackupContents,
 }
 
-/// Builds the payload from what the user chose to include.
+/// Collects database rows and credentials from what the user chose to include.
 ///
 /// The selection is read here rather than passed in, so the scheduled run and the manual export
 /// cannot disagree about it: there is one persisted answer and both go through this function.
-pub fn build_payload(conn: &Connection) -> Result<Payload, String> {
+pub fn collect_snapshot(conn: &Connection) -> Result<Snapshot, String> {
     let selection = load_settings(conn).include;
     let tables = snapshot::export(conn, &selection).map_err(|e| e.to_string())?;
     // `?`, unlike the rest of this function's tolerance for a credential that would not read: a
@@ -313,13 +315,20 @@ pub fn build_payload(conn: &Connection) -> Result<Payload, String> {
     // machine unable to authenticate anywhere — and it looks identical to an install that had no
     // credentials to begin with. Better to fail the run and say so.
     let secrets = if selection.credentials { vault::collect(conn)? } else { Vec::new() };
+    Ok(Snapshot { tables, secrets, repositories: Vec::new() })
+}
+
+/// Reads repository files after the database lock has been released. Both manual and automatic
+/// backups use the same collector and include repository changes in their unchanged-data digest.
+pub fn build_payload(mut snapshot: Snapshot) -> Result<Payload, String> {
+    snapshot.repositories = repositories::collect(&snapshot.tables)?;
     let contents = BackupContents {
-        rows: tables.iter().map(|t| t.rows.len() as i64).sum(),
-        secrets: secrets.len() as i64,
-        tables: tables.len() as i64,
+        rows: snapshot.tables.iter().map(|t| t.rows.len() as i64).sum(),
+        secrets: snapshot.secrets.len() as i64,
+        tables: snapshot.tables.len() as i64,
+        repositories: snapshot.repositories.len(),
         bytes: 0,
     };
-    let snapshot = Snapshot { tables, secrets };
     let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
     // Over the plaintext, not the file: two seals of identical data differ by design (fresh salt
     // and nonce every time), so hashing the file would make every run look like a change.
@@ -345,19 +354,6 @@ pub fn seal_payload(
     Ok((sealed, contents))
 }
 
-/// Builds and seals a backup in one go. The returned bytes are the file, ready to be written or
-/// uploaded; the string is the payload digest an unchanged next run compares against.
-pub fn create(
-    conn: &Connection,
-    passphrase: &str,
-    app_version: &str,
-) -> Result<(Vec<u8>, BackupContents, String), String> {
-    let payload = build_payload(conn)?;
-    let hash = payload.hash.clone();
-    let (sealed, contents) = seal_payload(payload, passphrase, app_version)?;
-    Ok((sealed, contents, hash))
-}
-
 /// What a restore did, and what still needs a human afterwards.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -365,6 +361,7 @@ pub struct RestoreReport {
     pub rows: i64,
     pub secrets: i64,
     pub tables: Vec<TableCount>,
+    pub repositories: usize,
     /// Projects whose folder isn't on this machine — the expected consequence of moving computers.
     pub missing_project_paths: Vec<String>,
     /// Credentials the OS store refused. On macOS this is usually a dismissed Keychain prompt.
@@ -392,6 +389,7 @@ fn report(summary: RestoreSummary, header: &envelope::BackupHeader) -> RestoreRe
             .map(|(name, rows)| TableCount { name, rows })
             .collect(),
         missing_project_paths: summary.missing_project_paths,
+        repositories: 0,
         failed_secrets: Vec::new(),
         dangling_rows: summary.dangling_rows,
         created_at: header.created_at.clone(),
@@ -412,10 +410,17 @@ pub fn restore(
 ) -> Result<RestoreReport, String> {
     let header = envelope::read_header(file)?;
     let plain = envelope::open(file, passphrase)?;
-    let snapshot: Snapshot =
+    let mut snapshot: Snapshot =
         serde_json::from_slice(&plain).map_err(|_| "the backup's contents could not be read")?;
 
+    let clone_root = queries::get_setting(conn, "clone_root").ok().flatten()
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(crate::paths::clone_root);
+    let restored = repositories::restore(&snapshot.repositories, &clone_root)?;
+    repositories::remap_tables(&mut snapshot.tables, &restored.mappings, &clone_root);
     let summary = snapshot::apply(conn, &snapshot.tables, mode).map_err(|e| e.to_string())?;
+    let repository_count = restored.commit();
 
     // The backup carries live state — a task mid-turn, a chain mid-step, a batch mid-generation —
     // because the alternative was leaving the user's work behind. Restored here, none of it has a
@@ -441,6 +446,7 @@ pub fn restore(
     }
 
     let mut report = report(summary, &header);
+    report.repositories = repository_count;
 
     // The cookie jar's key, as it was before the credentials land — only when the file carries one,
     // so a backup without credentials costs no credential-store read. See `reseal_cookie_jar`.
@@ -504,6 +510,17 @@ pub fn inspect(bytes: &[u8], path: &str) -> Result<BackupInfo, String> {
 mod tests {
     use super::*;
 
+    fn create(
+        conn: &Connection,
+        passphrase: &str,
+        app_version: &str,
+    ) -> Result<(Vec<u8>, BackupContents, String), String> {
+        let payload = build_payload(collect_snapshot(conn)?)?;
+        let hash = payload.hash.clone();
+        let (sealed, contents) = seal_payload(payload, passphrase, app_version)?;
+        Ok((sealed, contents, hash))
+    }
+
     fn seeded() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
@@ -546,6 +563,42 @@ mod tests {
     fn a_short_password_is_refused_before_anything_is_written() {
         assert!(create(&seeded(), "short", "1.0.0").is_err());
         assert!(set_passphrase("short").is_err());
+    }
+
+    #[test]
+    fn an_encrypted_backup_restores_working_copies_statistics_and_local_project_paths() {
+        let temp = std::env::temp_dir().join(format!("codeflow-backup-roundtrip-{}", uuid::Uuid::new_v4()));
+        let folder = temp.join("original/RulesEngine");
+        let original = git2::Repository::init(&folder).unwrap();
+        std::fs::write(folder.join("README.md"), "work in progress").unwrap();
+        let source = seeded();
+        source.execute(
+            "INSERT INTO projects (id, workspace_id, name, local_path, sort_order, created_at) VALUES ('p1', 'w1', 'RulesEngine', ?1, 0, '2026-11-06')",
+            [folder.to_string_lossy().as_ref()],
+        ).unwrap();
+        source.execute_batch(
+            "INSERT INTO usage_daily (day, workspace_id, repo, kind, key, count) VALUES ('2026-11-06', 'w1', 'p1', 'git', 'commit', 7);
+             INSERT INTO usage_hourly (day, hour, workspace_id, seconds) VALUES ('2026-11-06', 10, 'w1', 120);",
+        ).unwrap();
+        let (file, contents, _) = create(&source, "a-long-enough-password", "2.8.2").unwrap();
+        assert_eq!(contents.repositories, 1);
+        let mut target = seeded();
+        let destination = temp.join("destination");
+        queries::set_setting(&target, "clone_root", destination.to_string_lossy().as_ref()).unwrap();
+        let report = restore(&mut target, &file, "a-long-enough-password", RestoreMode::Replace).unwrap();
+        assert_eq!(report.repositories, 1);
+        assert!(report.missing_project_paths.is_empty());
+        let restored_path: String = target.query_row("SELECT local_path FROM projects WHERE id = 'p1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(std::path::Path::new(&restored_path), destination.join("RulesEngine"));
+        assert_eq!(std::fs::read_to_string(std::path::Path::new(&restored_path).join("README.md")).unwrap(), "work in progress");
+        let repo = git2::Repository::open(&restored_path).unwrap();
+        let count: i64 = target.query_row("SELECT count FROM usage_daily WHERE repo = 'p1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 7);
+        let seconds: i64 = target.query_row("SELECT seconds FROM usage_hourly", [], |r| r.get(0)).unwrap();
+        assert_eq!(seconds, 120);
+        drop(repo);
+        drop(original);
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     /// The digest is over the data, so an unchanged configuration produces the same one twice —
@@ -632,9 +685,14 @@ mod tests {
                 "#,
             )
             .unwrap();
+        let temp = std::env::temp_dir().join(format!("codeflow-backup-live-{}", uuid::Uuid::new_v4()));
+        let repo = temp.join("source");
+        std::fs::create_dir_all(&repo).unwrap();
+        source.execute("UPDATE projects SET local_path = ?1", [repo.to_string_lossy().as_ref()]).unwrap();
         let (file, _, _) = create(&source, "a-long-enough-password", "1.0.0").unwrap();
 
         let mut target = seeded();
+        queries::set_setting(&target, "clone_root", temp.join("destination").to_string_lossy().as_ref()).unwrap();
         restore(&mut target, &file, "a-long-enough-password", RestoreMode::Replace).unwrap();
 
         let status = |sql: &str| -> String { target.query_row(sql, [], |r| r.get(0)).unwrap() };
@@ -644,6 +702,7 @@ mod tests {
             status("SELECT last_reason FROM agent_chains WHERE id = 'ch1'"),
             "chain.interrupted"
         );
+        std::fs::remove_dir_all(temp).unwrap();
     }
 
     /// The Drive client id, by contrast, is exactly the sort of thing that should travel.

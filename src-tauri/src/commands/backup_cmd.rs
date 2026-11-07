@@ -181,11 +181,14 @@ pub async fn backup_export_to_file(app: AppHandle) -> Result<Option<ExportResult
     };
 
     let version = app.package_info().version.to_string();
-    let (sealed, contents, _) = {
+    let _guard = auto::begin(&app).ok_or("a backup is already running")?;
+    let snapshot = {
         let db = app.state::<Db>();
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        backup::create(&conn, &passphrase, &version)?
+        backup::collect_snapshot(&conn)?
     };
+    let payload = backup::build_payload(snapshot)?;
+    let (sealed, contents) = backup::seal_payload(payload, &passphrase, &version)?;
     std::fs::write(&path, &sealed).map_err(|e| format!("{path}: {e}"))?;
     Ok(Some(ExportResult { path, contents }))
 }

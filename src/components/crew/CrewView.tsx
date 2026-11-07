@@ -37,6 +37,7 @@ import { DeciderDialog, GovernorDialog } from "./Settings";
 import { BoardSpace } from "./board/BoardSpace";
 import { CardDrawer } from "./board/CardDrawer";
 import { TeamsSpace } from "./teams/TeamsSpace";
+import { TeamChatPane } from "./teams/TeamChatPane";
 import { TeamTemplatesDialog } from "./teams/TeamTemplates";
 import { RosterSpace } from "./roster/RosterSpace";
 import { AgentWizard } from "./roster/AgentWizard";
@@ -231,6 +232,7 @@ export function CrewView() {
       {overlay?.kind === "card" && <CardDrawer cardId={overlay.id} />}
       {overlay?.kind === "chat" && <MemberChat key={`${overlay.runId}:${overlay.memberId}:${overlay.taskId ?? ""}`} runId={overlay.runId} memberId={overlay.memberId} taskId={overlay.taskId} />}
       {overlay?.kind === "task" && <TaskPane taskId={overlay.id} />}
+      {overlay?.kind === "teamChat" && <TeamChatPane key={overlay.id} chatId={overlay.id} />}
       {overlay?.kind === "chain" && <ChainPane chainId={overlay.id} />}
       {overlay?.kind === "teamTemplates" && <TeamTemplatesDialog />}
       {overlay?.kind === "decider" && <DeciderDialog />}

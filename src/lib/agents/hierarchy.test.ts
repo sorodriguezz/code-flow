@@ -68,4 +68,62 @@ describe("hierarchy", () => {
     expect(out.nodes.every((n) => n.depth === 0)).toBe(true);
     expect(out.edges).toEqual([]);
   });
+
+  it.each([false, true])("leaves room around nested frames and a separate footer for each branch (reversed: %s)", (reversed) => {
+    const members = [
+      m("lead"),
+      m("tech", "", { leads: true }),
+      m("frontend", "tech", { leads: true }),
+      m("dev", "frontend"),
+    ];
+    const size = { w: 184, h: 68, gapX: 26, gapY: 56 };
+    const out = layoutOrg(reversed ? [...members].reverse() : members, "lead", size);
+    const outer = out.frames.find((f) => f.id === "tech")!;
+    const inner = out.frames.find((f) => f.id === "frontend")!;
+
+    expect(inner.x - outer.x).toBeGreaterThanOrEqual(14);
+    expect(outer.x + outer.w - (inner.x + inner.w)).toBeGreaterThanOrEqual(14);
+    expect(inner.y - outer.y).toBeGreaterThanOrEqual(14);
+    // Each footer has a 16px label, 6px below it and at least 8px above it.
+    expect(outer.y + outer.h - (inner.y + inner.h)).toBeGreaterThanOrEqual(30);
+    const dev = out.nodes.find((n) => n.id === "dev")!;
+    expect(inner.y + inner.h - (dev.y + size.h)).toBeGreaterThanOrEqual(30);
+    expect(out.frames.indexOf(outer)).toBeLessThan(out.frames.indexOf(inner));
+    for (const f of out.frames) {
+      expect(f.x).toBeGreaterThanOrEqual(0);
+      expect(f.y).toBeGreaterThanOrEqual(0);
+      expect(f.x + f.w).toBeLessThanOrEqual(out.width);
+      expect(f.y + f.h).toBeLessThanOrEqual(out.height);
+    }
+  });
+
+  it("keeps sibling branches and other members clear of nested frames", () => {
+    const members = [
+      m("lead"),
+      m("tech", "", { leads: true }),
+      m("backend", "tech", { leads: true }),
+      m("be1", "backend"),
+      m("be2", "backend"),
+      m("frontend", "tech", { leads: true }),
+      m("fe1", "frontend"),
+      m("fe2", "frontend"),
+      m("dba", "tech"),
+      m("qa", "", { leads: true }),
+      m("tester", "qa"),
+    ];
+    const size = { w: 184, h: 68, gapX: 26, gapY: 56 };
+    const out = layoutOrg(members, "lead", size);
+    for (const frame of out.frames) {
+      const branch = [frame.id, ...subtree(members, "lead", frame.id)];
+      for (const node of out.nodes.filter((n) => !branch.includes(n.id))) {
+        expect(
+          node.x + size.w <= frame.x || node.x >= frame.x + frame.w ||
+          node.y + size.h <= frame.y || node.y >= frame.y + frame.h,
+        ).toBe(true);
+      }
+    }
+    const byId = (id: string) => out.frames.find((f) => f.id === id)!;
+    expect(byId("frontend").x - (byId("backend").x + byId("backend").w)).toBeGreaterThanOrEqual(size.gapX);
+    expect(byId("qa").x - (byId("tech").x + byId("tech").w)).toBeGreaterThanOrEqual(size.gapX);
+  });
 });

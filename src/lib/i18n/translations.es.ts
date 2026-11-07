@@ -1893,7 +1893,7 @@ export const es = {
   // ---- Respaldo (toda la instalación, cifrado) ----
   "backup.title": "Respaldo",
   "backup.subtitle":
-    "Un archivo cifrado que convierte otro computador en este — ajustes, proyectos, colecciones, conexiones de base de datos y todas las credenciales guardadas.",
+    "Un archivo cifrado con tus repositorios y su historial Git, estadísticas, ajustes, colecciones, conexiones de base de datos y credenciales guardadas.",
   "backup.tabContent": "Qué incluir",
   "backup.tabContentHint":
     "Workspaces, repositorios, prompts, agentes y ajustes viajan siempre. Elige qué los acompaña.",
@@ -1911,10 +1911,10 @@ export const es = {
   "backup.tabGuides": "Guías de destino",
   "backup.tabGuidesHint":
     "Los dos destinos en la nube son con credenciales propias: un proyecto de Google Cloud para Drive, un registro de aplicación para OneDrive. Una carpeta sincronizada no necesita ninguno, y es el camino más corto.",
-  "backup.include.core": "Espacios de trabajo y configuración",
+  "backup.include.core": "Repositorios, estadísticas y configuración",
   "backup.include.coreAlways": "Siempre incluido",
   "backup.include.coreHint":
-    "Siempre se incluye, y es la única parte sin interruptor: todo lo de abajo depende de ella, y un respaldo sin esto se restaura sobre nada. Los espacios de trabajo y sus repositorios, los prompts, los agentes y servidores MCP, y todas las opciones de la app: el tema y el color de acento, el enrutado de IA, los perfiles de terminal, tus atajos de teclado y tus reglas de iconos.",
+    "En modo automático y manual se incluyen los espacios de trabajo, las estadísticas de uso, los repositorios con su carpeta .git y los cambios sin confirmar, además de prompts, agentes, servidores MCP y ajustes. Se excluyen dependencias, cachés y compilaciones regenerables de Node, Rust, PHP, Java y Python. Al importar, los repositorios se extraen en la carpeta local de CodeFlow y se adaptan sus rutas a Windows o macOS; si una carpeta ya existe, se crea otra copia.",
   "backup.include.credentials": "Credenciales",
   "backup.include.credentialsHint":
     "Cada token, clave y contraseña que la app guarda en el almacén de credenciales del sistema: PAT de Azure DevOps, tokens de GitHub, GitLab y Bitbucket, claves de proveedores de IA, contraseñas de bases de datos y accesos a la nube. Sin esto el otro equipo recibe todos los repositorios y conexiones en su lugar y no puede autenticarse con ninguno — tendrías que escribir cada uno a mano. Apágalo solo si el archivo va a quedar en un lugar donde no dejarías una contraseña.",
@@ -2347,12 +2347,13 @@ export const es = {
 
   "backup.restoredTitle": "Respaldo restaurado",
   "backup.restoredCounts": "Se restauraron {rows} registros y {secrets} credenciales.",
+  "backup.restoredRepositories": "Se restauraron {n} repositorio(s), con rutas adaptadas a este equipo. Las carpetas que ya existían se conservaron.",
   "backup.restartHint":
     "Reinicia para cargarlo. Hasta entonces la app sigue mostrando lo que había antes de restaurar.",
   "backup.restartNow": "Reiniciar ahora",
   "backup.later": "Más tarde",
   "backup.missingPaths":
-    "{n} carpeta(s) de proyecto no existen en este computador — abre cada proyecto y apúntalo a su carpeta aquí.",
+    "{n} carpeta(s) de proyecto no están disponibles. Los respaldos antiguos no contienen los archivos de los repositorios: clónalos o copia sus carpetas y actualiza la ubicación de cada proyecto.",
   "backup.failedSecrets":
     "No se pudieron escribir {n} credencial(es) en el almacén del sistema. En macOS suele ser un aviso del llavero que se cerró — vuelve a restaurar para reintentarlo.",
 

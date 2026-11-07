@@ -548,6 +548,63 @@ pre {
     var(--cf-surface);
 }
 
+/* CLI updates share one hover area so the gap between cards keeps the stack open. */
+.cf-cli-update-stack > :not(:first-child) {
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+.cf-cli-update-stack > :not(:first-child) > div {
+  overflow: hidden;
+}
+
+.cf-cli-update-stack > :not(:first-child) > div > * {
+  margin-top: 12px;
+}
+
+@media (hover: hover) {
+  .cf-cli-update-stack[data-stacked] {
+    padding-bottom: 13px;
+  }
+
+  .cf-cli-update-stack[data-stacked] > :first-child {
+    position: relative;
+    isolation: isolate;
+  }
+
+  .cf-cli-update-stack[data-stacked] > :first-child::before {
+    content: "";
+    position: absolute;
+    z-index: -1;
+    inset: 4px 3px -8px 7px;
+    rotate: 1.5deg;
+    border: 1px solid var(--cf-border);
+    border-radius: 12px;
+    background: var(--cf-surface-raised);
+    box-shadow: var(--cf-toast-shadow);
+    pointer-events: none;
+  }
+
+  .cf-cli-update-stack:is(:hover, :has(:focus-visible)) > :first-child::before {
+    opacity: 0;
+  }
+
+  .cf-cli-update-stack:not(:hover, :has(:focus-visible)) > :not(:first-child) {
+    grid-template-rows: 0fr;
+    visibility: hidden;
+  }
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .cf-cli-update-stack > :not(:first-child) {
+    transition: grid-template-rows 180ms ease, visibility 180ms;
+  }
+
+  .cf-cli-update-stack > :first-child::before {
+    transition: opacity 130ms ease;
+  }
+}
+
 /* Lightweight, GPU-only animations (opacity/transform) — no JS animation loop. */
 
 /* The bar of a task whose length nobody knows: a segment sliding across, never a made-up percentage. */

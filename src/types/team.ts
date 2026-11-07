@@ -120,6 +120,52 @@ export interface TeamMemberSnap extends TeamMember {
   account_id?: string | null;
 }
 
+export interface TeamChat {
+  id: string;
+  workspaceId: string;
+  projectId: string;
+  projectName: string;
+  teamId: string;
+  teamName: string;
+  teamUpdatedAt: string;
+  leadId: string;
+  taskId: string;
+  members: TeamMemberSnap[];
+  policy: TeamPolicy;
+  status: "idle" | "running" | "cancelling" | "error";
+  activeMemberId: string;
+  activeRunId: string;
+  error: string;
+  revision: number;
+  createdAt: string;
+}
+
+export interface TeamChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  memberId: string;
+  memberName: string;
+  content: string;
+  provider: string;
+  model: string;
+  traceId: string | null;
+  responseTimeMs: number;
+  createdAt: string;
+}
+
+export interface TeamChatState {
+  chat: TeamChat;
+  task: AgentTask;
+  messages: TeamChatMessage[];
+}
+
+export const TEAM_CHAT_BATCH_PREFIX = "team-chat:";
+export function teamChatIdOf(task: { batch_id?: string }): string | null {
+  const batch = task.batch_id ?? "";
+  if (!batch.startsWith(TEAM_CHAT_BATCH_PREFIX)) return null;
+  return batch.slice(TEAM_CHAT_BATCH_PREFIX.length).split(":")[0] || null;
+}
+
 export type TeamRunStatus = "running" | "gated" | "paused" | "done" | "failed" | "aborted";
 
 export interface TeamRun {

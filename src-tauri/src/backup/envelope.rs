@@ -47,7 +47,8 @@ pub const FORMAT: &str = "codeflow-full-backup";
 /// Bumped only when a reader of this version could no longer make sense of the file. A newer file
 /// is refused outright rather than half-read: a partial restore of a configuration is worse than
 /// none, because the user believes it worked.
-pub const FORMAT_VERSION: u32 = 1;
+// Version 2 carries working copies. Older readers must refuse it rather than silently discard them.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Deliberately not `.json` or `.zip` — the file is opaque, and an extension suggesting otherwise
 /// invites someone to try opening it in a text editor and conclude it is corrupt.

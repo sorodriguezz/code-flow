@@ -20,6 +20,7 @@
 //! runs them (headless turn or a CLI in a terminal), then reports each one back to `team_cmd`.
 
 pub mod artifacts;
+pub mod chat;
 pub mod gitops;
 pub mod hierarchy;
 pub mod metrics;
@@ -562,7 +563,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             conn.execute_batch(&format!("ALTER TABLE agent_team_items ADD COLUMN {column} {definition};"))?;
         }
     }
-    Ok(())
+    chat::migrate(conn)
 }
 
 fn json<T: Serialize>(value: &T) -> String {
@@ -1125,6 +1126,7 @@ pub fn is_team_conversation(conn: &Connection, conversation_id: &str) -> bool {
 
 /// Whether a conversation is a team item that must not write (lead turns, investigations, reviews).
 pub fn read_only_conversation(conn: &Connection, conversation_id: &str) -> bool {
+    if chat::read_only_conversation(conn, conversation_id) { return true; }
     conn.query_row(
         "SELECT i.kind, i.member_id, r.members FROM agent_tasks t
          JOIN agent_team_items i ON i.task_id = t.id
@@ -1187,7 +1189,7 @@ pub fn recover_after_restart(conn: &Connection) -> rusqlite::Result<()> {
         "UPDATE agent_team_runs SET status = 'paused', last_reason = 'team.interrupted' WHERE status = 'running'",
         [],
     )?;
-    Ok(())
+    chat::recover(conn)
 }
 
 #[cfg(test)]

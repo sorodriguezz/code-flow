@@ -178,6 +178,7 @@ export interface BackupContents {
   rows: number;
   secrets: number;
   tables: number;
+  repositories: number;
   bytes: number;
 }
 
@@ -195,6 +196,7 @@ export interface RestoreReport {
   rows: number;
   secrets: number;
   tables: { name: string; rows: number }[];
+  repositories: number;
   /** Projects whose folder isn't on this machine — expected after moving computers. */
   missingProjectPaths: string[];
   /** Credentials the OS store refused; on macOS, usually a dismissed Keychain prompt. */

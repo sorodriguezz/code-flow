@@ -65,8 +65,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
  * That move is the point of the feature: what used to travel was one workspace's collections; what
  * travels now is the install — every workspace, project, collection, database connection, prompt,
  * agent and setting, plus every credential in the OS store. Restore it on another
- * computer and that computer *is* this one, minus the history (see `backup/snapshot.rs` for the
- * table-by-table reasoning behind that line).
+ * computer with repositories, Git history, uncommitted work and usage statistics included.
  *
  * Two things about the shape of this panel are deliberate:
  *
@@ -692,6 +691,7 @@ function RestoreDoneModal({ report, onClose }: { report: RestoreReport; onClose:
             secrets: String(report.secrets),
           })}
         </p>
+        {report.repositories > 0 && <p className="mb-2">{t("backup.restoredRepositories", { n: String(report.repositories) })}</p>}
         <Note>{t("backup.restartHint")}</Note>
 
         {report.missingProjectPaths.length > 0 && (

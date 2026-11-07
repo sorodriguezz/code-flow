@@ -5,12 +5,11 @@
 //! - **It is time-driven, not change-driven.** The panel it replaces rewrote the file ten seconds
 //!   after any edit, which on a renamed request meant one full export per keystroke. This looks at
 //!   the clock instead, so a busy hour costs the same as an idle one.
-//! - **An unchanged configuration costs a hash.** The payload is built and digested under the
-//!   database lock; if the digest matches the last run's, nothing is encrypted, written or
+//! - **An unchanged configuration costs a hash.** Rows are read under the database lock and
+//!   repository files are read afterwards; if the digest matches, nothing is encrypted, written or
 //!   uploaded. Argon2 is deliberately expensive, and skipping it is most of the saving.
 //!
-//! The lock is never held across the network. Build and digest under it, drop it, then seal and
-//! upload — otherwise a slow Drive round trip would freeze every query in the app behind it.
+//! The lock is never held while reading repository files, sealing or uploading.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -72,13 +71,22 @@ pub const RUNNING_EVENT: &str = "backup:running";
 /// Held for the length of a run. A guard rather than a pair of calls because the run has a dozen
 /// `?` in it, and every one of them is a way to leave the flag stuck at `true` for the lifetime of
 /// the process — which would be a button that never comes back.
-struct RunGuard(AppHandle);
+pub struct RunGuard(AppHandle);
 
 impl Drop for RunGuard {
     fn drop(&mut self) {
         RUNNING.store(false, Ordering::SeqCst);
         let _ = self.0.emit(RUNNING_EVENT, false);
     }
+}
+
+/// Shared by scheduled runs and manual file exports, including their repository reads.
+pub fn begin(app: &AppHandle) -> Option<RunGuard> {
+    if RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return None;
+    }
+    let _ = app.emit(RUNNING_EVENT, true);
+    Some(RunGuard(app.clone()))
 }
 
 /// Whether a destination is configured well enough to write to — what greys out the switch.
@@ -106,19 +114,12 @@ pub async fn run(app: &AppHandle, force: bool) -> Result<RunOutcome, String> {
     // Compare-and-swap rather than a read then a write: the ticker and the button are on different
     // tasks, and two of them reading "not running" before either had written it is exactly the race
     // this is here to lose.
-    if RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-        return Ok(skipped("busy"));
-    }
-    let _guard = RunGuard(app.clone());
-    // Announced before the work rather than after the decision to do it. Building and digesting the
-    // payload is most of the cost of a tick that turns out to write nothing, and during it a second
-    // run genuinely cannot start — saying so is the honest report of what the flag means.
-    let _ = app.emit(RUNNING_EVENT, true);
+    let Some(_guard) = begin(app) else { return Ok(skipped("busy")); };
 
     let version = app.package_info().version.to_string();
 
-    // ---- under the lock: settings, credentials list, payload, digest ----
-    let (mut settings, drive, onedrive, payload, passphrase) = {
+    // ---- under the lock: settings, credentials and database rows ----
+    let (mut settings, drive, onedrive, snapshot, passphrase) = {
         let db = app.state::<Db>();
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let settings = super::load_settings(&conn);
@@ -133,9 +134,10 @@ pub async fn run(app: &AppHandle, force: bool) -> Result<RunOutcome, String> {
         let Some(passphrase) = super::passphrase()? else {
             return Ok(skipped("no-password"));
         };
-        let payload = super::build_payload(&conn)?;
-        (settings, drive, onedrive, payload, passphrase)
+        let snapshot = super::collect_snapshot(&conn)?;
+        (settings, drive, onedrive, snapshot, passphrase)
     };
+    let payload = super::build_payload(snapshot)?;
 
     if !force && payload.hash == settings.last_hash {
         return Ok(skipped("unchanged"));
