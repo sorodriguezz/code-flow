@@ -1,41 +1,18 @@
-/**
- * One open architecture document: its toolbar (name, save state, environment, sources, history,
- * export, the side panel's toggle), the lens strip, and the work area — the component library and
- * the canvas, with the lens's panel beside them. The document's JSON is never on screen: it is what
- * an import reads and an export writes.
- */
-import { useState } from "react";
-import {
-  AlertTriangle,
-  Download,
-  Gauge,
-  GitBranch,
-  History,
-  PanelRight,
-  Scale,
-  ShieldCheck,
-  Workflow,
-} from "lucide-react";
-import type { TranslationKey } from "../../lib/i18n/translations";
+import { useRef, type ReactNode } from "react";
+import { AlertTriangle, Gauge, PanelRight, Scale, ShieldCheck, Workflow } from "lucide-react";
 import { variesByEnvironment } from "../../lib/architecture/types";
-import { repoMenuItems } from "../../lib/repoMenu";
-import { diagramsClearVersions, diagramsDeleteVersion, diagramsListVersions, diagramsVersionContent } from "../../lib/tauri/diagramsCommands";
-import { useArchitectureStore } from "../../state/architectureStore";
-import { useArchitectureViewStore, type Lens } from "../../state/architectureViewStore";
+import { LENSES, useArchitectureViewStore, type Lens } from "../../state/architectureViewStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useT } from "../../state/languageStore";
-import { promptAction } from "../../state/promptStore";
 import { ActiveUnderline } from "../common/ActivePill";
 import { AiSparkles } from "../common/AiGlyph";
-import { buttonClass, iconButtonClass } from "../common/Button";
-import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import { iconButtonClass } from "../common/Button";
 import { ResizeHandle } from "../common/ResizeHandle";
-import { Segmented } from "../common/Segmented";
 import { Tooltip } from "../common/Tooltip";
-import { VersionHistoryModal } from "../common/VersionHistoryModal";
-import { inspectorClass, tabCountClass, toolbarClass, underlineStripClass, underlineTabClass } from "../common/recipes";
+import { fieldClass, inspectorClass, tabCountClass, underlineStripClass, underlineTabClass } from "../common/recipes";
+import { ArchDocumentToolbar } from "./ArchDocumentToolbar";
+import { ArchNavigator } from "./ArchNavigator";
 import { ArchCanvasArea } from "./canvas/ArchFlowCanvas";
-import { exportArchitecture, type ArchExport } from "./exportArch";
 import { useThemePalette } from "./palette";
 import { ArchModelContext, useArchModel } from "./useArchModel";
 import { AskPanel } from "./panels/AskPanel";
@@ -44,170 +21,85 @@ import { DiagramPanel } from "./panels/DiagramPanel";
 import { PanelFrame } from "./panels/PanelFrame";
 import { ReviewPanel } from "./panels/ReviewPanel";
 import { SimulatePanel } from "./panels/SimulatePanel";
-import { useArchSourceDialog } from "./sources/ArchSourceDialog";
 
-const LENS_ICON: Record<Lens, React.ReactNode> = {
+const LENS_ICON: Record<Lens, ReactNode> = {
   diagram: <Workflow size={14} />,
   review: <ShieldCheck size={14} />,
   simulate: <Gauge size={14} />,
   decisions: <Scale size={14} />,
   ask: <AiSparkles size={13} />,
 };
-const LENS_ORDER: Lens[] = ["diagram", "review", "simulate", "decisions", "ask"];
 
-type Anchor = { top: number; bottom: number; left: number; right: number; align?: "start" | "end" };
-
-export function ArchEditor() {
+export function ArchEditor({ documentsControl }: { documentsControl: ReactNode }) {
   const t = useT();
   const model = useArchModel();
   const palette = useThemePalette();
-  const draft = useArchitectureStore((s) => s.draft);
-  const item = useArchitectureStore((s) => s.items.find((i) => i.id === s.draft?.id));
-  const saving = useArchitectureStore((s) => s.saving);
-  const lastSavedAt = useArchitectureStore((s) => s.lastSavedAt);
-  const fileConflict = useArchitectureStore((s) => s.fileConflict);
-  const workspaceId = useArchitectureStore((s) => s.workspaceId);
   const lens = useArchitectureViewStore((s) => s.lens);
   const setLens = useArchitectureViewStore((s) => s.setLens);
   const diagramTab = useArchitectureViewStore((s) => s.diagramTab);
   const panelOpen = useArchitectureViewStore((s) => s.panelOpen);
   const setPanelOpen = useArchitectureViewStore((s) => s.setPanelOpen);
-  const setEnv = useArchitectureViewStore((s) => s.setEnv);
-  const openSources = useArchSourceDialog((s) => s.openAs);
   const panelWidth = useLayoutStore((s) => s.sizes.architecturePanelWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
-  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[]; anchor?: Anchor } | null>(null);
-  const [history, setHistory] = useState(false);
+  const detailsRef = useRef<HTMLElement>(null);
 
-  if (!draft || !model) return null;
-  const title = item?.title ?? model.doc.meta?.title ?? t("arch.untitled");
-  const envs = model.doc.meta?.environments ?? {};
-  const sources = model.doc.sources ?? [];
-  const crit = model.findings.filter((f) => f.severity === "critical").length;
-  const warn = model.findings.filter((f) => f.severity === "warning").length;
-  const anchorOf = (el: Element, align: "start" | "end" = "end"): Anchor => {
-    const r = el.getBoundingClientRect();
-    return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, align };
-  };
-
-  const exportMenu = (event: React.MouseEvent) => {
-    const go = (kind: ArchExport, dark = false) => () => void exportArchitecture(kind, { scene: model.scene, doc: model.doc, text: model.text, title, dark });
-    setMenu({
-      x: event.clientX, y: event.clientY, anchor: anchorOf(event.currentTarget),
-      items: [
-        { label: t("arch.export.svgSheet"), onClick: go("svgSheet") },
-        { label: t("arch.export.svg"), onClick: go("svg") },
-        { label: t("arch.export.svgDark"), onClick: go("svgSheet", true) },
-        { label: t("arch.export.png"), onClick: go("png") },
-        { label: t("arch.export.pdf"), onClick: go("pdf") },
-        { label: t("arch.export.json"), onClick: go("json"), separated: true },
-      ],
-    });
-  };
-  const repoMenu = (event: React.MouseEvent) => {
-    const items = repoMenuItems({
-      workspaceId,
-      originPath: item?.originPath ?? "",
-      own: true,
-      onSave: (projectId) => void useArchitectureStore.getState().saveToRepo(projectId),
-      onUnlink: () => void useArchitectureStore.getState().unlink(draft.id),
-    });
-    if (items.length) setMenu({ x: event.clientX, y: event.clientY, anchor: anchorOf(event.currentTarget, "start"), items });
-  };
-  const rename = () =>
-    void promptAction(t("arch.renamePrompt"), { initial: title, confirmLabel: t("arch.rename") }).then((value) => value && void useArchitectureStore.getState().rename(draft.id, value));
-
-  const status = fileConflict ? t("arch.status.conflict") : saving ? t("arch.status.saving") : draft.dirty ? t("arch.status.unsaved") : lastSavedAt ? t("arch.status.saved") : "";
-  const sourcesLabel = sources.length ? t("arch.src.update") : t("arch.src.generate");
+  if (!model) return null;
+  const envs = Object.entries(model.doc.meta?.environments ?? {});
+  const reviewCount = model.findings.filter((f) => f.severity === "critical" || f.severity === "warning").length;
+  const hasCritical = model.findings.some((f) => f.severity === "critical");
+  const counts = { diagram: 0, review: reviewCount, simulate: 0, decisions: model.doc.decisions?.length ?? 0, ask: 0 };
+  const panelLabel = t(panelOpen ? "arch.panel.hide" : "arch.panel.show");
 
   return (
     <ArchModelContext.Provider value={model}>
-      <div className="flex h-full min-h-0 flex-col" data-tour="arch-editor">
-        <header className={`${toolbarClass} @container gap-1.5 pl-3`}>
-          <Tooltip label={t("arch.rename")}>
-            <button type="button" className="min-w-[48px] max-w-[min(360px,40cqw)] truncate rounded-md px-1.5 py-0.5 text-left text-[14px] font-semibold text-[var(--cf-text)] hover:bg-[var(--cf-hover)]" onClick={rename}>{title}</button>
-          </Tooltip>
-          {item?.originPath ? (
-            <Tooltip label={item.originPath}>
-              <button type="button" className="inline-flex h-[22px] min-w-0 max-w-[220px] items-center gap-1 rounded-md px-1.5 text-[11.5px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] @max-[720px]:hidden" onClick={repoMenu}>
-                <GitBranch size={12} className="shrink-0" /><span className="truncate font-mono">{item.originPath.split(/[\\/]/).pop()}</span>
+      <div className="flex min-h-0 flex-1 flex-col" data-tour="arch-editor">
+        <ArchDocumentToolbar model={model} documentsControl={documentsControl} />
+        <div className="flex shrink-0 items-stretch border-b border-[var(--cf-border)] bg-[var(--cf-surface)]">
+          <div className={`${underlineStripClass} min-w-0 flex-1 !border-b-0`} role="group" aria-label={t("arch.lenses")} data-tour="arch-lenses">
+            {LENSES.map((view) => {
+              const active = lens === view;
+              const label = t(`arch.lens.${view}`);
+              const count = counts[view];
+              return (
+                <button
+                  key={view}
+                  type="button"
+                  aria-pressed={active}
+                  aria-label={count ? `${label} (${count})` : label}
+                  title={label}
+                  onClick={() => setLens(view)}
+                  className={underlineTabClass(active, "px-0.5 focus-visible:-outline-offset-2")}
+                >
+                  {active ? <ActiveUnderline layoutId="arch-lens" /> : null}
+                  <span className={active ? "text-[var(--cf-accent)]" : ""}>{LENS_ICON[view]}</span>
+                  <span className="@max-[580px]:hidden">{label}</span>
+                  {count ? <span aria-hidden className={`${tabCountClass} ${view === "review" && hasCritical ? "!text-[var(--cf-danger)]" : ""}`}>{count}</span> : null}
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex shrink-0 items-center gap-1 border-l border-[var(--cf-border)] px-2">
+            <ArchNavigator scene={model.scene} />
+            {envs.length > 1 && variesByEnvironment(model.doc) ? (
+              <Tooltip label={t("arch.meta.environment")} description={t("arch.meta.environmentHint")}>
+                <select className={fieldClass({ size: "sm", className: "max-w-[120px] @max-[520px]:max-w-[85px]" })} value={model.env} aria-label={t("arch.meta.environment")} onChange={(event) => useArchitectureViewStore.getState().setEnv(event.target.value)}>
+                  {envs.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                </select>
+              </Tooltip>
+            ) : null}
+            <Tooltip label={panelLabel}>
+              <button type="button" aria-pressed={panelOpen} className={iconButtonClass({ size: "sm", active: panelOpen })} onClick={() => useArchitectureViewStore.getState().togglePanel()} aria-label={panelLabel} data-tour="arch-panel-toggle">
+                <PanelRight size={15} />
               </button>
             </Tooltip>
-          ) : (
-            <Tooltip label={t("arch.saveToRepo")}>
-              <button type="button" className={iconButtonClass({ size: "xs" })} onClick={repoMenu} aria-label={t("arch.saveToRepo")}><GitBranch size={13} /></button>
-            </Tooltip>
-          )}
-          <span className={`truncate whitespace-nowrap text-[11.5px] ${fileConflict ? "text-[var(--cf-danger)]" : "text-[var(--cf-text-faint)]"}`}>{status}</span>
-          <span className="min-w-2 flex-1" />
-          {/* Only where it changes something: the environment fills in resource names (`api-{env}`)
-              on the cards and in what is exported, and a document with none has nothing to switch. */}
-          {Object.keys(envs).length > 1 && variesByEnvironment(model.doc) ? (
-            <Tooltip label={t("arch.meta.environment")} description={t("arch.meta.environmentHint")}>
-              <Segmented
-                layoutId="arch-env"
-                size="sm"
-                value={model.env}
-                onChange={(v) => setEnv(v)}
-                ariaLabel={t("arch.meta.environment")}
-                options={Object.entries(envs).map(([key, label]) => ({ value: key, label }))}
-              />
-            </Tooltip>
-          ) : null}
-          <span aria-hidden className="mx-1 h-[18px] w-px shrink-0 bg-[var(--cf-border)]" />
-          <Tooltip label={sourcesLabel} description={sources.length ? sources.map((x) => x.name).join(" · ") : t("arch.src.none")}>
-            <button type="button" className={buttonClass({ size: "sm", className: "gap-1.5" })} onClick={() => openSources("update")} data-tour="arch-sources-button" aria-label={sourcesLabel}>
-              <AiSparkles size={13} />
-              <span className="@max-[860px]:hidden">{sourcesLabel}</span>
-              {sources.length ? <span className={tabCountClass}>{sources.length}</span> : null}
-            </button>
-          </Tooltip>
-          <Tooltip label={t("arch.export")}>
-            <button type="button" className={buttonClass({ size: "sm", className: "gap-1.5" })} onClick={exportMenu} aria-label={t("arch.export")}>
-              <Download size={13} /><span className="@max-[700px]:hidden">{t("arch.export")}</span>
-            </button>
-          </Tooltip>
-          <Tooltip label={t("arch.history")}>
-            <button type="button" className={iconButtonClass({ size: "sm" })} onClick={() => setHistory(true)} aria-label={t("arch.history")}><History size={15} /></button>
-          </Tooltip>
-          <Tooltip label={panelOpen ? t("arch.panel.hide") : t("arch.panel.show")}>
-            <button type="button" aria-pressed={panelOpen} className={iconButtonClass({ size: "sm", active: panelOpen })} onClick={() => useArchitectureViewStore.getState().togglePanel()} aria-label={panelOpen ? t("arch.panel.hide") : t("arch.panel.show")} data-tour="arch-panel-toggle">
-              <PanelRight size={15} />
-            </button>
-          </Tooltip>
-        </header>
-        <div className={`${underlineStripClass} gap-5 px-4`} role="tablist" aria-label={t("arch.lenses")} data-tour="arch-lenses">
-          {LENS_ORDER.map((l) => {
-            const active = lens === l;
-            const count = l === "review" ? crit + warn : l === "decisions" ? (model.doc.decisions ?? []).length : 0;
-            return (
-              <button
-                key={l}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => {
-                  setLens(l);
-                  if (!panelOpen) setPanelOpen(true);
-                }}
-                className={underlineTabClass(active)}
-              >
-                {active ? <ActiveUnderline layoutId="arch-lens" /> : null}
-                <span className={active ? "text-[var(--cf-accent)]" : ""}>{LENS_ICON[l]}</span>
-                {t(`arch.lens.${l}` as TranslationKey)}
-                {count ? (
-                  <span className={tabCountClass} style={l === "review" && crit ? { color: "var(--cf-danger)", background: "color-mix(in oklab, var(--cf-danger) 13%, transparent)" } : undefined}>{count}</span>
-                ) : null}
-              </button>
-            );
-          })}
+          </div>
         </div>
-        <div className="flex min-h-0 flex-1">
+        <div className="relative isolate flex min-h-0 flex-1">
           <div className="relative min-h-0 min-w-0 flex-1">
-            <ArchCanvasArea model={model} palette={palette} lens={lens} documentKey={model.docId} />
+            <ArchCanvasArea model={model} palette={palette} lens={lens} documentKey={model.docId} detailsRef={detailsRef} />
             {model.error ? (
-              <div className="pointer-events-none absolute left-1/2 top-3 z-10 flex max-w-[70%] -translate-x-1/2 items-start gap-2 rounded-lg border border-[color-mix(in_oklab,var(--cf-danger)_35%,var(--cf-border))] bg-[var(--cf-surface-raised)] px-3 py-2 text-[12px] leading-[1.4] text-[var(--cf-text)] shadow-[var(--cf-shadow)]">
+              <div role="alert" className="pointer-events-none absolute left-1/2 top-3 z-10 flex max-w-[70%] -translate-x-1/2 items-start gap-2 rounded-lg border border-[color-mix(in_oklab,var(--cf-danger)_35%,var(--cf-border))] bg-[var(--cf-surface-raised)] px-3 py-2 text-[12px] leading-[1.4] text-[var(--cf-text)] shadow-[var(--cf-shadow)]">
                 <AlertTriangle size={14} className="mt-[1px] shrink-0 text-[var(--cf-danger)]" />
                 {t("arch.parse.broken")}
               </div>
@@ -215,12 +107,14 @@ export function ArchEditor() {
           </div>
           {panelOpen ? (
             <>
-              <ResizeHandle axis="x" invert value={panelWidth} min={280} max={560} onChange={(v) => setSize("architecturePanelWidth", v)} onCommit={(v) => commitSize("architecturePanelWidth", v)} />
-              <aside style={{ width: panelWidth }} className={`${inspectorClass} overflow-hidden`} data-tour="arch-panel">
+              <div className="relative shrink-0 @max-[960px]:hidden">
+                <ResizeHandle axis="x" invert value={panelWidth} min={280} max={560} onChange={(v) => setSize("architecturePanelWidth", v)} onCommit={(v) => commitSize("architecturePanelWidth", v)} />
+              </div>
+              <aside ref={detailsRef} style={{ width: panelWidth }} className={`${inspectorClass} overflow-hidden @max-[960px]:absolute @max-[960px]:bottom-14 @max-[960px]:right-2 @max-[960px]:top-2 @max-[960px]:z-20 @max-[960px]:max-w-[85%] @max-[960px]:rounded-xl @max-[960px]:border @max-[960px]:!bg-[var(--cf-surface-solid,var(--cf-surface))] @max-[960px]:shadow-[var(--cf-shadow)]`} aria-label={t("arch.panel.label")} data-tour="arch-panel">
                 <PanelFrame lens={lens} onClose={() => setPanelOpen(false)}>
                   {lens === "diagram" ? <DiagramPanel doc={model.doc} comps={model.comps} tab={diagramTab} /> : null}
-                  {lens === "review" ? <ReviewPanel findings={model.findings} comps={model.comps} /> : null}
-                  {lens === "simulate" ? <SimulatePanel sim={model.sim} comps={model.comps} /> : null}
+                  {lens === "review" ? <ReviewPanel model={model} /> : null}
+                  {lens === "simulate" ? <SimulatePanel doc={model.doc} sim={model.sim} comps={model.comps} /> : null}
                   {lens === "decisions" ? <DecisionsPanel doc={model.doc} comps={model.comps} patterns={model.patterns} /> : null}
                   {lens === "ask" ? <AskPanel /> : null}
                 </PanelFrame>
@@ -228,21 +122,6 @@ export function ArchEditor() {
             </>
           ) : null}
         </div>
-        {menu ? <ContextMenu x={menu.x} y={menu.y} items={menu.items} anchor={menu.anchor} onClose={() => setMenu(null)} /> : null}
-        {history ? (
-          <VersionHistoryModal
-            title={title}
-            listVersions={() => diagramsListVersions(draft.id)}
-            readVersion={(versionId) => diagramsVersionContent(versionId)}
-            deleteVersion={(versionId) => diagramsDeleteVersion(versionId)}
-            clearVersions={() => diagramsClearVersions(draft.id)}
-            onRestore={async (content) => {
-              useArchitectureStore.getState().editText(content);
-              await useArchitectureStore.getState().flush();
-            }}
-            onClose={() => setHistory(false)}
-          />
-        ) : null}
       </div>
     </ArchModelContext.Provider>
   );

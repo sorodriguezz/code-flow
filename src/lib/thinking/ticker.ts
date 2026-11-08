@@ -80,6 +80,7 @@ export function register(el: Element, painter: Painter): () => void {
   if (!listening) {
     listening = true;
     document.addEventListener("visibilitychange", start);
+    new MutationObserver(start).observe(document.documentElement, { attributes: true, attributeFilter: ["data-motion"] });
   }
   start();
   return () => {
@@ -97,6 +98,10 @@ function start() {
 
 function loop(now: number) {
   frame = 0;
+  if (prefersReducedMotion()) {
+    for (const entry of entries) if (entry.visible) entry.painter.still();
+    return;
+  }
   // Clamped: a tab that slept for a minute resumes where it was, not a minute further on.
   const dt = last ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
   last = now;

@@ -4,12 +4,12 @@ import { phaseGroup, thinkingState, type ThinkingActivity } from "../../lib/thin
 import { ORB_PX, register, prefersReducedMotion, type OrbSize, type Painter } from "../../lib/thinking/ticker";
 import { createSphere } from "../../lib/thinking/sphere";
 import { createOrb } from "../../lib/thinking/orb";
-import { createNetwork } from "../../lib/thinking/network";
+import { createAxolotl } from "../../lib/thinking/axolotl";
 import { createWave } from "../../lib/thinking/wave";
 import { createLiquid } from "../../lib/thinking/liquid";
 import { createCrystal } from "../../lib/thinking/crystal";
 import { createCat } from "../../lib/thinking/cat";
-import { createPixels } from "../../lib/thinking/pixels";
+import { createRocky } from "../../lib/thinking/rocky";
 import { createGhost } from "../../lib/thinking/ghost";
 import { createCrab } from "../../lib/thinking/crab";
 import { createMoon } from "../../lib/thinking/moon";
@@ -40,11 +40,11 @@ import { gazeAt, nearness, watchPointer } from "../../lib/thinking/pointer";
  *
  * `follow` makes the mark notice the pointer, wherever it is in the window — for the assistant's
  * button on the rail (the user: "que siga el mouse con los ojos", and then for the designs with no
- * eyes, "¿qué se puede hacer?"). The designs with eyes — the robot, the blob, the LED face and the
+ * eyes, "¿qué se puede hacer?"). The designs with eyes — the robot, the blob and the
  * characters — look at it instead of looking around; the rest turn to it each in their own way: the
  * globe, the crystal and the atom tip toward it, the drops are drawn to it, the orb's light and the
  * halo's glow swing round to its side, the plasma's lights drift there, the wave's crest leans its
- * way, the net lights up on that side and fires toward it, the moon turns its face. Out of the
+ * way, and the moon turns its face. Out of the
  * window, they go back to what they were doing. And every one of them perks up as the pointer comes
  * close (`nearness`): brighter, a soft glow, and running a little faster — as if about to be
  * clicked. None of it while the run is ending or resting, nor for a reader who asked for reduced
@@ -190,12 +190,12 @@ export function ThinkingOrb({
 const PAINTERS: Partial<Record<ThinkingDesign, (canvas: HTMLCanvasElement, px: number, gain: number) => Painter>> = {
   sphere: createSphere,
   orb: createOrb,
-  network: createNetwork,
+  axolotl: createAxolotl,
   wave: createWave,
   liquid: createLiquid,
   crystal: createCrystal,
   cat: createCat,
-  pixels: createPixels,
+  rocky: createRocky,
   ghost: createGhost,
   crab: createCrab,
   moon: createMoon,

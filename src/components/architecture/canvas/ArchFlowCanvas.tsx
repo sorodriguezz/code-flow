@@ -13,7 +13,7 @@
  * here opens the inspector.
  */
 import "@xyflow/react/dist/style.css";
-import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -22,12 +22,13 @@ import {
   ReactFlow,
   ReactFlowProvider,
   applyNodeChanges,
+  getViewportForBounds,
   useReactFlow,
   type EdgeChange,
   type NodeChange,
   type OnNodeDrag,
 } from "@xyflow/react";
-import { AlertTriangle, Keyboard, LayoutGrid, Maximize2, Minus, MousePointerClick, Plus, Redo2, Undo2 } from "lucide-react";
+import { AlertTriangle, Keyboard, LayoutGrid, Maximize2, Minus, Network, Plus, Redo2, Undo2 } from "lucide-react";
 import type { TranslationKey } from "../../../lib/i18n/translations";
 import { componentFor } from "../../../lib/architecture/catalog";
 import { addComponentAt, addZoneAt, clearPositions, connect, duplicateComponent, moveNode, removeElements, reverseConnection, setPosition, type Removal } from "../../../lib/architecture/canvasOps";
@@ -40,10 +41,12 @@ import { useArchitectureViewStore, type Lens, type Selection } from "../../../st
 import { useT } from "../../../state/languageStore";
 import { useThemeStore } from "../../../state/themeStore";
 import { buttonClass, iconButtonClass } from "../../common/Button";
+import { AiSparkles } from "../../common/AiGlyph";
 import { ContextMenu, type MenuItem } from "../../common/ContextMenu";
 import { Tooltip } from "../../common/Tooltip";
 import { popoverClass } from "../../common/recipes";
 import { mutate } from "../edits";
+import { useArchSourceDialog } from "../sources/ArchSourceDialog";
 import type { ArchModel } from "../useArchModel";
 import { EDGE_TYPES, type ArchEdgeT } from "./ArchEdge";
 import { ArchLibrary } from "./ArchLibrary";
@@ -55,6 +58,7 @@ interface Props {
   palette: ArchPalette;
   lens: Lens;
   documentKey: string;
+  detailsRef: RefObject<HTMLElement | null>;
 }
 
 const chipId = (id: string) => `art:chip:${id}`;
@@ -116,13 +120,14 @@ export function ArchCanvasArea(props: Props) {
   );
 }
 
-function CanvasArea({ model, palette, lens }: Props) {
+function CanvasArea({ model, palette, lens, detailsRef }: Props) {
   const t = useT();
   const rf = useReactFlow();
   const wrapper = useRef<HTMLDivElement>(null);
   const { scene, doc, comps, sim, findings } = model;
   const selection = useArchitectureViewStore((s) => s.selection);
   const hover = useArchitectureViewStore((s) => s.hover);
+  const dependencyPath = useArchitectureViewStore((s) => s.dependencyPath);
   const focus = useArchitectureViewStore((s) => s.focus);
   const select = useArchitectureViewStore((s) => s.select);
   const setLens = useArchitectureViewStore((s) => s.setLens);
@@ -139,6 +144,18 @@ function CanvasArea({ model, palette, lens }: Props) {
   // Below this width the library folds to its rail on its own, so the canvas keeps room to draw in.
   const area = useRef<HTMLDivElement>(null);
   const [narrow, setNarrow] = useState(false);
+  const [peekLibrary, setPeekLibrary] = useState(false);
+  const paletteOpen = useArchitectureViewStore((s) => s.paletteOpen);
+  const togglePalette = useArchitectureViewStore((s) => s.togglePalette);
+  const libraryOpen = narrow ? peekLibrary : paletteOpen;
+  const showLibrary = () => {
+    if (narrow) setPeekLibrary(true);
+    else if (!paletteOpen) togglePalette();
+  };
+  const hideLibrary = () => {
+    if (narrow) setPeekLibrary(false);
+    else if (paletteOpen) togglePalette();
+  };
   useEffect(() => {
     const el = area.current;
     if (!el) return;
@@ -146,13 +163,26 @@ function CanvasArea({ model, palette, lens }: Props) {
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
-  // The canvas just gained or lost the library's width: the drawing is fitted to what is left.
-  const firstNarrow = useRef(true);
+  useEffect(() => { if (!narrow) setPeekLibrary(false); }, [narrow]);
+
+  // Docking a panel changes the canvas's width. Keep the point under its center in view at the
+  // current zoom so an open inspector or library doesn't push the selected area off the edge.
   useEffect(() => {
-    if (firstNarrow.current) { firstNarrow.current = false; return; }
-    const id = setTimeout(() => void rf.fitView({ padding: 0.08, maxZoom: 1, duration: 200 }), 60);
-    return () => clearTimeout(id);
-  }, [narrow, rf]);
+    const canvas = wrapper.current;
+    if (!canvas) return;
+    let previousWidth = canvas.clientWidth;
+    const observer = new ResizeObserver(() => {
+      const width = canvas.clientWidth;
+      if (!width) return;
+      if (previousWidth && width !== previousWidth) {
+        const viewport = rf.getViewport();
+        void rf.setViewport({ ...viewport, x: viewport.x + (width - previousWidth) / 2 });
+      }
+      previousWidth = width;
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [rf]);
 
   // ---------- geometry ----------
 
@@ -263,7 +293,11 @@ function CanvasArea({ model, palette, lens }: Props) {
 
   // Selection and focus: flags on the nodes as they are, so a click never resets a drag in flight.
   const active = hover ?? selection;
-  const hot = useMemo(() => hotOf(active, doc), [active, doc]);
+  const hot = useMemo(() => (
+    dependencyPath && !hover
+      ? { cards: new Set(dependencyPath.ids), edges: new Set(dependencyPath.edges), focus: true }
+      : hotOf(active, doc)
+  ), [active, dependencyPath, doc, hover]);
   const picked = useMemo(() => selectedIds(selection), [selection]);
   const shown = useMemo(() => nodes.map((n) => {
     if (n.type === "card") {
@@ -329,6 +363,7 @@ function CanvasArea({ model, palette, lens }: Props) {
 
   /** A click, which a drag never ends in (d3-drag swallows the click after a move): the inspector. */
   const onNodeClick = useCallback((_: ReactMouseEvent, node: ArchNode) => {
+    useArchitectureViewStore.getState().setDependencyPath(null);
     if (node.type === "card") revealInspector();
   }, [revealInspector]);
 
@@ -436,6 +471,7 @@ function CanvasArea({ model, palette, lens }: Props) {
       if (!isOverCanvas(cx, cy)) return false;
       const p = rf.screenToFlowPosition({ x: cx, y: cy });
       place(item, p.x, p.y);
+      setPeekLibrary(false);
       return true;
     },
     addCentered: (item) => {
@@ -443,6 +479,7 @@ function CanvasArea({ model, palette, lens }: Props) {
       if (!r) return;
       const p = rf.screenToFlowPosition({ x: r.left + r.width / 2, y: r.top + r.height / 2 });
       place(item, p.x, p.y);
+      setPeekLibrary(false);
     },
   }), [isOverCanvas, rf, place]);
 
@@ -564,18 +601,38 @@ function CanvasArea({ model, palette, lens }: Props) {
     if (editable(event.target)) return;
     const mod = event.metaKey || event.ctrlKey;
     const sel = useArchitectureViewStore.getState().selection;
-    if (event.key === "Delete" || event.key === "Backspace") { if (sel) { event.preventDefault(); remove(sel); } return; }
+    if (event.key === "Delete" || event.key === "Backspace") {
+      if (sel) {
+        event.preventDefault();
+        if (!useArchitectureViewStore.getState().dependencyPath) remove(sel);
+      }
+      return;
+    }
     if (mod && event.key.toLowerCase() === "z") { event.preventDefault(); if (event.shiftKey) useArchitectureStore.getState().redo(); else useArchitectureStore.getState().undo(); return; }
     if (mod && event.key.toLowerCase() === "y") { event.preventDefault(); useArchitectureStore.getState().redo(); return; }
     if (mod && event.key.toLowerCase() === "d" && sel?.kind === "card") { event.preventDefault(); duplicate(sel.id); return; }
-    if (event.key === "Escape") select(null);
+    if (event.key === "Escape") {
+      const view = useArchitectureViewStore.getState();
+      if (view.dependencyPath) view.setDependencyPath(null);
+      else select(null);
+    }
   };
 
   useEffect(() => {
-    if (!focus) return;
-    const id = setTimeout(() => void rf.fitView({ nodes: [{ id: focus.id }], padding: 0.9, maxZoom: 1.1, duration: 300 }), 40);
+    if (!focus?.length) return;
+    const id = setTimeout(() => {
+      const canvas = wrapper.current?.getBoundingClientRect();
+      const nodes = focus.filter((key) => rf.getNode(key));
+      if (!canvas || !nodes.length) return;
+      const panel = detailsRef.current?.getBoundingClientRect();
+      const overlap = panel ? Math.max(0, canvas.right - panel.left) : 0;
+      const width = Math.max(canvas.width - overlap, canvas.width * 0.15);
+      const bounds = rf.getNodesBounds(nodes);
+      const viewport = getViewportForBounds(bounds, width, canvas.height, 0.1, 1.1, 0.18);
+      void rf.setViewport(viewport, { duration: 250 });
+    }, 40);
     return () => clearTimeout(id);
-  }, [focus, rf]);
+  }, [focus, rf, detailsRef]);
 
   const defs = useMemo(() => ({ __html: sceneDefs(scene, palette) }), [scene, palette, model.iconsReady]); // eslint-disable-line react-hooks/exhaustive-deps
   const vars = {
@@ -585,8 +642,9 @@ function CanvasArea({ model, palette, lens }: Props) {
 
   return (
     <CanvasActionsContext.Provider value={actions}>
-      <div ref={area} className="flex h-full min-h-0 min-w-0">
-        <ArchLibrary narrow={narrow} />
+      <div ref={area} className="relative isolate flex h-full min-h-0 min-w-0">
+        {narrow && libraryOpen ? <div aria-hidden className="w-10 shrink-0" /> : null}
+        <ArchLibrary narrow={narrow} open={libraryOpen} onOpen={showLibrary} onClose={hideLibrary} />
         <div ref={wrapper} className={`arch-flow @container relative min-h-0 min-w-0 flex-1${connecting ? " is-connecting" : ""}`} style={vars} onKeyDown={onKeyDown} tabIndex={-1} data-tour="arch-canvas">
           <svg aria-hidden className="absolute h-0 w-0 overflow-hidden"><defs dangerouslySetInnerHTML={defs} /></svg>
           <ReactFlow<ArchNode, ArchEdgeT>
@@ -665,9 +723,17 @@ function CanvasArea({ model, palette, lens }: Props) {
               </div>
             </Panel>
           </ReactFlow>
-          {!scene.cards.length && !scene.zones.length ? (
-            <div className="pointer-events-none absolute inset-0 grid place-items-center">
-              <p className="m-0 flex items-center gap-2 text-[12.5px] text-[var(--cf-text-faint)]"><MousePointerClick size={15} />{t("arch.canvas.empty")}</p>
+          {!model.error && !scene.cards.length && !scene.zones.length ? (
+            <div className="pointer-events-none absolute inset-0 grid place-items-center p-3 pb-16">
+              <div className="grid w-full max-w-[360px] justify-items-center gap-2 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-5 text-center shadow-[var(--cf-shadow)]">
+                <span className="grid size-9 place-items-center rounded-lg bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"><Network size={19} /></span>
+                <h2 className="m-0 text-[14px] font-semibold text-[var(--cf-text)]">{t("arch.canvas.start")}</h2>
+                <p className="m-0 text-[12px] leading-relaxed text-[var(--cf-text-muted)]">{t("arch.canvas.empty")}</p>
+                <div className="mt-1 flex flex-wrap justify-center gap-2">
+                  <button type="button" className={buttonClass({ variant: "primary", size: "sm", className: "pointer-events-auto" })} onClick={showLibrary}><Plus size={14} />{t("arch.canvas.components")}</button>
+                  <button type="button" className={buttonClass({ variant: "ghost", size: "sm", className: "pointer-events-auto" })} onClick={() => useArchSourceDialog.getState().openAs("update")}><AiSparkles size={13} />{t("arch.gen.fromSources")}</button>
+                </div>
+              </div>
             </div>
           ) : null}
         </div>

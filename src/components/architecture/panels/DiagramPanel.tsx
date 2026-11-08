@@ -19,9 +19,11 @@ import { buttonClass } from "../../common/Button";
 import { fieldClass, popoverClass } from "../../common/recipes";
 import { addComponent, addConnection, removeComponent, removeConnection, setComponentField, setSimField, setValue, zonePathOf } from "../edits";
 import { EntityHead, Field, Ref, SectionTitle, panelBodyClass } from "./bits";
+import { ComponentImpact } from "./ComponentImpact";
 
 const CATEGORIES: Category[] = ["actor", "compute", "data", "messaging", "network", "identity", "security", "observability", "external"];
 const ZONE_STYLES: ZoneStyle[] = ["cloud", "group", "cluster", "tier", "logical", "providers"];
+const NO_CONNECTIONS: NonNullable<ArchDoc["connections"]> = [];
 
 function findZone(nodes: LayoutNode[] | undefined, id: string): Zone | null {
   for (const n of nodes ?? []) {
@@ -73,7 +75,7 @@ export function DiagramPanel({ doc, comps, tab }: { doc: ArchDoc; comps: Resolve
   const select = useArchitectureViewStore((s) => s.select);
   const setHover = useArchitectureViewStore((s) => s.setHover);
   const [connectTo, setConnectTo] = useState("");
-  const conns = doc.connections ?? [];
+  const conns = doc.connections ?? NO_CONNECTIONS;
 
   if (tab === "flow") {
     const flow = doc.flow ?? [];
@@ -196,6 +198,7 @@ export function DiagramPanel({ doc, comps, tab }: { doc: ArchDoc; comps: Resolve
       return (
         <div className={panelBodyClass}>
           <EntityHead icon={c.icon ? <ArchIconGlyph id={c.icon} size={18} /> : null} title={c.name ?? id} subtitle={c.type} />
+          <ComponentImpact key={id} id={id} connections={conns} comps={comps} />
           <p className="m-0 rounded-lg border border-dashed border-[var(--cf-border-strong)] p-2.5 text-[12px] text-[var(--cf-text-muted)]">{t("arch.insp.shared", { from: c.sharedFrom })}</p>
         </div>
       );
@@ -206,6 +209,7 @@ export function DiagramPanel({ doc, comps, tab }: { doc: ArchDoc; comps: Resolve
     return (
       <div className={panelBodyClass}>
         <EntityHead icon={c.icon ? <ArchIconGlyph id={c.icon} size={18} /> : null} title={c.name || t("arch.insp.component")} subtitle={[c.type, c.category ? t(`arch.cat.${c.category}` as TranslationKey) : ""].filter(Boolean).join(" · ") || t("arch.insp.component")} />
+        <ComponentImpact key={id} id={id} connections={conns} comps={comps} />
         <SectionTitle>{t("arch.insp.general")}</SectionTitle>
         <Field label={t("arch.insp.name")} value={c.name ?? ""} onCommit={(v) => setComponentField(id, "name", v)} />
         <Field label={t("arch.insp.type")} value={c.type ?? ""} onCommit={(v) => setComponentField(id, "type", v)} />

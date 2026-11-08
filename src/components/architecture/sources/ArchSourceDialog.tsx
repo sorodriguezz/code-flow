@@ -188,6 +188,8 @@ function Dialog({ mode }: { mode: Mode }) {
 
   const generate = async () => {
     if (!sources.length || running) return;
+    const base = useArchitectureStore.getState().draft;
+    if (mode === "update" && (!base || base.id !== draftId)) return;
     setFailure("");
     const runId = newRunId("arch");
     setRunning(runId);
@@ -197,10 +199,15 @@ function Dialog({ mode }: { mode: Mode }) {
         workspaceId,
         sources,
         focus: focus.trim(),
-        document: mode === "update" ? useArchitectureStore.getState().draft?.text ?? null : null,
+        document: mode === "update" ? base?.text ?? null : null,
         language: useLanguageStore.getState().language,
         runId,
       });
+      const store = useArchitectureStore.getState();
+      if (store.workspaceId !== workspaceId) {
+        setFailure(t("arch.ai.proposalStale"));
+        return;
+      }
       const { text, changes, doc } = splitAnswer(raw);
       if (mode === "new") {
         if (!doc) { setFailure(text || t("arch.gen.noDocument")); return; }
@@ -209,10 +216,14 @@ function Dialog({ mode }: { mode: Mode }) {
         close();
         return;
       }
-      if (!draftId) return;
+      if (!base || store.opening || store.draft?.id !== base.id || store.draft.text !== base.text) {
+        setFailure(t("arch.ai.proposalStale"));
+        return;
+      }
       mutate((d) => stampSources(d, refs, brief));
-      useArchAskStore.getState().push(draftId, { role: "user", text: t("arch.gen.updateAsked", { sources: refs.map((r) => r.name).join(", ") }), action: "design" });
-      useArchAskStore.getState().push(draftId, { role: "assistant", text, action: "design", changes, doc: changes.length ? null : doc });
+      const patchBase = useArchitectureStore.getState().draft?.text;
+      useArchAskStore.getState().push(base.id, { role: "user", text: t("arch.gen.updateAsked", { sources: refs.map((r) => r.name).join(", ") }), action: "design" });
+      useArchAskStore.getState().push(base.id, { role: "assistant", text, action: "design", changes, patchBase: changes.length ? patchBase : undefined, doc: changes.length ? null : doc });
       useArchitectureViewStore.getState().setLens("ask");
       close();
     } catch (error) {

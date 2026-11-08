@@ -4,6 +4,7 @@ import { blink, INK, lipSync, lookFor, mouthOpen, sleepZ, strokeEye, WHITE, type
 import { clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { contactShadow, faceAt, material } from "./volume";
 import { listenLevel } from "./listen";
 import { voiceLevel } from "./voice";
 
@@ -125,6 +126,9 @@ export function createSpark(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
     // Failing, the whole flame shrinks as it goes out; listening, it leans in a little.
     const g = (0.4 + 0.6 * easeOut(grow)) * (1 - 0.14 * die) * (1 + 0.03 * perk);
     const warm = (c: Rgb) => mix(c, p.warning, warn * 0.3);
+    const turn = lookX * 0.69 + tilt;
+    const pitch = lookY * 0.039;
+    if (detail) contactShadow(ctx, u(cx + dx * 0.22), u(0.925), u(0.215), p.a, a * (0.24 - die * 0.12));
 
     ctx.save();
     ctx.translate(u(cx), u(cy + r - 0.02 * hop(cue.wake)));
@@ -146,10 +150,11 @@ export function createSpark(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
       tongue(-1);
       tongue(1);
     }
-    const grad = ctx.createLinearGradient(0, u(cy + r), 0, u(cy - h));
-    grad.addColorStop(0, rgba(warm(mix(mix(p.c, WHITE, 0.15), mix(end, WHITE, 0.3), tint)), a));
-    grad.addColorStop(0.45, rgba(warm(mix(p.b, end, tint)), a));
-    grad.addColorStop(1, rgba(warm(mix(p.a, mix(end, INK, 0.15), tint)), a));
+    const grad = material(ctx, u(cx + dx * 0.2), u(cy - h * 0.2), u(Math.max(r * 1.18, h * 0.72)), [
+      warm(mix(mix(p.a, WHITE, 0.65), mix(end, WHITE, 0.48), tint)),
+      warm(mix(mix(p.a, p.b, 0.42), end, tint)),
+      warm(mix(mix(p.b, INK, 0.27), mix(end, INK, 0.29), tint)),
+    ], a, turn);
     ctx.save();
     ctx.shadowColor = rgba(warm(mix(mix(p.a, p.c, 0.35), end, tint)), (p.dark ? 0.7 : 0.45) * a * (1 - die * 0.5));
     ctx.shadowBlur = u(0.14 + 0.12 * Math.max(0, flare) + 0.1 * Math.min(1.6, swell * gain) + 0.08 * draw + 0.14 * start);
@@ -160,21 +165,23 @@ export function createSpark(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
     // The core: a smaller, paler flame inside, where the face is.
     ctx.beginPath();
     flame(ctx, u(cx), u(cy + r * 0.2), u(r * 0.66), u(h * 0.52), u(dx * 0.5));
-    const core = ctx.createLinearGradient(0, u(cy + r), 0, u(cy - h * 0.52));
-    core.addColorStop(0, rgba(warm(mix(mix(WHITE, p.c, 0.18 * (1 - swell)), mix(end, WHITE, failed ? 0.35 : 0.6), tint)), 0.95 * a));
     // Brighter with the voice, with what it hears, and in the flash of a wake.
     const bright = Math.min(1, Math.max(swell, draw * 0.55, start));
-    core.addColorStop(1, rgba(warm(mix(mix(p.c, WHITE, 0.35 + 0.35 * bright), mix(end, WHITE, 0.3), tint)), (0.6 + 0.3 * bright) * a));
+    const core = material(ctx, u(cx + dx * 0.22), u(cy + 0.03), u(r * 0.76), [
+      warm(mix(mix(WHITE, p.c, 0.18 * (1 - swell)), mix(end, WHITE, failed ? 0.35 : 0.67), tint)),
+      warm(mix(mix(p.c, WHITE, 0.44 + 0.34 * bright), mix(end, WHITE, 0.42), tint)),
+      warm(mix(p.c, mix(end, p.b, 0.18), tint)),
+    ], (0.88 + 0.1 * bright) * a, turn);
     ctx.fillStyle = core;
     ctx.fill();
 
     // The face: eyes wide while it listens, wider still for a moment when woken.
     const open = act?.stopping ? 0.45 : cue.ask > 0.5 ? askBlink(time) : blink(time, 3.6);
-    const ey = cy + 0.015;
     const eyeR = detail ? 0.045 : 0.055;
     const wide = 1 + 0.15 * perk + 0.2 * start;
     for (const side of [-1, 1]) {
-      const ex = cx + side * 0.075 + dx * 0.15;
+      const { x, y: ey, width } = faceAt(cx + side * 0.075, cy + 0.015, 0.14, turn, pitch);
+      const ex = x + dx * 0.15;
       if (dazed) strokeEye(ctx, u(ex), u(ey), u(eyeR), "x", rgba(INK, 0.9 * a), Math.max(1, u(0.03)));
       else if (happy) strokeEye(ctx, u(ex), u(ey), u(eyeR), "happy", rgba(INK, 0.9 * a), Math.max(1, u(0.03)));
       else if (sleep > 0.5 || open < 0.15) {
@@ -182,12 +189,14 @@ export function createSpark(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
       } else {
         ctx.fillStyle = rgba(INK, 0.92 * a);
         ctx.beginPath();
-        ctx.ellipse(u(ex + lookX * 0.018), u(ey + lookY * 0.018), u(eyeR * 0.9 * wide), u(eyeR * 1.3 * open * wide), 0, 0, TAU);
+        ctx.ellipse(u(ex), u(ey), u(eyeR * 0.9 * wide * width), u(eyeR * 1.3 * open * wide), 0, 0, TAU);
         ctx.fill();
       }
     }
     const speaking = groupOf(act) === "speak";
     if ((detail || speaking) && !dazed) {
+      const { x: mouthX, y: mouthY } = faceAt(0.5, cy + 0.085, 0.128, turn, pitch);
+      const mx = mouthX + dx * 0.15;
       ctx.fillStyle = rgba(INK, 0.8 * a);
       ctx.strokeStyle = rgba(INK, 0.8 * a);
       ctx.lineWidth = Math.max(0.8, u(0.022));
@@ -196,14 +205,14 @@ export function createSpark(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
       if (speaking) {
         // Lip-sync: the mouth opens with the voice, a little wider than writing's chatter.
         const w = detail ? 0.03 : 0.045;
-        ctx.ellipse(u(cx + dx * 0.15), u(cy + 0.088), Math.max(0.6, u(w)), Math.max(0.5, u(w * mouthOpen(mouth, gain))), 0, 0, TAU);
+        ctx.ellipse(u(mx), u(mouthY + 0.003), Math.max(0.6, u(w)), Math.max(0.5, u(w * mouthOpen(mouth, gain))), 0, 0, TAU);
         ctx.fill();
       } else if (mouth > 0.05) {
-        ctx.ellipse(u(cx + dx * 0.15), u(cy + 0.085), u(0.022), u(0.03 * mouth + 0.005), 0, 0, TAU);
+        ctx.ellipse(u(mx), u(mouthY), u(0.022), u(0.03 * mouth + 0.005), 0, 0, TAU);
         ctx.fill();
       } else {
-        ctx.moveTo(u(cx - 0.028), u(cy + 0.08));
-        ctx.quadraticCurveTo(u(cx), u(cy + 0.105), u(cx + 0.028), u(cy + 0.08));
+        ctx.moveTo(u(mx - 0.028), u(mouthY - 0.005));
+        ctx.quadraticCurveTo(u(mx), u(mouthY + 0.02), u(mx + 0.028), u(mouthY - 0.005));
         ctx.stroke();
       }
     }

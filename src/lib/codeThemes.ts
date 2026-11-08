@@ -9,8 +9,8 @@
  * (`ui`), and the token colors Monaco highlights code with (`tokens`). The accent color stays
  * the user's own choice from the accent picker, so a theme never silently overrides it.
  *
- * Palettes are the published values of each scheme, not approximations — the point of picking
- * "Monokai" is getting Monokai.
+ * The syntax and ANSI colors follow the named schemes. The UI surfaces adapt those palettes to
+ * CodeFlow's frame, sheets and floating panels.
  */
 
 import { RAINBOW_COLUMNS } from "./csvDialect";
@@ -647,11 +647,11 @@ export const LIGHT_THEMES: CodeTheme[] = [
     id: "codeflow-light",
     name: "CodeFlow Light",
     mode: "light",
-    // "Papel": a grey frame around white sheets, so the two read apart without extra borders.
+    // A cool grey frame around lighter sheets.
     ui: {
       bg: "#ebebf0",
-      surface: "#ffffff",
-      surfaceRaised: "#ffffff",
+      surface: "#f8f8fc",
+      surfaceRaised: "#fcfcfe",
       border: "#e1e2e9",
       text: "#15161d",
       textMuted: "#545767",
@@ -681,9 +681,9 @@ export const LIGHT_THEMES: CodeTheme[] = [
     name: "GitHub Light",
     mode: "light",
     ui: {
-      bg: "#ffffff",
+      bg: "#f9fafc",
       surface: "#f6f8fa",
-      surfaceRaised: "#ffffff",
+      surfaceRaised: "#eef2f7",
       border: "#d0d7de",
       text: "#24292f",
       textMuted: "#57606a",
@@ -714,7 +714,7 @@ export const LIGHT_THEMES: CodeTheme[] = [
     ui: {
       bg: "#fafafa",
       surface: "#f0f0f0",
-      surfaceRaised: "#ffffff",
+      surfaceRaised: "#f6f6f8",
       border: "#dcdcdc",
       text: "#383a42",
       textMuted: "#8a8b91",
@@ -807,7 +807,7 @@ export const LIGHT_THEMES: CodeTheme[] = [
     ui: {
       bg: "#eff1f5",
       surface: "#e6e9ef",
-      surfaceRaised: "#ffffff",
+      surfaceRaised: "#f4f5fa",
       border: "#ccd0da",
       text: "#4c4f69",
       textMuted: "#7c7f93",
@@ -838,7 +838,7 @@ export const LIGHT_THEMES: CodeTheme[] = [
     ui: {
       bg: "#f5f5f5",
       surface: "#ededed",
-      surfaceRaised: "#ffffff",
+      surfaceRaised: "#fafafa",
       border: "#dcdcdc",
       text: "#333333",
       textMuted: "#777777",
@@ -864,9 +864,9 @@ export const LIGHT_THEMES: CodeTheme[] = [
     name: "Xcode Light",
     mode: "light",
     ui: {
-      bg: "#ffffff",
+      bg: "#f8f8fc",
       surface: "#f2f2f7",
-      surfaceRaised: "#ffffff",
+      surfaceRaised: "#f6f6fa",
       border: "#d8d8dc",
       text: "#262626",
       textMuted: "#6c6c70",
@@ -925,7 +925,7 @@ export const LIGHT_THEMES: CodeTheme[] = [
     ui: {
       bg: "#fcfcfc",
       surface: "#f3f4f5",
-      surfaceRaised: "#ffffff",
+      surfaceRaised: "#f8f9fa",
       border: "#e0e2e4",
       text: "#5c6166",
       textMuted: "#8a9199",
@@ -1059,7 +1059,7 @@ export const LIGHT_THEMES: CodeTheme[] = [
     name: "Light Pink",
     mode: "light",
     ui: {
-      bg: "#f5f5f5",
+      bg: "#faf4f8",
       surface: "#f5f0f3",
       // The line highlight's lavender.
       surfaceRaised: "#ede8fd",
@@ -1133,7 +1133,7 @@ export const LIGHT_THEMES: CodeTheme[] = [
     ui: {
       bg: "#fafafa",
       surface: "#f5f5f5",
-      surfaceRaised: "#ffffff",
+      surfaceRaised: "#f7f8fb",
       border: "#dcdee1",
       text: "#27292f",
       // The current line's number (`#27292fcc`) laid onto the editor; the others' `66` is 2.5:1.
@@ -1200,7 +1200,7 @@ export const LIGHT_THEMES: CodeTheme[] = [
     name: "i Light",
     mode: "light",
     ui: {
-      bg: "#ffffff",
+      bg: "#fafcff",
       surface: "#f4f6fc",
       // The line highlight (`#0064ff0c`), laid onto the editor.
       surfaceRaised: "#f3f8ff",

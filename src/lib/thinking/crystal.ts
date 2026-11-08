@@ -65,6 +65,17 @@ for (let i = 0; i < 12; i++) {
     if (Math.abs(d - 2) < 0.01) EDGES.push([i, j]);
   }
 }
+const FACES: [number, number, number][] = [];
+for (const [a, b] of EDGES) {
+  for (const [v, c] of EDGES) {
+    if (v !== b || !EDGES.some(([from, to]) => from === a && to === c)) continue;
+    const [x, y, z] = VERTS[a];
+    const [u, v2, w] = VERTS[b];
+    const [i, j, k] = VERTS[c];
+    const outward = x * (v2 * k - w * j) + y * (w * i - u * k) + z * (u * j - v2 * i);
+    FACES.push(outward > 0 ? [a, b, c] : [a, c, b]);
+  }
+}
 
 export function createCrystal(canvas: HTMLCanvasElement, px: number, gain = 1): Painter {
   const ctx = prepareCanvas(canvas, px);
@@ -137,6 +148,31 @@ export function createCrystal(canvas: HTMLCanvasElement, px: number, gain = 1): 
     ctx.beginPath();
     ctx.arc(c, c, px * 0.36, 0, TAU);
     ctx.fill();
+    // Each triangular face refracts the core. Front facets carry the sharp edge of the light.
+    const facets = FACES.map(([i, j, k], index) => ({ a: pts[i], b: pts[j], d: pts[k], index }));
+    facets.sort((a, b) => a.a[2] + a.b[2] + a.d[2] - b.a[2] - b.b[2] - b.d[2]);
+    for (const { a, b, d, index } of facets) {
+      const area = (b[0] - a[0]) * (d[1] - a[1]) - (b[1] - a[1]) * (d[0] - a[0]);
+      if (Math.abs(area) < 0.01) continue;
+      const opacity = (area < 0 ? 0.45 : 0.15) * alpha * (1 - 0.87 * burst) * (1 - 0.38 * crack);
+      const glass = mix(aiCycle(p, index / FACES.length + 0.16), end, green);
+      const reflection = mix(glass, [255, 255, 255], 0.62);
+      if (px >= 22) {
+        const fill = ctx.createLinearGradient(a[0], a[1], b[0], b[1]);
+        fill.addColorStop(0, rgba(reflection, opacity));
+        fill.addColorStop(0.52, rgba(glass, opacity * 0.32));
+        fill.addColorStop(1, rgba(mix(glass, p.text, 0.42), opacity * 0.85));
+        ctx.fillStyle = fill;
+      } else {
+        ctx.fillStyle = rgba(mix(glass, reflection, Math.min(1, Math.abs(area) / 20)), opacity * 0.65);
+      }
+      ctx.beginPath();
+      ctx.moveTo(a[0], a[1]);
+      ctx.lineTo(b[0], b[1]);
+      ctx.lineTo(d[0], d[1]);
+      ctx.closePath();
+      ctx.fill();
+    }
     ctx.lineCap = "round";
     // In proportion up to the gutter sizes; past them a wireframe drawn at px / 36 reads as a cage.
     const lw = Math.max(0.7, Math.min(px / 36, 1.2 + px / 90));

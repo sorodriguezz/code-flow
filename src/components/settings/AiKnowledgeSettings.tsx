@@ -253,6 +253,14 @@ export function AiKnowledgeSettings() {
   );
 }
 
+const EMBEDDING_FALLBACK = {
+  noModel: "knowledge.embeddingQueryNoModel",
+  modelUnavailable: "knowledge.embeddingQueryUnavailable",
+  indexing: "knowledge.embeddingQueryPreparing",
+  noVectors: "knowledge.embeddingQueryNoVectors",
+  failed: "knowledge.embeddingQueryFailed",
+} as const;
+
 function KnowledgeSearch({ workspaceId }: { workspaceId: string }) {
   const t = useT();
   const [query, setQuery] = useState("");
@@ -273,6 +281,7 @@ function KnowledgeSearch({ workspaceId }: { workspaceId: string }) {
     }
   };
   const results = result?.found;
+  const semanticMatch = results?.some((hit) => hit.matchedBy === "semantic" || hit.matchedBy === "hybrid");
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -292,12 +301,17 @@ function KnowledgeSearch({ workspaceId }: { workspaceId: string }) {
         </button>
       </div>
       {result && (
-        <div role="status" className="flex">
+        <div role="status" className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-[var(--cf-text-muted)]">
           <span className={chipClass(result.embeddingModel ? "accent" : "neutral")}>
             {result.embeddingModel
-              ? t("knowledge.embeddingQueryUsed", { model: result.embeddingModel })
+              ? t(semanticMatch ? "knowledge.embeddingQueryUsed" : "knowledge.embeddingQueryConsulted", { model: result.embeddingModel })
               : t("knowledge.embeddingQueryText")}
           </span>
+          {result.embeddingFallback && (
+            <span>{t(EMBEDDING_FALLBACK[result.embeddingFallback], { model: result.embeddingFallbackModel ?? "" })}</span>
+          )}
+          {result.embeddingModel && !semanticMatch && <span>{t("knowledge.embeddingQueryNoMatches")}</span>}
+          {result.embeddingIndexing && <span>{t("knowledge.embeddingQueryIndexing")}</span>}
         </div>
       )}
       {results && results.length === 0 && <span className="text-[12px] text-[var(--cf-text-muted)]">{t("knowledge.noResults")}</span>}
@@ -320,6 +334,11 @@ function KnowledgeSearch({ workspaceId }: { workspaceId: string }) {
                   <span className="min-w-0 truncate font-mono text-[11px] text-[var(--cf-text)]">{found.label || found.path}</span>
                 )}
                 {found.heading && <span className="truncate text-[11px] text-[var(--cf-text-muted)]">{found.heading}</span>}
+                {(found.matchedBy === "semantic" || found.matchedBy === "hybrid") && (
+                  <span className={chipClass("accent", "ml-auto shrink-0")}>
+                    {t(found.matchedBy === "hybrid" ? "knowledge.embeddingMatchHybrid" : "knowledge.embeddingMatchSemantic")}
+                  </span>
+                )}
               </div>
               <p className="mt-0.5 line-clamp-3 whitespace-pre-wrap text-[11px] leading-snug text-[var(--cf-text-muted)]">{found.snippet}</p>
             </div>

@@ -64,6 +64,7 @@ export interface KnowledgeFound {
   /** The commit its repository was indexed at, empty when it has none. */
   commit: string;
   indexedAt: number | null;
+  matchedBy: "textAndCode" | "semantic" | "hybrid";
 }
 
 export interface KnowledgeRefreshed {
@@ -78,6 +79,9 @@ export interface KnowledgeSearchResult {
   found: KnowledgeFound[];
   /** Set only when the search actually queried the vector index. */
   embeddingModel: string | null;
+  embeddingFallback: "noModel" | "modelUnavailable" | "indexing" | "noVectors" | "failed" | null;
+  embeddingFallbackModel: string | null;
+  embeddingIndexing: boolean;
 }
 
 export const knowledgeOverview = (workspaceId: string) => invoke<KnowledgeOverview>("knowledge_overview", { workspaceId });

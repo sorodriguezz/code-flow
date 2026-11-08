@@ -169,25 +169,35 @@ export function createMoon(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
 
     // Craters, drifting across as it turns.
     if (detail) {
-      ctx.fillStyle = rgba(warmed(mix(rim, INK, 0.12)), 0.35 * a);
       for (const [x, y, r] of CRATERS) {
         let ox = x + turn + tx * 0.35;
         ox = ((((ox + 1.3) % 2.6) + 2.6) % 2.6) - 1.3;
+        const rx = r * R * Math.max(0.24, Math.sqrt(Math.max(0, 1 - ox * ox)));
+        const craterX = cx + ox * R, craterY = cy + (y + ty * 0.3) * R;
+        const basin = ctx.createLinearGradient(craterX, craterY - r * R, craterX, craterY + r * R);
+        basin.addColorStop(0, rgba(warmed(mix(rim, INK, 0.55)), 0.54 * a));
+        basin.addColorStop(0.67, rgba(warmed(rim), 0.25 * a));
+        basin.addColorStop(1, rgba(bright, 0.75 * a));
+        ctx.fillStyle = basin;
         ctx.beginPath();
-        ctx.arc(cx + ox * R, cy + (y + ty * 0.3) * R, r * R, 0, TAU);
+        ctx.ellipse(craterX, craterY, rx, r * R, ox * 0.25, 0, TAU);
         ctx.fill();
       }
     }
 
-    // The shadow: a disc slid in from the left, covering all but the lit part — a sliver at 0, half
-    // at 0.5, none at 1, and all of it at `ECLIPSE`.
-    const offset = -R * (0.12 + 2 * phase);
-    if (offset > -2.1 * R) {
-      // Dark, but not black: the night side stays faintly there, the way earthshine leaves it.
+    // The terminator is an arc on the globe. Its curvature changes as the moon waxes.
+    if (phase < 1) {
+      const shadeWidth = R * Math.cos(Math.PI * clamp01((phase - ECLIPSE) / (1 - ECLIPSE)));
       const night: Rgb = mix(mix(p.b, INK, 0.84), mix(p.danger, INK, 0.3), failed ? tint : 0);
-      ctx.fillStyle = rgba(night, 0.93 * a);
+      const shadow = ctx.createRadialGradient(cx - 0.35 * R, cy - 0.34 * R, 0, cx, cy, R);
+      shadow.addColorStop(0, rgba(mix(night, rim, 0.36), 0.93 * a));
+      shadow.addColorStop(1, rgba(night, 0.96 * a));
+      ctx.fillStyle = shadow;
       ctx.beginPath();
-      ctx.arc(cx + offset, cy, R * 1.04, 0, TAU);
+      ctx.moveTo(cx, cy - R);
+      ctx.bezierCurveTo(cx + shadeWidth * 4 / 3, cy - R, cx + shadeWidth * 4 / 3, cy + R, cx, cy + R);
+      ctx.arc(cx, cy, R, Math.PI / 2, 3 * Math.PI / 2);
+      ctx.closePath();
       ctx.fill();
     }
     ctx.restore();

@@ -5,6 +5,7 @@ import { listenLevel } from "./listen";
 import { clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { contactShadow, faceAt, material } from "./volume";
 
 /**
  * "Cangrejo" — a crab in the shape of Ferris, Rust's mascot: CodeFlow's core is Rust, and this is
@@ -60,14 +61,17 @@ export function createCrab(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
   const isFailed = (act: ThinkingActivity | undefined) => !!act?.failed;
   const phaseOf = (act: ThinkingActivity | undefined) => (awake(act) ? act?.phase : undefined);
 
-  function claw(side: -1 | 1, lifted: number, gape: number, fill: string, lw: number) {
+  // It draws the pincers in as it sidesteps so the outer jaw stays inside the mark.
+  const clawX = (side: -1 | 1, lifted: number) => 0.5 + side * (0.351 + 0.02 * lifted - 0.85 * Math.abs(walkX));
+
+  function claw(side: -1 | 1, lifted: number, gape: number, color: Rgb, opacity: number) {
     if (!ctx) return;
     const base = { x: 0.5 + side * 0.25, y: 0.6 };
-    const cx = 0.5 + side * (0.36 + 0.02 * lifted);
+    const cx = clawX(side, lifted);
     const cy = 0.6 - 0.26 * lifted;
     // The arm.
-    ctx.strokeStyle = fill;
-    ctx.lineWidth = u(lw);
+    ctx.strokeStyle = rgba(mix(color, INK, 0.32), opacity);
+    ctx.lineWidth = u(0.055);
     ctx.lineCap = "round";
     ctx.beginPath();
     ctx.moveTo(u(base.x), u(base.y));
@@ -76,7 +80,7 @@ export function createCrab(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
     // The pincer: a round palm and two fat jaws pointing up and out, parting by `gape`. Filled
     // shapes, not strokes — drawn as lines the jaws read as a fork.
     const dir = -Math.PI / 2 + side * 0.45;
-    ctx.fillStyle = fill;
+    ctx.fillStyle = material(ctx, u(cx), u(cy - 0.034), u(0.128), [mix(color, WHITE, 0.72), color, mix(color, INK, 0.37)], opacity);
     ctx.beginPath();
     ctx.arc(u(cx), u(cy), u(0.065), 0, TAU);
     ctx.fill();
@@ -104,7 +108,8 @@ export function createCrab(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
     const end = endColor(p, failed);
     const happy = !failed && !!act?.done && fin >= 0.3;
     const dazed = failed && fin >= 0.1;
-    const tone = (h: Rgb) => rgba(mix(mix(h, end, tint), p.warning, warn * 0.3), alpha);
+    const shell = (h: Rgb) => mix(mix(h, end, tint), p.warning, warn * 0.3);
+    const tone = (h: Rgb) => rgba(shell(h), alpha);
     const bob = Math.sin(time * 2.4) * 0.012 * (1 - sleep) * (1 - 0.8 * perk);
     // Listening, it leans in a little; woken, it hops. Asking, it tilts about the height of its
     // claws — about its middle, one claw would swing out of the square.
@@ -112,6 +117,9 @@ export function createCrab(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
     const start = startle(cue.wake);
     const tilt = cue.ask * (0.07 + 0.04 * askBeat(time));
     lift += 0.05 * hop(cue.wake);
+    const turn = lookX * 0.67 + tilt;
+    const pitch = lookY * 0.042;
+    if (detail) contactShadow(ctx, u(0.5 + walkX), u(0.915), u(0.31 - lift * 0.55), p.b, alpha * (0.28 - lift));
 
     ctx.save();
     ctx.translate(u(0.5 + walkX), u(0.62 - lift + sink + bob));
@@ -141,9 +149,9 @@ export function createCrab(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
     }
 
     // Claws behind the shell's shoulders.
-    const clawFill = tone(mix(p.b, p.c, 0.35));
-    claw(-1, raise[0], open[0], clawFill, 0.045);
-    claw(1, raise[1], open[1], clawFill, 0.045);
+    const clawColor = shell(mix(p.b, p.c, 0.4));
+    claw(-1, raise[0], open[0], mix(clawColor, INK, Math.max(0, turn) * 0.25), alpha);
+    claw(1, raise[1], open[1], mix(clawColor, INK, Math.max(0, -turn) * 0.25), alpha);
 
     // The shell: a dome with Ferris's bumpy rim, over a flat underside.
     ctx.beginPath();
@@ -158,9 +166,9 @@ export function createCrab(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
     }
     ctx.quadraticCurveTo(u(0.5), u(0.84), u(0.5 - 0.28 * 1.07), u(0.64));
     ctx.closePath();
-    const grad = ctx.createLinearGradient(u(0.25), u(0.42), u(0.75), u(0.82));
-    grad.addColorStop(0, tone(p.a));
-    grad.addColorStop(1, tone(p.b));
+    const grad = material(ctx, u(0.5), u(0.60), u(0.31), [
+      shell(mix(p.a, WHITE, 0.65)), shell(p.a), shell(mix(p.b, INK, 0.35)),
+    ], alpha, turn);
     ctx.save();
     ctx.shadowColor = rgba(mix(p.a, end, tint), (p.dark ? 0.55 : 0.35) * alpha);
     // Brighter for each syllable it hears, and in the flash of a wake.
@@ -168,12 +176,20 @@ export function createCrab(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
     ctx.fillStyle = grad;
     ctx.fill();
     ctx.restore();
+    if (detail) {
+      ctx.strokeStyle = rgba(shell(mix(p.c, WHITE, 0.4)), alpha * 0.43);
+      ctx.lineWidth = u(0.022);
+      ctx.beginPath();
+      ctx.moveTo(u(0.27), u(0.65));
+      ctx.quadraticCurveTo(u(0.5 + turn * 0.07), u(0.79), u(0.73), u(0.65));
+      ctx.stroke();
+    }
 
     // Eyes — wide while it listens, wider for a moment when woken — and Ferris's smile.
     const lid = act?.stopping ? 0.45 : cue.ask > 0.5 ? askBlink(time) : blink(time, 3.1);
     const wide = 1 + 0.18 * perk + 0.25 * start;
-    for (const ex of [0.42, 0.58]) {
-      const ey = 0.57;
+    for (const x of [0.42, 0.58]) {
+      const { x: ex, y: ey, width } = faceAt(x, 0.57, 0.21, turn, pitch);
       if (dazed) strokeEye(ctx, u(ex), u(ey), u(0.045), "x", rgba(INK, 0.9 * alpha), Math.max(1, u(0.03)));
       else if (happy) strokeEye(ctx, u(ex), u(ey), u(0.045), "happy", rgba(INK, 0.9 * alpha), Math.max(1, u(0.03)));
       else if (sleep > 0.5 || lid < 0.15) {
@@ -181,28 +197,29 @@ export function createCrab(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
       } else {
         ctx.fillStyle = rgba(INK, 0.95 * alpha);
         ctx.beginPath();
-        ctx.ellipse(u(ex + lookX * 0.015), u(ey + lookY * 0.015), u(0.042 * wide), u(0.045 * lid * wide), 0, 0, TAU);
+        ctx.ellipse(u(ex), u(ey), u(0.042 * wide * width), u(0.045 * lid * wide), 0, 0, TAU);
         ctx.fill();
         if (detail) {
           ctx.fillStyle = rgba(WHITE, 0.9 * alpha);
           ctx.beginPath();
-          ctx.arc(u(ex + lookX * 0.015 - 0.013), u(ey + lookY * 0.015 - 0.015), u(0.013), 0, TAU);
+          ctx.arc(u(ex - 0.013 * width), u(ey - 0.015), u(0.013 * width), 0, TAU);
           ctx.fill();
         }
       }
     }
     if (detail && !dazed) {
+      const { x: cx, y: cy } = faceAt(0.5, 0.655, 0.19, turn, pitch);
       ctx.strokeStyle = rgba(INK, 0.75 * alpha);
       ctx.fillStyle = rgba(INK, 0.75 * alpha);
       ctx.lineWidth = Math.max(0.8, u(0.022));
       ctx.lineCap = "round";
       ctx.beginPath();
       if (mouth > 0.05) {
-        ctx.ellipse(u(0.5), u(0.665), u(0.035), u(0.03 * mouth + 0.006), 0, 0, TAU);
+        ctx.ellipse(u(cx), u(cy + 0.01), u(0.035), u(0.03 * mouth + 0.006), 0, 0, TAU);
         ctx.fill();
       } else {
-        ctx.moveTo(u(0.46), u(0.655));
-        ctx.quadraticCurveTo(u(0.5), u(0.69), u(0.54), u(0.655));
+        ctx.moveTo(u(cx - 0.04), u(cy));
+        ctx.quadraticCurveTo(u(cx), u(cy + 0.035), u(cx + 0.04), u(cy));
         ctx.stroke();
       }
     }
@@ -214,7 +231,7 @@ export function createCrab(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
       const color = mix(mix(p.c, WHITE, p.dark ? 0.35 : 0), p.warning, warn * 0.3);
       for (const side of [-1, 1] as const) {
         const i = side < 0 ? 0 : 1;
-        const x = u(0.5 + side * (0.36 + 0.02 * raise[i]));
+        const x = u(clawX(side, raise[i]));
         const y = u(0.6 - 0.26 * raise[i]);
         soundIn(ctx, x, y, u(0.17), u(0.08), -Math.PI / 2, 0.45, time + i * 0.4, draw * (1 - start) * alpha, color, Math.max(0.8, u(0.026)));
       }

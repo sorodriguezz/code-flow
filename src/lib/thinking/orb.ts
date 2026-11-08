@@ -7,6 +7,7 @@ import { prepareCanvas, type Painter } from "./ticker";
 import { voiceLevel } from "./voice";
 import type { Gaze } from "./face";
 import { easeToward, leanOf, toward } from "./pointer";
+import { material } from "./volume";
 
 /**
  * "Orbe" — the voice-powered orb (21st.dev, @isaiahbjork), the glowing ring whose edge boils with
@@ -294,6 +295,12 @@ export function createOrb(canvas: HTMLCanvasElement, px: number, gain = 1): Pain
     const size = px * scale(fin) * cued;
     const at = (px - size) / 2;
     if (cue.ask > 0.01) softHalo(ctx, px / 2, px / 2, px * 0.36, mix(p.b, p.c, 0.4), 0.25 * cue.ask * (0.6 + 0.4 * breath));
+    // A lens under the animated energy ring. Its reflection follows the cursor independently.
+    const lens = Math.max(px * 0.05, size * 0.36);
+    ctx.fillStyle = material(ctx, px / 2, px / 2, lens, [mix(hue2, light, 0.3), deep, hue1], p.dark ? 0.46 : 0.36, look.x);
+    ctx.beginPath();
+    ctx.arc(px / 2, px / 2, lens, 0, TAU);
+    ctx.fill();
     const gl = sharedGl();
     if (gl) {
       const g = gl.gl;
@@ -345,6 +352,14 @@ export function createOrb(canvas: HTMLCanvasElement, px: number, gain = 1): Pain
       ctx.strokeStyle = grad ?? rgb(mix(p.b, p.success, green));
       ctx.beginPath();
       ctx.arc(px / 2, px / 2, r * scale(fin) * cued, 0, TAU);
+      ctx.stroke();
+    }
+    if (px >= 26) {
+      ctx.strokeStyle = rgba(mix(hue2, [255, 255, 255], 0.75), 0.55);
+      ctx.lineWidth = Math.max(0.65, px * 0.01);
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.arc(px / 2, px / 2, lens * 0.89, 3.56 + look.x * 0.4, 4.31 + look.x * 0.4);
       ctx.stroke();
     }
     // Listening: rings of light closing on the ring from outside, as bright as what it hears.

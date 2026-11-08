@@ -52,7 +52,7 @@ export function ArchAiAction({ action, withInput = action !== "review" }: { acti
         />
       ) : null}
       <ArchThinking docId={docId} />
-      {last ? <ArchAnswer docId={docId} index={lastIndex} message={last} onAnswer={(text) => model && void askArchitecture(model, action, text)} /> : null}
+      {last ? <ArchAnswer key={lastIndex} docId={docId} index={lastIndex} message={last} onAnswer={(text) => model && void askArchitecture(model, action, text)} /> : null}
     </div>
   );
 }

@@ -5,6 +5,7 @@ import { blink, fillHeart, INK, lookFor, sleepZ, soundIn, strokeEye, WHITE, type
 import { listenLevel } from "./listen";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { contactShadow, faceAt, material } from "./volume";
 
 /**
  * "Gato" — a cat's head in the assistant's hues, glowing, with big bright eyes. It took the place of
@@ -169,12 +170,15 @@ export function createCat(canvas: HTMLCanvasElement, px: number, gain = 1): Pain
     sy *= 1 + 0.03 * perk;
     lift += 0.035 * hop(cue.wake);
 
-    const tone = (h: Rgb, g: Rgb) => rgba(mix(mix(h, g, green), p.warning, warn * 0.3), alpha);
-    const fur = [tone(p.a, mix(end, WHITE, 0.3)), tone(p.b, end), tone(p.c, mix(end, INK, 0.25))];
+    const coat = (h: Rgb, g: Rgb) => mix(mix(h, g, green), p.warning, warn * 0.3);
+    const tone = (h: Rgb, g: Rgb) => rgba(coat(h, g), alpha);
+    const turn = lookX * 0.65 - tilt * 1.6;
+    const pitch = lookY * 0.052;
     const innerEar = tone(mix(p.a, WHITE, 0.5), mix(end, WHITE, 0.55));
     const grow01 = 0.35 + 0.65 * easeOutBack(grow);
     // Listening, it holds still to hear.
     const bob = Math.sin(time * 2.2) * 0.012 * (1 - sleep) * (1 - 0.8 * perk) + sleep * 0.03 + crouch * 0.03;
+    if (detail) contactShadow(ctx, u(0.5), u(0.92), u(0.29 - lift * 0.7), p.b, alpha * (0.24 - lift));
 
     ctx.save();
     ctx.translate(u(0.5), u(0.88 - lift + bob));
@@ -189,15 +193,16 @@ export function createCat(canvas: HTMLCanvasElement, px: number, gain = 1): Pain
     for (const side of [-1, 1] as const) {
       const prick = -0.08 * perk - 0.06 * Math.min(1, draw) - 0.1 * start;
       const quizzical = side > 0 ? 0.3 * cue.ask : 0;
-      const angle = (thinking ? twitch(time, side) : 0) + sleep * 0.25 + flat - crouch * 0.12 + prick + quizzical;
-      ear(side, angle, fur[side < 0 ? 0 : 1], innerEar);
+      const angle = (thinking ? twitch(time, side) : 0) + sleep * 0.25 + flat - crouch * 0.12 + prick + quizzical + turn * side * 0.15;
+      ear(side, angle, tone(side < 0 ? p.a : mix(p.b, INK, 0.16), end), innerEar);
     }
 
     // The head, glowing.
-    const grad = ctx.createLinearGradient(u(0.15), u(0.3), u(0.85), u(0.9));
-    grad.addColorStop(0, fur[0]);
-    grad.addColorStop(0.55, fur[1]);
-    grad.addColorStop(1, fur[2]);
+    const grad = material(ctx, u(0.5), u(0.61), u(0.35), [
+      coat(mix(p.a, WHITE, 0.68), mix(end, WHITE, 0.65)),
+      coat(mix(p.b, p.c, 0.28), end),
+      coat(mix(p.a, INK, 0.38), mix(end, INK, 0.36)),
+    ], alpha, turn);
     ctx.save();
     ctx.shadowColor = rgba(mix(mix(p.a, end, green), p.warning, warn * 0.3), (p.dark ? 0.55 : 0.35) * alpha);
     // Brighter for each syllable it hears, and in the flash of a wake.
@@ -212,8 +217,8 @@ export function createCat(canvas: HTMLCanvasElement, px: number, gain = 1): Pain
     const open = act?.stopping ? 0.45 : cue.ask > 0.5 ? askBlink(time) : blink(time);
     const wide = 1 + 0.1 * perk + 0.15 * start;
     const eyeLight = mix(mix(p.c, WHITE, 0.55), p.warning, warn * 0.3);
-    for (const ex of [0.385, 0.615]) {
-      const ey = 0.6;
+    for (const x of [0.385, 0.615]) {
+      const { x: ex, y: ey, width } = faceAt(x, 0.6, 0.24, turn, pitch);
       ctx.lineCap = "round";
       if (dazed) {
         strokeEye(ctx, u(ex), u(ey), u(0.067), "x", rgba(WHITE, 0.9 * alpha), Math.max(1, u(0.032)));
@@ -229,7 +234,7 @@ export function createCat(canvas: HTMLCanvasElement, px: number, gain = 1): Pain
       }
       ctx.save();
       ctx.translate(u(ex), u(ey));
-      ctx.scale(1, open);
+      ctx.scale(width, open);
       ctx.shadowColor = rgba(p.c, 0.8 * alpha);
       ctx.shadowBlur = u(0.08);
       ctx.fillStyle = rgba(eyeLight, alpha);
@@ -248,17 +253,24 @@ export function createCat(canvas: HTMLCanvasElement, px: number, gain = 1): Pain
 
     if (detail) {
       // The nose, and a mouth only mid-meow.
+      const { x: nose, y: noseY } = faceAt(0.5, 0.67, 0.215, turn, pitch);
+      ctx.fillStyle = material(ctx, u(nose), u(noseY + 0.04), u(0.15), [
+        coat(mix(p.c, WHITE, 0.57), mix(end, WHITE, 0.5)), coat(p.b, end), coat(p.a, end),
+      ], alpha * 0.62, turn);
+      ctx.beginPath();
+      ctx.ellipse(u(nose), u(noseY + 0.04), u(0.112), u(0.067), 0, 0, TAU);
+      ctx.fill();
       ctx.fillStyle = tone(mix(p.a, WHITE, 0.55), mix(end, WHITE, 0.6));
       ctx.beginPath();
-      ctx.moveTo(u(0.475), u(0.67));
-      ctx.lineTo(u(0.525), u(0.67));
-      ctx.lineTo(u(0.5), u(0.7));
+      ctx.moveTo(u(nose - 0.025), u(noseY));
+      ctx.lineTo(u(nose + 0.025), u(noseY));
+      ctx.lineTo(u(nose), u(noseY + 0.03));
       ctx.closePath();
       ctx.fill();
       if (mouth > 0.05) {
         ctx.fillStyle = rgba(INK, 0.85 * alpha);
         ctx.beginPath();
-        ctx.ellipse(u(0.5), u(0.735), u(0.03), u(0.04 * mouth), 0, 0, TAU);
+        ctx.ellipse(u(nose), u(noseY + 0.065), u(0.03), u(0.04 * mouth), 0, 0, TAU);
         ctx.fill();
       }
     }

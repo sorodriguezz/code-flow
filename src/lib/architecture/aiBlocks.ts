@@ -10,7 +10,7 @@
 import { appendAt, rangeOf, removeAt, setAt, type JsonPath } from "./jsonEdit";
 import { jsoncToJson, parseArchText, findZone } from "./parse";
 import type { Finding } from "./rules";
-import type { SimResult } from "./sim";
+import { requestErrorRate, type SimResult } from "./sim";
 import type { ArchDoc, ResolvedComponents } from "./types";
 
 export type PatchOp =
@@ -30,7 +30,9 @@ const FENCE = (name: string) => new RegExp("```" + name + "[^\\S\\n]*\\n([\\s\\S
 function readOp(raw: unknown): PatchOp | null {
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Record<string, unknown>;
-  const path = Array.isArray(o.path) ? (o.path.filter((k) => typeof k === "string" || typeof k === "number") as JsonPath) : null;
+  const path = Array.isArray(o.path) && o.path.length && o.path.every((key) =>
+    typeof key === "string" || (Number.isInteger(key) && key >= 0),
+  ) ? (o.path as JsonPath) : null;
   switch (o.op) {
     case "set":
     case "replace":
@@ -40,7 +42,7 @@ function readOp(raw: unknown): PatchOp | null {
       return path && "value" in o ? { op: "add", path, value: o.value } : null;
     case "remove":
     case "delete":
-      return path && path.length ? { op: "remove", path } : null;
+      return path ? { op: "remove", path } : null;
     case "place":
       return typeof o.id === "string" ? { op: "place", id: o.id, zone: typeof o.zone === "string" ? o.zone : undefined } : null;
     default:
@@ -57,13 +59,16 @@ export function splitAnswer(text: string): { text: string; changes: PatchChange[
     try { parsed = JSON.parse(jsoncToJson(body.trim())); } catch { return block; }
     const list = Array.isArray(parsed) ? parsed : (parsed as { changes?: unknown[] })?.changes;
     if (!Array.isArray(list)) return block;
+    const parsedChanges: PatchChange[] = [];
     for (const item of list) {
       if (!item || typeof item !== "object") continue;
       const c = item as Record<string, unknown>;
-      const ops = (Array.isArray(c.ops) ? c.ops : []).map(readOp).filter((x): x is PatchOp => !!x);
-      if (!ops.length) continue;
-      changes.push({ title: String(c.title ?? "").trim() || "—", why: String(c.why ?? "").trim(), ops });
+      const ops = (Array.isArray(c.ops) ? c.ops : []).map(readOp);
+      // A missing operation can change the meaning of the rest of the patch.
+      if (!ops.length || !ops.every((op): op is PatchOp => op !== null)) return block;
+      parsedChanges.push({ title: String(c.title ?? "").trim() || "—", why: String(c.why ?? "").trim(), ops });
     }
+    changes.push(...parsedChanges);
     return "";
   });
   rest = rest.replace(FENCE("arch-doc"), (block, body: string) => {
@@ -99,6 +104,7 @@ export function applyChanges(text: string, changes: PatchChange[]): string {
         const r = parseArchText(out);
         if (!r.ok) throw new Error("document does not parse");
         const zonePath = op.zone ? zonePathIn(r.doc, op.zone) : null;
+        if (op.zone && !zonePath) throw new Error(`Zone ${op.zone} is not in the document`);
         out = appendAt(out, zonePath ? [...zonePath, "children"] : ["layout"], op.id);
       }
     }
@@ -135,14 +141,25 @@ export function describeOp(op: PatchOp): { sign: "+" | "-" | "~"; text: string }
 }
 
 /** What the app already knows about the document, for the model: findings, then the capacity model. */
-export function contextFor(findings: Finding[], sim: SimResult, comps: ResolvedComponents, describeFinding: (f: Finding) => string): string {
+export function contextFor(
+  findings: Finding[],
+  sim: SimResult,
+  comps: ResolvedComponents,
+  scenario: { scale: number; down: readonly string[]; env: string },
+  describeFinding: (f: Finding) => string,
+): string {
   const name = (id: string) => comps[id]?.name ?? id;
   const lines: string[] = [];
   lines.push("Review findings (rule-based):");
   if (!findings.length) lines.push("- none");
   for (const f of findings.slice(0, 30)) lines.push(`- [${f.severity}] ${describeFinding(f)}${f.affects.length ? ` (${f.affects.map(name).join(", ")})` : ""}`);
   lines.push("");
-  lines.push(`Simulation at ×1 traffic: verdict ${sim.verdict}; entry ${Math.round(sim.entry)} rps; synchronous part ${Math.round(sim.syncMs)} ms; flow error ${Math.round(sim.flowError * 100)} %.`);
+  lines.push(`Selected environment: ${scenario.env}.`);
+  const sync = !sim.syncSteps.length ? "no numbered steps"
+    : requestErrorRate(sim) >= 1 ? "no successful response" : `${Math.round(sim.syncMs)} ms`;
+  lines.push(`Simulation at ×${scenario.scale} traffic: verdict ${sim.verdict}; entry ${Math.round(sim.entry)} rps; synchronous part ${sync}; worst modeled synchronous flow error ${Math.round(sim.flowError * 100)} %.`);
+  if (sim.entry > 0) lines.push(`Estimated errors across actor traffic: ${Math.round(sim.actorError * 100)} %.`);
+  if (scenario.down.length) lines.push(`Components disabled in this scenario: ${scenario.down.map(name).join(", ")}.`);
   if (sim.firstToBreak) lines.push(`First to saturate: ${name(sim.firstToBreak)} at about ×${sim.breakAt.toFixed(1)}.`);
   const hot = Object.entries(sim.metrics).filter(([id, m]) => comps[id]?.category !== "actor" && m.load > 0).sort((a, b) => b[1].util - a[1].util).slice(0, 6);
   if (hot.length) lines.push(`Busiest: ${hot.map(([id, m]) => `${name(id)} ${Math.round(m.util * 100)} %`).join(", ")}.`);

@@ -4,6 +4,7 @@ import { blink, INK, lipSync, lookFor, mouthOpen, sleepZ, soundIn, strokeEye, WH
 import { clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { contactShadow, faceAt, material } from "./volume";
 import { listenLevel } from "./listen";
 import { voiceLevel } from "./voice";
 
@@ -69,13 +70,13 @@ export function createAlien(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
   const groupOf = (act: ThinkingActivity | undefined): PhaseGroup | "speak" | undefined =>
     awake(act) ? (act?.phase === "speak" ? "speak" : phaseGroup(act?.phase)) : undefined;
 
-  function head() {
+  function head(turn: number) {
     if (!ctx) return;
     ctx.beginPath();
     ctx.moveTo(u(0.5), u(0.355));
     ctx.bezierCurveTo(u(0.7), u(0.355), u(0.845), u(0.45), u(0.845), u(0.59));
-    ctx.bezierCurveTo(u(0.845), u(0.77), u(0.66), u(0.9), u(0.5), u(0.9));
-    ctx.bezierCurveTo(u(0.34), u(0.9), u(0.155), u(0.77), u(0.155), u(0.59));
+    ctx.bezierCurveTo(u(0.845), u(0.77), u(0.66 + turn * 0.08), u(0.9), u(0.5 + turn * 0.08), u(0.9));
+    ctx.bezierCurveTo(u(0.34 + turn * 0.08), u(0.9), u(0.155), u(0.77), u(0.155), u(0.59));
     ctx.bezierCurveTo(u(0.155), u(0.45), u(0.3), u(0.355), u(0.5), u(0.355));
     ctx.closePath();
   }
@@ -133,6 +134,9 @@ export function createAlien(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
     // The wake's hop — low, like the finish's, for the antennae.
     lift += 0.04 * hop(cue.wake) - 0.02 * perk;
 
+    const turn = lookX * 0.68 + tilt;
+    const pitch = lookY * 0.048;
+    if (detail) contactShadow(ctx, u(0.5), u(0.933), u(0.26 - lift * 0.7), p.b, a * (0.24 - lift));
     ctx.save();
     ctx.translate(u(0.5), u(0.9 - lift + sink + bob));
     ctx.rotate(tilt);
@@ -144,7 +148,7 @@ export function createAlien(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
     const tips: [number, number][] = [];
     for (const i of [0, 1]) {
       const side = i === 0 ? -1 : 1;
-      const bx = 0.5 + side * 0.1;
+      const bx = 0.5 + side * 0.1 + turn * 0.08;
       const by = 0.4;
       ctx.save();
       ctx.translate(u(bx), u(by));
@@ -170,7 +174,7 @@ export function createAlien(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
       ctx.save();
       ctx.shadowColor = rgba(tone(p.c, end), on * (p.dark ? 0.95 : 0.7) * a);
       ctx.shadowBlur = u(0.04 + 0.1 * on);
-      ctx.fillStyle = rgba(tip, a);
+      ctx.fillStyle = material(ctx, u(tipX), u(tipY), u(detail ? 0.05 : 0.065), [mix(tip, WHITE, 0.64), tip, mix(tip, INK, 0.36)], a, turn);
       ctx.beginPath();
       ctx.arc(u(tipX), u(tipY), u(detail ? 0.05 : 0.065), 0, TAU);
       ctx.fill();
@@ -183,11 +187,12 @@ export function createAlien(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
     }
 
     // The head, glowing.
-    head();
-    const grad = ctx.createLinearGradient(0, u(0.36), 0, u(0.9));
-    grad.addColorStop(0, rgba(tone(mix(p.c, WHITE, 0.18), mix(end, WHITE, 0.3)), a));
-    grad.addColorStop(0.6, rgba(tone(mix(p.c, p.b, 0.5), end), a));
-    grad.addColorStop(1, rgba(tone(mix(p.b, p.a, 0.4), mix(end, INK, 0.15)), a));
+    head(turn);
+    const grad = material(ctx, u(0.5), u(0.59), u(0.35), [
+      tone(mix(p.c, WHITE, 0.72), mix(end, WHITE, 0.64)),
+      tone(mix(p.c, p.b, 0.31), end),
+      tone(mix(p.b, INK, 0.34), mix(end, INK, 0.27)),
+    ], a, turn);
     ctx.save();
     ctx.shadowColor = rgba(tone(mix(p.c, p.a, 0.4), end), (p.dark ? 0.55 : 0.35) * a);
     ctx.shadowBlur = u(0.13);
@@ -200,8 +205,7 @@ export function createAlien(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
     const open = act?.stopping ? 0.45 : cue.ask > 0.5 ? askBlink(time) : blink(time, 3.7);
     const wide = 1 + 0.1 * perk + 0.15 * start;
     for (const side of [-1, 1]) {
-      const ex = 0.5 + side * 0.125;
-      const ey = 0.625;
+      const { x: ex, y: ey, width } = faceAt(0.5 + side * 0.125, 0.625, 0.24, turn, pitch);
       if (dazed) {
         strokeEye(ctx, u(ex), u(ey), u(0.07), "x", rgba(INK, 0.9 * a), Math.max(1, u(0.038)));
         continue;
@@ -215,11 +219,11 @@ export function createAlien(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
         continue;
       }
       ctx.save();
-      ctx.translate(u(ex + lookX * 0.014), u(ey + lookY * 0.012));
+      ctx.translate(u(ex), u(ey));
       // Half shut, the tilt eases off — a slanted slit reads as a scowl.
       ctx.rotate(-side * 0.42 * open);
-      ctx.scale(1, open);
-      ctx.fillStyle = rgba(INK, 0.95 * a);
+      ctx.scale(width, open);
+      ctx.fillStyle = material(ctx, 0, 0, u(0.103 * wide), [mix(INK, p.c, 0.34), INK, mix(INK, p.a, 0.22)], a, turn);
       ctx.beginPath();
       ctx.ellipse(0, 0, u(0.1 * wide), u(0.078 * wide), 0, 0, TAU);
       ctx.fill();
@@ -228,8 +232,8 @@ export function createAlien(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
         ctx.fillStyle = rgba(WHITE, 0.9 * a);
         ctx.beginPath();
         ctx.arc(
-          u(ex + lookX * 0.04 - 0.012),
-          u(ey + lookY * 0.03 - 0.022 * open),
+          u(ex - 0.019 * width),
+          u(ey - 0.022 * open),
           Math.max(0.7, u(0.025)) * Math.min(1, open * 1.5),
           0,
           TAU,
@@ -237,17 +241,18 @@ export function createAlien(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
         ctx.fill();
       }
     }
+    const { x: mx, y: my } = faceAt(0.5, 0.774, 0.19, turn, pitch);
     if (groupOf(act) === "speak") {
       // Lip-sync: the mouth opens with the voice.
       const w = detail ? 0.034 : 0.05;
       ctx.fillStyle = rgba(INK, 0.85 * a);
       ctx.beginPath();
-      ctx.ellipse(u(0.5), u(0.78), Math.max(0.6, u(w)), Math.max(0.5, u(w * mouthOpen(mouth, gain))), 0, 0, TAU);
+      ctx.ellipse(u(mx), u(my + 0.006), Math.max(0.6, u(w)), Math.max(0.5, u(w * mouthOpen(mouth, gain))), 0, 0, TAU);
       ctx.fill();
     } else if (detail && mouth > 0.05 && !dazed) {
       ctx.fillStyle = rgba(INK, 0.85 * a);
       ctx.beginPath();
-      ctx.ellipse(u(0.5), u(0.775), u(0.026), u(0.032 * mouth + 0.005), 0, 0, TAU);
+      ctx.ellipse(u(mx), u(my), u(0.026), u(0.032 * mouth + 0.005), 0, 0, TAU);
       ctx.fill();
     }
     ctx.restore();
@@ -262,7 +267,7 @@ export function createAlien(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
           const k = (time * 1.3 + j * 0.5) % 1;
           ctx.strokeStyle = rgba(warm(mix(p.c, WHITE, 0.35)), (1 - k) * signal * a);
           ctx.beginPath();
-          ctx.arc(x, y, u(0.07 + k * 0.08), dir - 0.65, dir + 0.65);
+          ctx.arc(x, y, u(0.055 + k * 0.07), dir - 0.65, dir + 0.65);
           ctx.stroke();
         }
       });

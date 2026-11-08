@@ -4,6 +4,7 @@ import { blink, INK, lipSync, lookFor, mouthOpen, sleepZ, soundIn, strokeEye, WH
 import { clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { contactShadow, faceAt, material } from "./volume";
 import { listenLevel } from "./listen";
 import { voiceLevel } from "./voice";
 
@@ -130,6 +131,9 @@ export function createCloud(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
     // Speaking, it makes room at its right for the sound arcs; listening, at its left for theirs.
     const sway = Math.sin(time * 0.9) * 0.025 * still - 0.05 * talk + 0.04 * perk;
     const bob = Math.sin(time * 1.7) * 0.015 * still + sleep * 0.02 + sag * 0.04 - 0.045 * hop(cue.wake);
+    const turn = lookX * 0.66 - tilt;
+    const pitch = lookY * 0.046;
+    if (detail) contactShadow(ctx, u(0.5 + sway), u(0.866), u(0.28), p.b, 0.22 * a * (1 - 0.5 * rain));
 
     // The bolt's flicker: a double flash, then dark.
     const beat = time % 1.1;
@@ -183,36 +187,55 @@ export function createCloud(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
     ctx.translate(-u(0.5), -u(0.75));
 
     // The body: the puffs and the underside, one path, one glow.
-    ctx.beginPath();
-    PUFFS.forEach(([x, y, r], i) => {
+    const puffs = PUFFS.map(([x, y, r], i) => {
       const breathe = 1 + Math.sin(time * 1.8 + i * 1.3) * 0.022 * still + Math.sin(fin * 18 + i * 2.1) * 0.07 * jelly;
       // Sitting up to listen: the top puff rises.
       const up = i === 0 ? 0.025 * perk : 0;
-      ctx.moveTo(u(x + r * breathe), u(y - up));
-      ctx.arc(u(x), u(y - up), u(r * breathe), 0, TAU);
+      return [x + turn * (i === 0 ? 0.035 : 0.018), y - up, r * breathe * (1 + (x - 0.5) * turn * 0.2)] as const;
     });
+    ctx.beginPath();
+    for (const [x, y, r] of puffs) {
+      ctx.moveTo(u(x + r), u(y));
+      ctx.arc(u(x), u(y), u(r), 0, TAU);
+    }
     ctx.rect(u(BASE[0]), u(BASE[1]), u(BASE[2] - BASE[0]), u(BASE[3] - BASE[1]));
     const top: Rgb = mix(mix(WHITE, p.c, 0.3), failed ? mix(end, INK, 0.15) : mix(end, WHITE, 0.3), tint);
     const bottom: Rgb = mix(mix(p.a, WHITE, 0.3), failed ? mix(end, INK, 0.5) : end, tint);
     const lit = Math.max(flash * 0.3, start * 0.35);
-    const grad = ctx.createLinearGradient(0, u(0.24), 0, u(0.76));
-    grad.addColorStop(0, rgba(warm(mix(top, WHITE, lit)), a));
-    grad.addColorStop(1, rgba(warm(mix(bottom, WHITE, lit)), a));
+    const grad = material(ctx, u(0.5), u(0.53), u(0.39), [
+      warm(mix(top, WHITE, 0.4 + lit)), warm(mix(top, bottom, 0.38)), warm(mix(bottom, p.b, 0.24)),
+    ], a, turn);
     ctx.save();
     ctx.shadowColor = rgba(warm(mix(p.a, end, tint)), (p.dark ? 0.6 : 0.4) * a);
     ctx.shadowBlur = u(0.13);
     ctx.fillStyle = grad;
     ctx.fill();
     ctx.restore();
+    if (detail) {
+      ctx.save();
+      ctx.clip();
+      // Overlapping lobes catch separate highlights while their lower edges blend into the cloud.
+      for (const [x, y, r] of puffs) {
+        const glow = ctx.createRadialGradient(u(x - r * 0.22), u(y - r * 0.4), 0, u(x), u(y), u(r));
+        glow.addColorStop(0, rgba(warm(mix(top, WHITE, 0.62)), a * 0.71));
+        glow.addColorStop(0.68, rgba(warm(top), a * 0.25));
+        glow.addColorStop(1, rgba(bottom, 0));
+        ctx.fillStyle = glow;
+        ctx.beginPath();
+        ctx.arc(u(x), u(y), u(r), 0, TAU);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
 
     // The face.
     const ink = rgba(mix(INK, WHITE, failed ? tint * 0.9 : 0), 0.9 * a);
     const open = act?.stopping ? 0.45 : cue.ask > 0.5 ? askBlink(time) : blink(time, 3.9);
-    const ey = 0.585;
     const eyeR = detail ? 0.042 : 0.052;
     // Wide while it listens, wider for a moment when woken.
     const wide = 1 + 0.15 * perk + 0.2 * start;
-    for (const ex of [0.415, 0.585]) {
+    for (const x of [0.415, 0.585]) {
+      const { x: ex, y: ey, width } = faceAt(x, 0.585, 0.22, turn, pitch);
       if (dazed) strokeEye(ctx, u(ex), u(ey), u(eyeR), "x", ink, Math.max(1, u(0.03)));
       else if (happy) strokeEye(ctx, u(ex), u(ey), u(eyeR * 1.1), "happy", ink, Math.max(1, u(0.032)));
       else if (sleep > 0.5 || open < 0.15) {
@@ -220,12 +243,13 @@ export function createCloud(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
       } else {
         ctx.fillStyle = ink;
         ctx.beginPath();
-        ctx.ellipse(u(ex + lookX * 0.02), u(ey + lookY * 0.018), u(eyeR * 0.9 * wide), u(eyeR * 1.35 * open * wide), 0, 0, TAU);
+        ctx.ellipse(u(ex), u(ey), u(eyeR * 0.9 * wide * width), u(eyeR * 1.35 * open * wide), 0, 0, TAU);
         ctx.fill();
       }
     }
     const speaking = groupOf(act) === "speak";
     if (detail || speaking) {
+      const { x, y } = faceAt(0.5, 0.66, 0.19, turn, pitch);
       ctx.fillStyle = ink;
       ctx.strokeStyle = ink;
       ctx.lineWidth = Math.max(0.8, u(0.022));
@@ -234,18 +258,18 @@ export function createCloud(canvas: HTMLCanvasElement, px: number, gain = 1): Pa
       if (speaking) {
         // Lip-sync: the mouth opens with the voice.
         const w = detail ? 0.032 : 0.048;
-        ctx.ellipse(u(0.5), u(0.67), Math.max(0.6, u(w)), Math.max(0.5, u(w * mouthOpen(mouth, gain))), 0, 0, TAU);
+        ctx.ellipse(u(x), u(y + 0.01), Math.max(0.6, u(w)), Math.max(0.5, u(w * mouthOpen(mouth, gain))), 0, 0, TAU);
         ctx.fill();
       } else if (mouth > 0.05 && !dazed) {
-        ctx.ellipse(u(0.5), u(0.665), u(0.025), u(0.032 * mouth + 0.005), 0, 0, TAU);
+        ctx.ellipse(u(x), u(y + 0.005), u(0.025), u(0.032 * mouth + 0.005), 0, 0, TAU);
         ctx.fill();
       } else if (dazed) {
-        ctx.moveTo(u(0.47), u(0.68));
-        ctx.quadraticCurveTo(u(0.5), u(0.655), u(0.53), u(0.68));
+        ctx.moveTo(u(x - 0.03), u(y + 0.02));
+        ctx.quadraticCurveTo(u(x), u(y - 0.005), u(x + 0.03), u(y + 0.02));
         ctx.stroke();
       } else {
-        ctx.moveTo(u(0.47), u(0.655));
-        ctx.quadraticCurveTo(u(0.5), u(0.685), u(0.53), u(0.655));
+        ctx.moveTo(u(x - 0.03), u(y - 0.005));
+        ctx.quadraticCurveTo(u(x), u(y + 0.025), u(x + 0.03), u(y - 0.005));
         ctx.stroke();
       }
     }

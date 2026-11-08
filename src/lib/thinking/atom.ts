@@ -1,10 +1,11 @@
 import { ended, type RunPhase, type ThinkingActivity } from "./activity";
 import { askBreath, cueClock, softHalo, startle } from "./cue";
-import { WHITE, type Gaze } from "./face";
+import { INK, WHITE, type Gaze } from "./face";
 import { clamp01, easeIn, easeOut, endColor, finishClock, rgba, TAU } from "./finish";
 import { listenLevel } from "./listen";
 import { aiHue, mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { material } from "./volume";
 import { easeToward, lean, toward } from "./pointer";
 
 /**
@@ -84,7 +85,7 @@ export function createAtom(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
     const y = Math.sin(a) * ry;
     const r = ORBITS[i] + turn;
     const [lx, ly, nearer] = lean(look, x * Math.cos(r) - y * Math.sin(r), x * Math.sin(r) + y * Math.cos(r), 0.4);
-    return [0.5 + lx, 0.5 + ly, nearer];
+    return [0.5 + lx, 0.5 + ly, nearer * (1 + 0.17 * Math.sin(a))];
   }
 
   function paint() {
@@ -121,18 +122,44 @@ export function createAtom(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
     flash = Math.max(flash, 0.8 * start);
     if (cue.ask > 0.01) softHalo(ctx, u(0.5), u(0.5), u(0.36), aiHue(p, 0.5), 0.2 * cue.ask * (0.6 + 0.4 * breath) * alpha);
 
-    // Orbits.
-    ctx.lineWidth = Math.max(0.7, Math.min(u(0.022), 1 + px / 90));
-    ORBITS.forEach((_, i) => {
-      ctx.strokeStyle = rgba(hue(i), 0.4 * alpha * orbitFade);
-      ctx.beginPath();
-      for (let s = 0; s <= steps; s++) {
-        const [x, y] = onOrbit(i, (s / steps) * TAU, size, wobble);
-        if (s === 0) ctx.moveTo(u(x), u(y));
-        else ctx.lineTo(u(x), u(y));
-      }
-      ctx.stroke();
-    });
+    const orbitWidth = Math.max(0.7, Math.min(u(0.022), 1 + px / 90));
+    const dot = Math.max(0.9, u(0.038));
+    const orbitHalf = (front: boolean) => {
+      const startAngle = front ? 0 : Math.PI;
+      const segments = steps / 2;
+      ORBITS.forEach((_, i) => {
+        ctx.lineWidth = orbitWidth * (front ? 1.32 : 0.72);
+        ctx.lineCap = "round";
+        ctx.strokeStyle = rgba(mix(hue(i), front ? WHITE : INK, front ? 0.25 : 0.24), (front ? 0.68 : 0.3) * alpha * orbitFade);
+        ctx.beginPath();
+        for (let s = 0; s <= segments; s++) {
+          const [x, y] = onOrbit(i, startAngle + (s / segments) * Math.PI, size, wobble);
+          if (s === 0) ctx.moveTo(u(x), u(y));
+          else ctx.lineTo(u(x), u(y));
+        }
+        ctx.stroke();
+      });
+    };
+    const particles = (front: boolean) => {
+      if (failed && fin >= 0) return;
+      electrons.forEach((a, i) => {
+        for (let t = 3; t >= 0; t--) {
+          const angle = a - t * 0.22 * Math.sign(spin || 1);
+          if ((Math.sin(angle) >= 0) !== front) continue;
+          const [x, y, nearer] = onOrbit(i, angle, size, wobble);
+          const r = dot * (1 - t * 0.2) * nearer;
+          const col = hue(i);
+          ctx.fillStyle = t === 0
+            ? material(ctx, u(x), u(y), r, [mix(col, WHITE, 0.87), col, mix(col, INK, 0.42)], alpha * (front ? 1 : 0.65))
+            : rgba(col, (0.5 - t * 0.12) * alpha);
+          ctx.beginPath();
+          ctx.arc(u(x), u(y), r, 0, TAU);
+          ctx.fill();
+        }
+      });
+    };
+    orbitHalf(false);
+    particles(false);
 
     // The nucleus: a few particles held together, glowing; it throbs while writing.
     const writing = !ended(act) && !act?.quiet && act?.phase === "write";
@@ -161,6 +188,8 @@ export function createAtom(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
       ctx.fill();
     }
     ctx.restore();
+    orbitHalf(true);
+    particles(true);
 
     // Listening: rings closing on the nucleus from outside, fading as they land.
     if (drawn > 0.01) {
@@ -187,7 +216,6 @@ export function createAtom(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
     }
 
     // Electrons with short trails — or, on a failure, flying off.
-    const dot = Math.max(0.9, u(0.04));
     if (failed && fin >= 0) {
       const k = clamp01(fin / 0.9);
       escape.forEach((e, i) => {
@@ -196,17 +224,7 @@ export function createAtom(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
         ctx.arc(u(e.x + e.vx * fin), u(e.y + e.vy * fin), dot, 0, TAU);
         ctx.fill();
       });
-      return;
     }
-    electrons.forEach((a, i) => {
-      for (let t = 3; t >= 0; t--) {
-        const [x, y, nearer] = onOrbit(i, a - t * 0.22 * Math.sign(spin || 1), size, wobble);
-        ctx.fillStyle = rgba(mix(hue(i), WHITE, t === 0 ? 0.35 : 0), (t === 0 ? 1 : 0.5 - t * 0.12) * alpha);
-        ctx.beginPath();
-        ctx.arc(u(x), u(y), dot * (1 - t * 0.2) * nearer, 0, TAU);
-        ctx.fill();
-      }
-    });
   }
 
   /** Records each electron's position and tangent as it leaves, so the escape starts from it. */

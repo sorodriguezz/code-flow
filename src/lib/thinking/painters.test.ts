@@ -3,14 +3,15 @@ import type { ThinkingActivity, ThinkingCue } from "./activity";
 import type { Painter } from "./ticker";
 import { ORB_PX } from "./ticker";
 import { endListen, setListenLevel } from "./listen";
+import type { Gaze } from "./face";
 import { createSphere } from "./sphere";
 import { createOrb } from "./orb";
-import { createNetwork } from "./network";
+import { createAxolotl } from "./axolotl";
 import { createWave } from "./wave";
 import { createLiquid } from "./liquid";
 import { createCrystal } from "./crystal";
 import { createCat } from "./cat";
-import { createPixels } from "./pixels";
+import { createRocky } from "./rocky";
 import { createGhost } from "./ghost";
 import { createCrab } from "./crab";
 import { createMoon } from "./moon";
@@ -274,12 +275,12 @@ type Make = (canvas: HTMLCanvasElement, px: number, gain: number) => Painter;
 const PAINTERS: Record<string, Make> = {
   sphere: createSphere,
   orb: createOrb,
-  network: createNetwork,
+  axolotl: createAxolotl,
   wave: createWave,
   liquid: createLiquid,
   crystal: createCrystal,
   cat: createCat,
-  pixels: createPixels,
+  rocky: createRocky,
   ghost: createGhost,
   crab: createCrab,
   moon: createMoon,
@@ -308,7 +309,7 @@ function play(
   make: Make,
   px: number,
   gain: number,
-  steps: { act: ThinkingActivity | undefined; frames: number; feed?: (frame: number) => number }[],
+  steps: { act: ThinkingActivity | undefined; frames: number; feed?: (frame: number) => number; gaze?: Gaze }[],
 ): Run {
   const canvas = fakeCanvas();
   const painter = make(canvas as unknown as HTMLCanvasElement, px, gain);
@@ -318,6 +319,7 @@ function play(
   let overflow = 0;
   for (const step of steps) {
     painter.setActivity(step.act);
+    painter.setGaze?.(step.gaze ?? null);
     for (let f = 0; f < step.frames; f++) {
       now += 1000 / 60;
       if (step.feed) setListenLevel(step.feed(f), now);
@@ -414,4 +416,30 @@ describe("every canvas design", () => {
       });
     });
   }
+});
+
+describe("perspective at the pointer's extremes", () => {
+  const characters = { axolotl: createAxolotl, rocky: createRocky, ghost: createGhost, cat: createCat, crab: createCrab, cloud: createCloud, alien: createAlien, spark: createSpark, bulb: createBulb };
+
+  it.each(Object.entries(characters))("keeps %s in view", (_, make) => {
+    const run = play(make, ORB_PX.hero, 2.2, [
+      { act: { phase: "think" }, gaze: [1, 0], frames: 90 },
+      { act: { phase: "edit" }, gaze: [-1, 0], frames: 90 },
+      { act: { phase: "write" }, gaze: [0, -1], frames: 90 },
+      { act: { phase: "read" }, gaze: [0, 1], frames: 90 },
+    ]);
+    expect(run.nan).toBe(false);
+    expect(run.overflow).toBeLessThanOrEqual(0.01);
+  });
+
+  it("keeps the ghost's body wide through the turn even at icon size", () => {
+    const canvas = fakeCanvas();
+    const px = ORB_PX.sm;
+    const ghost = createGhost(canvas as unknown as HTMLCanvasElement, px);
+    ghost.still();
+    ghost.setActivity({ done: true });
+    for (let frame = 0; frame < 9; frame++) ghost.tick(1 / 60);
+    const { minX, maxX } = canvas.ctx!.box;
+    expect(maxX - minX).toBeGreaterThan(px * DPR * 0.5);
+  });
 });

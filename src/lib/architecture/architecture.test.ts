@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 import { applyChanges, splitAnswer } from "./aiBlocks";
 import { addComponentAt, addZoneAt, clearPositions, connect, moveNode, parentZoneOf, removeElements } from "./canvasOps";
 import { categoryFor } from "./catalog";
+import { traceDependencies } from "./dependencies";
 import { appendAt, formatDoc, pathAt, rangeOf, removeAt, setAt } from "./jsonEdit";
 import { layoutDoc } from "./layout";
 import { jsoncToJson, parseArchText, validateDoc } from "./parse";
 import { detectPatterns } from "./patterns";
 import { review } from "./rules";
-import { simulate } from "./sim";
+import { outageEffects, simulate } from "./sim";
 import { renderSvg, LIGHT_PALETTE } from "./svg";
 import { exampleDoc as templateDoc, EXAMPLE_IDS as TEMPLATE_IDS } from "./examples.fixture";
 import { blankDoc } from "./templates";
@@ -193,9 +194,96 @@ describe("capacity model", () => {
     expect(s.metrics.b.load).toBeCloseTo(50);
     expect(s.metrics.db.load).toBeCloseTo(50);
   });
+
+  it("weights entry errors across all actors, including lower-traffic entrances", () => {
+    const doc: ArchDoc = {
+      components: {
+        people: { category: "actor", sim: { rps: 80 } },
+        partners: { category: "actor", sim: { rps: 20 } },
+        portal: { category: "compute" },
+        partnerApi: { category: "compute" },
+      },
+      connections: [{ from: "people", to: "portal" }, { from: "partners", to: "partnerApi" }],
+    };
+    const result = simulate(doc, resolveComponents(doc), 1, new Set(["partnerApi"]));
+    expect(result.entry).toBe(100);
+    expect(result.actorError).toBeCloseTo(0.2);
+    expect(result.verdict).toBe("fails");
+  });
+
+  it("separates propagated errors, lost downstream traffic and pending async work", () => {
+    const doc: ArchDoc = {
+      components: {
+        people: { category: "actor", sim: { rps: 30 } },
+        producer: { category: "compute", sim: { rps: 10 } },
+        api: { category: "compute" },
+        database: { category: "data" },
+      },
+      connections: [{ from: "people", to: "api" }, { from: "producer", to: "api", kind: "async" }, { from: "api", to: "database" }],
+    };
+    const comps = resolveComponents(doc);
+    const healthy = simulate(doc, comps, 2, new Set());
+    const outage = simulate(doc, comps, 2, new Set(["api"]));
+    expect(outageEffects(outage, healthy)).toEqual([
+      { id: "people", errorIncrease: 1, loadLost: 0, backlogIncrease: 0 },
+      { id: "api", errorIncrease: 0, loadLost: 0, backlogIncrease: 20 },
+      { id: "database", errorIncrease: 0, loadLost: 80, backlogIncrease: 0 },
+    ]);
+    expect(outageEffects(healthy, healthy)).toEqual([]);
+  });
+});
+
+describe("dependency tracing", () => {
+  const doc: ArchDoc = {
+    components: { user: {}, api: {}, db: {}, worker: {} },
+    connections: [
+      { from: "missing", to: "db" },
+      { from: "user", to: "api" },
+      { from: "api", to: "db" },
+      { from: "api", to: "db", kind: "async" },
+      { from: "db", to: "api" },
+      { from: "user", to: "db", kind: "async" },
+      { from: "db", to: "worker", kind: "async" },
+    ],
+  };
+  const comps = resolveComponents(doc);
+
+  it("preserves the shortest route and original indexes through cycles and parallel edges", () => {
+    const { routes, pathTo } = traceDependencies(doc.connections!, comps, "user", "dependencies", false);
+    expect([...routes.keys()]).toEqual(["api", "db", "worker"]);
+    expect(pathTo("worker")).toEqual({ ids: ["user", "db", "worker"], edges: [5, 6] });
+    expect(routes.get("worker")).toMatchObject({ asynchronous: true, hops: 2 });
+  });
+
+  it("can follow only synchronous callers and keeps arrows in the real direction", () => {
+    const { routes, pathTo } = traceDependencies(doc.connections!, comps, "db", "callers", true);
+    expect([...routes.keys()]).toEqual(["api", "user"]);
+    expect(pathTo("user")).toEqual({ ids: ["user", "api", "db"], edges: [1, 2] });
+    expect(pathTo("missing")).toBeNull();
+    expect(pathTo("db")).toBeNull();
+  });
 });
 
 describe("review and patterns", () => {
+  it("does not flag missing observability on an empty diagram", () => {
+    expect(review({}, {})).toEqual([]);
+  });
+
+  it("points to the original positions of connections that need attention", () => {
+    const doc: ArchDoc = {
+      components: { user: { category: "actor" }, api: { category: "compute" } },
+      connections: [
+        { from: "missing", to: "api" },
+        { from: "user", to: "api", protocol: "HTTP" },
+        { from: "user", to: "api", protocol: "HTTPS" },
+        { from: "user", to: "api" },
+      ],
+    };
+    const findings = review(doc, resolveComponents(doc));
+    expect(findings.find((finding) => finding.rule === "plainHttp")?.connections).toEqual([1]);
+    expect(findings.find((finding) => finding.rule === "noProtocol")?.connections).toEqual([3]);
+  });
+
   it("finds what the reference diagram is missing", () => {
     const doc = bookings();
     const rules = review(doc, resolveComponents(doc)).map((f) => f.rule);
@@ -231,6 +319,16 @@ describe("the assistant's proposals", () => {
     expect(r.text).toBe("Text before.");
     expect(r.changes).toHaveLength(1);
     expect(r.changes[0].ops[0]).toEqual({ op: "set", path: ["components", "core_rules", "sim", "replicas"], value: 2 });
+  });
+
+  it("leaves a patch with a malformed path in the answer instead of applying it partially", () => {
+    const text = answer([
+      { op: "set", path: ["components", false, "api"], value: { name: "API" } },
+      { op: "remove", path: ["connections", 0] },
+    ]);
+    const result = splitAnswer(text);
+    expect(result.changes).toEqual([]);
+    expect(result.text).toContain("arch-patch");
   });
 
   it("applies a change in place and keeps the comments around it", () => {

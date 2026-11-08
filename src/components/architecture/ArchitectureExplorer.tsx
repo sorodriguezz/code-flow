@@ -9,23 +9,19 @@
  * «Mover a» in its menu. The drag is pointer-driven: Tauri's webview swallows HTML5 `dragstart`.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, Copy, FilePlus2, Folder, FolderInput, FolderPlus, GitBranch, MoreVertical, Network, Pencil, Pin, PinOff, Plus, Search, Trash2, Upload, X } from "lucide-react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { parseArchText } from "../../lib/architecture/parse";
+import { ChevronRight, Copy, FilePlus2, Folder, FolderInput, FolderPlus, GitBranch, MoreVertical, Network, PanelLeftClose, Pencil, Pin, PinOff, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { repoMenuItems } from "../../lib/repoMenu";
-import type { TranslationKey } from "../../lib/i18n/translations";
-import { diagramsReadImport } from "../../lib/tauri/diagramsCommands";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { folderSubtree, useArchitectureStore, type ArchFolder, type ArchItem } from "../../state/architectureStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
 import { promptAction } from "../../state/promptStore";
-import { pushErrorToast } from "../../state/toastStore";
 import { iconButtonClass } from "../common/Button";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { explorerHeadClass, fieldClass, rowClass } from "../common/recipes";
 import { useArchSourceDialog } from "./sources/ArchSourceDialog";
 import { AiSparkles } from "../common/AiGlyph";
+import { importArchitecture } from "./importArchitecture";
 
 type Menu = { x: number; y: number; items: MenuItem[]; heading?: string; anchor?: { top: number; bottom: number; left: number; right: number; align?: "start" | "end" } };
 
@@ -39,12 +35,13 @@ type Dragged = { kind: "doc" | "folder"; id: string };
 const ROOT = "";
 const INDENT = 14;
 
-export function ArchitectureExplorer() {
+export function ArchitectureExplorer({ onClose }: { onClose: () => void }) {
   const t = useT();
   const items = useArchitectureStore((s) => s.items);
   const folders = useArchitectureStore((s) => s.folders);
   const folded = useArchitectureStore((s) => s.folded);
   const activeId = useArchitectureStore((s) => s.activeId);
+  const openingId = useArchitectureStore((s) => s.opening?.id);
   const workspaceId = useArchitectureStore((s) => s.workspaceId);
   const [query, setQuery] = useState("");
   const [menu, setMenu] = useState<Menu & { rowKey?: string } | null>(null);
@@ -81,13 +78,13 @@ export function ArchitectureExplorer() {
       if (!press || !dragged.current) return;
       setDragCursor(false);
       setDrag(null);
+      // Suppress the click dispatched after the drag, even if the drop landed outside the explorer.
+      window.setTimeout(() => { dragged.current = false; }, 0);
       const over = target(event.clientX, event.clientY);
       if (over === null) return;
       const into = over === ROOT ? null : over;
       if (press.what.kind === "doc") void store().moveToFolder(press.what.id, into);
       else if (press.what.id !== into) void store().moveFolder(press.what.id, into);
-      // The click that follows a drag is not a click on the row.
-      window.setTimeout(() => { dragged.current = false; }, 0);
     };
     // A drag the window never saw end — let go outside it, or taken by the system — would leave the
     // closed hand on every element of the app (`body.cf-dragging`), so it ends here too.
@@ -141,23 +138,6 @@ export function ArchitectureExplorer() {
       ],
     });
 
-  const importFile = async () => {
-    const picked = await openDialog({ multiple: false, filters: [{ name: t("tabbar.architecture"), extensions: ["json", "jsonc"] }] });
-    if (typeof picked !== "string") return;
-    try {
-      const text = await diagramsReadImport(picked);
-      const parsed = parseArchText(text);
-      if (!parsed.ok) {
-        pushErrorToast(t("arch.importInvalid", { reason: t(`arch.parse.${parsed.error.code}` as TranslationKey) }));
-        return;
-      }
-      const name = (picked.split(/[\\/]/).pop() ?? "").replace(/(\.arch)?\.jsonc?$/i, "");
-      await store().importText(text, parsed.doc.meta?.title || name);
-    } catch (error) {
-      pushErrorToast(String(error));
-    }
-  };
-
   /** «Mover a»: every folder but the row's own subtree, and the top of the list. */
   const moveTargets = (current: string | null, onPick: (folderId: string | null) => void, skip?: Set<string>): MenuItem[] => {
     const depthOf = (f: ArchFolder): number => (f.parentId ? 1 + depthOf(folders.find((x) => x.id === f.parentId) ?? { ...f, parentId: null }) : 0);
@@ -187,7 +167,9 @@ export function ArchitectureExplorer() {
       originPath: item.originPath,
       own: true,
       separated: true,
-      onSave: (projectId) => void store().open(item.id).then(() => store().saveToRepo(projectId)),
+      onSave: async (projectId) => {
+        if (await store().open(item.id) && store().draft?.id === item.id) await store().saveToRepo(projectId);
+      },
       onUnlink: () => void store().unlink(item.id),
     }),
     {
@@ -249,12 +231,13 @@ export function ArchitectureExplorer() {
   );
 
   const docRow = (item: ArchItem, depth: number) => {
-    const selected = item.id === activeId;
+    const selected = item.id === (openingId ?? activeId);
     const key = `doc:${item.id}`;
     return (
-      <div key={item.id} role="option" aria-selected={selected} className={`group ${rowClass(selected, "h-[30px] pr-1")} ${drag?.what.id === item.id ? "opacity-50" : ""}`} style={{ paddingLeft: 8 + depth * INDENT }} onContextMenu={(event) => openMenu(event, key, docMenuItems(item), false)}>
+      <div key={item.id} className={`group ${rowClass(selected, "h-[30px] pr-1")} ${drag?.what.id === item.id ? "opacity-50" : ""}`} style={{ paddingLeft: 8 + depth * INDENT }} onContextMenu={(event) => openMenu(event, key, docMenuItems(item), false)}>
         <button
           type="button"
+          aria-current={item.id === activeId ? "page" : undefined}
           className="flex h-full min-w-0 flex-1 items-center gap-2 text-left"
           onPointerDown={press({ kind: "doc", id: item.id })}
           onClick={() => {
@@ -313,14 +296,17 @@ export function ArchitectureExplorer() {
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-tour="arch-explorer">
       <div className={`${explorerHeadClass} @container`}>
-        <span className="min-w-0 flex-1 truncate text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-muted)]">
-          <span className="@max-[140px]:hidden">{t("tabbar.architecture")}</span>
+        <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-[var(--cf-text)]">
+          {t("arch.documents")}
         </span>
-        <button type="button" className={iconButtonClass({ size: "sm" })} title={t("arch.import")} aria-label={t("arch.import")} onClick={() => void importFile()}>
+        <button type="button" className={iconButtonClass({ size: "sm" })} title={t("arch.import")} aria-label={t("arch.import")} onClick={() => void importArchitecture(t)} disabled={!workspaceId}>
           <Upload size={14} />
         </button>
-        <button type="button" className={iconButtonClass({ size: "sm" })} title={t("arch.new")} aria-label={t("arch.new")} onClick={newMenu} data-tour="arch-new">
+        <button type="button" className={iconButtonClass({ size: "sm" })} title={t("arch.new")} aria-label={t("arch.new")} onClick={newMenu} data-tour="arch-new" disabled={!workspaceId}>
           <Plus size={15} />
+        </button>
+        <button type="button" className={iconButtonClass({ size: "sm" })} title={t("arch.documents.hide")} aria-label={t("arch.documents.hide")} onClick={onClose}>
+          <PanelLeftClose size={15} />
         </button>
       </div>
 
@@ -330,7 +316,12 @@ export function ArchitectureExplorer() {
           ref={searchField}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          onKeyDown={(event) => event.key === "Escape" && setQuery("")}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && query) {
+              event.preventDefault();
+              setQuery("");
+            }
+          }}
           placeholder={t("arch.search")}
           aria-label={t("arch.search")}
           spellCheck={false}
@@ -348,15 +339,14 @@ export function ArchitectureExplorer() {
         ) : null}
       </div>
 
-      <div
+      <nav
         className={`min-h-0 flex-1 overflow-y-auto px-1.5 pb-2 ${rootTarget && drag ? "rounded-md bg-[color-mix(in_oklab,var(--cf-accent)_6%,transparent)]" : ""}`}
-        role="listbox"
-        aria-label={t("tabbar.architecture")}
+        aria-label={t("arch.documents")}
         data-arch-drop={ROOT}
       >
         {needle ? shown.map((item) => docRow(item, 0)) : [...folderRows(null, 0), ...shown.filter((i) => !i.folderId || !folders.some((f) => f.id === i.folderId)).map((item) => docRow(item, 0))]}
         {!shown.length && (needle || !folders.length) ? <p className="m-0 px-2 py-1.5 text-[12px] text-[var(--cf-text-faint)]">{needle ? t("arch.noMatches") : t("arch.empty")}</p> : null}
-      </div>
+      </nav>
 
       {menu ? <ContextMenu x={menu.x} y={menu.y} items={menu.items} heading={menu.heading} anchor={menu.anchor} onClose={() => setMenu(null)} /> : null}
     </div>

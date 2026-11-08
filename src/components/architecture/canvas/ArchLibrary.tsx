@@ -18,7 +18,6 @@ import { GENERIC, ZONE_KINDS, categoryFor } from "../../../lib/architecture/cata
 import { PROVIDERS, listPackIcons, searchArchIcons, type PackEntry, type ProviderId } from "../../../lib/architecture/icons";
 import type { Category } from "../../../lib/architecture/types";
 import type { TranslationKey } from "../../../lib/i18n/translations";
-import { useArchitectureViewStore } from "../../../state/architectureViewStore";
 import { useT } from "../../../state/languageStore";
 import { iconButtonClass } from "../../common/Button";
 import { fieldClass } from "../../common/recipes";
@@ -40,20 +39,15 @@ function providerItem(entry: PackEntry, provider: ProviderId): LibraryItem {
   return { kind: "component", icon: entry.id, name: entry.label, type: PROVIDER_LABEL[provider], category: categoryFor(entry.label, entry.group) };
 }
 
-/** `narrow`: the canvas is short of room, so the library shows as its rail unless opened from it — a
- *  look that does not change the open-or-folded the person chose for a wider window. */
-export function ArchLibrary({ narrow = false }: { narrow?: boolean }) {
+interface LibraryProps {
+  open: boolean;
+  narrow: boolean;
+  onOpen: () => void;
+  onClose: () => void;
+}
+
+export function ArchLibrary({ open, narrow, onOpen, onClose }: LibraryProps) {
   const t = useT();
-  const chosen = useArchitectureViewStore((s) => s.paletteOpen);
-  const togglePalette = useArchitectureViewStore((s) => s.togglePalette);
-  const [peek, setPeek] = useState(false);
-  useEffect(() => { if (!narrow) setPeek(false); }, [narrow]);
-  const open = chosen && (!narrow || peek);
-  const unfold = () => {
-    if (!chosen) togglePalette();
-    if (narrow) setPeek(true);
-  };
-  const fold = () => (narrow ? setPeek(false) : togglePalette());
   const actions = useCanvasActions();
   const [query, setQuery] = useState("");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ zones: true, generic: true });
@@ -190,7 +184,7 @@ export function ArchLibrary({ narrow = false }: { narrow?: boolean }) {
     const jump = (key: string) => {
       scrollTo.current = key;
       setExpanded((cur) => ({ ...cur, [key]: true }));
-      unfold();
+      onOpen();
     };
     const marks: Array<{ key: string; label: string; icon: string }> = [
       { key: "zones", label: t("arch.lib.zones"), icon: "group" },
@@ -200,7 +194,7 @@ export function ArchLibrary({ narrow = false }: { narrow?: boolean }) {
     return (
       <div className="flex w-10 shrink-0 flex-col items-center gap-1 border-r border-[var(--cf-border)] bg-[var(--cf-surface)] py-2" data-tour="arch-library">
         <Tooltip label={t("arch.lib.open")} side="right">
-          <button type="button" className={iconButtonClass({ size: "md" })} onClick={unfold} aria-label={t("arch.lib.open")}><ChevronsRight size={15} /></button>
+          <button type="button" className={iconButtonClass({ size: "md" })} onClick={onOpen} aria-label={t("arch.lib.open")}><ChevronsRight size={15} /></button>
         </Tooltip>
         <span aria-hidden className="my-1 h-px w-5 bg-[var(--cf-border)]" />
         {marks.map((m) => (
@@ -213,7 +207,7 @@ export function ArchLibrary({ narrow = false }: { narrow?: boolean }) {
   }
 
   return (
-    <div className="flex w-[240px] shrink-0 flex-col border-r border-[var(--cf-border)] bg-[var(--cf-surface)]" data-tour="arch-library">
+    <div className={`flex w-[240px] shrink-0 flex-col border-r border-[var(--cf-border)] bg-[var(--cf-surface)] ${narrow ? "absolute inset-y-0 left-0 z-20 max-w-[75%] !bg-[var(--cf-surface-solid,var(--cf-surface))] shadow-[var(--cf-shadow)]" : ""}`} data-tour="arch-library">
       <div className="flex h-10 shrink-0 items-center gap-1 pl-3 pr-1.5">
         <span className="truncate text-[13px] font-semibold text-[var(--cf-text)]">{t("arch.lib.title")}</span>
         <Tooltip label={t("arch.lib.title")} description={t("arch.lib.hint")}>
@@ -221,7 +215,7 @@ export function ArchLibrary({ narrow = false }: { narrow?: boolean }) {
         </Tooltip>
         <span className="flex-1" />
         <Tooltip label={t("arch.lib.close")}>
-          <button type="button" className={iconButtonClass({ size: "sm" })} onClick={fold} aria-label={t("arch.lib.close")}><ChevronsLeft size={15} /></button>
+          <button type="button" className={iconButtonClass({ size: "sm" })} onClick={onClose} aria-label={t("arch.lib.close")}><ChevronsLeft size={15} /></button>
         </Tooltip>
       </div>
       <div className="relative mx-2.5 mb-2 shrink-0">

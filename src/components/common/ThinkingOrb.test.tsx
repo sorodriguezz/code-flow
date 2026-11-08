@@ -180,7 +180,7 @@ describe("the thinking designs", () => {
 
   it("give the avatar time for the finishes built around one, and a brief resolve to the rest", () => {
     const finishing = [
-      "orb", "network", "wave", "liquid", "crystal", "cat", "pixels", "ghost",
+      "orb", "axolotl", "wave", "liquid", "crystal", "cat", "rocky", "ghost",
       "crab", "moon", "atom", "spark", "cloud", "bulb", "alien",
     ] as const;
     for (const id of finishing) {
@@ -193,8 +193,7 @@ describe("the thinking designs", () => {
 
   it("draw speaking from the voice where they can, and are handed writing's look elsewhere", () => {
     const voiced = THINKING_DESIGNS.filter((design) => thinkingSpeaksItself(design.id)).map((design) => design.id);
-    // The shader and the waves, and the four mascots with a lip-synced mouth.
-    expect(voiced).toEqual(["orb", "wave", "spark", "cloud", "bulb", "alien"]);
+    expect(voiced).toEqual(["orb", "axolotl", "wave", "spark", "cloud", "bulb", "alien"]);
     // Only a painter can read the voice frame by frame; a CSS design has no voice of its own.
     for (const id of voiced) expect(THINKING_DESIGNS.find((design) => design.id === id)?.kind, id).toBe("canvas");
   });
@@ -217,6 +216,10 @@ describe("the thinking designs", () => {
     expect(isThinkingDesign("star")).toBe(false);
     expect(storedThinkingDesign("star")).toBe("cat");
     expect(storedThinkingDesign("panda")).toBe("moon");
+    expect(isThinkingDesign("pixels")).toBe(false);
+    expect(storedThinkingDesign("pixels")).toBe("rocky");
+    expect(isThinkingDesign("network")).toBe(false);
+    expect(storedThinkingDesign("network")).toBe("axolotl");
     expect(storedThinkingDesign("cat")).toBe("cat");
     expect(storedThinkingDesign("reactor")).toBe(DEFAULT_THINKING_DESIGN);
     expect(storedThinkingDesign(null)).toBe(DEFAULT_THINKING_DESIGN);

@@ -5,6 +5,7 @@
  * find as they left them.
  */
 import { create } from "zustand";
+import type { DependencyPath } from "../lib/architecture/dependencies";
 
 export type Lens = "diagram" | "review" | "simulate" | "decisions" | "ask";
 export const LENSES: Lens[] = ["diagram", "review", "simulate", "decisions", "ask"];
@@ -54,11 +55,13 @@ interface ViewState {
   selection: Selection | null;
   /** A transient highlight (hovering a flow step, a finding) that wins over the selection. */
   hover: Selection | null;
+  /** Read-only highlighting. Nodes on a traced route are never added to the editable selection. */
+  dependencyPath: DependencyPath | null;
   env: string | null;
   scale: number;
   down: string[];
-  /** Asks the canvas to bring this card or zone into view (a finding, a flow step, a reference chip). */
-  focus: { id: string; at: number } | null;
+  /** Cards or zones the canvas should bring into view. A new array also repeats the request. */
+  focus: string[] | null;
 
   setLens: (lens: Lens) => void;
   togglePalette: () => void;
@@ -72,11 +75,12 @@ interface ViewState {
   revealInspector: () => void;
   select: (selection: Selection | null, opts?: { reveal?: boolean }) => void;
   setHover: (selection: Selection | null) => void;
+  setDependencyPath: (path: DependencyPath | null) => void;
   setEnv: (env: string) => void;
   setScale: (scale: number) => void;
   toggleDown: (id: string) => void;
   setDown: (ids: string[]) => void;
-  focusOn: (id: string) => void;
+  focusOn: (ids: string[]) => void;
   /** A different document: forget what was selected in the last one. */
   resetForDocument: () => void;
 }
@@ -94,12 +98,13 @@ export function sameSelection(a: Selection | null, b: Selection | null): boolean
 
 export const useArchitectureViewStore = create<ViewState>((set, get) => ({
   lens: read(LENS_KEY, LENSES, "diagram"),
-  paletteOpen: read(PALETTE_KEY, ["open", "closed"] as const, "open") === "open",
-  panelOpen: read(PANEL_KEY, PANEL_STATES, "open") === "open",
-  panelCollapsed: read(PANEL_KEY, PANEL_STATES, "open") === "collapsed",
+  paletteOpen: read(PALETTE_KEY, ["open", "closed"] as const, "closed") === "open",
+  panelOpen: read(PANEL_KEY, PANEL_STATES, "closed") === "open",
+  panelCollapsed: read(PANEL_KEY, PANEL_STATES, "closed") === "collapsed",
   diagramTab: "inspector",
   selection: null,
   hover: null,
+  dependencyPath: null,
   env: null,
   scale: 1,
   down: [],
@@ -107,7 +112,8 @@ export const useArchitectureViewStore = create<ViewState>((set, get) => ({
 
   setLens: (lens) => {
     write(LENS_KEY, lens);
-    set({ lens, hover: null });
+    set({ lens, hover: null, dependencyPath: null });
+    if (lens !== "diagram" && !get().panelOpen) get().setPanelOpen(true);
   },
   togglePalette: () => {
     const paletteOpen = !get().paletteOpen;
@@ -116,15 +122,15 @@ export const useArchitectureViewStore = create<ViewState>((set, get) => ({
   },
   setPanelOpen: (panelOpen) => {
     write(PANEL_KEY, panelOpen ? "open" : "closed");
-    set({ panelOpen, panelCollapsed: false });
+    set({ panelOpen, panelCollapsed: false, dependencyPath: null });
   },
   togglePanel: () => {
     if (!get().panelOpen) return get().setPanelOpen(true);
     write(PANEL_KEY, "collapsed");
-    set({ panelOpen: false, panelCollapsed: true });
+    set({ panelOpen: false, panelCollapsed: true, dependencyPath: null });
   },
   setDiagramTab: (diagramTab) => {
-    set({ diagramTab });
+    set({ diagramTab, dependencyPath: null });
     if (!get().panelOpen) get().setPanelOpen(true);
   },
   revealInspector: () => {
@@ -132,10 +138,13 @@ export const useArchitectureViewStore = create<ViewState>((set, get) => ({
     if (lens === "diagram" && !panelOpen && !panelCollapsed) get().setDiagramTab("inspector");
   },
   select: (selection, opts = {}) => {
-    if (!sameSelection(get().selection, selection)) set({ selection });
-    if (opts.reveal && (selection?.kind === "card" || selection?.kind === "zone")) get().focusOn(selection.id);
+    if (!sameSelection(get().selection, selection)) set({ selection, dependencyPath: null });
+    if (!opts.reveal) return;
+    if (selection?.kind === "card" || selection?.kind === "zone") get().focusOn([selection.id]);
+    else if (selection?.kind === "cards") get().focusOn(selection.ids);
   },
   setHover: (hover) => set({ hover }),
+  setDependencyPath: (dependencyPath) => set({ dependencyPath }),
   setEnv: (env) => set({ env }),
   setScale: (scale) => set({ scale: Math.max(0.25, Math.min(8, scale)) }),
   toggleDown: (id) => {
@@ -143,6 +152,6 @@ export const useArchitectureViewStore = create<ViewState>((set, get) => ({
     set({ down: down.includes(id) ? down.filter((x) => x !== id) : [...down, id] });
   },
   setDown: (down) => set({ down }),
-  focusOn: (id) => set({ focus: { id, at: Date.now() } }),
-  resetForDocument: () => set({ selection: null, hover: null, env: null, scale: 1, down: [], focus: null }),
+  focusOn: (ids) => set({ focus: [...ids] }),
+  resetForDocument: () => set({ selection: null, hover: null, dependencyPath: null, env: null, scale: 1, down: [], focus: null }),
 }));

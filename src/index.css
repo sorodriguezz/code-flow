@@ -25,9 +25,10 @@
    tint, a sunken tone or a strong border without anyone editing 24 palettes — and why none of them
    may be written as a literal. */
 :root {
+  --cf-color-scheme: light;
   --cf-bg: #ebebf0;
-  --cf-surface: #ffffff;
-  --cf-surface-raised: #ffffff;
+  --cf-surface: #f8f8fc;
+  --cf-surface-raised: #fcfcfe;
   --cf-border: #e1e2e9;
   --cf-text: #15161d;
   --cf-text-muted: #545767;
@@ -37,13 +38,9 @@
      primary button in the app failed contrast in dark mode. See `accentStore`. */
   --cf-on-accent: #ffffff;
   --cf-accent-soft: color-mix(in oklab, var(--cf-accent) 15%, var(--cf-surface));
-  /* A field has to read as a field on both surfaces it lands on — the white panels, where a white
-     fill alone says nothing, and the tinted cards, where a transparent one said nothing at all. So
-     the border does most of the work and is deliberately darker than `--cf-border`: that one is
-     tuned for dividing regions, and a divider's weight is too quiet for the edge of something you
-     are meant to type into. */
-  --cf-field: #ffffff;
-  --cf-field-border: #c6c8d4;
+  /* Fields follow the selected surfaces. Their border carries more weight than a divider. */
+  --cf-field: color-mix(in oklab, var(--cf-surface) 55%, var(--cf-surface-raised));
+  --cf-field-border: color-mix(in oklab, var(--cf-border) 88%, var(--cf-text));
   /* The 700 shades, not the 500s: these are read as *text* all over the app ("+12", "Conectado",
      "Guardado"), and the 500s sat at ~3.2:1 on white. */
   --cf-success: #15803d;
@@ -201,6 +198,7 @@
 }
 
 :root[data-theme="dark"] {
+  --cf-color-scheme: dark;
   --cf-agent-indigo: #818cf8;
   --cf-agent-blue: #60a5fa;
   --cf-agent-cyan: #22d3ee;
@@ -222,11 +220,7 @@
   --cf-accent: #818cf8;
   --cf-on-accent: #0b0c11;
   --cf-accent-soft: color-mix(in oklab, var(--cf-accent) 15%, var(--cf-surface));
-  /* Dark fields go darker than the surface, not lighter — a well rather than a raised tile, which
-     is the direction a dark UI reads as "recessed, put text here". Same reasoning as the light
-     theme's note. */
-  --cf-field: #0c0d12;
-  --cf-field-border: #343747;
+  --cf-field: var(--cf-sunken);
   --cf-success: #4ade80;
   --cf-danger: #f87171;
   --cf-warning: #fbbf24;
@@ -275,6 +269,7 @@
    what a window shows for the frame or two before that — the same palette as the explicit block. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
+    --cf-color-scheme: dark;
     --cf-agent-indigo: #818cf8;
     --cf-agent-blue: #60a5fa;
     --cf-agent-cyan: #22d3ee;
@@ -296,8 +291,7 @@
     --cf-accent: #818cf8;
     --cf-on-accent: #0b0c11;
     --cf-accent-soft: color-mix(in oklab, var(--cf-accent) 15%, var(--cf-surface));
-    --cf-field: #0c0d12;
-    --cf-field-border: #343747;
+    --cf-field: var(--cf-sunken);
     --cf-success: #4ade80;
     --cf-danger: #f87171;
     --cf-warning: #fbbf24;
@@ -352,6 +346,7 @@ body {
   margin: 0;
   background: var(--cf-bg);
   color: var(--cf-text);
+  color-scheme: var(--cf-color-scheme);
   font-family: var(--font-sans);
   overflow: hidden;
   /* Both spellings. WKWebView reads only the prefixed one, and the dev server does not add it, so
@@ -359,6 +354,26 @@ body {
      reported on the API client's explorer, 2026-09-25. */
   -webkit-user-select: none;
   user-select: none;
+}
+
+/* Native menus and the controls supplied by React Flow use the same palette as their panels. */
+:where(select option, select optgroup) {
+  background-color: var(--cf-surface-raised-solid, var(--cf-surface-raised));
+  color: var(--cf-text);
+}
+
+:where(.react-flow) {
+  --xy-background-color: var(--cf-sunken);
+  --xy-controls-button-background-color: var(--cf-surface-raised);
+  --xy-controls-button-background-color-hover: var(--cf-sunken);
+  --xy-controls-button-border-color: var(--cf-border);
+  --xy-controls-button-color: var(--cf-text-muted);
+  --xy-controls-button-color-hover: var(--cf-text);
+  --xy-minimap-background-color: var(--cf-surface);
+  --xy-minimap-mask-background-color: color-mix(in oklab, var(--cf-bg) 62%, transparent);
+  --xy-minimap-node-background-color: var(--cf-border-strong);
+  --xy-edge-label-background-color: var(--cf-surface);
+  --xy-edge-label-color: var(--cf-text);
 }
 
 /* …and what somebody typed stays theirs to select and copy. Declared on the field itself, so it
@@ -1317,6 +1332,12 @@ pre {
   position: absolute;
   inset: 0;
 }
+.cf-orb:is(.cf-orb--halo, .cf-orb--bot, .cf-orb--blob, .cf-orb--plasma) .cf-orb-cue::before {
+  content: "";
+  position: absolute;
+  inset: 83% 18% 2%;
+  background: radial-gradient(ellipse closest-side, color-mix(in oklab, #120d28 30%, transparent), transparent);
+}
 /* A run that has printed nothing for minutes: the CSS marks dim; the canvas ones slow down too. */
 .cf-orb[data-state="quiet"]:not(:has(.cf-orb-canvas)) {
   opacity: 0.55;
@@ -1396,6 +1417,17 @@ pre {
   position: absolute;
   inset: 4%;
   animation: cf-halo-turn 5s linear infinite;
+}
+.cf-orb-halo::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(from 25deg, #edfaff, var(--cf-ai-c) 19%, #393675 45%, var(--cf-ai-a) 76%, #edfaff);
+  mask-image: radial-gradient(circle closest-side, transparent 69%, #000 85%, #000 92%, transparent);
+}
+.cf-orb:is([data-state="done"], [data-state="failed"]) .cf-orb-halo::before {
+  background: conic-gradient(from 25deg, #edfaff, var(--cf-orb-end) 28%, color-mix(in oklab, var(--cf-orb-end) 46%, #18132b) 62%, var(--cf-orb-end) 81%, #edfaff);
 }
 .cf-orb-halo-glow {
   position: absolute;
@@ -1494,7 +1526,7 @@ pre {
   height: calc(var(--cf-orb-size) * 0.2);
   margin-left: calc(var(--cf-orb-size) * -0.03);
   border-radius: 999px;
-  background: var(--cf-ai-b);
+  background: linear-gradient(90deg, #403368, color-mix(in oklab, var(--cf-ai-b) 50%, white) 40%, var(--cf-ai-b));
 }
 .cf-orb-antenna::after {
   content: "";
@@ -1505,15 +1537,27 @@ pre {
   height: calc(var(--cf-orb-size) * 0.16);
   margin-left: calc(var(--cf-orb-size) * -0.08);
   border-radius: 50%;
-  background: var(--cf-ai-c);
+  background: radial-gradient(circle at 32% 28%, #efffff, var(--cf-ai-c) 48%, #2a4385 100%);
   box-shadow: 0 0 calc(var(--cf-orb-size) * 0.12) var(--cf-ai-c);
   animation: cf-bot-signal 1.2s ease-in-out infinite;
 }
 .cf-orb-head {
   position: absolute;
   inset: 22% 7% 6%;
-  border-radius: 32%;
-  background: linear-gradient(135deg, var(--cf-ai-a), var(--cf-ai-b) 55%, var(--cf-ai-c));
+  border-radius: 36% 36% 33% 33% / 43% 43% 38% 38%;
+  background: radial-gradient(ellipse at 31% 15%, #ded5ff, var(--cf-ai-a) 34%, var(--cf-ai-b) 60%, #24306b 100%);
+  box-shadow:
+    inset 0 calc(var(--cf-orb-size) * 0.035) calc(var(--cf-orb-size) * 0.055) rgb(255 255 255 / 0.45),
+    inset 0 calc(var(--cf-orb-size) * -0.055) calc(var(--cf-orb-size) * 0.07) rgb(12 12 44 / 0.45);
+  transition: transform 0.17s ease-out;
+}
+.cf-orb-head::after {
+  content: "";
+  position: absolute;
+  inset: 81% 33% 11%;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, rgb(191 240 255 / 0.63), transparent 75%);
+  pointer-events: none;
 }
 .cf-orb-visor {
   position: absolute;
@@ -1522,7 +1566,10 @@ pre {
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  background: color-mix(in oklab, var(--cf-ai-b) 22%, #06070b);
+  background: radial-gradient(ellipse at 34% 12%, #3e5078, #161c36 57%, #080a17);
+  box-shadow:
+    inset 0 calc(var(--cf-orb-size) * 0.03) calc(var(--cf-orb-size) * 0.05) rgb(6 7 19 / 0.67),
+    0 calc(var(--cf-orb-size) * 0.018) 0 rgb(196 210 255 / 0.58);
 }
 .cf-orb-eyes {
   display: flex;
@@ -1546,11 +1593,11 @@ pre {
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  background: linear-gradient(
-    135deg,
-    color-mix(in oklab, var(--cf-orb-end) 72%, #fff),
-    var(--cf-orb-end) 55%,
-    color-mix(in oklab, var(--cf-orb-end) 70%, #000)
+  background: radial-gradient(
+    ellipse at 30% 18%,
+    color-mix(in oklab, var(--cf-orb-end) 53%, #fff),
+    var(--cf-orb-end) 49%,
+    color-mix(in oklab, var(--cf-orb-end) 57%, #171227)
   );
   opacity: 0;
   transition: opacity 0.45s ease;
@@ -1583,7 +1630,7 @@ pre {
 }
 .cf-orb[data-state="done"] .cf-orb-visor,
 .cf-orb[data-state="failed"] .cf-orb-visor {
-  background: color-mix(in oklab, var(--cf-orb-end) 20%, #06070b);
+  background: radial-gradient(ellipse at 33% 10%, color-mix(in oklab, var(--cf-orb-end) 35%, #172436), #090b17 84%);
 }
 .cf-orb[data-state="done"] .cf-orb-eyes,
 .cf-orb[data-state="done"] .cf-orb-eye,
@@ -1648,17 +1695,19 @@ pre {
   border-radius: 42% 58% 63% 37% / 41% 44% 56% 59%;
   background: radial-gradient(
     circle at 32% 28%,
-    color-mix(in oklab, #fff 45%, var(--cf-ai-c)) 0,
-    var(--cf-ai-b) 48%,
-    var(--cf-ai-a) 100%
+    color-mix(in oklab, #fff 78%, var(--cf-ai-c)) 0,
+    color-mix(in oklab, var(--cf-ai-b) 70%, var(--cf-ai-c)) 47%,
+    color-mix(in oklab, var(--cf-ai-a) 65%, #1c1840) 88%,
+    color-mix(in oklab, var(--cf-ai-c) 38%, var(--cf-ai-a)) 100%
   );
+  box-shadow: inset 0 calc(var(--cf-orb-size) * -0.045) calc(var(--cf-orb-size) * 0.085) rgb(19 14 59 / 0.36);
   animation: cf-blob-turn 6s linear infinite;
 }
 .cf-orb-goo-2 {
   inset: 10%;
   border-radius: 61% 39% 45% 55% / 52% 63% 37% 48%;
-  background: radial-gradient(circle at 70% 70%, var(--cf-ai-c) 0, color-mix(in oklab, var(--cf-ai-a) 80%, transparent) 70%);
-  opacity: 0.55;
+  background: radial-gradient(ellipse at 72% 70%, color-mix(in oklab, var(--cf-ai-c) 77%, #fff) 0, color-mix(in oklab, var(--cf-ai-a) 54%, transparent) 44%, transparent 70%);
+  opacity: 0.38;
   animation: cf-blob-turn-back 9s linear infinite;
 }
 .cf-orb-gaze {
@@ -1676,7 +1725,7 @@ pre {
   width: calc(var(--cf-orb-size) * 0.11);
   height: calc(var(--cf-orb-size) * 0.17);
   border-radius: 999px;
-  background: #160f2e;
+  background: radial-gradient(circle at 33% 25%, #c6dfff 0, #453974 16%, #160f2e 47%);
   animation: cf-bot-blink 4.1s ease-in-out infinite;
 }
 /* Following the pointer (`ThinkingOrb follow`): the eyes stop looking around and look at it.
@@ -1690,12 +1739,15 @@ pre {
   );
   transition: transform 0.18s ease-out;
 }
+.cf-orb[data-gaze]:not([data-state]) .cf-orb-head {
+  transform: perspective(calc(var(--cf-orb-size) * 2)) rotateY(calc(var(--cf-gaze-x, 0) * 23deg)) rotateX(calc(var(--cf-gaze-y, 0) * -16deg));
+}
 .cf-orb[data-gaze]:not([data-state]) .cf-orb-gaze {
   animation: none;
   transform: translate(
-    calc(var(--cf-orb-size) * 0.06 * var(--cf-gaze-x, 0)),
-    calc(var(--cf-orb-size) * 0.06 * var(--cf-gaze-y, 0))
-  );
+    calc(var(--cf-orb-size) * 0.14 * var(--cf-gaze-x, 0)),
+    calc(var(--cf-orb-size) * 0.10 * var(--cf-gaze-y, 0))
+  ) perspective(calc(var(--cf-orb-size) * 1.5)) rotateY(calc(var(--cf-gaze-x, 0) * 31deg));
   transition: transform 0.18s ease-out;
 }
 /* The CSS designs without eyes follow it too. The halo shifts a hair toward the pointer and gathers
@@ -1723,6 +1775,7 @@ pre {
 }
 .cf-orb[data-gaze]:not([data-state]) :is(.cf-orb-halo, .cf-orb-halo-lean) {
   translate: calc(var(--cf-orb-size) * 0.05 * var(--cf-gaze-x, 0)) calc(var(--cf-orb-size) * 0.05 * var(--cf-gaze-y, 0));
+  rotate: y calc(var(--cf-gaze-x, 0) * 28deg);
 }
 .cf-orb[data-gaze]:not([data-state]) .cf-orb-halo-lean {
   opacity: 1;
@@ -1850,7 +1903,7 @@ pre {
   border-radius: 50%;
   clip-path: circle(50% at 50% 50%);
   isolation: isolate;
-  background: color-mix(in oklab, var(--cf-ai-b) 16%, #06070c);
+  background: radial-gradient(ellipse at 32% 28%, #3e4774, #161b3f 54%, #090819 80%, #191645 100%);
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--cf-ai-c) 30%, transparent);
 }
 /* Each light keeps its own hue: they overlap only at their soft edges, and blend there. */
@@ -1880,7 +1933,17 @@ pre {
   position: absolute;
   inset: 0;
   border-radius: 50%;
-  background: radial-gradient(circle at 32% 26%, rgb(255 255 255 / 0.3) 0, transparent 30%);
+  background:
+    radial-gradient(ellipse at 29% 23%, rgb(255 255 255 / 0.76) 0, rgb(189 234 255 / 0.28) 13%, transparent 27%),
+    radial-gradient(ellipse at 73% 79%, color-mix(in oklab, var(--cf-ai-c) 43%, transparent), transparent 42%);
+}
+.cf-orb-plasma::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  box-shadow: inset 0 0 calc(var(--cf-orb-size) * 0.12) rgb(11 7 30 / 0.7), inset 0 calc(var(--cf-orb-size) * -0.02) calc(var(--cf-orb-size) * 0.055) rgb(181 185 255 / 0.4);
 }
 .cf-orb[data-state="done"] .cf-orb-blot-1,
 .cf-orb[data-state="done"] .cf-orb-blot-3,

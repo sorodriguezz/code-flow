@@ -8,7 +8,7 @@
  * which changes the diagram. The composer is the chats' own: the engine chip and the send button
  * inside the box, at its foot.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import { ArrowUp, Eraser, Info } from "lucide-react";
 import type { TranslationKey } from "../../../lib/i18n/translations";
 import { useArchitectureStore } from "../../../state/architectureStore";
@@ -29,13 +29,14 @@ export function AskPanel() {
   const thread = useArchAskStore((s) => s.threads[docId]) ?? [];
   const running = useArchAskStore((s) => !!s.running[docId]);
   const clear = useArchAskStore((s) => s.clear);
-  const [input, setInput] = useState("");
+  const input = useArchAskStore((s) => s.drafts[docId] ?? "");
+  const setDraft = useArchAskStore((s) => s.setDraft);
   const list = useRef<HTMLDivElement>(null);
   useEffect(() => { list.current?.scrollTo({ top: list.current.scrollHeight }); }, [thread.length, running]);
 
   const send = (text: string, action: "ask" | "threats" | "tutor" | "design" = "ask") => {
     if (!model || running || !text.trim()) return;
-    setInput("");
+    setDraft(docId, "");
     void askArchitecture(model, action, text.trim());
   };
 
@@ -62,7 +63,7 @@ export function AskPanel() {
         <div className="flex flex-col gap-1.5 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1.5 focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))]">
           <textarea
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => setDraft(docId, e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send(input); } }}
             rows={2}
             placeholder={t("arch.ask.placeholder")}

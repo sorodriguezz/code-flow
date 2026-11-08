@@ -4,6 +4,7 @@ import { blink, INK, lipSync, lookFor, mouthOpen, sleepZ, strokeEye, WHITE, type
 import { clamp01, easeOut, easeOutBack, endColor, finishClock, rgba, TAU } from "./finish";
 import { mix, palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { contactShadow, faceAt, material } from "./volume";
 import { listenLevel } from "./listen";
 import { voiceLevel } from "./voice";
 
@@ -165,6 +166,9 @@ export function createBulb(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
     const over = Math.max(0, g - 1);
     // Listening, it leans in a little.
     const s = (0.4 + 0.6 * easeOut(grow)) * (1 + 0.02 * perk);
+    const turn = lookX * 0.62 + tilt;
+    const pitch = lookY * 0.047;
+    if (detail) contactShadow(ctx, u(0.5), u(0.938), u(0.173), p.b, 0.26 * a);
 
     ctx.save();
     ctx.translate(u(0.5), u(0.9 - 0.025 * hop(cue.wake)));
@@ -210,7 +214,12 @@ export function createBulb(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
 
     // The screw base: threads, and the contact at the bottom.
     const metal = warm(mix(mix(p.a, p.b, 0.5), INK, p.dark ? 0.2 : 0.35));
-    ctx.fillStyle = rgba(metal, a);
+    const threaded = ctx.createLinearGradient(u(CX - 0.105), 0, u(CX + 0.105), 0);
+    threaded.addColorStop(0, rgba(mix(metal, INK, 0.43), a));
+    threaded.addColorStop(0.28, rgba(mix(metal, WHITE, 0.65), a));
+    threaded.addColorStop(0.57, rgba(mix(metal, WHITE, 0.24), a));
+    threaded.addColorStop(1, rgba(mix(metal, INK, 0.55), a));
+    ctx.fillStyle = threaded;
     if (detail) {
       roundRect(CX - 0.105, NECK_Y - 0.005, 0.21, 0.05, 0.022);
       ctx.fill();
@@ -237,9 +246,9 @@ export function createBulb(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
       lit,
     );
     glass();
-    const grad = ctx.createRadialGradient(u(CX), u(CY - 0.06), u(0.02), u(CX), u(CY), u(R * 1.05));
-    grad.addColorStop(0, rgba(warm(mix(centre, WHITE, over)), a));
-    grad.addColorStop(1, rgba(warm(edge), a));
+    const grad = material(ctx, u(CX), u(CY), u(R * 1.08), [
+      warm(mix(centre, WHITE, 0.42 + over)), warm(centre), warm(edge),
+    ], a, turn);
     ctx.save();
     ctx.shadowColor = rgba(warm(mix(mix(p.c, p.a, 0.4), end, tint)), (p.dark ? 0.8 : 0.5) * Math.min(1, lit + 0.15) * a);
     ctx.shadowBlur = u(0.06 + 0.16 * Math.min(1.3, g));
@@ -250,6 +259,14 @@ export function createBulb(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
     ctx.strokeStyle = rgba(warm(mix(mix(p.a, WHITE, 0.25), end, tint)), (0.75 - 0.5 * lit) * a);
     ctx.lineWidth = Math.max(0.8, u(0.022));
     ctx.stroke();
+    if (detail) {
+      ctx.strokeStyle = rgba(mix(WHITE, p.c, 0.38), a * (0.55 - lit * 0.22));
+      ctx.lineWidth = u(0.018);
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.ellipse(u(CX + turn * 0.045), u(CY + 0.01), u(R * 0.81), u(R * 0.84), 0, 3.38, 4.13);
+      ctx.stroke();
+    }
 
     // The filament: a little coil of wire that glows with the bulb.
     if (detail) {
@@ -291,23 +308,24 @@ export function createBulb(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
     // The face: dark ink on a lit glass, its eyes lighting up on a dark one.
     const ink = rgba(mix(mix(WHITE, p.c, 0.25), INK, clamp01((g - 0.22) * 3.3)), 0.92 * a);
     const open = act?.stopping ? 0.45 : cue.ask > 0.5 ? askBlink(time) : blink(time, 3.5);
-    const ey = 0.435;
     const eyeR = detail ? 0.042 : 0.052;
     // Wide while it listens, wider for a moment when woken.
     const wide = 1 + 0.15 * perk + 0.2 * start;
-    for (const ex of [0.42, 0.58]) {
+    for (const x of [0.42, 0.58]) {
+      const { x: ex, y: ey, width } = faceAt(x, 0.435, 0.208, turn, pitch);
       if (dazed) strokeEye(ctx, u(ex), u(ey), u(eyeR), "x", ink, Math.max(1, u(0.03)));
       else if (happy) strokeEye(ctx, u(ex), u(ey), u(eyeR * 1.1), "happy", ink, Math.max(1, u(0.032)));
       else if (sleep > 0.5 || open < 0.15) strokeEye(ctx, u(ex), u(ey), u(eyeR), "closed", ink, Math.max(0.8, u(0.026)));
       else {
         ctx.fillStyle = ink;
         ctx.beginPath();
-        ctx.ellipse(u(ex + lookX * 0.02), u(ey + lookY * 0.018), u(eyeR * 0.9 * wide), u(eyeR * 1.35 * open * wide), 0, 0, TAU);
+        ctx.ellipse(u(ex), u(ey), u(eyeR * 0.9 * wide * width), u(eyeR * 1.35 * open * wide), 0, 0, TAU);
         ctx.fill();
       }
     }
     const speaking = groupOf(act) === "speak";
     if ((detail || speaking) && !dazed) {
+      const { x, y } = faceAt(0.5, 0.515, 0.18, turn, pitch);
       ctx.fillStyle = ink;
       ctx.strokeStyle = ink;
       ctx.lineWidth = Math.max(0.8, u(0.022));
@@ -316,14 +334,14 @@ export function createBulb(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
       if (speaking) {
         // Lip-sync: the mouth opens with the voice.
         const w = detail ? 0.03 : 0.046;
-        ctx.ellipse(u(0.5), u(0.522), Math.max(0.6, u(w)), Math.max(0.5, u(w * mouthOpen(mouth, gain))), 0, 0, TAU);
+        ctx.ellipse(u(x), u(y + 0.007), Math.max(0.6, u(w)), Math.max(0.5, u(w * mouthOpen(mouth, gain))), 0, 0, TAU);
         ctx.fill();
       } else if (mouth > 0.05) {
-        ctx.ellipse(u(0.5), u(0.515), u(0.024), u(0.03 * mouth + 0.005), 0, 0, TAU);
+        ctx.ellipse(u(x), u(y), u(0.024), u(0.03 * mouth + 0.005), 0, 0, TAU);
         ctx.fill();
       } else {
-        ctx.moveTo(u(0.475), u(0.507));
-        ctx.quadraticCurveTo(u(0.5), u(0.532), u(0.525), u(0.507));
+        ctx.moveTo(u(x - 0.025), u(y - 0.008));
+        ctx.quadraticCurveTo(u(x), u(y + 0.017), u(x + 0.025), u(y - 0.008));
         ctx.stroke();
       }
     }

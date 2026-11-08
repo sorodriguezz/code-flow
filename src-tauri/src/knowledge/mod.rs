@@ -892,9 +892,19 @@ pub struct Found {
     pub commit: String,
     /// When the collection it came from was last brought up to date, ms since the epoch.
     pub indexed_at: Option<i64>,
+    pub matched_by: MatchMethod,
     /// The index collection, which is what tells two `README.md` apart.
     #[serde(skip)]
     pub collection: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MatchMethod {
+    #[default]
+    TextAndCode,
+    Semantic,
+    Hybrid,
 }
 
 const RRF_K: f32 = 60.0;
@@ -1051,6 +1061,7 @@ fn found_of(scope: &Scope, metas: &HashMap<String, (i64, String)>, hit: index::H
         title: hit.title,
         commit,
         indexed_at,
+        matched_by: MatchMethod::TextAndCode,
         collection: hit.collection,
     }
 }
@@ -1078,13 +1089,16 @@ pub fn fuse(lists: Vec<Vec<Found>>, limit: usize) -> Vec<Found> {
             match merged.iter_mut().find(|m| same_place(m, &found)) {
                 Some(existing) => {
                     existing.score += vote;
+                    if existing.matched_by != found.matched_by {
+                        existing.matched_by = MatchMethod::Hybrid;
+                    }
                     if existing.snippet.len() < found.snippet.len() && found.source != "symbol" {
                         existing.snippet = found.snippet.clone();
                     }
                     if existing.source == "symbol" && found.source != "symbol" {
                         // The passage's provenance (its commit, its index time) is the richer one.
                         let score = existing.score;
-                        *existing = Found { score, ..found };
+                        *existing = Found { score, matched_by: existing.matched_by, ..found };
                     }
                 }
                 None => merged.push(Found { score: vote, ..found }),
@@ -1133,6 +1147,10 @@ pub struct Answer {
     pub found: Vec<Found>,
     /// The model that searched the vector index, even if there were no relevant matches.
     pub embedding_model: Option<String>,
+    pub embedding_fallback: Option<EmbeddingFallback>,
+    pub embedding_fallback_model: Option<String>,
+    /// This query searched the available vectors while more were scheduled for indexing.
+    pub embedding_indexing: bool,
     /// The repositories and folders still being indexed when the search answered: the results may
     /// miss them.
     pub partial: Vec<String>,
@@ -1140,6 +1158,16 @@ pub struct Answer {
     pub via_main_checkout: Option<String>,
     /// What the scope covers, in words.
     pub searched: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EmbeddingFallback {
+    NoModel,
+    ModelUnavailable,
+    Indexing,
+    NoVectors,
+    Failed,
 }
 
 /// A full search: refresh what is stale (waiting [`FIRST_WAIT`] at most), the lexical retrievers,
@@ -1180,47 +1208,80 @@ pub async fn search_indexed(scope: &Scope, question: &str, limit: usize) -> Resu
         let question = question.to_string();
         tokio::task::spawn_blocking(move || lexical(&scope, &question, limit * 3, MapUse::Build)).await.map_err(|e| e.to_string())?
     };
-    let (semantic_hits, embedding_model) = match space {
-        Some(space) => match semantic(scope, question, &space).await {
-            Some(hits) => (hits, Some(space.model_label())),
-            None => (Vec::new(), None),
+    let (semantic_hits, embedding_model, embedding_fallback, embedding_indexing) = match &space {
+        Some(space) => match semantic(scope, question, space).await {
+            Ok((hits, indexing)) => (hits, Some(space.model_label()), None, indexing),
+            Err(reason) => (Vec::new(), None, Some(reason), false),
         },
-        None => (Vec::new(), None),
+        None => {
+            let reason = if setting.as_deref().is_some_and(|id| !id.trim().is_empty()) {
+                EmbeddingFallback::ModelUnavailable
+            } else {
+                EmbeddingFallback::NoModel
+            };
+            (Vec::new(), None, Some(reason), false)
+        }
     };
     let found = fuse(vec![lexical_hits, semantic_hits], limit);
-    Ok(Answer { found, embedding_model, partial: partial(scope), via_main_checkout: scope.via_main_checkout.clone(), searched: scope.searched() })
+    Ok(Answer {
+        found,
+        embedding_model,
+        embedding_fallback,
+        embedding_fallback_model: space.filter(|_| embedding_fallback.is_some()).map(|space| space.model_label()),
+        embedding_indexing,
+        partial: partial(scope),
+        via_main_checkout: scope.via_main_checkout.clone(),
+        searched: scope.searched(),
+    })
 }
 
 /// The semantic retriever: a few pending prose chunks embedded first, then the question's nearest
 /// chunks above [`COSINE_FLOOR`] — private ones only for a local model.
-/// `None` means vector search did not run successfully, distinct from a search with no matches.
-async fn semantic(scope: &Scope, question: &str, space: &embed::Space) -> Option<Vec<Found>> {
+/// An empty list means the vector search ran without relevant matches.
+async fn semantic(scope: &Scope, question: &str, space: &embed::Space) -> Result<(Vec<Found>, bool), EmbeddingFallback> {
+    use EmbeddingFallback::{Failed, Indexing, NoVectors};
+
     let keys = scope.keys();
     // A handful of prose chunks without vectors (a new folder, a small project) are embedded now,
     // before searching: a few seconds, and the question is the one that needed them — a Spanish
     // question about an English decision record finds nothing lexically. More than that goes to
     // the background, and this search stays lexical until it is done.
-    let pending = index::global().ok().and_then(|index| index::pending_vectors(&index, &space.name, &keys, SYNC_EMBED + 1).ok()).unwrap_or_default();
+    let pending = index::global().and_then(|index| index::pending_vectors(&index, &space.name, &keys, SYNC_EMBED + 1).map_err(|e| e.to_string()));
+    let mut indexing_failed = pending.is_err();
+    let pending = pending.unwrap_or_default();
+    let indexing = pending.len() > SYNC_EMBED;
     if !pending.is_empty() && pending.len() <= SYNC_EMBED {
         let texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
-        if let Ok(vectors) = space.embed_documents(&texts).await {
-            let items: Vec<(i64, Vec<f32>)> = pending.iter().map(|(id, _)| *id).zip(vectors).collect();
-            if let Ok(mut index) = index::global() {
-                let _ = index::store_vectors(&mut index, &space.name, &items);
+        indexing_failed = match space.embed_documents(&texts).await {
+            Ok(vectors) => {
+                let items: Vec<(i64, Vec<f32>)> = pending.iter().map(|(id, _)| *id).zip(vectors).collect();
+                index::global().and_then(|mut index| index::store_vectors(&mut index, &space.name, &items).map_err(|e| e.to_string())).is_err()
             }
-        }
-    } else if !pending.is_empty() {
+            Err(_) => true,
+        };
+    } else if indexing {
         vectorize_in_background(scope.clone(), space.clone());
     }
-    if !index::global().is_ok_and(|index| index::has_vectors(&index, &space.name, &keys)) {
-        return None;
+    let has_vectors = {
+        let index = index::global().map_err(|_| Failed)?;
+        index::has_vectors(&index, &space.name, &keys).map_err(|_| Failed)?
+    };
+    if !has_vectors {
+        return Err(if indexing { Indexing } else if indexing_failed { Failed } else { NoVectors });
     }
-    let query = space.embed_query(question).await.ok()?;
-    let index = index::global().ok()?;
-    let hits = index::search_vectors_scoped(&index, &space.name, &keys, &query, 20, !scope.cloud).ok()?;
+    let query = space.embed_query(question).await.map_err(|_| Failed)?;
+    if query.is_empty() {
+        return Err(Failed);
+    }
+    let index = index::global().map_err(|_| Failed)?;
+    let hits = index::search_vectors_scoped(&index, &space.name, &keys, &query, 20, !scope.cloud).map_err(|_| Failed)?;
     let metas = metas(&index, &keys);
     drop(index);
-    Some(hits.into_iter().filter(|(_, score)| *score > COSINE_FLOOR).map(|(hit, _)| found_of(scope, &metas, hit)).collect())
+    let found = hits.into_iter().filter(|(_, score)| *score > COSINE_FLOOR).map(|(hit, _)| Found {
+        matched_by: MatchMethod::Semantic,
+        ..found_of(scope, &metas, hit)
+    }).collect();
+    Ok((found, indexing))
 }
 
 /// The repositories and folders of `scope` an index is still being built for, or that have never
@@ -1572,10 +1633,23 @@ mod tests {
     #[test]
     fn rrf_rewards_agreement() {
         let fts = vec![found("a.md", 1, 10, "repo"), found("b.md", 1, 5, "repo")];
-        let semantic = vec![found("b.md", 3, 8, "repo"), found("c.md", 1, 2, "repo")];
+        let semantic = vec![
+            Found { matched_by: MatchMethod::Semantic, ..found("b.md", 3, 8, "repo") },
+            Found { matched_by: MatchMethod::Semantic, ..found("c.md", 1, 2, "repo") },
+        ];
         let fused = fuse(vec![fts, semantic], 5);
         assert_eq!(fused[0].path, "b.md", "found by both, overlapping lines");
         assert_eq!(fused.len(), 3);
+        assert_eq!(fused[0].matched_by, MatchMethod::Hybrid);
+        assert_eq!(fused.iter().find(|hit| hit.path == "a.md").unwrap().matched_by, MatchMethod::TextAndCode);
+        assert_eq!(fused.iter().find(|hit| hit.path == "c.md").unwrap().matched_by, MatchMethod::Semantic);
+    }
+
+    #[tokio::test]
+    async fn a_model_without_vectors_reports_why_the_query_stayed_lexical() {
+        let model = crate::localai::embedder::find(crate::localai::embedder::DEFAULT_EMBED_MODEL_ID).unwrap();
+        let space = embed::Space::bundled(model);
+        assert_eq!(semantic(&Scope::default(), "search", &space).await, Err(EmbeddingFallback::NoVectors));
     }
 
     /// Fusion merged by path and lines alone, so the `README.md` of two repositories — found by the

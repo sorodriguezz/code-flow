@@ -59,6 +59,7 @@ export interface SimResult {
   asyncSteps: number[];
   /** The booking-style error: what fails along the synchronous part of the flow. */
   flowError: number;
+  /** Estimated share of incoming actor requests that fail, weighted by their traffic. */
   actorError: number;
   hottest: string | null;
   /** Traffic multiple at which the first component reaches 100 %. */
@@ -71,6 +72,7 @@ export interface SimResult {
 export const capacityOf = (c: { category?: Category; sim?: { capacity?: number; replicas?: number } }) =>
   (c.sim?.capacity ?? DEFAULTS[c.category ?? "compute"]?.[0] ?? 200) * (c.sim?.replicas ?? 1);
 export const baseLatencyOf = (c: { category?: Category; sim?: { latency?: number } }) => c.sim?.latency ?? DEFAULTS[c.category ?? "compute"]?.[1] ?? 20;
+export const requestErrorRate = (result: SimResult) => result.entry > 0 ? result.actorError : result.flowError;
 
 export function simulate(doc: ArchDoc, comps: ResolvedComponents, scale: number, down: ReadonlySet<string>): SimResult {
   const ids = Object.keys(comps);
@@ -99,7 +101,9 @@ export function simulate(doc: ArchDoc, comps: ResolvedComponents, scale: number,
       if (e.kind === "async") asyncIn[e.to] = (asyncIn[e.to] ?? 0) + pass;
       else syncIn[e.to] = (syncIn[e.to] ?? 0) + pass;
     }
+    const stable = ids.every((id) => next[id] === load[id]);
     load = next;
+    if (stable) break;
   }
 
   const metrics: Record<string, NodeMetrics> = {};
@@ -152,9 +156,9 @@ export function simulate(doc: ArchDoc, comps: ResolvedComponents, scale: number,
   const asyncMs = asyncPart.reduce((a, e) => a + hop(e), 0);
   const services = syncPart.filter((e) => comps[e.from].category === "compute").map((e) => e.from);
   const flowError = services.length ? Math.max(...services.map((id) => eff[id])) : 0;
-  const actors = ids.filter(actor).sort((a, b) => (src[b] ?? 0) - (src[a] ?? 0));
-  const actorError = actors.length ? eff[actors[0]] : 0;
+  const actors = ids.filter(actor);
   const entry = actors.reduce((a, id) => a + (src[id] ?? 0), 0);
+  const actorError = entry > 0 ? actors.reduce((sum, id) => sum + src[id] * eff[id], 0) / entry : 0;
 
   const live = ids.filter((id) => !actor(id) && !metrics[id].down && metrics[id].cap > 0 && metrics[id].load > 0);
   let hottest: string | null = null;
@@ -193,4 +197,24 @@ export function simulate(doc: ArchDoc, comps: ResolvedComponents, scale: number,
     backlogs,
     verdict,
   };
+}
+
+interface OutageEffect {
+  id: string;
+  errorIncrease: number;
+  loadLost: number;
+  backlogIncrease: number;
+}
+
+/** Isolates the effect of outages by comparing two runs at the same traffic level. */
+export function outageEffects(active: SimResult, healthy: SimResult): OutageEffect[] {
+  return Object.entries(active.metrics).flatMap(([id, metric]) => {
+    const normal = healthy.metrics[id];
+    if (!normal) return [];
+    const errorIncrease = !metric.down && metric.load > 0 ? Math.max(0, active.effectiveError[id] - healthy.effectiveError[id]) : 0;
+    const loadLost = metric.down ? 0 : Math.max(0, normal.load - metric.load);
+    const backlogIncrease = Math.max(0, metric.backlog - normal.backlog);
+    if (errorIncrease < 0.0005 && loadLost < 0.05 && backlogIncrease < 0.05) return [];
+    return [{ id, errorIncrease, loadLost, backlogIncrease }];
+  }).sort((a, b) => b.errorIncrease - a.errorIncrease || b.backlogIncrease - a.backlogIncrease || b.loadLost - a.loadLost);
 }

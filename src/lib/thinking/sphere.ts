@@ -4,6 +4,8 @@ import { aiHue, mix, palette, rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 import type { Gaze } from "./face";
 import { listenLevel } from "./listen";
+import { material } from "./volume";
+import { easeOut } from "./finish";
 import { easeToward, toward } from "./pointer";
 
 /**
@@ -154,6 +156,12 @@ export function createSphere(canvas: HTMLCanvasElement, px: number, gain = 1): P
     const start = startle(cue.wake);
     const breath = askBreath(time);
     const Rnow = R * (1 - 0.07 * drawn) * (1 + 0.04 * start) * (1 + 0.03 * cue.ask * (breath - 0.5));
+    const glass = mix(p.b, failed ? p.danger : p.success, Math.min(1, now.sweep));
+    const shellR = Rnow * Math.max(0.12, easeOut(now.k));
+    ctx.fillStyle = material(ctx, px / 2, px / 2, shellR, [mix(glass, p.c, 0.68), glass, mix(glass, p.a, 0.55)], now.alpha * (p.dark ? 0.23 : 0.14), look.x);
+    ctx.beginPath();
+    ctx.arc(px / 2, px / 2, shellR, 0, TAU);
+    ctx.fill();
     if (cue.ask > 0.01) softHalo(ctx, px / 2, px / 2, px * 0.36, aiHue(p, 0.5), 0.22 * cue.ask * (0.6 + 0.4 * breath) * now.alpha);
     const cr = Math.cos(turn);
     const sr = Math.sin(turn);
@@ -225,7 +233,8 @@ export function createSphere(canvas: HTMLCanvasElement, px: number, gain = 1): P
         1.6 * sw * (1 - sw);
       alpha = Math.min(1, alpha) * e * now.alpha * (1 - 0.35 * now.warn);
       if (alpha < 0.02) continue;
-      let color = p.text;
+      const surfaceLight = Math.max(0, -mx * 0.44 + my * 0.54 + depth * 0.58);
+      let color = mix(p.text, aiHue(p, 0.27 + q.u * 0.47), 0.31 + surfaceLight * 0.38);
       if (sw > 0.02) color = mix(p.text, failed ? p.danger : p.success, sw * 1.2);
       else if (g > 0.04) color = mix(p.text, aiHue(p, q.u), g * 2.2);
       if (now.warn > 0.02) color = mix(color, p.warning, now.warn * 0.45);

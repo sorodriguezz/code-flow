@@ -589,9 +589,9 @@ pub fn status(conn: &Connection, collection: &str, space: Option<&str>) -> rusql
 }
 
 /// Whether any of `collections` has a vector in `space` — one indexed probe, not a count.
-pub fn has_vectors(conn: &Connection, space: &str, collections: &[String]) -> bool {
+pub fn has_vectors(conn: &Connection, space: &str, collections: &[String]) -> rusqlite::Result<bool> {
     if collections.is_empty() {
-        return false;
+        return Ok(false);
     }
     let sql = format!(
         "SELECT EXISTS (SELECT 1 FROM vectors v JOIN chunks c ON c.id = v.chunk_id JOIN sources s ON s.id = c.source_id
@@ -602,7 +602,7 @@ pub fn has_vectors(conn: &Connection, space: &str, collections: &[String]) -> bo
     for c in collections {
         values.push(c);
     }
-    conn.query_row(&sql, values.as_slice(), |r| r.get::<_, bool>(0)).unwrap_or(false)
+    conn.query_row(&sql, values.as_slice(), |r| r.get::<_, bool>(0))
 }
 
 /// One lexical or semantic match.
@@ -1118,7 +1118,7 @@ mod tests {
         let best = search_vectors(&conn, "s1", &cols, &[0.9, 0.1], 1).unwrap();
         assert_eq!(best[0].0.heading, "Storage");
         assert_eq!(status(&conn, "repo:p", Some("s1")).unwrap().vectors, 2);
-        assert!(has_vectors(&conn, "s1", &cols) && !has_vectors(&conn, "s2", &cols));
+        assert!(has_vectors(&conn, "s1", &cols).unwrap() && !has_vectors(&conn, "s2", &cols).unwrap());
     }
 
     /// The held copy of a space follows the index: a vector stored after the first search is found

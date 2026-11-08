@@ -1,11 +1,11 @@
 import { ended, type ThinkingActivity } from "./activity";
 import { askBreath, cueClock, softHalo, startle } from "./cue";
-import { clamp01, easeOut, endColor, finishClock } from "./finish";
+import { clamp01, easeOut, endColor, finishClock, rgba } from "./finish";
 import { listenLevel } from "./listen";
-import { mix, palette, rgb } from "./palette";
+import { mix, palette } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 import { voiceLevel } from "./voice";
-import type { Gaze } from "./face";
+import { INK, WHITE, type Gaze } from "./face";
 import { easeToward, toward } from "./pointer";
 
 /**
@@ -106,40 +106,47 @@ export function createWave(canvas: HTMLCanvasElement, px: number, gain = 1): Pai
     const merge = fin >= 0 ? easeOut((fin - (failed ? 0 : SWELL)) / MERGE) : 0;
     const green = fin >= 0 ? clamp01((fin - (failed ? 0 : SWELL * 0.8)) / 0.45) : 0;
     const end = endColor(p, failed);
-    const yOf = (curve: (typeof CURVES)[number], i: number, nx: number, envelope: number) =>
-      Math.sin(
-        // Inward: by the distance from the middle — rounded there, or the mirrored crests meet in a kink.
-        (inward ? Math.hypot(nx, 0.12) * curve.freq * Math.PI + time * Math.abs(curve.speed) : nx * curve.freq * Math.PI + time * curve.speed) +
-          curve.phase,
-      ) *
-      envelope *
-      height *
-      curve.weight *
-      (0.75 + 0.25 * Math.sin(time * 1.1 + i));
+    // Inward waves mirror the distance from the middle, with a rounded crest where they meet.
+    const angleOf = (curve: (typeof CURVES)[number], nx: number) =>
+      (inward ? Math.hypot(nx, 0.12) * curve.freq * Math.PI + time * Math.abs(curve.speed) : nx * curve.freq * Math.PI + time * curve.speed) + curve.phase;
+    const amplitude = (curve: (typeof CURVES)[number], i: number) => height * curve.weight * (0.75 + 0.25 * Math.sin(time * 1.1 + i));
+    const lead = amplitude(CURVES[0], 0);
     // On a dark ground the waves add up to light where they cross; on a light one that would wash
     // out to white, so they simply overlap.
     ctx.globalCompositeOperation = p.dark ? "lighter" : "source-over";
     ctx.lineCap = "round";
     CURVES.forEach((curve, i) => {
+      const height = amplitude(curve, i);
       ctx.beginPath();
       for (let s = 0; s <= steps; s++) {
         const nx = (s / steps) * 2 - 1;
         // Pinned at both ends, peaking at the crest: each side stretched to fit its half.
         const k = nx < crest ? (nx - crest) / (1 + crest) : (nx - crest) / (1 - crest);
         const envelope = Math.pow(1 - k * k, 2);
-        const own = yOf(curve, i, nx, envelope);
-        const y = mid + (merge > 0 ? own + (yOf(CURVES[0], 0, nx, envelope) - own) * merge : own);
-        const x = left + (s / steps) * width;
+        const angle = angleOf(curve, nx);
+        const displacement = Math.sin(angle) * height;
+        const merged = merge > 0 ? displacement + (Math.sin(angleOf(CURVES[0], nx)) * lead - displacement) * merge : displacement;
+        const depth = Math.cos(angle) * envelope * (1 - merge);
+        const y = mid + merged * envelope * (1 + depth * 0.22) + depth * height * 0.12 * (i - 1);
+        const x = left + (s / steps) * width + depth * px * 0.026 * look.x;
         if (s === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
       // In proportion up to the gutter sizes; finer than that big, where px / 16 reads as a rope.
-      ctx.lineWidth = Math.max(1, i === 0 ? Math.min(px / 16, 3 + px / 60) : Math.min(px / 22, 2 + px / 80));
+      const thickness = Math.max(1.2, i === 0 ? Math.min(px / 11, 5 + px / 54) : Math.min(px / 16, 3 + px / 67));
       const hue = activity?.quiet && !ended(activity) ? p.warning : colors[i];
-      ctx.strokeStyle = rgb(green > 0 ? mix(hue, end, green) : hue);
+      const color = mix(hue, end, green);
       // Folded, the other two fade out under the first: summed by "lighter" they washed the end
       // colour out to white, and a red or green line has to read as red or green.
       ctx.globalAlpha = (activity?.stopping ? 0.3 : i === 0 ? 0.95 : 0.7) * (i === 0 ? 1 : 1 - merge);
+      ctx.lineWidth = thickness;
+      ctx.strokeStyle = rgba(mix(color, INK, 0.42), 1);
+      ctx.stroke();
+      ctx.lineWidth = thickness * 0.73;
+      ctx.strokeStyle = rgba(color, 0.88);
+      ctx.stroke();
+      ctx.lineWidth = Math.max(0.45, thickness * 0.25);
+      ctx.strokeStyle = rgba(mix(color, WHITE, 0.72), 0.83);
       ctx.stroke();
     });
     ctx.globalCompositeOperation = "source-over";

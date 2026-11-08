@@ -19,6 +19,8 @@ export interface Finding {
   severity: Severity;
   area: Area;
   affects: string[];
+  /** Exact positions of relevant connections in the document. */
+  connections?: number[];
   params: Record<string, string | number>;
 }
 
@@ -27,10 +29,10 @@ const pct = (x: number) => Math.round(x * 100);
 
 export function review(doc: ArchDoc, comps: ResolvedComponents): Finding[] {
   const out: Finding[] = [];
-  const add = (rule: string, severity: Severity, area: Area, affects: string[], params: Record<string, string | number> = {}) =>
-    out.push({ rule, severity, area, affects: [...new Set(affects)], params });
+  const add = (rule: string, severity: Severity, area: Area, affects: string[], params: Record<string, string | number> = {}, connections?: number[]) =>
+    out.push({ rule, severity, area, affects: [...new Set(affects)], params, connections });
   const ids = Object.keys(comps);
-  const conns = (doc.connections ?? []).filter((e) => comps[e.from] && comps[e.to]);
+  const conns = (doc.connections ?? []).map((edge, index) => ({ ...edge, index })).filter((e) => comps[e.from] && comps[e.to]);
   const cat = (id: string) => comps[id]?.category;
   const text = (id: string) => `${id} ${comps[id].name ?? ""} ${comps[id].type ?? ""} ${comps[id].description ?? ""} ${comps[id].icon ?? ""}`;
   const name = (id: string) => comps[id]?.name ?? id;
@@ -45,7 +47,7 @@ export function review(doc: ArchDoc, comps: ResolvedComponents): Finding[] {
   }
 
   // Observability
-  if (!ids.some((id) => cat(id) === "observability" || /monitor|insights|observab|prometheus|grafana|datadog|opentelemetry|log.?analytics|cloudwatch|stackdriver/i.test(text(id)))) {
+  if (ids.length && !ids.some((id) => cat(id) === "observability" || /monitor|insights|observab|prometheus|grafana|datadog|opentelemetry|log.?analytics|cloudwatch|stackdriver/i.test(text(id)))) {
     const note = (doc.notes ?? []).find((n) => /insights|telemetr|observab|monitor/i.test(`${n.title ?? ""} ${n.text ?? ""}`));
     add(note ? "observabilityNoted" : "observability", "critical", "observability", [], note ? { note: note.id } : {});
   }
@@ -61,13 +63,13 @@ export function review(doc: ArchDoc, comps: ResolvedComponents): Finding[] {
   if (!ids.some((id) => cat(id) === "identity") && ids.some((id) => /admin|backoffice|back-office/i.test(text(id))))
     add("adminWithoutIdentity", "critical", "security", ids.filter((id) => /admin|backoffice|back-office/i.test(text(id))));
   const plain = conns.filter((e) => (cat(e.from) === "actor" || cat(e.from) === "external" || cat(e.to) === "external") && /^http$/i.test(e.protocol ?? ""));
-  if (plain.length) add("plainHttp", "critical", "security", plain.flatMap((e) => [e.from, e.to]));
+  if (plain.length) add("plainHttp", "critical", "security", plain.flatMap((e) => [e.from, e.to]), {}, plain.map((e) => e.index));
 
   // Resilience
   const spof = [...reach].filter((id) => cat(id) === "compute" && !comps[id].sim?.managed && (comps[id].sim?.replicas ?? 1) <= 1);
   if (spof.length) add("singlePoint", "warning", "resilience", spof, { names: spof.map(name).join(", ") });
   const extSync = conns.filter((e) => e.kind !== "async" && cat(e.to) === "external" && reach.has(e.from));
-  if (extSync.length) add("externalSync", "warning", "resilience", extSync.flatMap((e) => [e.from, e.to]));
+  if (extSync.length) add("externalSync", "warning", "resilience", extSync.flatMap((e) => [e.from, e.to]), {}, extSync.map((e) => e.index));
 
   // Performance: the longest synchronous chain from a person.
   let best: string[] = [];
@@ -106,7 +108,7 @@ export function review(doc: ArchDoc, comps: ResolvedComponents): Finding[] {
 
   // Maintainability
   const noProtocol = conns.filter((e) => !e.protocol && cat(e.to) !== "actor");
-  if (noProtocol.length) add("noProtocol", "suggestion", "maintainability", noProtocol.flatMap((e) => [e.from, e.to]), { count: noProtocol.length });
+  if (noProtocol.length) add("noProtocol", "suggestion", "maintainability", noProtocol.flatMap((e) => [e.from, e.to]), { count: noProtocol.length }, noProtocol.map((e) => e.index));
   const alone = Object.keys(doc.components ?? {}).filter((id) => !conns.some((e) => e.from === id || e.to === id));
   if (alone.length) add("isolated", "suggestion", "maintainability", alone, { names: alone.map(name).join(", ") });
 

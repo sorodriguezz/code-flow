@@ -82,9 +82,9 @@ interface ArchitectureState {
   /** Folders shown folded, by id — kept per workspace in this webview. */
   folded: string[];
   activeId: string | null;
+  opening: { id: string | null } | null;
   draft: Draft | null;
   saving: boolean;
-  lastSavedAt: number | null;
   /** The linked file changed on disk under an unsaved edit. */
   fileConflict: boolean;
   /** Parsed documents named by the open document's `includes`, by title. */
@@ -96,7 +96,7 @@ interface ArchitectureState {
 
   setWorkspace: (workspaceId: string | null) => Promise<void>;
   refresh: () => Promise<void>;
-  open: (id: string | null) => Promise<void>;
+  open: (id: string | null, opts?: { discardChanges?: boolean }) => Promise<boolean>;
   editText: (text: string) => void;
   undo: () => void;
   redo: () => void;
@@ -197,9 +197,9 @@ export const useArchitectureStore = create<ArchitectureState>((set, get) => ({
   folders: [],
   folded: [],
   activeId: null,
+  opening: null,
   draft: null,
   saving: false,
-  lastSavedAt: null,
   fileConflict: false,
   included: [],
   past: [],
@@ -209,15 +209,16 @@ export const useArchitectureStore = create<ArchitectureState>((set, get) => ({
     if (get().workspaceId === workspaceId && !get().loading) return;
     await get().flush({ interactive: false });
     if (!workspaceId) {
-      set({ workspaceId: null, loading: false, items: [], activeId: null, draft: null, included: [] });
+      set({ workspaceId: null, loading: false, items: [], folders: [], activeId: null, opening: null, draft: null, included: [] });
       return;
     }
-    set({ workspaceId, loading: true, items: [], folders: [], folded: readFolded(workspaceId), activeId: null, draft: null, included: [] });
+    set({ workspaceId, loading: true, items: [], folders: [], folded: readFolded(workspaceId), activeId: null, opening: null, draft: null, included: [] });
     try {
       const tree = await diagramsLoadTree(workspaceId);
       if (get().workspaceId !== workspaceId) return;
       set({ items: sortItems(tree.diagrams.filter((d) => d.format === FORMAT_ARCH).map(toItem)), folders: ownFolders(tree.folders), loading: false });
     } catch (error) {
+      if (get().workspaceId !== workspaceId) return;
       set({ loading: false });
       pushErrorToast(String(error));
     }
@@ -235,25 +236,53 @@ export const useArchitectureStore = create<ArchitectureState>((set, get) => ({
     }
   },
 
-  open: async (id) => {
-    await get().flush({ interactive: false });
-    if (!id) {
-      set({ activeId: null, draft: null, included: [], fileConflict: false });
-      return;
-    }
-    set({ activeId: id, fileConflict: false });
+  open: async (id, { discardChanges = false } = {}) => {
+    const opening = { id };
+    set({ opening });
     try {
-      const sync = await diagramsPullFile(id);
-      if (get().activeId !== id) return;
-      if (!sync.row) {
-        set({ activeId: null, draft: null });
-        void get().refresh();
-        return;
+      if (discardChanges) {
+        if (saveTimer) { clearTimeout(saveTimer); saveTimer = undefined; }
+        await pendingFlush;
+      } else {
+        await get().flush({ interactive: false });
       }
-      set({ draft: { id, text: sync.row.doc, dirty: false, fileVersion: sync.version, fileError: sync.file_error }, lastSavedAt: null, past: [], future: [] });
+      if (get().opening !== opening) return false;
+      if (!discardChanges && get().draft?.dirty) {
+        pushErrorToast(translate("arch.open.unsaved"));
+        return false;
+      }
+      if (!id) {
+        set({ activeId: null, draft: null, included: [], fileConflict: false });
+        return true;
+      }
+      const sync = await diagramsPullFile(id);
+      if (get().opening !== opening) return false;
+      if (discardChanges && sync.file_error) {
+        pushErrorToast(sync.file_error);
+        return false;
+      }
+      if (!discardChanges && get().draft?.dirty) {
+        pushErrorToast(translate("arch.open.unsaved"));
+        return false;
+      }
+      if (!sync.row) {
+        pushErrorToast(translate("arch.open.missing"));
+        void get().refresh();
+        return false;
+      }
+      set({
+        activeId: id,
+        draft: { id, text: sync.row.doc, dirty: false, fileVersion: sync.version, fileError: sync.file_error },
+        included: [], fileConflict: false, past: [], future: [],
+      });
+      if (discardChanges) notifyUnsavedChanged();
       await get().reloadIncluded();
+      return get().opening === opening;
     } catch (error) {
-      pushErrorToast(String(error));
+      if (get().opening === opening) pushErrorToast(String(error));
+      return false;
+    } finally {
+      if (get().opening === opening) set({ opening: null });
     }
   },
 
@@ -293,12 +322,11 @@ export const useArchitectureStore = create<ArchitectureState>((set, get) => ({
       set({ saving: true });
       try {
         const saved = await diagramsSaveDiagram(draft.id, sent, FORMAT_ARCH, "", draft.fileVersion, !!opts.force);
+        if (!saved.meta) throw new Error(translate("arch.open.missing"));
         const now = get().draft;
-        if (now && now.id === draft.id) set({ draft: { ...now, dirty: now.text !== sent, fileVersion: saved.version ?? now.fileVersion }, lastSavedAt: Date.now(), fileConflict: false });
-        if (saved.meta) {
-          const item = toItem(saved.meta);
-          set({ items: sortItems(get().items.map((i) => (i.id === item.id ? item : i))) });
-        }
+        if (now?.id === draft.id) set({ draft: { ...now, dirty: now.text !== sent, fileVersion: saved.version ?? now.fileVersion, fileError: "" }, fileConflict: false });
+        const item = toItem(saved.meta);
+        set({ items: sortItems(get().items.map((i) => (i.id === item.id ? item : i))) });
       } catch (error) {
         const message = String(error);
         if (message.includes("changed-on-disk")) set({ fileConflict: true });
@@ -308,7 +336,8 @@ export const useArchitectureStore = create<ArchitectureState>((set, get) => ({
         pendingFlush = null;
         notifyUnsavedChanged();
       }
-      if (get().draft?.dirty) scheduleSave(get);
+      const now = get().draft;
+      if (now?.id === draft.id && now.dirty && now.text !== sent && !get().fileConflict) scheduleSave(get);
     })();
     return pendingFlush;
   },
@@ -320,6 +349,7 @@ export const useArchitectureStore = create<ArchitectureState>((set, get) => ({
     const name = title?.trim() || translate("arch.untitled");
     try {
       const meta = await diagramsCreateDiagram(workspaceId, folderId, name, formatDoc(blankDoc(name, lang)), FORMAT_ARCH, "[]");
+      if (get().workspaceId !== workspaceId) return null;
       // Unfolded, so the new document is seen where it was made.
       if (folderId && get().folded.includes(folderId)) get().toggleFolder(folderId);
       set({ items: sortItems([toItem(meta), ...get().items]) });
@@ -337,6 +367,7 @@ export const useArchitectureStore = create<ArchitectureState>((set, get) => ({
     const name = title?.trim() || doc.meta?.title || translate("arch.untitled");
     try {
       const meta = await diagramsCreateDiagram(workspaceId, null, name, formatDoc(doc), FORMAT_ARCH, "[]");
+      if (get().workspaceId !== workspaceId) return null;
       set({ items: sortItems([toItem(meta), ...get().items]) });
       await get().open(meta.id);
       return meta.id;
@@ -351,6 +382,7 @@ export const useArchitectureStore = create<ArchitectureState>((set, get) => ({
     if (!workspaceId) return null;
     try {
       const meta = await diagramsCreateDiagram(workspaceId, null, title.trim() || translate("arch.untitled"), text, FORMAT_ARCH, "[]");
+      if (get().workspaceId !== workspaceId) return null;
       set({ items: sortItems([toItem(meta), ...get().items]) });
       await get().open(meta.id);
       return meta.id;
@@ -365,7 +397,10 @@ export const useArchitectureStore = create<ArchitectureState>((set, get) => ({
       const meta = await diagramsUnlinkFile(id);
       if (meta) set({ items: get().items.map((i) => (i.id === id ? toItem(meta) : i)) });
       const now = get().draft;
-      if (now?.id === id) set({ draft: { ...now, fileVersion: null, fileError: "" } });
+      if (now?.id === id) {
+        set({ draft: { ...now, fileVersion: null, fileError: "" }, fileConflict: false });
+        if (now.dirty) scheduleSave(get);
+      }
     } catch (error) {
       pushErrorToast(String(error));
     }
@@ -493,6 +528,11 @@ export const useArchitectureStore = create<ArchitectureState>((set, get) => ({
     const { draft } = get();
     if (!draft) return false;
     await get().flush({ interactive: false });
+    if (get().draft?.id !== draft.id) return false;
+    if (get().draft?.dirty) {
+      pushErrorToast(translate("arch.open.unsaved"));
+      return false;
+    }
     try {
       const saved = await diagramsSaveToRepo(draft.id, projectId);
       if (saved.meta) {
@@ -500,7 +540,7 @@ export const useArchitectureStore = create<ArchitectureState>((set, get) => ({
         set({ items: get().items.map((i) => (i.id === item.id ? item : i)) });
       }
       const now = get().draft;
-      if (now) set({ draft: { ...now, fileVersion: saved.version } });
+      if (now?.id === draft.id) set({ draft: { ...now, fileVersion: saved.version } });
       return true;
     } catch (error) {
       pushErrorToast(String(error));
@@ -546,7 +586,7 @@ registerIslandApp(["architecture"], {
   isLoaded: () => useArchitectureStore.getState().workspaceId !== null || useArchitectureStore.getState().loading,
   flush: () => useArchitectureStore.getState().flush({ interactive: false }),
   release: () => {
-    useArchitectureStore.setState({ workspaceId: null, loading: false, items: [], activeId: null, draft: null, included: [] });
+    useArchitectureStore.setState({ workspaceId: null, loading: false, items: [], folders: [], activeId: null, opening: null, draft: null, included: [] });
   },
   reload: () => {
     useArchitectureStore.setState({ workspaceId: null, loading: false });

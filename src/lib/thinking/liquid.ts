@@ -6,6 +6,7 @@ import { easeToward, leanOf, toward } from "./pointer";
 import { aiCycle, clamp01, easeOut, endColor, finishClock, makeBurst, rgba, TAU } from "./finish";
 import { aiHue, mix, palette } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
+import { contactShadow } from "./volume";
 
 /**
  * "Líquido" — four drops of mercury in the assistant's hues, merging and pulling apart (metaballs).
@@ -119,11 +120,18 @@ export function createLiquid(canvas: HTMLCanvasElement, px: number, gain = 1): P
       for (let i = 0; i < res; i++) {
         const x = ((i + 0.5) / res) * 2 - 1;
         let f = 0;
+        let slopeX = 0;
+        let slopeY = 0;
         for (let n = 0; n < pos.length; n++) {
           const ball = pos[n];
           const dx = x - ball[0];
           const dy = y - ball[1];
-          f += (ball[2] * ball[2]) / (dx * dx + dy * dy + 1e-4);
+          const inverse = 1 / (dx * dx + dy * dy + 1e-4);
+          const weight = ball[2] * ball[2] * inverse;
+          const slope = weight * inverse;
+          f += weight;
+          slopeX += slope * dx;
+          slopeY += slope * dy;
         }
         const k = (j * res + i) * 4;
         const edge = clamp01((f - 0.9) / 0.22);
@@ -137,12 +145,17 @@ export function createLiquid(canvas: HTMLCanvasElement, px: number, gain = 1): P
         const lo = at < 0.5 ? p.a : p.b;
         const hi = at < 0.5 ? p.b : p.c;
         const along = clamp01(at < 0.5 ? at * 2 : (at - 0.5) * 2);
-        // Lit from the top left, a rim of shade at the bottom right: a drop, not a sticker.
-        const light = clamp01(0.5 + x * lightX + y * lightY);
-        const toWhite = clamp01(Math.min(1, light * light * 0.55 * clamp01((f - 1) * 1.5) + 0.3 * start));
+        // Shade the slope of the liquid surface. Each lobe has a highlight even as it merges.
+        const depth = 0.9 + f * 1.1;
+        const normal = Math.sqrt(slopeX * slopeX + slopeY * slopeY + depth * depth);
+        const light = clamp01((slopeX * lightX + slopeY * lightY + depth * 0.57) / normal);
+        const reflection = light * light;
+        const toWhite = clamp01(reflection * reflection * 0.76 + light * 0.14 + 0.25 * start);
+        const shade = 0.72 + light * 0.32 + (1 - edge) * 0.16;
         for (let c = 0; c < 3; c++) {
           let v = lo[c] + (hi[c] - lo[c]) * along;
           v = v + (end[c] - v) * toEnd;
+          v *= shade;
           v = v + (255 - v) * toWhite;
           data[k + c] = v + (p.warning[c] - v) * toWarm;
         }
@@ -151,6 +164,7 @@ export function createLiquid(canvas: HTMLCanvasElement, px: number, gain = 1): P
     }
     octx.putImageData(img, 0, 0);
     ctx.clearRect(0, 0, px, px);
+    if (px >= 22) contactShadow(ctx, px * (0.5 + pullX * 0.064), px * 0.889, px * 0.29, p.b, 0.23 * alpha);
     if (cue.ask > 0.01) softHalo(ctx, px / 2, px / 2, px * 0.36, aiHue(p, 0.5), 0.22 * cue.ask * (0.6 + 0.4 * breath) * alpha);
     const c = px / 2;
     // The landing: a damped squash and stretch, anchored at the drop's foot.
