@@ -2,6 +2,7 @@ import { useId, useMemo, type ReactNode } from "react";
 import { Workflow } from "lucide-react";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
 import { BRAND_LOGOS, type BrandLogo } from "../../lib/icons/brandLogos";
+import { scopeIds } from "../../lib/icons/scopeIds";
 
 /**
  * A brand mark by id — an AI engine's or a platform's — with a caller-supplied fallback for the
@@ -91,29 +92,5 @@ export function ProviderGlyph({
       className={className}
       fallback={Fallback ? <Fallback size={size} className={`shrink-0 ${className}`} /> : null}
     />
-  );
-}
-
-/**
- * Makes every id a body defines unique to one instance, references included.
- *
- * Deliberately literal: it rewrites `id="x"`, `url(#x)` and `href="#x"` for the ids the body itself
- * declares, and touches nothing else. A regex over the whole markup would be shorter and would also
- * rewrite an `id` that appeared inside path data or a title. `href` is the `<use>` reference —
- * Next.js's mark masks with a `<use href="#circle">`, and left pointing at the old id the mask was
- * empty and the whole mark vanished.
- */
-function scopeIds(body: string, suffix: string): string {
-  const declared = [...body.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
-  return declared.reduce(
-    (markup, id) =>
-      markup
-        .split(`id="${id}"`)
-        .join(`id="${id}-${suffix}"`)
-        .split(`url(#${id})`)
-        .join(`url(#${id}-${suffix})`)
-        .split(`href="#${id}"`)
-        .join(`href="#${id}-${suffix}"`),
-    body,
   );
 }

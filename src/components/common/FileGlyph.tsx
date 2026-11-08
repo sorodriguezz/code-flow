@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useId, useMemo, useSyncExternalStore } from "react";
 import { Folder, FolderOpen } from "lucide-react";
 import {
   iconCatalogVersion,
@@ -8,6 +8,7 @@ import {
   type CatalogIcon,
 } from "../../lib/icons/catalog";
 import { customIconFor, type IconRule } from "../../lib/icons/rules";
+import { scopeIds } from "../../lib/icons/scopeIds";
 import { catalogIconFor, fileIconFor } from "../../lib/fileIcon";
 import { useIconRulesStore } from "../../state/iconRulesStore";
 
@@ -25,6 +26,9 @@ function useIconCatalog(): number {
 
 /** One catalogue glyph, drawn inline. */
 export function CatalogGlyph({ icon, size = 13 }: { icon: CatalogIcon; size?: number }) {
+  // A cached, hidden view can otherwise own the first copy of a gradient or mask ID.
+  const uid = useId().replace(/[^a-zA-Z0-9]/g, "");
+  const body = useMemo(() => scopeIds(icon.body, uid), [icon.body, uid]);
   return (
     <svg
       width={size}
@@ -35,7 +39,7 @@ export function CatalogGlyph({ icon, size = 13 }: { icon: CatalogIcon; size?: nu
       // The markup comes from the icon packages or from this repo's own bundled set, never from
       // anything the user typed — the rules only ever store an *id*, which is looked up here. See the
       // note on `CatalogIcon.body`.
-      dangerouslySetInnerHTML={{ __html: icon.body }}
+      dangerouslySetInnerHTML={{ __html: body }}
     />
   );
 }
