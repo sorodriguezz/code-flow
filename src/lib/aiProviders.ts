@@ -333,6 +333,7 @@ export const PROVIDER_MODELS: Record<string, AiModelOption[]> = {
     { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-opus-4-8", label: "Opus 4.8" },
     { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
+    { id: "claude-fable-5-2", label: "Fable 5.2" },
     { id: "claude-fable-5-1", label: "Fable 5.1" },
     // Earlier generations, still served. Opus 3 is not here and cannot be: Anthropic retired
     // `claude-3-opus-20240229` on 2026-01-05, so every turn would fail with "model not found".

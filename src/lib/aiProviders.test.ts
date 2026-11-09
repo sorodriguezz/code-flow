@@ -29,6 +29,12 @@ describe("modelDisplayLabel", () => {
     expect(modelDisplayLabel("claude", "claude-fable-5", t)).toBe("Fable 5");
   });
 
+  it("tells Fable 5.2 from Fable 5.1 and Fable 5", () => {
+    expect(modelDisplayLabel("claude", "claude-fable-5-2", t)).toBe("Fable 5.2");
+    expect(modelDisplayLabel("claude", "claude-fable-5-2-20261101", t)).toBe("Fable 5.2");
+    expect(modelDisplayLabel("claude", "claude-fable-5-1", t)).toBe("Fable 5.1");
+  });
+
   it("keeps the model's name for a [1m] variant", () => {
     expect(modelDisplayLabel("claude", "claude-opus-4-6[1m]", t)).toBe("Opus 4.6 · 1M");
     expect(modelDisplayLabel("claude", "claude-sonnet-4-6[1M]", t)).toBe("Sonnet 4.6 · 1M");

@@ -31,7 +31,8 @@ import { ContextBars } from "./ContextBars";
 import { useConversationStore } from "../../state/conversationStore";
 import { useUiStore } from "../../state/uiStore";
 import { focusEditorOn } from "../../lib/editorIslands";
-import { markCodeRefs } from "../../lib/codeRefs";
+import { markCodeRefs, resolveCodeRef } from "../../lib/codeRefs";
+import { parseRunSteps, touchedFiles } from "../../lib/runSteps";
 import { parseContextBreakdown } from "../../lib/contextBreakdown";
 import { bodyForBlock, fileNameForBlock, pathFromFirstLine } from "../../lib/codeFileName";
 import { OutputBar } from "./OutputBar";
@@ -328,6 +329,20 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
     el.addEventListener("click", onClick);
     return () => el.removeEventListener("click", onClick);
   }, [bodyRef, repoId, markup]);
+
+  // Hovering a reference shows the full path it names, the way the source chips under the answer
+  // do — resolved against the files this turn read or changed. Set on the DOM after the fact: the
+  // HTML is memoised on the text alone, and a trace can arrive after it.
+  const touchedPaths = useMemo(() => touchedFiles(parseRunSteps(trace), Infinity).map((f) => f.path), [trace]);
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    for (const code of el.querySelectorAll<HTMLElement>("code[data-ref]")) {
+      const full = resolveCodeRef(code.dataset.ref!, touchedPaths);
+      if (full) code.title = full;
+      else code.removeAttribute("title");
+    }
+  }, [bodyRef, markup, touchedPaths]);
 
   // Mermaid as a diagram, `$…$` as KaTeX, HTML as a preview on request — after the code bars, which it hangs on.
   const darkTheme = useThemeStore((s) => s.resolved) === "dark";

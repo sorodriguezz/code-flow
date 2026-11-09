@@ -19,3 +19,20 @@ export function markCodeRefs(html: string): string {
     )
     .join("");
 }
+
+/**
+ * The full path an inline reference points at, picked from the files the turn read or changed.
+ *
+ * Answers name files short (`trakcare.dto.ts`, `dto/trakcare.dto.ts`); the turn's trace holds the
+ * paths the tools were actually given. A reference matches a path it is a whole-segment suffix of,
+ * so `a.ts` never matches `data.ts`. No match gives `null` rather than a guess joined to the repo
+ * root: a bare name could live in any folder, and a tooltip with a wrong path is worse than none.
+ */
+export function resolveCodeRef(ref: string, paths: readonly string[]): string | null {
+  const want = ref.replace(/\\/g, "/");
+  for (const path of paths) {
+    const norm = path.replace(/\\/g, "/");
+    if (norm === want || norm.endsWith(`/${want}`)) return path;
+  }
+  return null;
+}
