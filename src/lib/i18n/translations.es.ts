@@ -2834,6 +2834,7 @@ export const es = {
   "quota.pillLabel": "Mostrar en la barra de estado",
   "quota.pillHint":
     "Cuál de los límites de arriba reporta el porcentaje que va junto al medidor. En automático es el que esté más lleno, así que va cambiando a medida que las ventanas se reinician.",
+  "quota.noRecentData": "Sin datos recientes",
   "quota.railOpenLimits": "Ver límites del plan",
   "quota.railLabel": "Mostrar en la barra lateral",
   "quota.railHint":

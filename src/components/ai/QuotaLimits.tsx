@@ -7,6 +7,7 @@ import {
   formatResetIn,
   formatUsed,
   quotaKey,
+  missingClaudeWeekly,
   severityOf,
   useQuotaStore,
   type ResetAt,
@@ -159,6 +160,7 @@ function ProviderBlock({
           {quota.limits.map((limit) => (
             <LimitRow key={`${limit.kind}:${limit.scope}`} limit={limit} narrowed={narrowed} />
           ))}
+          {missingClaudeWeekly(quota) && <MissingWeeklyQuota />}
           {quota.error.startsWith("from_run") && <FromRunNote quota={quota} />}
         </div>
       )}
@@ -357,4 +359,15 @@ function emptyMessage(error: string, t: Translate): string {
   const until = rateLimitedUntil(error);
   if (until) return t("quota.rateLimited", { time: until });
   return t("quota.unreadableWhy", { why: shortReason(error) });
+}
+
+/** An unavailable window has no percentage or progress bar. */
+export function MissingWeeklyQuota() {
+  const t = useT();
+  return (
+    <span className="flex items-baseline justify-between gap-3 text-[11px] text-[var(--cf-text-muted)]">
+      <span>{t("quota.weekly")}</span>
+      <span>{t("quota.noRecentData")}</span>
+    </span>
+  );
 }

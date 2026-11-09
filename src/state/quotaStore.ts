@@ -455,3 +455,9 @@ export function railWindows(quota: ProviderQuota): { session: QuotaLimit | null;
     fullest(whole.filter((l) => l.kind !== "session"));
   return { session, long };
 }
+
+/** A run may report only the session. Missing weekly data is not zero consumption. */
+export function missingClaudeWeekly(quota: ProviderQuota): boolean {
+  return quota.provider === "claude" && quota.error.split("|")[0] === "from_run"
+    && !quota.limits.some((limit) => limit.kind === "weekly");
+}

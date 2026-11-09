@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatResetAt, formatResetIn } from "./quotaStore";
+import { formatResetAt, formatResetIn, missingClaudeWeekly } from "./quotaStore";
 
 /** A fixed local instant to count from, so the day boundaries under test are the machine's own —
  *  which is exactly what the panel resolves against. */
@@ -46,5 +46,25 @@ describe("formatResetAt", () => {
     expect(formatResetAt("", now)).toBeNull();
     expect(formatResetAt("not a date", now)).toBeNull();
     expect(formatResetAt(inMinutes(-1), now)).toBeNull();
+  });
+});
+
+
+describe("missingClaudeWeekly", () => {
+  const session = { kind: "session", scope: "", used_percent: 3, resets_at: inMinutes(45) };
+  const quota = { provider: "claude", plan: "", account_id: "personal", fetched_at: new Date(now).toISOString(), error: "from_run", limits: [session] };
+
+  it("marks partial Claude run readings, including endpoint fallbacks", () => {
+    expect(missingClaudeWeekly(quota)).toBe(true);
+    expect(missingClaudeWeekly({ ...quota, error: "from_run|stale" })).toBe(true);
+  });
+
+  it("preserves a confirmed weekly reading at zero", () => {
+    expect(missingClaudeWeekly({ ...quota, limits: [session, { ...session, kind: "weekly", used_percent: 0 }] })).toBe(false);
+  });
+
+  it("does not invent a weekly window for other providers or direct responses", () => {
+    expect(missingClaudeWeekly({ ...quota, provider: "codex" })).toBe(false);
+    expect(missingClaudeWeekly({ ...quota, error: "" })).toBe(false);
   });
 });

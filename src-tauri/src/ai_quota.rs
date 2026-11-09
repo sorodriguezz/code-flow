@@ -526,11 +526,28 @@ async fn read_now(engine: &QuotaEngine) -> ProviderQuota {
         (other, _) => failed(other, "unsupported"),
     };
 
+    cache_reading(key, fresh, fresh_for(provider) > FRESH_FOR)
+}
+
+/// Publish readings with limits, including `from_run|…`: provenance is not a failed read.
+fn cache_reading(key: &str, fresh: ProviderQuota, cache_failures: bool) -> ProviderQuota {
+    // An endpoint fallback can contain an older run than a successful direct reading we kept.
+    // Accept new run data without letting an older snapshot move the account backwards.
+    if !fresh.limits.is_empty() {
+        if let Some((_, previous)) = cached(key) {
+            let older = chrono::DateTime::parse_from_rfc3339(&fresh.fetched_at).ok()
+                .zip(chrono::DateTime::parse_from_rfc3339(&previous.fetched_at).ok())
+                .is_some_and(|(new, old)| new < old);
+            if !previous.limits.is_empty() && older {
+                return previous;
+            }
+        }
+    }
     // A failed read falls back to the last good one rather than blanking the row. The stale answer
     // keeps its own `fetched_at`, so "these numbers are from four minutes ago" is visible rather
     // than implied — and the cache clock is *not* reset, so the next poll tries again immediately
     // instead of serving the stale copy for another minute.
-    if !fresh.error.is_empty() {
+    if fresh.limits.is_empty() && !fresh.error.is_empty() {
         if let Some((_, previous)) = cached(key) {
             if !previous.limits.is_empty() {
                 return previous;
@@ -541,7 +558,7 @@ async fn read_now(engine: &QuotaEngine) -> ProviderQuota {
         // floored by `LAST_ATTEMPT`: an unfiled failure would leave a "reading…" row with no read
         // behind it. The HTTP providers are re-read by the next poll a minute later, so theirs
         // stays honest as it is.
-        if fresh_for(provider) > FRESH_FOR {
+        if cache_failures {
             remember(key, fresh.clone());
         }
         return fresh;
@@ -588,6 +605,53 @@ fn kind_rank(kind: &str) -> u8 {
         "weekly" => 1,
         "monthly" => 2,
         _ => 3,
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    fn reading(percent: f64, error: &str, at: &str) -> ProviderQuota {
+        ProviderQuota {
+            provider: "claude".into(),
+            limits: vec![QuotaLimit { kind: "session".into(), scope: String::new(), used_percent: percent, resets_at: String::new() }],
+            plan: String::new(), error: error.into(), fetched_at: at.into(), account_id: None,
+        }
+    }
+
+    #[test]
+    fn a_new_run_replaces_and_caches_the_previous_reading() {
+        for (key, source) in [("test:new_run", "from_run"), ("test:run_fallback", "from_run|stale")] {
+            remember(key, reading(80.0, "", "old"));
+            let current = cache_reading(key, reading(3.0, source, "new"), false);
+            assert_eq!(current.limits[0].used_percent, 3.0);
+            assert_eq!(current.fetched_at, "new");
+            let (_, kept) = cached(key).unwrap();
+            assert_eq!(kept.limits[0].used_percent, 3.0);
+            assert_eq!(kept.error, source);
+            forget(key);
+        }
+    }
+
+    #[test]
+    fn an_old_run_does_not_replace_a_newer_direct_reading() {
+        let key = "test:older_run";
+        remember(key, reading(5.0, "", "2026-11-09T18:00:00Z"));
+        let result = cache_reading(key, reading(3.0, "from_run|stale", "2026-11-09T17:00:00Z"), false);
+        assert_eq!(result.limits[0].used_percent, 5.0);
+        assert_eq!(result.fetched_at, "2026-11-09T18:00:00Z");
+        forget(key);
+    }
+
+    #[test]
+    fn a_failed_read_keeps_the_previous_numbers_and_timestamp() {
+        let key = "test:failed_read";
+        remember(key, reading(3.0, "from_run", "original"));
+        let result = cache_reading(key, failed("claude", reason::STALE), false);
+        assert_eq!(result.limits[0].used_percent, 3.0);
+        assert_eq!(result.fetched_at, "original");
+        forget(key);
     }
 }
 
@@ -1057,6 +1121,10 @@ mod claude {
             assert!(run_limits(&limit, 3_000).is_empty(), "the session rolled over");
             let both = crate::ai::AiRateLimit { seven_day_pct: 40.0, seven_day_resets_at: 9_000, ..limit };
             assert_eq!(run_limits(&both, 1_000).len(), 2);
+            let unused_week = crate::ai::AiRateLimit { seven_day_pct: 0.0, ..both };
+            let limits = run_limits(&unused_week, 1_000);
+            assert_eq!(limits.len(), 2, "a reported week at zero is still a reading");
+            assert_eq!(limits[1].used_percent, 0.0);
         }
 
         /// A `429` is waited out: as long as Anthropic asks, else five minutes doubling per refusal in

@@ -1,11 +1,11 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { ArrowUpRight, Clock3 } from "lucide-react";
 import { useT } from "../../state/languageStore";
-import { formatResetIn, formatUsed, quotaKey, railWindows, severityOf, useQuotaStore } from "../../state/quotaStore";
+import { formatResetIn, formatUsed, missingClaudeWeekly, quotaKey, railWindows, severityOf, useQuotaStore } from "../../state/quotaStore";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import { useUiStore } from "../../state/uiStore";
 import { providerDisplayLabel } from "../../lib/aiProviders";
-import { limitLabel, narrowedKinds, quotaAccountLabel } from "../ai/QuotaLimits";
+import { MissingWeeklyQuota, limitLabel, narrowedKinds, quotaAccountLabel } from "../ai/QuotaLimits";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { Tooltip } from "../common/Tooltip";
 import type { QuotaLimit } from "../../types/domain";
@@ -146,6 +146,7 @@ export function RailQuotaRings() {
               <span className="cf-quota-details">
                 {session && <QuotaWindow limit={session} narrowed={narrowed} inner />}
                 {long && <QuotaWindow limit={long} narrowed={narrowed} />}
+                {missingClaudeWeekly(quota) && <span className="mt-3 block"><MissingWeeklyQuota /></span>}
                 <span className="cf-quota-hint">
                   {t("quota.railOpenLimits")} <ArrowUpRight size={12} aria-hidden />
                 </span>
