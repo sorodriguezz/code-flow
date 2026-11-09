@@ -4158,6 +4158,16 @@ body.cf-dragging * {
   overflow: hidden;
 }
 
+/* A sheet with a dialog open in it rises above its sibling sheets. The view's sheet is its own
+   stacking context (`.cf-ambient-bg` isolates it), so a `fixed` scrim inside it — z-index or not —
+   could never climb out of it, and the terminal dock, a later sibling, painted over the bottom of
+   every modal opened from a view. Lifting the whole sheet only while a dialog is in it keeps the
+   normal order (dock over the view's own content) the rest of the time. */
+.cf-sheet:has(.fixed.inset-0, [aria-modal="true"]) {
+  position: relative;
+  z-index: 50;
+}
+
 /* The frame, as a class rather than `bg-[var(--cf-bg)]` on each window's root, so the see-through
    rules below have one thing to aim at. */
 .cf-frame {
