@@ -2834,6 +2834,7 @@ export const es = {
   "quota.pillLabel": "Mostrar en la barra de estado",
   "quota.pillHint":
     "Cuál de los límites de arriba reporta el porcentaje que va junto al medidor. En automático es el que esté más lleno, así que va cambiando a medida que las ventanas se reinician.",
+  "quota.railOpenLimits": "Ver límites del plan",
   "quota.railLabel": "Mostrar en la barra lateral",
   "quota.railHint":
     "Un anillo por cuenta al pie de la barra lateral: la sesión por dentro y la semana por fuera. Pasa el mouse para ver qué cuenta es; se actualiza cada minuto y al terminar cada turno.",

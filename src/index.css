@@ -4522,6 +4522,80 @@ html:has(.cf-codi-shell) body {
   }
 }
 
+/* Plan quota orbits: finite arrival motion; hover reveals the fullest window's consumption.
+   The rings always keep their real values — they never spin like a busy indicator. */
+.cf-quota-orbit {
+  isolation: isolate;
+  color: var(--cf-text);
+  background: color-mix(in oklab, var(--cf-surface-raised) 65%, transparent);
+  box-shadow: 0 1px 3px color-mix(in oklab, var(--cf-text) 7%, transparent);
+  transition: background 180ms, box-shadow 180ms, scale 220ms cubic-bezier(.22, 1, .36, 1);
+  animation: cf-quota-arrive 400ms var(--cf-quota-delay) both;
+}
+.cf-quota-orbit::before {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  z-index: -1;
+  border: 1px solid var(--cf-quota-color);
+  border-radius: inherit;
+  opacity: 0;
+  scale: .9;
+  transition: opacity 180ms, scale 220ms;
+}
+.cf-quota-orbit:is(:hover, :focus-visible) {
+  scale: 1.08;
+  background: var(--cf-surface-raised);
+  box-shadow: 0 3px 10px color-mix(in oklab, var(--cf-accent) 16%, transparent);
+}
+.cf-quota-orbit:is(:hover, :focus-visible)::before { opacity: .3; scale: 1; }
+.cf-quota-orbit:focus-visible { outline: 2px solid var(--cf-accent); outline-offset: 4px; }
+.cf-quota-orbit:active { scale: .96; }
+.cf-quota-core {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: linear-gradient(145deg, var(--cf-surface-raised), var(--cf-surface));
+}
+.cf-quota-core > * { grid-area: 1 / 1; transition: opacity 160ms, scale 200ms; }
+.cf-quota-value { font-size: 9px; font-weight: 700; font-variant-numeric: tabular-nums; opacity: 0; scale: .8; }
+.cf-quota-orbit:is(:hover, :focus-visible) .cf-quota-logo { opacity: 0; scale: .7; }
+.cf-quota-orbit:is(:hover, :focus-visible) .cf-quota-value { opacity: 1; scale: 1; }
+.cf-quota-warning {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cf-quota-color);
+  border: 1.5px solid var(--cf-surface-raised);
+}
+.cf-quota-segment { transition: stroke-dasharray 600ms, stroke 300ms; animation: cf-quota-fill 650ms var(--cf-quota-delay) both; }
+.cf-quota-plan { font-size: 9px; font-weight: 600; text-transform: uppercase; color: var(--cf-text-muted); border: 1px solid var(--cf-border); border-radius: 4px; padding: 2px 5px; }
+.cf-quota-details { display: block; width: 230px; max-width: 100%; padding-top: 6px; }
+.cf-quota-window { display: block; }
+.cf-quota-window + .cf-quota-window { margin-top: 12px; }
+.cf-quota-window-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.cf-quota-window-name { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.cf-quota-key { width: 7px; height: 7px; flex-shrink: 0; border: 1.5px solid var(--cf-quota-color); border-radius: 50%; }
+.cf-quota-key-inner { background: var(--cf-quota-color); }
+.cf-quota-window-value { flex-shrink: 0; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--cf-text); }
+.cf-quota-meter { display: block; height: 4px; overflow: hidden; margin-top: 5px; border-radius: 4px; background: var(--cf-press); }
+.cf-quota-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--cf-quota-color); transform-origin: left; animation: cf-quota-meter-in 350ms cubic-bezier(.22, 1, .36, 1) both; }
+.cf-quota-reset { display: flex; align-items: center; gap: 4px; margin-top: 4px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.cf-quota-hint { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--cf-border); font-size: 10px; color: var(--cf-text-muted); }
+@keyframes cf-quota-arrive { from { opacity: 0; translate: 0 5px; } to { opacity: 1; translate: 0 0; } }
+@keyframes cf-quota-fill { from { opacity: 0; } to { opacity: 1; } }
+@keyframes cf-quota-meter-in { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@media (prefers-reduced-motion: reduce) {
+  .cf-quota-orbit, .cf-quota-segment, .cf-quota-meter > span { animation: none; }
+  .cf-quota-orbit, .cf-quota-orbit::before, .cf-quota-core > * { transition: none; }
+  .cf-quota-orbit:is(:hover, :focus-visible) { scale: 1; }
+}
+
 /* Motion levels — Apariencia › Modo y color › Animaciones (`motionStore`), stamped on the root as
    `data-motion`. Everything above is the medium level, the default, and what a root with no stamp
    gets.

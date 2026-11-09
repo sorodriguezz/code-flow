@@ -2858,6 +2858,7 @@ const en = {
   "quota.pillLabel": "Show in the status bar",
   "quota.pillHint":
     "Which of the limits above the percentage next to the gauge reports. On automatic it is whichever is fullest, so it changes as windows roll over.",
+  "quota.railOpenLimits": "Open plan limits",
   "quota.railLabel": "Show on the rail",
   "quota.railHint":
     "One ring per account at the foot of the side rail: the session inside, the week outside. Hover to see which account it is; it refreshes every minute and after every finished turn.",
