@@ -11,6 +11,10 @@ const PICK_SETTING = "quota_pill_limit";
  * install that never ticks the box keeps the rail it had. */
 const RAIL_SETTING = "quota_rail_rings";
 
+/** The accounts the rail leaves out, as a JSON array of `quotaKey`s. Stored as what is *hidden*
+ * rather than what is shown, so an account added later appears on the rail without a second tick. */
+const RAIL_HIDDEN_SETTING = "quota_rail_hidden";
+
 /** How often the quota re-reads while somebody is watching it.
  *
  * A minute, where the spend meter beside it polls every ten seconds, and the difference is what is
@@ -61,6 +65,10 @@ interface QuotaState {
   /** Persists the rail toggle. Turning it on is a deliberate action, so it is also allowed to be the
    * first read — the one the keychain prompt hangs off. */
   setRailRings: (on: boolean) => Promise<void>;
+  /** `quotaKey`s of the accounts the rail does not draw a ring for. */
+  railHidden: string[];
+  /** Shows or hides one account's ring, and persists the choice. */
+  setRailShown: (key: string, shown: boolean) => Promise<void>;
   /** `trigger` says who asked. `"refresh"` skips the backend's per-provider cache — without that
    * the button re-reads a cache at most a minute old and hands back the same numbers, which looks
    * like a broken button and is in fact a working cache. `"poll"` additionally forbids starting a
@@ -91,6 +99,14 @@ export const useQuotaStore = create<QuotaState>((set, get) => ({
   lastReadAt: 0,
   pick: "",
   railRings: false,
+  railHidden: [],
+
+  setRailShown: async (key: string, shown: boolean) => {
+    const rest = get().railHidden.filter((k) => k !== key);
+    const next = shown ? rest : [...rest, key];
+    set({ railHidden: next });
+    await setSetting(RAIL_HIDDEN_SETTING, next.length ? JSON.stringify(next) : "");
+  },
 
   setRailRings: async (on: boolean) => {
     set({ railRings: on });
@@ -179,11 +195,20 @@ let pickLoaded = false;
 async function loadPrefs(): Promise<void> {
   if (pickLoaded) return;
   pickLoaded = true;
-  const [stored, rail] = await Promise.all([
+  const [stored, rail, hidden] = await Promise.all([
     getSetting(PICK_SETTING).catch(() => null),
     getSetting(RAIL_SETTING).catch(() => null),
+    getSetting(RAIL_HIDDEN_SETTING).catch(() => null),
   ]);
   if (stored?.trim()) useQuotaStore.setState({ pick: stored.trim() });
+  if (hidden?.trim()) {
+    try {
+      const keys: unknown = JSON.parse(hidden);
+      if (Array.isArray(keys)) useQuotaStore.setState({ railHidden: keys.filter((k): k is string => typeof k === "string") });
+    } catch {
+      // A malformed row hides nothing: every account shows, as on a fresh install.
+    }
+  }
   if (rail === "1") {
     useQuotaStore.setState({ railRings: true });
     // The rings are on screen all the time, so they cannot wait for a panel to be opened: the user

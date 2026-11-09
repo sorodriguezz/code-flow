@@ -25,27 +25,58 @@ const RING_STYLE: Record<ReturnType<typeof severityOf>, { stroke: string; width:
   critical: { stroke: "#ef4444", width: STROKE + 0.5, glow: "drop-shadow(0 0 2px rgba(239,68,68,0.75))" },
 };
 
+/** Each ring is cut into ten segments of 10% each, so the reading is exact at a glance: a segment
+ * fills proportionally (8% → most of the first one; 99% → nine full and the tenth almost full), and
+ * a ring only looks complete when it really is at 100%. */
+const SEGMENTS = 10;
+/** Gap between segments along the ring, in user units. */
+const GAP = 1.6;
+/** Smallest visible fill for a non-zero value, so 1% still shows a sliver. */
+const MIN_FILL = 0.8;
+
 function Ring({ r, limit }: { r: number; limit: QuotaLimit | null }) {
   const c = 2 * Math.PI * r;
+  const step = c / SEGMENTS;
+  const seg = step - GAP;
   const used = limit ? Math.min(100, Math.max(0, limit.used_percent)) : 0;
   const style = RING_STYLE[severityOf(used)];
+  const perSegment = 100 / SEGMENTS;
   return (
     <>
-      <circle cx={SIZE / 2} cy={SIZE / 2} r={r} fill="none" stroke="var(--cf-border)" strokeWidth={STROKE} opacity={limit ? 1 : 0.4} />
-      {limit && used > 0 && (
-        <circle
-          cx={SIZE / 2}
-          cy={SIZE / 2}
-          r={r}
-          fill="none"
-          stroke={style.stroke}
-          strokeWidth={style.width}
-          strokeLinecap="round"
-          strokeDasharray={`${(c * Math.max(used, 2)) / 100} ${c}`}
-          style={style.glow ? { filter: style.glow } : undefined}
-          className="transition-[stroke-dasharray,stroke] duration-500"
-        />
-      )}
+      {/* Track: ten dashes of `seg`, each followed by a gap, starting half a gap past the top. */}
+      <circle
+        cx={SIZE / 2}
+        cy={SIZE / 2}
+        r={r}
+        fill="none"
+        stroke="var(--cf-border)"
+        strokeWidth={STROKE}
+        strokeDasharray={`${seg} ${GAP}`}
+        strokeDashoffset={-GAP / 2}
+        opacity={limit ? 1 : 0.4}
+      />
+      {limit &&
+        used > 0 &&
+        Array.from({ length: SEGMENTS }, (_, i) => {
+          const fraction = Math.min(1, Math.max(0, (used - i * perSegment) / perSegment));
+          if (fraction <= 0) return null;
+          const len = Math.max(seg * fraction, MIN_FILL);
+          return (
+            <circle
+              key={i}
+              cx={SIZE / 2}
+              cy={SIZE / 2}
+              r={r}
+              fill="none"
+              stroke={style.stroke}
+              strokeWidth={style.width}
+              strokeDasharray={`${len} ${c}`}
+              strokeDashoffset={-(i * step + GAP / 2)}
+              style={style.glow ? { filter: style.glow } : undefined}
+              className="transition-[stroke-dasharray,stroke] duration-500"
+            />
+          );
+        })}
     </>
   );
 }
@@ -66,6 +97,7 @@ export function RailQuotaRings() {
   const t = useT();
   const enabled = useQuotaStore((s) => s.railRings);
   const providers = useQuotaStore((s) => s.providers);
+  const hidden = useQuotaStore((s) => s.railHidden);
   const accounts = useAiAccountsStore((s) => s.accounts);
   const ensureAccounts = useAiAccountsStore((s) => s.ensure);
   const nameOf = useAccountName();
@@ -88,7 +120,7 @@ export function RailQuotaRings() {
   if (!enabled) return null;
   const rows = providers
     .map((quota) => ({ quota, ...railWindows(quota) }))
-    .filter((row) => row.session || row.long);
+    .filter((row) => (row.session || row.long) && !hidden.includes(quotaKey(row.quota)));
   if (rows.length === 0) return null;
 
   const line = (limit: QuotaLimit | null, narrowed: Set<string>) => {

@@ -1,3 +1,4 @@
+import { TreeGuide } from "../common/TreeGuide";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -752,6 +753,7 @@ export function ServicesDock() {
                           dropBefore={dragHere && rowDrag.id !== tab.id && rowDrag.index === index}
                           dropAfter={dragHere && index === tabs.length - 1 && rowDrag.index > index}
                           dragging={rowDrag?.id === tab.id}
+                          last={index === tabs.length - 1}
                           onDragStart={(event) => beginRowDrag(event, section.id, tab)}
                           onMenu={(event) => {
                             event.preventDefault();
@@ -912,6 +914,7 @@ function TerminalRow({
   dropBefore,
   dropAfter,
   dragging,
+  last,
   onDragStart,
   onMenu,
   renaming,
@@ -938,6 +941,8 @@ function TerminalRow({
   dropBefore: boolean;
   dropAfter: boolean;
   dragging: boolean;
+  /** The section's last terminal: its tree line ends here (`└`) instead of running on (`├`). */
+  last: boolean;
   onDragStart: (event: React.PointerEvent<HTMLElement>) => void;
   onMenu: (event: React.MouseEvent<HTMLElement>) => void;
   renaming: boolean;
@@ -964,12 +969,14 @@ function TerminalRow({
       onDoubleClick={() => !renaming && onRenameStart()}
       onPointerDown={(event) => !renaming && onDragStart(event)}
       onContextMenu={onMenu}
-      className={`group/row relative flex cursor-pointer items-center gap-1.5 px-2 py-[3px] pl-4 text-[12px] ${
+      className={`group/row relative flex cursor-pointer items-center gap-1.5 px-2 py-[3px] pl-6 text-[12px] ${
         selected
           ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
           : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"
       } ${dragging ? "opacity-50" : ""}`}
     >
+      {/* Under the section's folder icon (8px padding + half an 11px icon). */}
+      <TreeGuide x={13} last={last} bleed={2} />
       {(dropBefore || dropAfter) && (
         <span
           aria-hidden

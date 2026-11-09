@@ -54,6 +54,7 @@ import { ChatModelPicker } from "./ChatModelPicker";
 import { EMPTY_JOBS, useJobsStore, type Job } from "../../state/jobsStore";
 import { EMPTY_CONVERSATIONS, useChatHistoryStore } from "../../state/activityStore";
 import { useWorkspaceChatStore } from "../../state/workspaceChatStore";
+import { TreeGuide } from "../common/TreeGuide";
 import { EMPTY_LINKS, nestByLineage, parentMap, useChatLineageStore } from "../../state/chatLineageStore";
 import type { ChatConversation } from "../../lib/tauri/chatCommands";
 import { liveSessionsOf, useChatStore, type ChatSession } from "../../state/chatStore";
@@ -644,28 +645,46 @@ function RecentList({
     for (const link of links) out.set(link.parentId, (out.get(link.parentId) ?? 0) + 1);
     return out;
   }, [links]);
+  // What is drawn: everything but the rows inside a folded parent.
+  const visible = useMemo(() => {
+    const out: { item: ActivityEntry; depth: number; hasChildren: boolean; isFolded: boolean }[] = [];
+    let hiddenBelow = -1;
+    for (const row of nested) {
+      if (hiddenBelow >= 0 && row.depth > hiddenBelow) continue;
+      hiddenBelow = -1;
+      const id = row.item.type === "chat" ? row.item.conv.session_id : "";
+      const isFolded = row.hasChildren && folded.has(id);
+      if (isFolded) hiddenBelow = row.depth;
+      out.push({ ...row, isFolded });
+    }
+    return out;
+  }, [nested, folded]);
+  /** Whether a row at `depth` has a sibling still to come after index `index`. */
+  const continues = (index: number, depth: number) => {
+    for (let j = index + 1; j < visible.length; j++) {
+      if (visible[j].depth < depth) return false;
+      if (visible[j].depth === depth) return true;
+    }
+    return false;
+  };
+  // Tree geometry: each level's line runs under the parent's icon (row padding 6 + half a 14px icon).
+  const guideX = (level: number) => 13 + (level - 1) * 12;
   let lastDay = "";
-  let hiddenBelow = -1;
   return (
     <div className="space-y-0.5">
-      {nested.map(({ item: entry, depth, hasChildren }) => {
-        // Inside a folded parent: not drawn.
-        if (hiddenBelow >= 0 && depth > hiddenBelow) return null;
-        hiddenBelow = -1;
+      {visible.map(({ item: entry, depth, hasChildren, isFolded }, index) => {
         const id = entry.type === "chat" ? entry.conv.session_id : "";
-        const isFolded = hasChildren && folded.has(id);
-        if (isFolded) hiddenBelow = depth;
         // A subchat sits under its parent, wherever its own day falls.
         const day = depth === 0 ? dayLabel(entryTimestamp(entry), t, locale) : lastDay;
         const header = day !== lastDay ? day : null;
         lastDay = day;
+        const ancestors: number[] = [];
+        for (let level = 1; level < depth; level++) if (continues(index, level)) ancestors.push(guideX(level));
         return (
           <div key={entryKey(entry)}>
             {header && <p className="px-1.5 pb-1 pt-2 text-[11px] font-semibold text-[var(--cf-text-faint)]">{header}</p>}
-            <div
-              className={depth > 0 ? "border-l border-[var(--cf-border)]" : undefined}
-              style={depth > 0 ? { marginLeft: 6 + (depth - 1) * 12, paddingLeft: 4 } : undefined}
-            >
+            <div className={depth > 0 ? "relative" : undefined} style={depth > 0 ? { paddingLeft: guideX(depth) + 4 } : undefined}>
+              {depth > 0 && <TreeGuide x={guideX(depth)} last={!continues(index, depth)} ancestors={ancestors} bleed={2} />}
               <RecentRow
                 entry={entry}
                 repo={showRepo ? projectOf(entry, projectName) : null}
