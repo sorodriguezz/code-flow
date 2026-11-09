@@ -4,7 +4,7 @@ import { formatResetIn, formatUsed, quotaKey, railWindows, severityOf, useQuotaS
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import { useUiStore } from "../../state/uiStore";
 import { providerDisplayLabel } from "../../lib/aiProviders";
-import { BAR_COLOUR, limitLabel, narrowedKinds, quotaAccountLabel } from "../ai/QuotaLimits";
+import { limitLabel, narrowedKinds, quotaAccountLabel } from "../ai/QuotaLimits";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { Tooltip } from "../common/Tooltip";
 import type { QuotaLimit } from "../../types/domain";
@@ -16,9 +16,19 @@ const R_OUTER = SIZE / 2 - STROKE / 2 - 0.5;
 /** Inner ring: the session, one stroke and a hairline inside the outer one. */
 const R_INNER = R_OUTER - STROKE - 1.25;
 
+/** How each severity paints. Normal follows whatever accent the theme uses, but softened, so the
+ * warnings are the only strong colour on the ring — even with an orange or red accent, a ring that
+ * turns amber or red reads as a change rather than as more of the same. */
+const RING_STYLE: Record<ReturnType<typeof severityOf>, { stroke: string; width: number; glow?: string }> = {
+  normal: { stroke: "color-mix(in oklab, var(--cf-accent) 60%, transparent)", width: STROKE },
+  low: { stroke: "#f59e0b", width: STROKE + 0.5, glow: "drop-shadow(0 0 2px rgba(245,158,11,0.7))" },
+  critical: { stroke: "#ef4444", width: STROKE + 0.5, glow: "drop-shadow(0 0 2px rgba(239,68,68,0.75))" },
+};
+
 function Ring({ r, limit }: { r: number; limit: QuotaLimit | null }) {
   const c = 2 * Math.PI * r;
   const used = limit ? Math.min(100, Math.max(0, limit.used_percent)) : 0;
+  const style = RING_STYLE[severityOf(used)];
   return (
     <>
       <circle cx={SIZE / 2} cy={SIZE / 2} r={r} fill="none" stroke="var(--cf-border)" strokeWidth={STROKE} opacity={limit ? 1 : 0.4} />
@@ -28,11 +38,12 @@ function Ring({ r, limit }: { r: number; limit: QuotaLimit | null }) {
           cy={SIZE / 2}
           r={r}
           fill="none"
-          stroke={BAR_COLOUR[severityOf(used)]}
-          strokeWidth={STROKE}
+          stroke={style.stroke}
+          strokeWidth={style.width}
           strokeLinecap="round"
           strokeDasharray={`${(c * Math.max(used, 2)) / 100} ${c}`}
-          className="transition-[stroke-dasharray] duration-500"
+          style={style.glow ? { filter: style.glow } : undefined}
+          className="transition-[stroke-dasharray,stroke] duration-500"
         />
       )}
     </>

@@ -482,6 +482,25 @@ jobs:
           # The hardened runtime notarization requires is already on: this signature carries it.
           #
           # Harmless on the Windows leg, which never reads it.
+          #
+          # ── Developer ID: ready, not on ─────────────────────────────────────────────────────
+          # Not paid for yet (decided 2026-11-09). When it is, this is the whole switch:
+          #   1. Export the "Developer ID Application" certificate as .p12 and add the secrets
+          #      APPLE_CERTIFICATE (base64 of the .p12), APPLE_CERTIFICATE_PASSWORD,
+          #      APPLE_SIGNING_IDENTITY ("Developer ID Application: Name (TEAMID)"), and for
+          #      notarization APPLE_ID, APPLE_PASSWORD (an app-specific password), APPLE_TEAM_ID.
+          #   2. Uncomment the six lines below and delete the `"-"` line.
+          # Left commented rather than wired to empty secrets on purpose: tauri-bundler treats a
+          # *present but empty* APPLE_CERTIFICATE as a certificate to import and fails the build.
+          # Besides the Gatekeeper warning, a stable identity is what makes a keychain "Always
+          # Allow" survive updates; the Claude quota read no longer depends on it (it goes through
+          # `/usr/bin/security`, see `ai_quota.rs`), but anything else reading the keychain will.
+          # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          # APPLE_ID: ${{ secrets.APPLE_ID }}
+          # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_SIGNING_IDENTITY: "-"
         with:
           # `tagName` / `releaseName` / `releaseBody` / `releaseDraft` / `prerelease` are absent on

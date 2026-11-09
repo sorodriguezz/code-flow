@@ -438,6 +438,18 @@ pub async fn fetch(engine: QuotaEngine, trigger: Trigger) -> ProviderQuota {
             .unwrap_or_else(|| pending(provider));
     }
 
+    // The system Claude account on a poll, before the keychain has ever answered on this machine:
+    // no dialog may come out of a timer, so it serves what the CLI's last run in this app reported
+    // and is **not** filed in the cache — otherwise the user's own first open would be handed this
+    // placeholder for a minute instead of the read it is meant to start.
+    if trigger == Trigger::Poll && provider == "claude" && engine.account.is_none() && !claude::may_read_quietly() {
+        let from_run = claude::from_last_run(key);
+        if !from_run.limits.is_empty() {
+            return from_run;
+        }
+        return cached(key).map(|(_, previous)| previous).unwrap_or_else(|| pending(provider));
+    }
+
     read_now(&engine).await
 }
 
@@ -661,11 +673,77 @@ mod claude {
 
     /// The endpoint behind the CLI's own `/usage`. Same OAuth token, same beta header.
     const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
-    /// The keychain item Claude Code writes on macOS. Reading it prompts the user once, the first
-    /// time — which is why the frontend only asks for quota after a deliberate action (opening the
-    /// panel), never at startup.
+    /// The keychain item Claude Code writes on macOS. Reading it can prompt the user — see
+    /// [`keychain_secret`] for how, and [`may_read_quietly`] for when that is allowed to happen.
     #[cfg(target_os = "macos")]
     const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+    /// `security`'s exit status for "no such item" (`errSecItemNotFound`, truncated to a byte). Not
+    /// a refusal: Claude Code is signed out, or keeps its token in the file instead.
+    #[cfg(target_os = "macos")]
+    const SECURITY_NOT_FOUND: i32 = 44;
+
+    /// Left in the app's state directory the first time the keychain answered, so a later launch
+    /// knows the background poll can read it without raising a dialog.
+    #[cfg(target_os = "macos")]
+    fn granted_marker() -> std::path::PathBuf {
+        crate::paths::state_dir().join("claude-keychain-granted")
+    }
+
+    /// Whether the system account can be read **without any chance of a dialog** — what the
+    /// background poll (and so the rail rings at startup) is allowed to do.
+    ///
+    /// True when the token is in `~/.claude/.credentials.json`, which no prompt guards, or when the
+    /// keychain has already answered on this machine (the marker). Otherwise the poll stays off the
+    /// keychain and serves what the CLI's last run reported, and the first real read waits for the
+    /// user to open the limits panel — so the dialog, if there is one, follows something they did.
+    pub fn may_read_quietly() -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            if granted_marker().exists() {
+                return true;
+            }
+            config_dir().is_some_and(|dir| dir.join(".credentials.json").exists())
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            true
+        }
+    }
+
+    /// Claude Code's keychain secret, read through Apple's own `/usr/bin/security` rather than
+    /// in-process.
+    ///
+    /// **This is what makes "Always Allow" stick.** The keychain remembers that choice against the
+    /// *code signature* of whoever asked. Read in-process, that is CodeFlow's — and an ad-hoc
+    /// signature changes with every build, so every update was a new app to macOS and the dialog
+    /// came back. `/usr/bin/security` is signed by Apple and the same across our updates, so a grant
+    /// given to it survives them; and when Claude Code created the item with that same tool, it is
+    /// already on the item's access list and there is no dialog at all.
+    ///
+    /// A Developer ID signature would make the in-process read stable too (see the signing notes in
+    /// `.github/workflows/release.yml`); this path stays correct either way.
+    ///
+    /// `None` when there is no item, or the user refused. A refusal drops the marker, so the poll
+    /// goes back to keeping off the keychain instead of asking again every minute.
+    #[cfg(target_os = "macos")]
+    fn keychain_secret(account: &str) -> Option<String> {
+        let output = std::process::Command::new("/usr/bin/security")
+            .args(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let _ = std::fs::write(granted_marker(), chrono::Utc::now().to_rfc3339());
+            let secret = String::from_utf8(output.stdout).ok()?;
+            return Some(secret.trim_end_matches('\n').to_string());
+        }
+        if output.status.code() != Some(SECURITY_NOT_FOUND) {
+            let _ = std::fs::remove_file(granted_marker());
+        }
+        None
+    }
 
     #[derive(Deserialize)]
     struct Credentials {
@@ -731,11 +809,9 @@ mod claude {
                 .or_else(|_| std::env::var("LOGNAME"))
                 .unwrap_or_default();
             if !account.is_empty() {
-                if let Ok(entry) = keyring::Entry::new(KEYCHAIN_SERVICE, &account) {
-                    if let Ok(raw) = entry.get_password() {
-                        if let Ok(parsed) = serde_json::from_str::<Credentials>(&raw) {
-                            return Some(parsed);
-                        }
+                if let Some(raw) = keychain_secret(&account) {
+                    if let Ok(parsed) = serde_json::from_str::<Credentials>(&raw) {
+                        return Some(parsed);
                     }
                 }
             }
