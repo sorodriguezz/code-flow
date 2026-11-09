@@ -16,6 +16,7 @@ import { TourLauncher } from "../tour/TourLauncher";
 import { railTabStop, stepRailIndex } from "../../lib/railKeyNav";
 import { useShortcutHint } from "../../lib/useShortcutHint";
 import { useAiRunStore } from "../../state/aiRunStore";
+import { RailQuotaRings } from "./RailQuotaRings";
 
 /** The runs the Agentes app owns: a task's turn and a chain's step. See `aiRunStore`. */
 const AGENT_RUN_KINDS = new Set<string>(["agents.liveKindAgent", "agents.liveKindChain"]);
@@ -491,6 +492,9 @@ export function AppRail() {
           title bar — the split this button exists to have ended. A control that is always in the
           same place is the whole argument for putting it here. */}
       <div className="flex w-full shrink-0 flex-col items-center gap-1 pt-2">
+        {/* Opt-in plan limits, one ring per account (see `RailQuotaRings`). In the fixed foot, so they
+            take their room from the app list above — which scrolls — instead of covering it. */}
+        <RailQuotaRings />
         <AssistantButton />
         <span className="my-1 h-px w-5 bg-[var(--cf-border)]" />
         <TourLauncher />

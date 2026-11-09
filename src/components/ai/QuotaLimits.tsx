@@ -22,7 +22,7 @@ type Translate = (key: TranslationKey, params?: Record<string, string | number>)
 /** How the bar is coloured at each severity. Green is deliberately *not* used for a barely-touched
  * limit — "you are 10% into your week" is not a success state, it is the ordinary one, and a row of
  * green bars trains the eye to stop reading them. Only the warnings get a colour. */
-const BAR_COLOUR: Record<ReturnType<typeof severityOf>, string> = {
+export const BAR_COLOUR: Record<ReturnType<typeof severityOf>, string> = {
   normal: "var(--cf-accent)",
   low: "#f59e0b",
   critical: "#ef4444",

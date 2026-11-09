@@ -5,6 +5,7 @@ import { useT } from "../../state/languageStore";
 import { ageOf, limitKey, useQuotaStore } from "../../state/quotaStore";
 import { QuotaLimits, limitLabel, limitTitle, quotaAccountLabel } from "../ai/QuotaLimits";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
+import { RailRingsToggle } from "../ai/RailRingsToggle";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { providerDisplayLabel } from "../../lib/aiProviders";
 import { Select, type SelectOption } from "../common/Select";
@@ -149,6 +150,9 @@ export function QuotaSection() {
       {/* Under the limits, not above them: the picker is a choice *about* those rows, and reading
           the list first is what makes the options mean anything. */}
       <PillPicker />
+      {/* Its own card under the pill's, not a fourth option in its dropdown: the pill is one
+          limit picked from many, the rail draws every account at once. */}
+      <RailRingsToggle />
     </section>
   );
 }

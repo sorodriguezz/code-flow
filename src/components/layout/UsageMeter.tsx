@@ -4,6 +4,7 @@ import { Gauge, RefreshCw } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import { formatUsed, pillLimit, severityOf, useQuotaStore } from "../../state/quotaStore";
+import { RailRingsToggle } from "../ai/RailRingsToggle";
 import { QuotaLimits, limitTitle, quotaAccountLabel } from "../ai/QuotaLimits";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 
@@ -173,6 +174,10 @@ export function UsageMeter() {
             {/* Where the other half went. Tokens and cost used to sit under this and no longer do:
                 two kinds of number in one small panel meant reading which was which every time, and
                 only one of them can run out. Spend is a screen's worth of material anyway. */}
+            <div className="shrink-0 border-t border-[var(--cf-border)] px-3 py-2">
+              <RailRingsToggle compact />
+            </div>
+
             <p className="shrink-0 border-t border-[var(--cf-border)] px-3 py-2 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
               {t("quota.spendMovedHint")}
             </p>

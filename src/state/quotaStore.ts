@@ -7,6 +7,10 @@ import { accountKey } from "../lib/aiAccounts";
 /** Where the status-bar pick is stored. Blank — the default — means "whichever is fullest". */
 const PICK_SETTING = "quota_pill_limit";
 
+/** Whether the rail draws one ring per account. `"1"` on, anything else off — off by default, so an
+ * install that never ticks the box keeps the rail it had. */
+const RAIL_SETTING = "quota_rail_rings";
+
 /** How often the quota re-reads while somebody is watching it.
  *
  * A minute, where the spend meter beside it polls every ten seconds, and the difference is what is
@@ -52,6 +56,11 @@ interface QuotaState {
   pick: string;
   /** Persists the pick and applies it immediately. Blank restores the automatic behaviour. */
   setPick: (key: string) => Promise<void>;
+  /** Whether the rail shows the per-account rings (session inside, week outside). */
+  railRings: boolean;
+  /** Persists the rail toggle. Turning it on is a deliberate action, so it is also allowed to be the
+   * first read — the one the keychain prompt hangs off. */
+  setRailRings: (on: boolean) => Promise<void>;
   /** `trigger` says who asked. `"refresh"` skips the backend's per-provider cache — without that
    * the button re-reads a cache at most a minute old and hands back the same numbers, which looks
    * like a broken button and is in fact a working cache. `"poll"` additionally forbids starting a
@@ -81,6 +90,13 @@ export const useQuotaStore = create<QuotaState>((set, get) => ({
   fetched: false,
   lastReadAt: 0,
   pick: "",
+  railRings: false,
+
+  setRailRings: async (on: boolean) => {
+    set({ railRings: on });
+    if (on && !get().fetched) void get().refresh("open");
+    await setSetting(RAIL_SETTING, on ? "1" : "");
+  },
 
   setPick: async (key: string) => {
     // Optimistic: the pill is expected to change under the cursor that changed it, and a failed
@@ -138,7 +154,7 @@ export const useQuotaStore = create<QuotaState>((set, get) => ({
       // so unlike the providers themselves it can happen the moment the status bar mounts. Without
       // it the pill would show the automatic pick until something opened the panel, which on a
       // machine that never opens it is for ever.
-      void loadPick();
+      void loadPrefs();
       timer = setInterval(() => {
         if (document.visibilityState !== "visible") return;
         if (!get().fetched) return;
@@ -160,11 +176,22 @@ export const useQuotaStore = create<QuotaState>((set, get) => ({
 /** Reads the stored pick once per session. Idempotent by flag rather than by comparing values: a
  * user who picks "automatic" writes a blank, which is indistinguishable from "not read yet". */
 let pickLoaded = false;
-async function loadPick(): Promise<void> {
+async function loadPrefs(): Promise<void> {
   if (pickLoaded) return;
   pickLoaded = true;
-  const stored = await getSetting(PICK_SETTING).catch(() => null);
+  const [stored, rail] = await Promise.all([
+    getSetting(PICK_SETTING).catch(() => null),
+    getSetting(RAIL_SETTING).catch(() => null),
+  ]);
   if (stored?.trim()) useQuotaStore.setState({ pick: stored.trim() });
+  if (rail === "1") {
+    useQuotaStore.setState({ railRings: true });
+    // The rings are on screen all the time, so they cannot wait for a panel to be opened: the user
+    // asked for them by ticking the box, which is the consent the first read needs. A poll, so it
+    // never starts a CLI at startup; once this lands the minute timer and finished turns keep it live.
+    const state = useQuotaStore.getState();
+    if (!state.fetched) void state.refresh("poll");
+  }
 }
 
 function onVisibilityChange(): void {
@@ -383,4 +410,23 @@ export function severityOf(usedPercent: number): "normal" | "low" | "critical" {
   if (usedPercent >= 90) return "critical";
   if (usedPercent >= 75) return "low";
   return "normal";
+}
+
+/** The two windows one account's rail ring draws: the session inside, the longer window outside.
+ *
+ * "Longer" is the unscoped week when there is one, then the fullest scoped week (Gemini reports its
+ * week only per model group), then the month, then — for a provider whose windows have no kind at
+ * all — the fullest remaining whole window. Slices of a total never win, for the reason
+ * [`wholeWindows`] gives: a model you never touch must not paint the ring for the week. */
+export function railWindows(quota: ProviderQuota): { session: QuotaLimit | null; long: QuotaLimit | null } {
+  const whole = wholeWindows(quota);
+  const fullest = (limits: QuotaLimit[]) =>
+    limits.reduce<QuotaLimit | null>((best, l) => (!best || l.used_percent > best.used_percent ? l : best), null);
+  const session = fullest(whole.filter((l) => l.kind === "session"));
+  const long =
+    whole.find((l) => l.kind === "weekly" && !l.scope) ??
+    fullest(whole.filter((l) => l.kind === "weekly")) ??
+    fullest(whole.filter((l) => l.kind === "monthly")) ??
+    fullest(whole.filter((l) => l.kind !== "session"));
+  return { session, long };
 }
