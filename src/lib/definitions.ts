@@ -136,6 +136,34 @@ export function findImportSource(text: string, symbol: string): string | null {
   return null;
 }
 
+/**
+ * What the clicked name is a member *of*, when it is one: `this._repo.create` → `"_repo"`,
+ * `this.create` → `"this"`, a bare `create` → `null`. `wordStart` is the 1-based column the name
+ * starts at.
+ *
+ * Only the last link of the chain is read — `a.b.c` answers `"b"` — because that is the one whose
+ * declared type says where `c` lives.
+ */
+export function memberReceiver(lineText: string, wordStart: number): string | null {
+  const before = lineText.slice(0, Math.max(0, wordStart - 1));
+  const match = /([\w$]+)\s*[?!]?\.\s*$/.exec(before);
+  return match ? match[1] : null;
+}
+
+/**
+ * The type a name is declared with in this file, read from its annotation — a constructor
+ * parameter property (`private readonly _repo: CapaRepository`), a field, a parameter, a variable —
+ * or from `name = new Type(`. Only the head of the type is taken (`Repo<T>` → `Repo`), and only a
+ * capitalised one: `string`, `number` and friends have no file to go to.
+ */
+export function declaredTypeOf(text: string, name: string): string | null {
+  const id = escapeRegExp(name);
+  const annotated = new RegExp(String.raw`(?:^|[^\w$.])${id}\s*[?!]?\s*:\s*(?:readonly\s+)?([A-Z][\w$]*)`, "m").exec(text);
+  if (annotated) return annotated[1];
+  const constructed = new RegExp(String.raw`(?:^|[^\w$.])${id}\s*=\s*new\s+([A-Z][\w$]*)`, "m").exec(text);
+  return constructed ? constructed[1] : null;
+}
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -183,7 +211,18 @@ export interface DefinitionHit {
  */
 export function rankDefinitions(
   hits: readonly DefinitionHit[],
-  options: { symbol: string; fromPath: string; fromLine: number; importedFrom: string | null },
+  options: {
+    symbol: string;
+    fromPath: string;
+    fromLine: number;
+    importedFrom: string | null;
+    /**
+     * True when the name was reached through another object (`this._repo.create`, `api.get`): it
+     * is a member of *that* object's type, so a declaration of the same name in this file — the
+     * service's own `create` — is a coincidence, not the answer. `this.create` is not foreign.
+     */
+    foreignMember?: boolean;
+  },
 ): DefinitionHit[] {
   const declarationKeyword = new RegExp(
     String.raw`\b(?:function|class|interface|type|enum|struct|trait|record|def|fn|impl)\s`,
@@ -202,7 +241,7 @@ export function rankDefinitions(
       // weight it lost to one (`export function x` elsewhere outscored a local `function x`).
       // Deliberately below the import bonus — an explicit `import { x }` means x is *not* declared
       // in this file, so a same-file match is then a coincidence and the import still wins.
-      if (hit.path === options.fromPath) score += 70;
+      if (hit.path === options.fromPath) score += options.foreignMember ? -50 : 70;
       else if (dirOf(hit.path) === fromDir) score += 5;
       // An import line naming the symbol is where it was *brought in*, not declared — useful as
       // a last resort, actively wrong as a first answer.

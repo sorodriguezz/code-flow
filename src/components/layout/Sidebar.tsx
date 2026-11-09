@@ -479,6 +479,16 @@ function CollapsedProjectChip({
   // The repository everything on screen is about. Not one that lives in a window of its own: this
   // chip only focuses that window.
   const marked = !detachedTo && project.id === activeProjectId;
+  // Files with uncommitted changes — the same count the unfolded row's `●n` shows (`ProjectBadges`):
+  // the open repository's live status, every other one from the panel's periodic summary.
+  const isActive = project.id === activeProjectId;
+  const summaryChanged = useRepoSummaryStore((s) => s.byPath[project.local_path]?.changed ?? 0);
+  const liveChanged = useRepoStore((s) =>
+    isActive && s.status
+      ? new Set([...s.status.staged, ...s.status.unstaged, ...s.status.untracked].map((f) => f.path)).size
+      : null,
+  );
+  const changed = liveChanged ?? summaryChanged;
   const tile = marked && !held ? monogramActiveStyle(project.color) : monogramStyle(project.color);
 
   const removeMissing = async () => {
@@ -559,7 +569,9 @@ function CollapsedProjectChip({
       <Tooltip
         side="right"
         label={project.name}
-        description={detachedTo ? t("windows.focusWindow") : t("sidebar.reorderHint")}
+        description={`${changed > 0 ? `${t("sidebar.badgeChanged", { n: changed })} · ` : ""}${
+          detachedTo ? t("windows.focusWindow") : t("sidebar.reorderHint")
+        }`}
         // A label naming the chip under the pointer is a label about the wrong thing while
         // that chip is being moved, and it would sit across the rail being rearranged.
         disabled={drag !== null}
@@ -623,6 +635,16 @@ function CollapsedProjectChip({
             />
           )}
           {reorder.arming === project.id && <HoldProgress shape="ring" />}
+          {/* Uncommitted changes: a dot on the chip's top-right corner — or its bottom-right one
+              when the corner is taken by the "in another window" mark. */}
+          {changed > 0 && (
+            <span
+              aria-hidden
+              className={`pointer-events-none absolute -right-0.5 h-2 w-2 rounded-full bg-[var(--cf-warning)] shadow-[0_0_0_1.5px_rgba(0,0,0,0.35)] ${
+                detachedTo ? "-bottom-0.5" : "-top-0.5"
+              }`}
+            />
+          )}
           {/* The rail is one chip wide, so the mark has to sit on the chip itself. A statement,
               not a control: the chip underneath already goes to that window. */}
           {detachedTo && (

@@ -1,7 +1,9 @@
 import * as monaco from "monaco-editor";
 import {
   declarationPattern,
+  declaredTypeOf,
   findImportSource,
+  memberReceiver,
   moduleSpecifierAt,
   rankDefinitions,
   resolveModuleFile,
@@ -118,9 +120,18 @@ async function findDefinition(
   if (!word) return null;
   const symbol = word.word;
 
+  const text = model.getValue();
+
+  // A member reached through another object — `this._repositorio.create` — lives on that object's
+  // type, not here. Its declared type (`_repositorio: CapaRepository`) and the import that brought
+  // the type in name the file to prefer, exactly as an import of the name itself would.
+  const receiver = memberReceiver(lineText, word.startColumn);
+  const foreignMember = receiver !== null && receiver !== "this";
+  const receiverType = foreignMember ? declaredTypeOf(text, receiver) : null;
+
   // Where the name came from, when it came from somewhere — this is what turns a repo-wide grep
   // into an answer, by giving one candidate file a decisive edge in the ranking.
-  const importSpec = findImportSource(model.getValue(), symbol);
+  const importSpec = receiverType ? findImportSource(text, receiverType) : findImportSource(text, symbol);
   const importedFrom = importSpec
     ? resolveModuleFile(importSpec, fromPath, await repoFiles(project.local_path))
     : null;
@@ -143,6 +154,7 @@ async function findDefinition(
     fromPath,
     fromLine: position.lineNumber,
     importedFrom,
+    foreignMember,
   });
   if (ranked.length === 0) return null;
 
