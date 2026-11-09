@@ -88,6 +88,11 @@ type Phase =
 const NO_IMPORT = "__none__";
 const NEW_WORKSPACE = "__new__";
 
+/** Whether `path` is absolute on Windows (`C:\\…`, `\\\\server\\…`) or on a Unix (`/…`), as asked. */
+function absoluteOn(path: string, windows: boolean): boolean {
+  return windows ? /^(?:[A-Za-z]:[\\/]|\\\\)/.test(path) : path.startsWith("/");
+}
+
 function localPlatform(): ScaffoldPlatform {
   const platform = currentPlatform();
   return platform === "windows" || platform === "linux" ? platform : "macos";
@@ -179,7 +184,11 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
       const [prefs, base] = await Promise.all([loadPrefs(), defaultCloneDir().catch(() => ({ root: "", separator: "/" }))]);
       if (cancelled) return;
       setSep(base.separator);
-      setParent(prefs.parent || base.root);
+      // The remembered folder only when it is a path on *this* system: a backup restored from
+      // Windows onto a Mac carried `C:\\Users\\<them>\\…` here, which this machine can never use.
+      // Anything else falls back to this install's own default (`<user dir>/repos`).
+      const remembered = prefs.parent && absoluteOn(prefs.parent, base.separator === "\\") ? prefs.parent : "";
+      setParent(remembered || base.root);
       if (prefs.pm) setPm(prefs.pm);
       if (prefs.commit !== undefined) setCommit(prefs.commit);
       if (prefs.options) {

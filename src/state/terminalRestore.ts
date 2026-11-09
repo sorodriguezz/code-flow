@@ -52,6 +52,27 @@ export function parseSavedDock(raw: string | null): SavedDock {
   return { v: 1, projects: {} };
 }
 
+/** Whether `path` is absolute on Windows (`C:\\…`, `\\\\server\\…`) or on a Unix (`/…`), as asked. */
+function absoluteOn(path: string, windows: boolean): boolean {
+  return windows ? /^(?:[A-Za-z]:[\\/]|\\\\)/.test(path) : path.startsWith("/");
+}
+
+/**
+ * The saved dock without folders from another operating system. A backup made on Windows and
+ * restored on a Mac carries every tab's `C:\\Users\\<them>\\…`, which this machine can never open:
+ * such a tab keeps its place but loses its folder (`restore` then opens it in the repository), and
+ * a repository none of whose tabs belong here is dropped — so it stops being written back forever.
+ */
+export function withoutForeignPaths(dock: SavedDock, windows: boolean): SavedDock {
+  const projects: SavedDock["projects"] = {};
+  for (const [id, project] of Object.entries(dock.projects)) {
+    const tabs = project.tabs.map((tab) => (tab.cwd && !absoluteOn(tab.cwd, windows) ? { ...tab, cwd: "" } : tab));
+    if (tabs.length > 0 && tabs.every((tab, at) => !tab.cwd && project.tabs[at].cwd)) continue;
+    projects[id] = { ...project, tabs };
+  }
+  return { ...dock, projects };
+}
+
 /** The last `KEPT_LINES` lines of `text`, trailing blank lines dropped, capped in characters. */
 export function tailOf(text: string): string {
   const lines = text.replace(/\s+$/, "").split("\n");

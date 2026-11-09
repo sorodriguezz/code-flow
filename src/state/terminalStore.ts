@@ -14,7 +14,15 @@ import {
   replaceId,
   type TerminalGroup,
 } from "./terminalLayout";
-import { parseSavedDock, replayText, snapshotProject, type SavedDock, type SavedProject } from "./terminalRestore";
+import {
+  parseSavedDock,
+  replayText,
+  snapshotProject,
+  withoutForeignPaths,
+  type SavedDock,
+  type SavedProject,
+} from "./terminalRestore";
+import { currentPlatform } from "../lib/platform";
 
 export interface TerminalTab {
   id: string;
@@ -428,7 +436,10 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     const view = isMainWindow() ? await getSetting(DOCK_VIEW_KEY).catch(() => null) : null;
     set({ dockView: view === "services" || view === "containers" ? view : "terminal" });
     if (isMainWindow()) {
-      savedAtStart = parseSavedDock(await getSetting(RESTORE_KEY).catch(() => null));
+      savedAtStart = withoutForeignPaths(
+        parseSavedDock(await getSetting(RESTORE_KEY).catch(() => null)),
+        currentPlatform() === "windows",
+      );
       startSaveLoop();
     }
   },

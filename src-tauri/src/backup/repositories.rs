@@ -641,16 +641,55 @@ pub fn remap_tables(tables: &mut [TableDump], mappings: &[(String, PathBuf)], cl
                             *value = clone_root.to_string_lossy().into_owned().into();
                         }
                     }
+                    if row.get(key).and_then(|v| v.as_str()) == Some("scaffold_prefs") {
+                        if let Some(value) = row.get_mut(value) {
+                            if let Some(fixed) = local_scaffold_parent(value.as_str(), clone_root) {
+                                *value = fixed.into();
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+/// The "new project" dialog remembers the last base folder it created a project in
+/// (`scaffold_prefs.parent`). A folder from the machine the backup was made on — `C:\\Users\\<them>\\…`
+/// restored onto a Mac, or a folder that is simply not here — is replaced by this install's clone
+/// root, the same place the dialog would have offered on a fresh install. `None` when nothing needs
+/// to change.
+fn local_scaffold_parent(raw: Option<&str>, clone_root: &Path) -> Option<String> {
+    let mut prefs: serde_json::Value = serde_json::from_str(raw?).ok()?;
+    let parent = prefs.get("parent")?.as_str()?;
+    if parent.is_empty() || (Path::new(parent).is_absolute() && Path::new(parent).is_dir()) {
+        return None;
+    }
+    prefs["parent"] = clone_root.to_string_lossy().into_owned().into();
+    Some(prefs.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_foreign_scaffold_base_folder_becomes_this_installs_clone_root() {
+        let root = std::env::temp_dir();
+        let foreign = if cfg!(windows) { "/Users/someone/CodeFlow/repos" } else { r"C:\Users\someone\CodeFlow\repos" };
+        let raw = json!({ "parent": foreign, "pm": "npm" }).to_string();
+        let fixed: serde_json::Value = serde_json::from_str(&local_scaffold_parent(Some(&raw), &root).unwrap()).unwrap();
+        assert_eq!(fixed["parent"], root.to_string_lossy().as_ref());
+        assert_eq!(fixed["pm"], "npm");
+    }
+
+    #[test]
+    fn a_scaffold_base_folder_that_exists_here_is_kept() {
+        let here = std::env::temp_dir();
+        let raw = json!({ "parent": here.to_string_lossy() }).to_string();
+        assert_eq!(local_scaffold_parent(Some(&raw), Path::new("/elsewhere")), None);
+    }
 
     struct TestDir(PathBuf);
     impl TestDir {
@@ -712,7 +751,7 @@ mod tests {
         );
         write(&source, ".DS_Store", "junk");
         let archive = RepositoryArchive {
-            source_path: r"C:\Users\sorodriguezz\CodeFlow\repos\RulesEngine".into(),
+            source_path: r"C:\Users\someone\CodeFlow\repos\RulesEngine".into(),
             archive: pack(&source).unwrap(),
         };
         let restored = restore(&[archive], &temp.0.join("destination")).unwrap();
@@ -762,7 +801,7 @@ mod tests {
     #[test]
     fn rebases_both_foreign_path_styles_and_json_without_matching_similar_repository_names() {
         for old in [
-            r"C:\Users\sorodriguezz\CodeFlow\repos\RulesEngine",
+            r"C:\Users\someone\CodeFlow\repos\RulesEngine",
             "/Users/sebas/CodeFlow/repos/RulesEngine",
         ] {
             let root = PathBuf::from("local-repos");

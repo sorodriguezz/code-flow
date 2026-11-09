@@ -53,7 +53,7 @@ describe("rankDefinitions for a foreign member", () => {
       foreignMember: true,
     });
     expect(ranked[0].path).toBe("src/capa/capa.repository.interface.ts");
-    expect(ranked.at(-1)?.path).toBe("src/capa/capa.service.ts");
+    expect(ranked[ranked.length - 1].path).toBe("src/capa/capa.service.ts");
   });
   it("still puts the class's own member first for this.create", () => {
     const ranked = rankDefinitions(hits, {

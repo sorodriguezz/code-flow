@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { KEPT_LINES, parseSavedDock, replayText, snapshotProject, tailOf } from "./terminalRestore";
+import { KEPT_LINES, parseSavedDock, replayText, snapshotProject, tailOf, withoutForeignPaths } from "./terminalRestore";
 import { newGroup } from "./terminalLayout";
 
 describe("terminal restore", () => {
@@ -7,6 +7,23 @@ describe("terminal restore", () => {
     expect(parseSavedDock("{")).toEqual({ v: 1, projects: {} });
     expect(parseSavedDock('{"v":2}')).toEqual({ v: 1, projects: {} });
     expect(parseSavedDock(null)).toEqual({ v: 1, projects: {} });
+  });
+
+  it("drops folders from another operating system", () => {
+    const tab = (cwd: string) => ({ title: "sh", cwd });
+    const dock = {
+      v: 1 as const,
+      projects: {
+        windowsOnly: { tabs: [tab("C:\\Users\\someone\\repo")], groups: [], focused: 0 },
+        mixed: { tabs: [tab("/Users/someone/repo"), tab("D:\\work")], groups: [], focused: 0 },
+        local: { tabs: [tab("/Users/someone/api")], groups: [], focused: 0 },
+      },
+    };
+    const onMac = withoutForeignPaths(dock, false);
+    expect(Object.keys(onMac.projects)).toEqual(["mixed", "local"]);
+    expect(onMac.projects.mixed.tabs.map((t) => t.cwd)).toEqual(["/Users/someone/repo", ""]);
+    const onWindows = withoutForeignPaths(dock, true);
+    expect(Object.keys(onWindows.projects)).toEqual(["windowsOnly", "mixed"]);
   });
 
   it("keeps the end of the output", () => {
