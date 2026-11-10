@@ -1577,6 +1577,7 @@ sharded_invoke_handler! {
         commands::mock_cmd::api_mock_save_config,
         commands::mock_cmd::api_mock_start,
         commands::mock_cmd::api_mock_stop,
+        commands::mock_cmd::api_mock_delete,
         commands::mock_cmd::api_mock_list,
         commands::mock_cmd::api_mock_log,
         commands::mock_cmd::api_mock_clear_log,

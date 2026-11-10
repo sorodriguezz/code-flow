@@ -149,8 +149,9 @@ interface MeetingsState {
   notesWithWorkspace: string | null;
   /** A call app using the microphone, offered for notes. */
   suggestion: { name: string } | null;
-  /** Collapsed panels, by note id. */
-  collapsed: Record<string, boolean>;
+  /** Unfolded meeting panels, by meeting id. Folded is the default (user, 2026-11-09): a note is
+   *  opened to be read or written far more often than to replay its meeting. */
+  expanded: Record<string, boolean>;
   /** A search result in a transcript, waiting for its note's meeting panel to show the line. */
   jumpTo: { noteId: string; meetingId: string; atMs: number } | null;
   /** When `status` was read — the recording's clock runs on from it. */
@@ -179,8 +180,8 @@ interface MeetingsState {
   install: (item: "vad" | "voices") => Promise<void>;
   cancelInstall: () => Promise<void>;
   dismissSuggestion: () => void;
-  toggleCollapsed: (noteId: string) => void;
-  /** Opens a transcript at a line: selects its meeting, unfolds the panel and puts the line in view. */
+  toggleExpanded: (meetingId: string) => void;
+  /** Opens a transcript at a line: unfolds its meeting's panel and puts the line in view. */
   jumpToLine: (noteId: string, meetingId: string, atMs: number) => void;
   clearJump: () => void;
   setStartOpen: (noteId: string | null) => void;
@@ -277,7 +278,7 @@ export const useMeetingsStore = create<MeetingsState>((set, get) => ({
   notesWith: new Set(),
   notesWithWorkspace: null,
   suggestion: null,
-  collapsed: {},
+  expanded: {},
   jumpTo: null,
   statusAt: 0,
   startOpenFor: null,
@@ -457,10 +458,10 @@ export const useMeetingsStore = create<MeetingsState>((set, get) => ({
 
   dismissSuggestion: () => set({ suggestion: null }),
 
-  toggleCollapsed: (noteId) => set((state) => ({ collapsed: { ...state.collapsed, [noteId]: !state.collapsed[noteId] } })),
+  toggleExpanded: (meetingId) => set((state) => ({ expanded: { ...state.expanded, [meetingId]: !state.expanded[meetingId] } })),
 
   jumpToLine: (noteId, meetingId, atMs) =>
-    set((state) => ({ jumpTo: { noteId, meetingId, atMs }, collapsed: { ...state.collapsed, [noteId]: false } })),
+    set((state) => ({ jumpTo: { noteId, meetingId, atMs }, expanded: { ...state.expanded, [meetingId]: true } })),
 
   clearJump: () => set({ jumpTo: null }),
 

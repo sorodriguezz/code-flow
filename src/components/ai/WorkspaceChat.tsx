@@ -1058,14 +1058,14 @@ function ReposChip({
   );
 }
 
-/** The quiet lines under an answer: what the turn cost, and folders where its edits cannot be undone. */
+/** The quiet line under an answer: folders where its edits cannot be undone. What the turn cost is
+ *  not repeated here — the bubble's stamp already shows it (↑ ↓ $) on the line just above. */
 function TurnNotes({ message }: { message: WsChatMessage }) {
   const t = useT();
   const notes = turnNotes(message, t);
-  if (!notes.usage && !notes.unprotected) return null;
+  if (!notes.unprotected) return null;
   return (
     <div className="space-y-0.5 px-0.5">
-      {notes.usage && <p className="text-[10.5px] text-[var(--cf-text-faint)]">{notes.usage}</p>}
       {notes.unprotected && (
         <p className="flex items-start gap-1 text-[11px] text-[var(--cf-warning)]" title={message.unprotectedDirs?.join("\n")}>
           <AlertCircle size={11} className="mt-0.5 shrink-0" />

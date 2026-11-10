@@ -24,6 +24,12 @@ pub fn save(conn: &Connection, collection_id: &str, config: &str) -> rusqlite::R
     Ok(())
 }
 
+/// Forgets a collection's mock: its routes and settings. The collection itself is untouched.
+pub fn delete(conn: &Connection, collection_id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM api_mocks WHERE collection_id = ?1", params![collection_id])?;
+    Ok(())
+}
+
 /// Every mock config in a workspace (global collections included), with each collection's name —
 /// what the Services dock lists.
 pub fn list_for_workspace(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<(String, String, String)>> {
@@ -69,6 +75,8 @@ mod tests {
         let listed = list_for_workspace(&conn, "w1").unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].1, "Shop");
+        delete(&conn, "c2").unwrap();
+        assert_eq!(get(&conn, "c2").unwrap(), None);
         conn.execute("DELETE FROM api_collections WHERE id = 'c1'", []).unwrap();
         assert_eq!(get(&conn, "c1").unwrap(), None);
     }

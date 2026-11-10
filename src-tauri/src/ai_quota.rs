@@ -839,9 +839,9 @@ mod claude {
         #[serde(default)]
         kind: String,
         /// How much of the window has been used, 0–100 — already the direction this module reports
-        /// in.
+        /// in. Optional: a window listed without a figure is not a window at 0% (see [`map_limits`]).
         #[serde(default)]
-        percent: f64,
+        percent: Option<f64>,
         #[serde(default)]
         resets_at: Option<String>,
         /// Present on `weekly_scoped`: which model this slice of the week belongs to. Its `id` is
@@ -1018,9 +1018,10 @@ mod claude {
         };
         clear_back_off();
 
+        let run = crate::claude::last_rate_limit("claude").map(|(limit, _)| limit);
         ProviderQuota {
             provider: "claude".to_string(),
-            limits: tighten(map_limits(parsed)),
+            limits: tighten(without_unmetered_week(map_limits(parsed), run.as_ref())),
             plan: String::new(),
             error: String::new(),
             fetched_at: now_rfc3339(),
@@ -1093,17 +1094,37 @@ mod claude {
             .limits
             .into_iter()
             .filter(|limit| !limit.kind.is_empty())
-            .map(|limit| QuotaLimit {
-                kind: if limit.kind == "session" { "session" } else { "weekly" }.to_string(),
-                scope: limit
-                    .scope
-                    .and_then(|s| s.model)
-                    .and_then(|m| m.display_name)
-                    .unwrap_or_default(),
-                used_percent: limit.percent,
-                resets_at: limit.resets_at.unwrap_or_default(),
+            // A window listed with no figure is one the plan does not meter — drawn, it was a bar at
+            // 0% that never moved.
+            .filter_map(|limit| {
+                Some(QuotaLimit {
+                    kind: if limit.kind == "session" { "session" } else { "weekly" }.to_string(),
+                    scope: limit
+                        .scope
+                        .and_then(|s| s.model)
+                        .and_then(|m| m.display_name)
+                        .unwrap_or_default(),
+                    used_percent: limit.percent?,
+                    resets_at: limit.resets_at.unwrap_or_default(),
+                })
             })
             .collect()
+    }
+
+    /// Drops weekly windows at 0% from an account whose CLI meters only the session.
+    ///
+    /// Enterprise plans have no weekly cap — only the five-hour session (user, 2026-11-09: «la cuenta
+    /// ACHS es enterprise, entonces no tiene límite semanal») — yet the endpoint still lists a week,
+    /// at 0% with a reset date, and the panel drew "Semanal 0% usado" for a limit that does not exist.
+    /// The CLI's own per-run report is the tell: on such a plan it names the session and never a
+    /// week (`seven_day_resets_at` stays 0 across runs). A week that has any use is kept whatever
+    /// the runs said: that number is real.
+    fn without_unmetered_week(limits: Vec<QuotaLimit>, run: Option<&crate::ai::AiRateLimit>) -> Vec<QuotaLimit> {
+        let session_only = run.is_some_and(|r| r.five_hour_resets_at > 0 && r.seven_day_resets_at == 0);
+        if !session_only {
+            return limits;
+        }
+        limits.into_iter().filter(|l| !(l.kind == "weekly" && l.used_percent <= 0.0)).collect()
     }
 
     #[cfg(test)]
@@ -1185,6 +1206,31 @@ mod claude {
         fn missing_limits_is_empty_not_zero() {
             let limits = map_limits(serde_json::from_str("{}").unwrap());
             assert!(limits.is_empty());
+        }
+
+        /// A window listed without a figure is not drawn as 0%.
+        #[test]
+        fn a_window_without_a_percent_is_left_out() {
+            let raw = r#"{"limits":[{"kind":"session","percent":9,"resets_at":"2026-11-10T03:30:00Z"},{"kind":"weekly_all","percent":null,"resets_at":"2026-11-10T20:00:00Z"},{"kind":"weekly_all","resets_at":"2026-11-10T20:00:00Z"}]}"#;
+            let limits = map_limits(serde_json::from_str(raw).unwrap());
+            assert_eq!(limits.len(), 1);
+            assert_eq!(limits[0].kind, "session");
+        }
+
+        /// Enterprise: the runs name the session and never a week, so the endpoint's week at 0% is a
+        /// limit the plan does not have. A week with use, or a plan whose runs report one, keeps it.
+        #[test]
+        fn a_plan_metered_only_by_session_shows_no_empty_week() {
+            let limits = map_limits(serde_json::from_str(REAL).unwrap());
+            let enterprise = crate::ai::AiRateLimit { five_hour_pct: 9.0, five_hour_resets_at: 2_000, seven_day_pct: 0.0, seven_day_resets_at: 0 };
+            let kept = without_unmetered_week(limits.clone(), Some(&enterprise));
+            // The whole week (45%) stays; only the slice at 0% goes.
+            assert!(kept.iter().any(|l| l.kind == "weekly" && l.used_percent == 45.0));
+            assert!(!kept.iter().any(|l| l.kind == "weekly" && l.used_percent == 0.0));
+
+            let pro = crate::ai::AiRateLimit { seven_day_pct: 2.0, seven_day_resets_at: 9_000, ..enterprise };
+            assert_eq!(without_unmetered_week(limits.clone(), Some(&pro)).len(), limits.len());
+            assert_eq!(without_unmetered_week(limits.clone(), None).len(), limits.len());
         }
     }
 }

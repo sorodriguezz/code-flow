@@ -439,9 +439,11 @@ export function ChatModelPicker({
           } ${className}`}
         >
           <ProviderGlyph providerId={active.id} size={13} />
-          {activeLabel}
+          {/* One line, always: squeezed, the engine's name broke into two ("Claude / Code") and
+              doubled the row's height. The model and account give way instead (`truncate`). */}
+          <span className="shrink-0 whitespace-nowrap">{activeLabel}</span>
           <span className="text-[var(--cf-text-muted)]/50">·</span>
-          <span className="truncate font-medium text-[var(--cf-text)]/70">
+          <span className="min-w-0 truncate font-medium text-[var(--cf-text)]/70">
             {modelLabel}
             {accountLabel && ` · ${accountLabel}`}
           </span>

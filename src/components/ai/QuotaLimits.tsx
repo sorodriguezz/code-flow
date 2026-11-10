@@ -7,6 +7,7 @@ import {
   formatResetIn,
   formatUsed,
   quotaKey,
+  missingClaudeSession,
   missingClaudeWeekly,
   severityOf,
   useQuotaStore,
@@ -157,6 +158,7 @@ function ProviderBlock({
         </p>
       ) : (
         <div className={compact ? "space-y-1.5" : "space-y-2"}>
+          {missingClaudeSession(quota) && <MissingQuota label={t("quota.session")} />}
           {quota.limits.map((limit) => (
             <LimitRow key={`${limit.kind}:${limit.scope}`} limit={limit} narrowed={narrowed} />
           ))}
@@ -364,9 +366,15 @@ function emptyMessage(error: string, t: Translate): string {
 /** An unavailable window has no percentage or progress bar. */
 export function MissingWeeklyQuota() {
   const t = useT();
+  return <MissingQuota label={t("quota.weekly")} />;
+}
+
+/** A window the last run did not report, or that has reset since — "no recent data", never 0%. */
+export function MissingQuota({ label }: { label: string }) {
+  const t = useT();
   return (
     <span className="flex items-baseline justify-between gap-3 text-[11px] text-[var(--cf-text-muted)]">
-      <span>{t("quota.weekly")}</span>
+      <span>{label}</span>
       <span>{t("quota.noRecentData")}</span>
     </span>
   );

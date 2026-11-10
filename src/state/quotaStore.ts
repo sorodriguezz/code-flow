@@ -456,6 +456,14 @@ export function railWindows(quota: ProviderQuota): { session: QuotaLimit | null;
   return { session, long };
 }
 
+/** A run-reported session that has rolled over since: the backend drops it (its percentage belonged
+ *  to a window that is over), and the row must say "no data" rather than vanish — an account in use
+ *  whose session simply disappeared read as a bug (user report, 2026-11-09). */
+export function missingClaudeSession(quota: ProviderQuota): boolean {
+  return quota.provider === "claude" && quota.error.split("|")[0] === "from_run"
+    && !quota.limits.some((limit) => limit.kind === "session");
+}
+
 /** A run may report only the session. Missing weekly data is not zero consumption. */
 export function missingClaudeWeekly(quota: ProviderQuota): boolean {
   return quota.provider === "claude" && quota.error.split("|")[0] === "from_run"

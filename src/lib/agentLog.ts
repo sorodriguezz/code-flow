@@ -14,7 +14,26 @@ import { translate } from "../state/languageStore";
 import { planFromTodos, planLine } from "./runPlan";
 
 /** Fields that usually hold the interesting argument of a tool call, in order of preference. */
-const TOOL_ARG_KEYS = ["file_path", "path", "notebook_path", "command", "pattern", "url", "query", "prompt"];
+// After the common ones, what CodeFlow's own tools are called on — a memory's topic, a note's id,
+// another chat, a service — so «Consultó» under the answer can say which (`turnActivity`).
+const TOOL_ARG_KEYS = [
+  "file_path",
+  "path",
+  "notebook_path",
+  "command",
+  "pattern",
+  "url",
+  "query",
+  "prompt",
+  "topic",
+  "id",
+  "chat",
+  "repo",
+  "service",
+  "terminal",
+  "name",
+  "action",
+];
 
 const MAX_TEXT = 160;
 
@@ -230,10 +249,10 @@ const CODEFLOW_TOOLS: Record<string, string> = {
   find_symbol: "Grep",
   find_usages: "Grep",
   outline: "LS",
-  // Knowledge and memories are searches too; the app's own tools (service logs, a note, a saved
-  // request) keep their names — none of them is a file of the repository the chips could name.
-  search_knowledge: "Grep",
-  recall: "Grep",
+  // Knowledge and memories keep their names, like the app's own tools (service logs, a note, a saved
+  // request): «Consultó» under the answer says which memories and notes the turn went to
+  // (`turnActivity`), and a `Grep` would have hidden that. They still read as a search
+  // (`runSteps.phaseOfTool`).
 };
 
 function codeflowLine(event: Record<string, unknown>): string | null {

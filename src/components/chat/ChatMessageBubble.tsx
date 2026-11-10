@@ -14,7 +14,7 @@ import type { AiRunLine } from "../../state/aiRunStore";
 import type { TurnUsage } from "../../types/domain";
 import { compactTokens, formatCost } from "../../lib/usageFormat";
 import { AiErrorBanner } from "../ai/AiErrorBanner";
-import { AiRunLog, RunFileChips } from "../ai/AiRunLog";
+import { AiRunLog, RunActivityChips, RunFileChips } from "../ai/AiRunLog";
 import { AiSparkles } from "../common/AiGlyph";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { thinkingFinishMs } from "../../lib/thinkingDesigns";
@@ -31,7 +31,8 @@ import { ContextBars } from "./ContextBars";
 import { useConversationStore } from "../../state/conversationStore";
 import { useUiStore } from "../../state/uiStore";
 import { focusEditorOn } from "../../lib/editorIslands";
-import { markCodeRefs, resolveCodeRef } from "../../lib/codeRefs";
+import { markCodeRefs, pathsFromToolArgs, resolveCodeRef } from "../../lib/codeRefs";
+import { useWorkspaceStore } from "../../state/workspaceStore";
 import { parseRunSteps, touchedFiles } from "../../lib/runSteps";
 import { parseContextBreakdown } from "../../lib/contextBreakdown";
 import { bodyForBlock, fileNameForBlock, pathFromFirstLine } from "../../lib/codeFileName";
@@ -331,18 +332,33 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   }, [bodyRef, repoId, markup]);
 
   // Hovering a reference shows the full path it names, the way the source chips under the answer
-  // do — resolved against the files this turn read or changed. Set on the DOM after the fact: the
-  // HTML is memoised on the text alone, and a trace can arrive after it.
-  const touchedPaths = useMemo(() => touchedFiles(parseRunSteps(trace), Infinity).map((f) => f.path), [trace]);
+  // do — resolved against the files this turn read or changed, then any path its commands and
+  // searches were given (a file touched through the shell), then the repository for a
+  // folder-qualified one. Set on the DOM after the fact: the HTML is memoised on the text alone, and
+  // a trace can arrive after it.
+  const touchedPaths = useMemo(() => {
+    const steps = parseRunSteps(trace);
+    const files = touchedFiles(steps, Infinity).map((f) => f.path);
+    const fromArgs = pathsFromToolArgs(steps.filter((s) => s.kind === "tool" && s.arg).map((s) => s.arg));
+    return [...files, ...fromArgs.filter((p) => !files.includes(p))];
+  }, [trace]);
+  const repoRoot = useWorkspaceStore((s) => {
+    if (!repoId) return null;
+    for (const list of Object.values(s.projectsByWorkspace)) {
+      const found = list.find((p) => p.id === repoId);
+      if (found) return found.local_path;
+    }
+    return null;
+  });
   useEffect(() => {
     const el = bodyRef.current;
     if (!el) return;
     for (const code of el.querySelectorAll<HTMLElement>("code[data-ref]")) {
-      const full = resolveCodeRef(code.dataset.ref!, touchedPaths);
+      const full = resolveCodeRef(code.dataset.ref!, touchedPaths, repoRoot);
       if (full) code.title = full;
       else code.removeAttribute("title");
     }
-  }, [bodyRef, markup, touchedPaths]);
+  }, [bodyRef, markup, touchedPaths, repoRoot]);
 
   // Mermaid as a diagram, `$…$` as KaTeX, HTML as a preview on request — after the code bars, which it hangs on.
   const darkTheme = useThemeStore((s) => s.resolved) === "dark";
@@ -584,6 +600,8 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
       {/* The files the turn read or changed — its sources — then the files it wrote. Both are part
           of what this turn said; the row after them is what you *do* about it. */}
       {trace && trace.length > 0 && <RunFileChips lines={trace} density={variant} />}
+      {/* Where else it went: memories, notes, references, the web, commands — see `RunActivityChips`. */}
+      {trace && trace.length > 0 && <RunActivityChips lines={trace} density={variant} />}
       {outputs && outputs.files.length > 0 && (
         <div className="pt-0.5">
           <OutputBar conversationId={outputs.conversationId} files={outputs.files} label={false} />
@@ -1114,14 +1132,28 @@ function ChatStamp({ message, detail }: { message: ChatBubbleMessage; detail: Ch
     // recorded before the provider was tracked.
     if (message.model) parts.push(modelDisplayLabel(message.provider ?? "", message.model, t));
     if (detail === "full" && message.engineVersion) parts.push(`v${message.engineVersion}`);
-    // ↑ what was sent (cache reads and writes included, they are input too), ↓ what came back; the
-    // cost only when the CLI put a number on it.
+    // ↑ the input this turn added (fresh input and what was written to the cache), ↓ what came back;
+    // the cost only when the CLI put a number on it. Cache *reads* stay out of the figure and in the
+    // tooltip: the CLI reports the turn's bill, which re-reads the whole conversation from cache on
+    // every tool step, so counting them made the number swing with how many tools a turn used
+    // (156k on one answer, 1.2M on the next) rather than with anything the user did.
     if (detail === "full" && message.usage) {
       const u = message.usage;
-      const sent = u.input_tokens + u.cache_read_tokens + u.cache_write_tokens;
-      if (sent + u.output_tokens > 0 || u.cost_usd !== null) {
-        const tokens = `↑${compactTokens(sent)} ↓${compactTokens(u.output_tokens)}`;
-        parts.push(u.cost_usd !== null ? `${tokens} · ${formatCost(u.cost_usd)}` : tokens);
+      const fresh = u.input_tokens + u.cache_write_tokens;
+      if (fresh + u.cache_read_tokens + u.output_tokens > 0 || u.cost_usd !== null) {
+        const tokens = (
+          <span
+            title={t("chat.usageTooltip", {
+              fresh: compactTokens(fresh),
+              cached: compactTokens(u.cache_read_tokens),
+              output: compactTokens(u.output_tokens),
+            })}
+          >
+            ↑{compactTokens(fresh)} ↓{compactTokens(u.output_tokens)}
+            {u.cost_usd !== null && ` · ${formatCost(u.cost_usd)}`}
+          </span>
+        );
+        parts.push(tokens);
       }
     }
   }

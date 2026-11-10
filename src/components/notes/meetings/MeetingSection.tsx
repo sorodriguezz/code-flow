@@ -82,44 +82,86 @@ export const MeetingSection = memo(function MeetingSection({
   const meetings = useMeetingsStore((s) => s.byNote[noteId]);
   const recording = useMeetingsStore((s) => s.status?.recording ?? null);
   const startOpen = useMeetingsStore((s) => s.startOpenFor === noteId);
-  const [selected, setSelected] = useState<string | null>(null);
 
   useEffect(() => {
     ensureMeetingEvents();
     void useMeetingsStore.getState().loadNote(noteId);
-    setSelected(null);
   }, [noteId]);
 
-  // A transcript search result for this note: its meeting is the one to show.
-  const jump = useMeetingsStore((s) => (s.jumpTo?.noteId === noteId ? s.jumpTo : null));
-  useEffect(() => {
-    if (jump) setSelected(jump.meetingId);
-  }, [jump]);
-
   const live = recording?.noteId === noteId ? recording : null;
-  const shown = useMemo(() => {
-    if (!meetings || meetings.length === 0) return null;
-    return meetings.find((m) => m.id === selected) ?? meetings[meetings.length - 1];
-  }, [meetings, selected]);
+  // Every meeting of the note, one under the other (user, 2026-11-09: no picker to choose one), the
+  // one recording right now excepted — its bar is above.
+  const shown = useMemo(() => (meetings ?? []).filter((m) => m.id !== live?.meetingId), [meetings, live?.meetingId]);
 
   return (
     <>
       {startOpen && !recording && <StartStrip noteId={noteId} workspaceId={workspaceId} />}
       {live && <RecordBar meetingId={live.meetingId} />}
-      {shown && shown.id !== live?.meetingId && (
-        <MeetingPanel
-          meeting={shown}
-          meetings={meetings ?? []}
-          onSelect={setSelected}
-          noteId={noteId}
-          noteTitle={noteTitle}
-          workspaceId={workspaceId}
-          onInsert={onInsert}
-        />
+      {shown.length > 0 && (
+        <MeetingList meetings={shown} noteTitle={noteTitle} workspaceId={workspaceId} onInsert={onInsert} />
       )}
     </>
   );
 });
+
+/** How many folded meetings show before the list scrolls. */
+const VISIBLE_MEETINGS = 3;
+
+/**
+ * The note's meetings stacked, each folded to its one header row until opened. Past
+ * `VISIBLE_MEETINGS` the list scrolls inside a frame of exactly that many folded rows, so a note with
+ * a season of dailies does not push its own text off the screen; with one of them open the frame
+ * grows to make room for its transcript, and still scrolls.
+ */
+function MeetingList({
+  meetings,
+  noteTitle,
+  workspaceId,
+  onInsert,
+}: {
+  meetings: Meeting[];
+  noteTitle: string;
+  workspaceId: string;
+  onInsert: (markdown: string) => boolean;
+}) {
+  const anyOpen = useMeetingsStore((s) => meetings.some((m) => s.expanded[m.id]));
+  const listRef = useRef<HTMLDivElement>(null);
+  const [rowHeight, setRowHeight] = useState<number | null>(null);
+  const scrolls = meetings.length > VISIBLE_MEETINGS;
+
+  // Measured rather than assumed: the header row's height follows the font size and whatever a
+  // status button adds to it.
+  useEffect(() => {
+    const first = listRef.current?.firstElementChild?.firstElementChild as HTMLElement | null | undefined;
+    if (first) setRowHeight(first.getBoundingClientRect().height);
+  }, [meetings.length]);
+
+  // Newest first: the meeting just recorded is the one most likely to be opened.
+  const ordered = useMemo(() => [...meetings].reverse(), [meetings]);
+
+  return (
+    <div
+      ref={listRef}
+      className={`flex shrink-0 flex-col border-b border-[var(--cf-border)] ${scrolls ? "overflow-y-auto overscroll-contain" : ""}`}
+      style={
+        scrolls
+          ? { maxHeight: anyOpen ? "min(60vh, 640px)" : rowHeight ? `${Math.ceil(rowHeight * VISIBLE_MEETINGS + VISIBLE_MEETINGS)}px` : undefined }
+          : undefined
+      }
+    >
+      {ordered.map((meeting) => (
+        <MeetingPanel
+          key={meeting.id}
+          meeting={meeting}
+          number={meetings.length > 1 ? meetings.indexOf(meeting) + 1 : null}
+          noteTitle={noteTitle}
+          workspaceId={workspaceId}
+          onInsert={onInsert}
+        />
+      ))}
+    </div>
+  );
+}
 
 /** The largest meeting the "how many people" prompt accepts. Not a limit of the clustering, which
  *  takes any count — a ceiling on typos, since the number entered is what the voices are split
@@ -489,17 +531,14 @@ const STAGES: Record<string, string> = {
 
 function MeetingPanel({
   meeting,
-  meetings,
-  onSelect,
-  noteId,
+  number,
   noteTitle,
   workspaceId,
   onInsert,
 }: {
   meeting: Meeting;
-  meetings: Meeting[];
-  onSelect: (id: string) => void;
-  noteId: string;
+  /** Its place among the note's meetings, oldest = 1; `null` when it is the only one. */
+  number: number | null;
   noteTitle: string;
   workspaceId: string;
   onInsert: (markdown: string) => boolean;
@@ -508,7 +547,7 @@ function MeetingPanel({
   const language = useLanguageStore((s) => s.language);
   const detail: MeetingDetail | undefined = useMeetingsStore((s) => s.details[meeting.id]);
   const progress = useMeetingsStore((s) => s.progress[meeting.id]);
-  const collapsed = useMeetingsStore((s) => !!s.collapsed[noteId]);
+  const collapsed = useMeetingsStore((s) => !s.expanded[meeting.id]);
   const voicesInstalled = useMeetingsStore((s) => s.status?.voicesInstalled ?? false);
   const [tab, setTab] = useState<"transcript" | "ai">("transcript");
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[]; searchable?: boolean } | null>(null);
@@ -759,13 +798,24 @@ function MeetingPanel({
           : "";
 
   return (
-    <div className="flex shrink-0 flex-col border-b border-[var(--cf-border)]">
-      <div className="flex items-center gap-1.5 px-3 py-1.5 text-[12px]">
-        <button type="button" className={ICON_BUTTON} aria-label={collapsed ? t("meetings.expand") : t("meetings.collapse")} onClick={() => useMeetingsStore.getState().toggleCollapsed(noteId)}>
+    <div className="flex shrink-0 flex-col border-b border-[var(--cf-border)] last:border-b-0">
+      {/* The whole row folds and unfolds — not only the chevron — except where a click means
+          something else (its buttons, the ⋯). */}
+      <div
+        className="flex cursor-pointer items-center gap-1.5 px-3 py-1.5 text-[12px] hover:bg-[var(--cf-hover)]"
+        onClick={(e) => {
+          if ((e.target as HTMLElement).closest("button, select, input, [role=combobox]") && !(e.target as HTMLElement).closest("[data-fold]")) return;
+          useMeetingsStore.getState().toggleExpanded(meeting.id);
+        }}
+      >
+        <button type="button" data-fold className={ICON_BUTTON} aria-expanded={!collapsed} aria-label={collapsed ? t("meetings.expand") : t("meetings.collapse")}>
           {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
         </button>
         <AudioLines size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-        <span className="font-medium">{t("meetings.title")}</span>
+        <span className="font-medium">
+          {t("meetings.title")}
+          {number !== null && <span className="ml-1 tabular-nums text-[var(--cf-text-muted)]">{number}</span>}
+        </span>
         <span className="text-[var(--cf-text-muted)]">
           {when}
           {meeting.durationMs > 0 ? ` · ${duration(meeting.durationMs)}` : ""}
@@ -775,17 +825,6 @@ function MeetingPanel({
             <Lock size={9} />
             {t("meetings.localOnly")}
           </span>
-        )}
-        {meetings.length > 1 && (
-          <div className="w-[150px]">
-            <Select
-              size="sm"
-              value={meeting.id}
-              onChange={onSelect}
-              ariaLabel={t("meetings.which")}
-              options={meetings.map((m, index) => ({ value: m.id, label: t("meetings.nth", { n: index + 1 }) }))}
-            />
-          </div>
         )}
         <span className={`min-w-0 flex-1 truncate text-[11.5px] ${meeting.status === "failed" && meeting.error !== "cancelled" ? "text-[var(--cf-danger)]" : "text-[var(--cf-text-muted)]"}`} title={meeting.error || undefined}>
           {statusLine}

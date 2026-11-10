@@ -97,7 +97,9 @@ export const mockSaveConfig = (collectionId: string, config: MockConfig) =>
   invoke<MockStatus | null>("api_mock_save_config", { collectionId, config });
 export const mockStart = (collectionId: string) => invoke<MockStatus>("api_mock_start", { collectionId });
 export const mockStop = (collectionId: string) => invoke<void>("api_mock_stop", { collectionId });
-export const mockList = () => invoke<MockStatus[]>("api_mock_list");
+/** Stops the mock if running and forgets its routes and settings; the collection stays. */
+export const mockDelete = (collectionId: string) => invoke<void>("api_mock_delete", { collectionId });
+export const mockList =() => invoke<MockStatus[]>("api_mock_list");
 export const mockLog = (collectionId: string) => invoke<MockLogEntry[]>("api_mock_log", { collectionId });
 export const mockClearLog = (collectionId: string) => invoke<void>("api_mock_clear_log", { collectionId });
 export const mockWorkspace = (workspaceId: string) => invoke<MockSummary[]>("api_mock_workspace", { workspaceId });

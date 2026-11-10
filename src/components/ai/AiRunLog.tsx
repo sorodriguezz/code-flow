@@ -1,5 +1,22 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Check, ChevronRight, Cpu, Pencil, RotateCcw, Square } from "lucide-react";
+import {
+  AppWindow,
+  Brain,
+  Check,
+  ChevronRight,
+  Cpu,
+  Globe,
+  Library,
+  MessagesSquare,
+  NotebookText,
+  Pencil,
+  Plug,
+  RotateCcw,
+  Square,
+  SquareTerminal,
+  type LucideIcon,
+} from "lucide-react";
+import { turnActivity, type ActivityGroup, type ActivityKind } from "../../lib/turnActivity";
 import { useAiRunStore, type AiRunLine } from "../../state/aiRunStore";
 import { buttonClass } from "../common/Button";
 import { ThinkingOrb } from "../common/ThinkingOrb";
@@ -774,6 +791,82 @@ export function RunFileChips({ lines, density = "panel" }: { lines?: AiRunLine[]
           )}
         </button>
       ))}
+    </div>
+  );
+}
+
+const ACTIVITY_ICON: Record<ActivityKind, LucideIcon> = {
+  memory: Brain,
+  notes: NotebookText,
+  reference: Library,
+  chats: MessagesSquare,
+  web: Globe,
+  connector: Plug,
+  app: AppWindow,
+  command: SquareTerminal,
+};
+
+const ACTIVITY_LABEL: Record<ActivityKind, TranslationKey> = {
+  memory: "ai.activity.memory",
+  notes: "ai.activity.notes",
+  reference: "ai.activity.reference",
+  chats: "ai.activity.chats",
+  web: "ai.activity.web",
+  connector: "ai.activity.connector",
+  app: "ai.activity.app",
+  command: "ai.activity.command",
+};
+
+/**
+ * «Consultó»: where a finished turn went besides the repository's files — memories, notes, reference
+ * repositories, other chats, the web, connectors, the app's services, and the commands it ran — one
+ * chip per kind with how many calls. A chip opens the list of what each call was about, selectable,
+ * so «¿de dónde sacó eso?» is answered without opening the whole run log. See `lib/turnActivity`.
+ */
+export function RunActivityChips({ lines, density = "panel" }: { lines?: AiRunLine[]; density?: "reading" | "panel" }) {
+  const t = useT();
+  const groups = useMemo(() => turnActivity(parseRunSteps(lines)), [lines]);
+  const [open, setOpen] = useState<string | null>(null);
+  if (groups.length === 0) return null;
+  const reading = density === "reading";
+  const keyOf = (group: ActivityGroup) => (group.kind === "connector" ? `connector:${group.source}` : group.kind);
+  const shown = groups.find((group) => keyOf(group) === open) ?? null;
+  return (
+    <div className="cf-fade-in flex flex-col gap-1">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="mr-0.5 font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--cf-text-faint)]">{t("ai.activity.title")}</span>
+        {groups.map((group) => {
+          const key = keyOf(group);
+          const Icon = ACTIVITY_ICON[group.kind];
+          const label = group.kind === "connector" && group.source ? group.source : t(ACTIVITY_LABEL[group.kind]);
+          const active = open === key;
+          return (
+            <button
+              key={key}
+              type="button"
+              aria-expanded={active}
+              title={group.items.slice(0, 12).join("\n")}
+              onClick={() => setOpen(active ? null : key)}
+              className={`inline-flex max-w-[16rem] items-center gap-1.5 rounded-full py-0 pl-1.5 pr-2 text-[var(--cf-text)] shadow-[inset_0_0_0_1px_var(--cf-border-strong)] transition-colors hover:bg-[var(--cf-hover)] ${
+                active ? "bg-[var(--cf-hover)]" : ""
+              } ${reading ? "h-6 text-[11.5px]" : "h-[22px] text-[10.5px]"}`}
+            >
+              <Icon size={reading ? 12 : 11} className="shrink-0 text-[var(--cf-text-muted)]" />
+              <span className="truncate">{label}</span>
+              <span className="shrink-0 tabular-nums text-[var(--cf-text-muted)]">{group.count}</span>
+            </button>
+          );
+        })}
+      </div>
+      {shown && shown.items.length > 0 && (
+        <ul className="max-h-40 select-text overflow-y-auto rounded-md px-2 py-1 font-mono text-[10.5px] leading-relaxed text-[var(--cf-text-muted)] shadow-[inset_0_0_0_1px_var(--cf-border)]">
+          {shown.items.map((item) => (
+            <li key={item} className="truncate" title={item}>
+              {item}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

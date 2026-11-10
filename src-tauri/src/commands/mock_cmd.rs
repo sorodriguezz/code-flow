@@ -83,6 +83,21 @@ pub async fn api_mock_stop(app: AppHandle, collection_id: String) -> Result<(), 
     Ok(())
 }
 
+/// Deletes a collection's mock: stops it if it is running, drops its log and forgets its routes and
+/// settings. The collection and its requests stay; «Levantar mock» builds a new one from scratch.
+#[tauri::command]
+pub async fn api_mock_delete(app: AppHandle, collection_id: String) -> Result<(), String> {
+    mock::stop(&collection_id).await;
+    mock::clear_log(&collection_id);
+    {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        mock_queries::delete(&conn, &collection_id).map_err(|e| e.to_string())?;
+    }
+    notify(&app, &collection_id);
+    Ok(())
+}
+
 /// Every running mock, in any workspace.
 #[tauri::command]
 pub fn api_mock_list() -> Vec<MockStatus> {

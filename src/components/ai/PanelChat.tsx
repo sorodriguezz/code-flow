@@ -976,7 +976,10 @@ export function PanelChat({
               <DictationBar />
             </div>
           ) : (
-          <div className="flex items-center gap-1.5 px-0.5">
+          // Wraps rather than overflows, as the workspace chat's does: on a 14" screen with the panel
+          // narrow, the send button was pushed past the box's edge (user report, 2026-11-09). The
+          // `@container` lets the chips drop their words first; only then does a row wrap.
+          <div className="@container flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 px-0.5">
             <ChatModelPicker
               liveModel={session.model}
               chatActive={session.messages.length > 0}
@@ -997,6 +1000,7 @@ export function PanelChat({
               type="button"
               onClick={() => useChatStore.getState().setPlan(conversationId, !planMode)}
               aria-pressed={planMode}
+              aria-label={t("assistant.planMode")}
               title={t("assistant.planModeHint")}
               className={`flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] ${
                 planMode
@@ -1005,7 +1009,8 @@ export function PanelChat({
               }`}
             >
               <ListChecks size={13} />
-              {t("assistant.planMode")}
+              {/* The label gives way when the panel is narrow: the icon, title and name stay. */}
+              <span className="hidden @[26rem]:inline">{t("assistant.planMode")}</span>
             </button>
             {/* The CLI's own MCP servers, switched for this repository. */}
             <McpMenu provider={provider} scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId }} />

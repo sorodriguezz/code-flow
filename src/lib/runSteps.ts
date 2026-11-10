@@ -1,6 +1,7 @@
 import type { AiRunLine } from "../state/aiRunStore";
 import type { RunPhase } from "./thinking/activity";
 import { PLAN_MARK } from "./runPlan";
+import { isMemoryFileStep } from "./turnActivity";
 
 /**
  * A run's log, read as steps — what the run card shows as rows and what its headline says.
@@ -80,7 +81,7 @@ export function parseRunSteps(lines: readonly AiRunLine[] | undefined): RunStep[
 export function phaseOfTool(tool: string): RunPhase {
   const name = tool.toLowerCase();
   if (/^(read|notebookread|ls|view|cat|read_file|list_dir)$/.test(name)) return "read";
-  if (/^(grep|glob|search|websearch|webfetch|web_search|web_fetch|toolsearch|find)$/.test(name)) return "search";
+  if (/^(grep|glob|search|websearch|webfetch|web_search|web_fetch|toolsearch|find|recall|search_knowledge)$/.test(name)) return "search";
   if (/^(edit|multiedit|write|notebookedit|apply_patch|str_replace_editor|search_replace|create)$/.test(name)) return "edit";
   if (/^(bash|bashoutput|shell|killshell|exec|run_terminal_cmd|run_terminal_command)$/.test(name)) return "run";
   if (/^(task|agent|spawn_subagent|spawn_agent)$/.test(name)) return "delegate";
@@ -106,6 +107,8 @@ export function touchedFiles(steps: readonly RunStep[], limit = 8): { path: stri
   const files: { path: string; edited: boolean }[] = [];
   for (const step of steps) {
     if (step.kind !== "tool" || !step.arg) continue;
+    // A memory the engine keeps as a file is said as a memory (`turnActivity`), not as a file.
+    if (isMemoryFileStep(step)) continue;
     const edited = EDITS.test(step.tool);
     if (!edited && !READS.test(step.tool)) continue;
     // A truncated argument (`…`) is not a path that can be opened.

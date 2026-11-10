@@ -28,11 +28,37 @@ export function markCodeRefs(html: string): string {
  * so `a.ts` never matches `data.ts`. No match gives `null` rather than a guess joined to the repo
  * root: a bare name could live in any folder, and a tooltip with a wrong path is worse than none.
  */
-export function resolveCodeRef(ref: string, paths: readonly string[]): string | null {
+export function resolveCodeRef(ref: string, paths: readonly string[], repoRoot?: string | null): string | null {
   const want = ref.replace(/\\/g, "/");
   for (const path of paths) {
     const norm = path.replace(/\\/g, "/");
     if (norm === want || norm.endsWith(`/${want}`)) return path;
   }
+  // A reference with a folder in it (`src/lib/a.ts`) is written relative to the repository — that is
+  // how answers name its files — so it is the repository's file even if this turn never opened it.
+  // A bare name (`a.ts`) still is not guessed: it could live in any folder.
+  if (repoRoot && want.includes("/") && !want.startsWith("/")) {
+    return `${repoRoot.replace(/[\\/]+$/, "")}/${want.replace(/^\.\//, "")}`;
+  }
   return null;
+}
+
+/** A quoted string or a bare word of a command line, quotes dropped. */
+const TOKEN = /"([^"]+)"|'([^']+)'|(\S+)/g;
+
+/**
+ * Every path a turn's tools were given — files read or edited, and the ones inside a command or a
+ * search (`sqlite3 "$HOME/…/codeflow.db"`, `cat src/a.ts`) — so a file the answer names after
+ * touching it through the shell still gets its full path on hover. `$HOME` is shown as `~`.
+ */
+export function pathsFromToolArgs(args: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const arg of args) {
+    for (const match of arg.matchAll(TOKEN)) {
+      const token = (match[1] ?? match[2] ?? match[3] ?? "").replace(/^\$HOME(?=\/)|^\$\{HOME\}(?=\/)/, "~").replace(/[;,)]+$/, "");
+      if (token.endsWith("…") || !/[\\/]/.test(token) || /^[a-z]+:\/\//i.test(token)) continue;
+      if (!out.includes(token)) out.push(token);
+    }
+  }
+  return out;
 }
