@@ -11,7 +11,7 @@ import { pushErrorToast } from "./toastStore";
 import { translate } from "./languageStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { islandOpened, islandReturned } from "../lib/islandSync";
-import { chatIslandOpened, chatIslandReturned } from "../lib/chatIslandSync";
+import { chatIslandOpened, chatIslandReturned, parseChatIslandRef } from "../lib/chatIslandSync";
 
 /**
  * Which apps and repositories are open in windows of their own.
@@ -44,6 +44,8 @@ export interface WindowReturn {
 
 /** How long a return stays in `returns`: the longest of its animations, plus a margin. */
 const RETURN_MS = 2400;
+const CHAT_WINDOW_KIND = "chat";
+const WORKSPACE_CHAT_SURFACE = "ws";
 
 interface WindowState {
   /** Every satellite open right now, this window included if it is one. */
@@ -177,7 +179,11 @@ export const useWindowStore = create<WindowState>((set, get) => ({
     try {
       // Opened where it was asked for: an app detached while this window sits on "Tienda" shows
       // "Tienda", whatever that window was switched to the last time it was open.
-      await openSatellite(kind, refId, title, useWorkspaceStore.getState().activeWorkspaceId, at);
+      const chatRef = kind === CHAT_WINDOW_KIND ? parseChatIslandRef(refId) : null;
+      const workspaceId = chatRef?.surface === WORKSPACE_CHAT_SURFACE
+        ? chatRef.workspaceId
+        : useWorkspaceStore.getState().activeWorkspaceId;
+      await openSatellite(kind, refId, title, workspaceId, at);
       return true;
     } catch (err) {
       pushErrorToast(String(err));

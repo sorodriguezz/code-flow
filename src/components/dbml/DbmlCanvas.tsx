@@ -91,6 +91,9 @@ import type { DbmlView } from "./DbmlMinimap";
 
 const ZOOM_MIN = 0.15;
 const ZOOM_MAX = 2.5;
+const SELECTED_TABLE_GLOW = "url(#cf-dbml-glow)";
+const RELATED_TABLE_GLOW = "url(#cf-dbml-glow-soft)";
+const TABLE_CORNER_RADIUS = 12;
 /** The scale a table found by searching is at least brought to. */
 const READABLE_ZOOM = 0.85;
 
@@ -2381,11 +2384,11 @@ const SchemaBox = memo(function SchemaBox({
   // that say "in the set" stay strong and the mark that says "look here" — the halo — is the one
   // that separates them.
   const bandOpacity = selected ? 0.22 : related ? 0.115 : 0.09;
+  const tableGlow = selected ? SELECTED_TABLE_GLOW : related ? RELATED_TABLE_GLOW : undefined;
 
   return (
     <g
       transform={`translate(${node.x} ${node.y})`}
-      filter={selected ? "url(#cf-dbml-glow)" : related ? "url(#cf-dbml-glow-soft)" : undefined}
       onPointerDown={onPointerDown}
       onPointerEnter={onPointerEnter}
       onPointerLeave={onPointerLeave}
@@ -2393,6 +2396,16 @@ const SchemaBox = memo(function SchemaBox({
       onDoubleClick={onOpen}
       style={{ cursor: draggable ? "move" : "pointer" }}
     >
+      {tableGlow && (
+        <rect
+          width={node.width}
+          height={node.height}
+          rx={TABLE_CORNER_RADIUS}
+          fill="var(--cf-surface)"
+          filter={tableGlow}
+          pointerEvents="none"
+        />
+      )}
       {/* The card itself: opaque, and *outside* the fade below.
 
           Boxes overlap — the layout allows it, and dragging one onto another is a thing people do —

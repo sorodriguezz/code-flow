@@ -12,12 +12,11 @@ import { createCat } from "../../lib/thinking/cat";
 import { createRocky } from "../../lib/thinking/rocky";
 import { createGhost } from "../../lib/thinking/ghost";
 import { createCrab } from "../../lib/thinking/crab";
-import { createMoon } from "../../lib/thinking/moon";
-import { createAtom } from "../../lib/thinking/atom";
-import { createSpark } from "../../lib/thinking/spark";
 import { createCloud } from "../../lib/thinking/cloud";
 import { createBulb } from "../../lib/thinking/bulb";
 import { createAlien } from "../../lib/thinking/alien";
+import { createCalcifer, createWalle, createTars, createR2d2 } from "../../lib/thinking/cinema";
+import { createNutcracker } from "../../lib/thinking/nutcracker";
 import { useThinkingDesignStore } from "../../state/thinkingDesignStore";
 import { voiceLevel } from "../../lib/thinking/voice";
 import { listenLevel } from "../../lib/thinking/listen";
@@ -42,9 +41,9 @@ import { gazeAt, nearness, watchPointer } from "../../lib/thinking/pointer";
  * button on the rail (the user: "que siga el mouse con los ojos", and then for the designs with no
  * eyes, "¿qué se puede hacer?"). The designs with eyes — the robot, the blob and the
  * characters — look at it instead of looking around; the rest turn to it each in their own way: the
- * globe, the crystal and the atom tip toward it, the drops are drawn to it, the orb's light and the
- * halo's glow swing round to its side, the plasma's lights drift there, the wave's crest leans its
- * way, and the moon turns its face. Out of the
+ * globe, the crystal tip toward it, the drops are drawn to it, the orb's light and the
+ * light swings round to its side, the plasma's lights drift there, the wave's crest leans its
+ * way, and the characters turn their heads. Out of the
  * window, they go back to what they were doing. And every one of them perks up as the pointer comes
  * close (`nearness`): brighter, a soft glow, and running a little faster — as if about to be
  * clicked. None of it while the run is ending or resting, nor for a reader who asked for reduced
@@ -198,12 +197,14 @@ const PAINTERS: Partial<Record<ThinkingDesign, (canvas: HTMLCanvasElement, px: n
   rocky: createRocky,
   ghost: createGhost,
   crab: createCrab,
-  moon: createMoon,
-  atom: createAtom,
-  spark: createSpark,
+  tars: createTars,
+  r2d2: createR2d2,
+  calcifer: createCalcifer,
+  walle: createWalle,
   cloud: createCloud,
   bulb: createBulb,
   alien: createAlien,
+  nutcracker: createNutcracker,
 };
 
 /** How much faster a mark runs with the pointer right on it: 1 + this, easing in as it comes close. */
@@ -272,7 +273,7 @@ function OrbCanvas({
 
   // Primitives, so a caller passing a fresh object each render does not re-run this. Speaking is
   // drawn as writing by the designs that have no voice of their own; the ones that do (the orb's
-  // shader, the waves, and the four mascots — Chispa, Nube, Bombilla, Marciano — each with a
+  // shader, the waves, and the four mascots — Calcifer, Nube, Bombilla, Marciano — each with a
   // lip-synced mouth) take the phase and the voice's loudness themselves (`voice` in
   // `lib/thinkingDesigns`). Listening is every design's own: each takes it as is. A cue goes by its
   // kind and `at`, so a new wake — a new `at` — reaches the painter even when nothing else changed.
@@ -300,18 +301,6 @@ function OrbCanvas({
  * row updating a timer, say) hands React the same elements and it skips them.
  */
 const PARTS: Partial<Record<ThinkingDesign, ReactElement>> = {
-  // The AI loader (21st.dev, @beratberkayg): a disc lit from inside by three hues, turning, its
-  // colours drifting as a second layer fades over the first.
-  halo: (
-    <>
-      <span className="cf-orb-halo">
-        <span className="cf-orb-halo-glow" />
-        <span className="cf-orb-halo-glow cf-orb-halo-glow-2" />
-      </span>
-      {/* Its light on the pointer's side while it follows — still while the disc turns. */}
-      <span className="cf-orb-halo-lean" />
-    </>
-  ),
   // A little robot: the antenna blinks, the eyes look left, right, then up and to the side the way
   // someone does when working something out — and blink, out of step with the looking.
   bot: (

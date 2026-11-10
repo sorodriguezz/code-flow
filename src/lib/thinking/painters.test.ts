@@ -14,12 +14,11 @@ import { createCat } from "./cat";
 import { createRocky } from "./rocky";
 import { createGhost } from "./ghost";
 import { createCrab } from "./crab";
-import { createMoon } from "./moon";
-import { createAtom } from "./atom";
-import { createSpark } from "./spark";
 import { createCloud } from "./cloud";
 import { createBulb } from "./bulb";
 import { createAlien } from "./alien";
+import { createCalcifer, createWalle, createTars, createR2d2 } from "./cinema";
+import { createNutcracker } from "./nutcracker";
 
 /**
  * The canvas designs, stepped by hand. Nothing here runs a frame loop — the browser pane's hidden tab
@@ -50,6 +49,7 @@ const motion = vi.hoisted(() => ({ off: false }));
 vi.mock("../motion", () => ({ motionOff: () => motion.off }));
 
 const DPR = 2;
+const CANVAS_TEST_TIMEOUT_MS = 60_000;
 
 interface Box {
   minX: number;
@@ -272,6 +272,42 @@ function fakeCanvas() {
 
 type Make = (canvas: HTMLCanvasElement, px: number, gain: number) => Painter;
 
+const CINEMA_PAINTERS = [
+  ["calcifer", createCalcifer], ["walle", createWalle], ["tars", createTars], ["r2d2", createR2d2],
+] as const;
+const CINEMA_STATES: readonly ThinkingActivity[] = [
+  { phase: "think" }, { phase: "read" }, { phase: "edit" }, { phase: "write" },
+  { phase: "speak" }, { phase: "listen" }, { quiet: true }, { done: true }, { failed: true },
+];
+const RESTING_CHARACTER_STATES: readonly ThinkingActivity[] = [{ quiet: true }, { done: true }, { failed: true }];
+const CINEMA_TEST_GROUP = "cinema character states";
+const ALL_STATES_TEST = "%s paints all nine states distinctly";
+const RESTING_GAZE_TEST = "%s follows the pointer while running and settles while resting";
+const ALL_SIZES_TEST = "%s keeps all states inside every icon size";
+const CINEMA_GAIN = 2.2;
+const CINEMA_STATE_COUNT = 9;
+const CINEMA_FRAME_COUNT = 4;
+const CINEMA_BOUNDS_TOLERANCE = 0.01;
+const GAZE_LEFT: Gaze = [-1, -1];
+const GAZE_RIGHT: Gaze = [1, 1];
+const ACTIVE_CHARACTER_STATE: ThinkingActivity = { phase: "think" };
+const ALL_CHARACTER_SIZES = Object.values(ORB_PX);
+const CHARACTER_LINE_METHOD = "lineTo";
+const CHARACTER_ARC_METHOD = "arc";
+
+function characterFrame(make: Make, activity: ThinkingActivity, gaze: Gaze): string {
+  const canvas = fakeCanvas();
+  const painter = make(canvas as unknown as HTMLCanvasElement, ORB_PX.hero, CINEMA_GAIN);
+  const context = canvas.ctx!;
+  const lines = vi.spyOn(context, CHARACTER_LINE_METHOD);
+  const arcs = vi.spyOn(context, CHARACTER_ARC_METHOD);
+  painter.setActivity(activity);
+  painter.setGaze?.(gaze);
+  painter.still();
+  const calls = [lines.mock.calls, arcs.mock.calls];
+  return JSON.stringify(calls);
+}
+
 const PAINTERS: Record<string, Make> = {
   sphere: createSphere,
   orb: createOrb,
@@ -283,12 +319,14 @@ const PAINTERS: Record<string, Make> = {
   rocky: createRocky,
   ghost: createGhost,
   crab: createCrab,
-  moon: createMoon,
-  atom: createAtom,
-  spark: createSpark,
+  walle: createWalle,
+  tars: createTars,
+  r2d2: createR2d2,
+  calcifer: createCalcifer,
   cloud: createCloud,
   bulb: createBulb,
   alien: createAlien,
+  nutcracker: createNutcracker,
 };
 
 /** The fake clock the painters' `performance.now()` reads (the voice, the microphone, the cues). */
@@ -383,7 +421,7 @@ describe("every canvas design", () => {
         }
         // Thousands of frames a design, the liquid's per-pixel field among them: seconds alone, and
         // more than vitest's default five when the whole suite shares the machine.
-      }, 30_000);
+      }, CANVAS_TEST_TIMEOUT_MS);
 
       it("keeps listening, speaking and the cues inside the square at the hero size, gain 2.2", () => {
         const run = play(make, ORB_PX.hero, 2.2, [
@@ -396,7 +434,7 @@ describe("every canvas design", () => {
           { act: { phase: "speak", cue: wake() }, frames: 40 },
         ]);
         expect(run.overflow, `${id} leaves the square by ${(run.overflow * 100).toFixed(1)}%`).toBeLessThanOrEqual(0.01);
-      }, 30_000);
+      }, CANVAS_TEST_TIMEOUT_MS);
 
       it("paints a still frame of listening and of each cue under reduced motion", () => {
         motion.off = true;
@@ -419,7 +457,7 @@ describe("every canvas design", () => {
 });
 
 describe("perspective at the pointer's extremes", () => {
-  const characters = { axolotl: createAxolotl, rocky: createRocky, ghost: createGhost, cat: createCat, crab: createCrab, cloud: createCloud, alien: createAlien, spark: createSpark, bulb: createBulb };
+  const characters = { walle: createWalle, tars: createTars, r2d2: createR2d2, axolotl: createAxolotl, rocky: createRocky, ghost: createGhost, cat: createCat, crab: createCrab, cloud: createCloud, alien: createAlien, calcifer: createCalcifer, bulb: createBulb };
 
   it.each(Object.entries(characters))("keeps %s in view", (_, make) => {
     const run = play(make, ORB_PX.hero, 2.2, [
@@ -430,7 +468,7 @@ describe("perspective at the pointer's extremes", () => {
     ]);
     expect(run.nan).toBe(false);
     expect(run.overflow).toBeLessThanOrEqual(0.01);
-  });
+  }, CANVAS_TEST_TIMEOUT_MS);
 
   it("keeps the ghost's body wide through the turn even at icon size", () => {
     const canvas = fakeCanvas();
@@ -442,4 +480,32 @@ describe("perspective at the pointer's extremes", () => {
     const { minX, maxX } = canvas.ctx!.box;
     expect(maxX - minX).toBeGreaterThan(px * DPR * 0.5);
   });
+});
+
+describe(CINEMA_TEST_GROUP, () => {
+  it.each(CINEMA_PAINTERS)(ALL_STATES_TEST, (_, make) => {
+    const states = CINEMA_STATES.map((activity) => characterFrame(make, activity, null));
+    const unique = new Set(states);
+    expect(unique.size).toBe(CINEMA_STATE_COUNT);
+  });
+
+  it.each(CINEMA_PAINTERS)(RESTING_GAZE_TEST, (_, make) => {
+    const lookingLeft = characterFrame(make, ACTIVE_CHARACTER_STATE, GAZE_LEFT);
+    const lookingRight = characterFrame(make, ACTIVE_CHARACTER_STATE, GAZE_RIGHT);
+    expect(lookingLeft).not.toBe(lookingRight);
+    for (const activity of RESTING_CHARACTER_STATES) {
+      const left = characterFrame(make, activity, GAZE_LEFT);
+      const right = characterFrame(make, activity, GAZE_RIGHT);
+      expect(left).toBe(right);
+    }
+  });
+
+  it.each(CINEMA_PAINTERS)(ALL_SIZES_TEST, (_, make) => {
+    for (const px of ALL_CHARACTER_SIZES) {
+      const steps = CINEMA_STATES.map((act) => ({ act, frames: CINEMA_FRAME_COUNT, gaze: GAZE_RIGHT }));
+      const run = play(make, px, CINEMA_GAIN, steps);
+      expect(run.nan).toBe(false);
+      expect(run.overflow).toBeLessThanOrEqual(CINEMA_BOUNDS_TOLERANCE);
+    }
+  }, CANVAS_TEST_TIMEOUT_MS);
 });

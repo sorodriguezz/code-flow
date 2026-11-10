@@ -6,13 +6,19 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const opened: string[] = [];
+const openedWorkspaces: (string | null)[] = [];
 const toasts: string[] = [];
+const FOREIGN_WORKSPACE = "workspace-other";
+const FOREIGN_CHAT_REF = "ws:workspace-other:conversation";
+const CHAT_WINDOW_KIND = "chat";
+const CHAT_TITLE = "Agenda";
 
 vi.mock("../lib/tauri/windows", () => ({
   focusSatellite: async () => {},
   listSatellites: async () => [],
-  openSatellite: async (_kind: string, refId: string) => {
+  openSatellite: async (_kind: string, refId: string, _title: string, workspaceId: string | null) => {
     opened.push(refId);
+    openedWorkspaces.push(workspaceId);
     return `sat-app-${refId}`;
   },
 }));
@@ -27,10 +33,17 @@ const sat = (label: string, kind: "app" | "repo" | "quick" | "chat", ref_id: str
 
 beforeEach(() => {
   opened.length = 0;
+  openedWorkspaces.length = 0;
   toasts.length = 0;
 });
 
 describe("the satellite limit", () => {
+  it("opens a workspace chat on its own workspace while the main window stays elsewhere", async () => {
+    useWindowStore.setState({ satellites: [] });
+    const openedChat = await useWindowStore.getState().detach(CHAT_WINDOW_KIND, FOREIGN_CHAT_REF, CHAT_TITLE);
+    expect(openedChat).toBe(true);
+    expect(openedWorkspaces).toEqual([FOREIGN_WORKSPACE]);
+  });
   it("does not count the hotkey ask box", async () => {
     useWindowStore.setState({
       satellites: [sat("sat-app-notes", "app", "notes"), sat("sat-quick-ask", "quick", "ask")],

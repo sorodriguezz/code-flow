@@ -1332,7 +1332,7 @@ pre {
   position: absolute;
   inset: 0;
 }
-.cf-orb:is(.cf-orb--halo, .cf-orb--bot, .cf-orb--blob, .cf-orb--plasma) .cf-orb-cue::before {
+.cf-orb:is(.cf-orb--bot, .cf-orb--blob, .cf-orb--plasma) .cf-orb-cue::before {
   content: "";
   position: absolute;
   inset: 83% 18% 2%;
@@ -1389,78 +1389,6 @@ pre {
     filter: brightness(min(1.4, calc(1 + var(--cf-orb-voice, 0) * 0.25 * var(--cf-orb-gain, 1))));
     transition: transform 70ms linear, filter 70ms linear;
   }
-}
-
-/* Halo — the AI loader (21st.dev, @beratberkayg). A disc lit from inside: three inset shadows in
-   the assistant's hues, offset downwards, so turning the disc walks the light round its rim. The
-   second layer carries the hues in the other order and fades in and out, which is the colour
-   drift the original got by animating the shadows themselves — here without repainting them. */
-@keyframes cf-halo-turn {
-  from {
-    transform: rotate(90deg);
-  }
-  to {
-    transform: rotate(450deg);
-  }
-}
-@keyframes cf-halo-drift {
-  0%,
-  100% {
-    opacity: 0;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-.cf-orb-halo {
-  --cf-halo-u: calc(var(--cf-orb-size) * 0.04);
-  position: absolute;
-  inset: 4%;
-  animation: cf-halo-turn 5s linear infinite;
-}
-.cf-orb-halo::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: conic-gradient(from 25deg, #edfaff, var(--cf-ai-c) 19%, #393675 45%, var(--cf-ai-a) 76%, #edfaff);
-  mask-image: radial-gradient(circle closest-side, transparent 69%, #000 85%, #000 92%, transparent);
-}
-.cf-orb:is([data-state="done"], [data-state="failed"]) .cf-orb-halo::before {
-  background: conic-gradient(from 25deg, #edfaff, var(--cf-orb-end) 28%, color-mix(in oklab, var(--cf-orb-end) 46%, #18132b) 62%, var(--cf-orb-end) 81%, #edfaff);
-}
-.cf-orb-halo-glow {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  box-shadow:
-    0 var(--cf-halo-u) calc(var(--cf-halo-u) * 2) 0 var(--cf-ai-c) inset,
-    0 calc(var(--cf-halo-u) * 2) calc(var(--cf-halo-u) * 3) 0 var(--cf-ai-b) inset,
-    0 calc(var(--cf-halo-u) * 5) calc(var(--cf-halo-u) * 5) 0 var(--cf-ai-a) inset,
-    0 0 calc(var(--cf-halo-u) * 0.6) calc(var(--cf-halo-u) * 0.25) color-mix(in oklab, var(--cf-ai-c) 35%, transparent),
-    0 0 var(--cf-halo-u) calc(var(--cf-halo-u) * 0.3) color-mix(in oklab, var(--cf-ai-b) 25%, transparent);
-}
-.cf-orb-halo-glow-2 {
-  box-shadow:
-    0 var(--cf-halo-u) calc(var(--cf-halo-u) * 2) 0 var(--cf-ai-a) inset,
-    0 calc(var(--cf-halo-u) * 2) var(--cf-halo-u) 0 var(--cf-ai-c) inset,
-    0 calc(var(--cf-halo-u) * 4) calc(var(--cf-halo-u) * 5) 0 var(--cf-ai-b) inset,
-    0 0 calc(var(--cf-halo-u) * 0.6) calc(var(--cf-halo-u) * 0.25) color-mix(in oklab, var(--cf-ai-a) 35%, transparent),
-    0 0 var(--cf-halo-u) calc(var(--cf-halo-u) * 0.3) color-mix(in oklab, var(--cf-ai-c) 25%, transparent);
-  animation: cf-halo-drift 5s ease-in-out infinite;
-}
-.cf-orb[data-state="done"] .cf-orb-halo-glow,
-.cf-orb[data-state="failed"] .cf-orb-halo-glow {
-  background: radial-gradient(circle at 50% 72%, color-mix(in oklab, var(--cf-orb-end) 38%, transparent), transparent 70%);
-  box-shadow:
-    0 var(--cf-halo-u) calc(var(--cf-halo-u) * 2) 0 var(--cf-orb-end) inset,
-    0 calc(var(--cf-halo-u) * 4) calc(var(--cf-halo-u) * 5) 0 color-mix(in oklab, var(--cf-orb-end) 75%, #fff) inset,
-    0 0 calc(var(--cf-halo-u) * 1.5) calc(var(--cf-halo-u) * 0.4) color-mix(in oklab, var(--cf-orb-end) 55%, transparent);
-}
-/* Ended, the drifting second layer would lay the assistant's hues back over the finish colour. */
-.cf-orb[data-state="done"] .cf-orb-halo-glow-2 {
-  animation: none;
-  opacity: 0;
 }
 
 /* Bot — a small robot head. The visor is dark in both themes: the eyes are lights, and lights
@@ -1750,35 +1678,9 @@ pre {
   ) perspective(calc(var(--cf-orb-size) * 1.5)) rotateY(calc(var(--cf-gaze-x, 0) * 31deg));
   transition: transform 0.18s ease-out;
 }
-/* The CSS designs without eyes follow it too. The halo shifts a hair toward the pointer and gathers
-   a rim of light on its side — the inset light it is drawn with, aimed instead of turning; on top of
-   it, the rim goes all round. The plasma's lights drift to the pointer's side, each its own distance
-   so they part a little, and the sheen with them: the light comes from where the pointer is. The
-   `translate` property, never `transform`, which their own animations own. */
-.cf-orb-halo,
 .cf-orb-blot,
 .cf-orb-sheen {
   transition: translate 0.22s ease-out;
-}
-.cf-orb-halo-lean {
-  --cf-halo-u: calc(var(--cf-orb-size) * 0.04);
-  position: absolute;
-  inset: 4%;
-  border-radius: 50%;
-  pointer-events: none;
-  opacity: 0;
-  box-shadow: inset calc(var(--cf-halo-u) * -2.5 * var(--cf-gaze-x, 0)) calc(var(--cf-halo-u) * -2.5 * var(--cf-gaze-y, 0))
-    calc(var(--cf-halo-u) * 2.5) 0 color-mix(in oklab, var(--cf-ai-c) 80%, #fff);
-  transition:
-    opacity 0.3s ease-out,
-    translate 0.22s ease-out;
-}
-.cf-orb[data-gaze]:not([data-state]) :is(.cf-orb-halo, .cf-orb-halo-lean) {
-  translate: calc(var(--cf-orb-size) * 0.05 * var(--cf-gaze-x, 0)) calc(var(--cf-orb-size) * 0.05 * var(--cf-gaze-y, 0));
-  rotate: y calc(var(--cf-gaze-x, 0) * 28deg);
-}
-.cf-orb[data-gaze]:not([data-state]) .cf-orb-halo-lean {
-  opacity: 1;
 }
 .cf-orb[data-gaze]:not([data-state]) .cf-orb-blot-1 {
   translate: calc(var(--cf-orb-size) * 0.12 * var(--cf-gaze-x, 0)) calc(var(--cf-orb-size) * 0.12 * var(--cf-gaze-y, 0));
@@ -1951,15 +1853,8 @@ pre {
   background: var(--cf-orb-end);
 }
 
-/* Failed, the shapes (the colour is `--cf-orb-end`, above): the halo stops turning, the robot's eyes
-   sink and its antenna droops, the creature sags with its eyes cast down, the plasma freezes. */
-.cf-orb[data-state="failed"] .cf-orb-halo,
 .cf-orb[data-state="failed"] .cf-orb-blot {
   animation-play-state: paused;
-}
-.cf-orb[data-state="failed"] .cf-orb-halo-glow-2 {
-  animation: none;
-  opacity: 0;
 }
 .cf-orb[data-state="failed"] .cf-orb-antenna {
   transform: rotate(32deg);
@@ -2022,15 +1917,6 @@ pre {
   }
 }
 @media (prefers-reduced-motion: no-preference) {
-  .cf-orb[data-phase="read"] .cf-orb-halo {
-    animation-duration: 9s;
-  }
-  .cf-orb[data-phase="work"] .cf-orb-halo {
-    animation-duration: 1.6s;
-  }
-  .cf-orb[data-phase="write"] .cf-orb-halo-glow:not(.cf-orb-halo-glow-2) {
-    animation: cf-orb-pulse 0.55s ease-in-out infinite;
-  }
 
   .cf-orb[data-phase="read"] .cf-orb-eyes {
     animation: cf-orb-scan 1.3s ease-in-out infinite;
@@ -2097,25 +1983,6 @@ pre {
   }
 }
 
-/* Codi — «Escuchando» and the cues (`ThinkingOrb`, `lib/thinking/cue`).
-
-   Listening (`data-phase="listen"`), every design draws the sound in, each its own way, by
-   `--cf-orb-listen` (the microphone's level 0–1, written each frame) times Codi's `--cf-orb-gain`:
-   the robot and the creature perk up, lean in and look straight out, eyes wider (neither has a
-   mouth to shut); the robot's antenna light pulses with each syllable and the creature's body draws
-   in round it; the halo's disc pulls in as its rim lights all round; the plasma's lights are drawn
-   to its middle. Speaking swells a mark out (`.cf-orb--speaking`) — this is the other way.
-
-   A wake (`data-cue="wake"`): half a second's startle on the parts' wrapper — the characters hop,
-   their eyes wide and straight out; the halo and the plasma pop and flash. An ask (`data-cue="ask"`)
-   holds: the characters tilt their heads and look out, blinking twice every few seconds; the halo
-   and the plasma breathe slowly inside a soft halo.
-
-   `scale`, `rotate` and `translate`, never `transform` — the parts' own loops own that — and every
-   cue animation is on `.cf-orb-cue`, or on a part whose loop it stands in for while the cue holds;
-   the ask's halo is on the mark itself, so the wrapper's breath does not carry it.
-   The wake's keyframes leave out their ends, so each starts from and settles back to whatever the
-   part is drawn at underneath — a listening antenna's swell, the halo's lit rim — without a jump. */
 @keyframes cf-orb-wake-hop {
   30% {
     translate: 0 calc(var(--cf-orb-size) * -0.03);
@@ -2137,11 +2004,6 @@ pre {
 @keyframes cf-orb-wake-eyes {
   20% {
     scale: 1.3 1.45;
-  }
-}
-@keyframes cf-orb-wake-flash {
-  18% {
-    opacity: 1;
   }
 }
 @keyframes cf-orb-wake-shine {
@@ -2187,8 +2049,6 @@ pre {
     scale: 0.955;
   }
 }
-/* The halo and the plasma fill their square, so asking they draw back a little to show the soft
-   halo round them, and breathe from there. */
 @keyframes cf-orb-ask-recede {
   to {
     scale: 0.92;
@@ -2255,23 +2115,6 @@ pre {
   .cf-orb[data-phase="listen"] .cf-orb-pupil {
     scale: 1.15 1.25;
   }
-  /* The halo turns slowly and its disc pulls in with each syllable, while its rim lights all round —
-     the inset light it follows the pointer with, aimed at nothing. */
-  .cf-orb[data-phase="listen"] .cf-orb-halo {
-    animation-duration: 9s;
-    scale: max(0.8, calc(1 - var(--cf-orb-listen, 0) * 0.09 * var(--cf-orb-gain, 1)));
-    transition:
-      translate 0.22s ease-out,
-      scale 70ms linear;
-  }
-  .cf-orb[data-phase="listen"] .cf-orb-halo-lean {
-    opacity: min(1, calc(0.2 + var(--cf-orb-listen, 0) * 0.8 * var(--cf-orb-gain, 1)));
-    scale: max(0.8, calc(1 - var(--cf-orb-listen, 0) * 0.09 * var(--cf-orb-gain, 1)));
-    transition:
-      opacity 70ms linear,
-      translate 0.22s ease-out,
-      scale 70ms linear;
-  }
   /* The plasma's lights slow and are drawn into its middle with each syllable: `scale` applies after
      their drifting `transform`, so it pulls their offsets in with them. */
   .cf-orb[data-phase="listen"] .cf-orb-blot {
@@ -2304,12 +2147,8 @@ pre {
   .cf-orb[data-cue="wake"] .cf-orb-antenna::after {
     animation: cf-orb-wake-pop 0.5s ease-out;
   }
-  /* The halo and the plasma pop and flash — the halo's rim lighting all round, the plasma's sheen. */
-  .cf-orb[data-cue="wake"] .cf-orb-cue:has(> .cf-orb-halo, > .cf-orb-plasma) {
+  .cf-orb[data-cue="wake"] .cf-orb-cue:has(> .cf-orb-plasma) {
     animation: cf-orb-wake-pop 0.5s ease-out;
-  }
-  .cf-orb[data-cue="wake"] .cf-orb-halo-lean {
-    animation: cf-orb-wake-flash 0.5s ease-out;
   }
   .cf-orb[data-cue="wake"] .cf-orb-sheen {
     animation: cf-orb-wake-shine 0.5s ease-out;
@@ -2338,17 +2177,15 @@ pre {
   .cf-orb[data-cue="ask"] .cf-orb-blob {
     animation: cf-orb-ask-breathe 3s ease-in-out infinite;
   }
-  /* The halo and the plasma draw back and breathe slowly inside a soft halo — on the mark itself,
-     behind its parts, so their breath does not take the halo with it — turning and drifting slowly. */
-  .cf-orb[data-cue="ask"] .cf-orb-cue:has(> .cf-orb-halo, > .cf-orb-plasma) {
+  .cf-orb[data-cue="ask"] .cf-orb-cue:has(> .cf-orb-plasma) {
     animation:
       cf-orb-ask-recede 0.4s ease-out both,
       cf-orb-ask-breathe-back 3s ease-in-out 0.4s infinite;
   }
-  .cf-orb[data-cue="ask"]:has(.cf-orb-halo, .cf-orb-plasma) {
+  .cf-orb[data-cue="ask"]:has(.cf-orb-plasma) {
     isolation: isolate;
   }
-  .cf-orb[data-cue="ask"]:has(.cf-orb-halo, .cf-orb-plasma)::after {
+  .cf-orb[data-cue="ask"]:has(.cf-orb-plasma)::after {
     content: "";
     position: absolute;
     inset: 0;
@@ -2362,9 +2199,6 @@ pre {
     );
     animation: cf-orb-ask-glow 3s ease-in-out infinite;
   }
-  .cf-orb[data-cue="ask"] .cf-orb-halo {
-    animation-duration: 12s;
-  }
   .cf-orb[data-cue="ask"] .cf-orb-blot {
     animation-duration: 9s;
   }
@@ -2373,14 +2207,6 @@ pre {
 @media (prefers-reduced-motion: reduce) {
   .cf-orb[data-state="failed"] {
     animation: none;
-  }
-  .cf-orb-halo {
-    animation: none;
-    transform: rotate(160deg);
-  }
-  .cf-orb-halo-glow-2 {
-    animation: none;
-    opacity: 0.5;
   }
   .cf-orb-bot,
   .cf-orb-eyes,

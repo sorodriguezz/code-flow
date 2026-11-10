@@ -4,7 +4,7 @@ import DOMPurify from "dompurify";
 import { Check, Code2, Copy, Download, Eye, FileCode2, FileText, FolderGit2, Globe, Image as ImageIcon, Workflow, type LucideIcon } from "lucide-react";
 import { ApiModal, GhostButton } from "../api/ApiModal";
 import { Select } from "../common/Select";
-import { Markdown } from "../common/Markdown";
+import { ArtifactMarkdown } from "./ArtifactMarkdown";
 import { artifactFileName, type ArtifactKind, type ChatArtifactBlock } from "../../lib/chatArtifacts";
 import { chatArtifactVersions, type ChatArtifact } from "../../lib/tauri/chatRefsCommands";
 import { writeFileBytes } from "../../lib/tauri/commands";
@@ -12,6 +12,8 @@ import { useT } from "../../state/languageStore";
 import { useThemeStore } from "../../state/themeStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+
+const MARKDOWN_ARTIFACT_KIND: ArtifactKind = "markdown";
 
 export function artifactIcon(kind: ArtifactKind | string): LucideIcon {
   switch (kind) {
@@ -67,7 +69,7 @@ function Preview({ kind, content, scripts }: { kind: ArtifactKind; content: stri
       />
     );
   }
-  if (kind === "markdown") return <Markdown source={content} className="cf-markdown-preview" />;
+  if (kind === MARKDOWN_ARTIFACT_KIND) return <ArtifactMarkdown source={content} />;
   if (kind === "mermaid") return <MermaidView source={content} />;
   return <Code content={content} />;
 }

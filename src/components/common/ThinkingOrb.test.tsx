@@ -19,6 +19,14 @@ const css = readFileSync(new URL("../../index.css", import.meta.url), "utf8");
 // The setting, stood in for. A static render reads a zustand store's *initial* state (its server
 // snapshot), so `setState` could never show here whether the orb follows the store.
 const setting = vi.hoisted(() => ({ design: "sphere" }));
+const EXPECTED_DESIGN_COUNT = 21;
+const VOICED_DESIGNS = ["orb", "walle", "axolotl", "wave", "tars", "r2d2", "calcifer", "cloud", "bulb", "alien", "nutcracker"];
+const CHARACTER_SUCCESSORS = [
+  ["spark", "calcifer"], ["halo", "walle"], ["moon", "tars"], ["atom", "r2d2"],
+] as const;
+const PROTOTYPE_KEYS = ["__proto__", "constructor", "toString"];
+const SUCCESSOR_TEST = "migrates the saved %s selection to %s";
+const UNKNOWN_KEY_TEST = "rejects the inherited key %s";
 vi.mock("../../state/thinkingDesignStore", () => ({
   useThinkingDesignStore: (select: (state: { design: string }) => unknown) => select(setting),
 }));
@@ -134,7 +142,7 @@ describe("ThinkingOrb", () => {
       renderToStaticMarkup(<ThinkingOrb design={design} activity={{ phase: "listen" }} />).match(/data-phase="(\w+)"/)?.[1];
     expect(phaseOf("bot")).toBe("listen");
     expect(phaseOf("sphere")).toBeUndefined();
-    expect(renderToStaticMarkup(<ThinkingOrb design="halo" activity={{ phase: "listen", cue: { kind: "ask", at: 0 } }} />)).toContain(
+    expect(renderToStaticMarkup(<ThinkingOrb design="bot" activity={{ phase: "listen", cue: { kind: "ask", at: 0 } }} />)).toContain(
       'data-cue="ask"',
     );
     // The canvas designs are handed the cue themselves.
@@ -170,9 +178,21 @@ describe("ThinkingOrb", () => {
 });
 
 describe("the thinking designs", () => {
-  it("are twenty, the sphere first and by default", () => {
+  it.each(CHARACTER_SUCCESSORS)(SUCCESSOR_TEST, (previous, successor) => {
+    const retired = isThinkingDesign(previous);
+    const selected = storedThinkingDesign(previous);
+    expect(retired).toBe(false);
+    expect(selected).toBe(successor);
+  });
+
+  it.each(PROTOTYPE_KEYS)(UNKNOWN_KEY_TEST, (key) => {
+    const selected = storedThinkingDesign(key);
+    expect(selected).toBe(DEFAULT_THINKING_DESIGN);
+  });
+
+  it("include the seasonal design, the sphere first and by default", () => {
     const ids = THINKING_DESIGNS.map((design) => design.id);
-    expect(ids).toHaveLength(20);
+    expect(ids).toHaveLength(EXPECTED_DESIGN_COUNT);
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids[0]).toBe("sphere");
     expect(DEFAULT_THINKING_DESIGN).toBe("sphere");
@@ -180,8 +200,8 @@ describe("the thinking designs", () => {
 
   it("give the avatar time for the finishes built around one, and a brief resolve to the rest", () => {
     const finishing = [
-      "orb", "axolotl", "wave", "liquid", "crystal", "cat", "rocky", "ghost",
-      "crab", "moon", "atom", "spark", "cloud", "bulb", "alien",
+      "orb", "axolotl", "wave", "liquid", "crystal", "cat", "rocky", "ghost", "walle",
+      "crab", "tars", "r2d2", "calcifer", "cloud", "bulb", "alien", "nutcracker",
     ] as const;
     for (const id of finishing) {
       expect(thinkingFinishMs(id), id).toBeGreaterThanOrEqual(1400);
@@ -193,7 +213,7 @@ describe("the thinking designs", () => {
 
   it("draw speaking from the voice where they can, and are handed writing's look elsewhere", () => {
     const voiced = THINKING_DESIGNS.filter((design) => thinkingSpeaksItself(design.id)).map((design) => design.id);
-    expect(voiced).toEqual(["orb", "axolotl", "wave", "spark", "cloud", "bulb", "alien"]);
+    expect(voiced).toEqual(VOICED_DESIGNS);
     // Only a painter can read the voice frame by frame; a CSS design has no voice of its own.
     for (const id of voiced) expect(THINKING_DESIGNS.find((design) => design.id === id)?.kind, id).toBe("canvas");
   });
@@ -215,7 +235,7 @@ describe("the thinking designs", () => {
   it("reads a replaced design as its successor, and anything else unknown as the default", () => {
     expect(isThinkingDesign("star")).toBe(false);
     expect(storedThinkingDesign("star")).toBe("cat");
-    expect(storedThinkingDesign("panda")).toBe("moon");
+    expect(storedThinkingDesign("panda")).toBe("tars");
     expect(isThinkingDesign("pixels")).toBe(false);
     expect(storedThinkingDesign("pixels")).toBe("rocky");
     expect(isThinkingDesign("network")).toBe(false);

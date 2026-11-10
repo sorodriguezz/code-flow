@@ -40,6 +40,8 @@ const still = (Icon: LucideIcon) => <Icon size={13} className="mt-[2px] shrink-0
 /** A stable "no folds" for a workspace not read yet — a selector that built `[]` would hand back a
  *  new reference on every call, which `useSyncExternalStore` reads as a change. */
 const NOTHING_FOLDED: string[] = [];
+const ROW_ACTIONS_CLASS = "-ml-1.5 flex max-w-0 shrink-0 items-center gap-0.5 overflow-hidden opacity-0 group-hover/row:ml-0 group-hover/row:max-w-full group-hover/row:overflow-visible group-hover/row:opacity-100 group-focus-within/row:ml-0 group-focus-within/row:max-w-full group-focus-within/row:overflow-visible group-focus-within/row:opacity-100";
+const OPEN_ROW_ACTIONS_CLASS = "flex shrink-0 items-center gap-0.5";
 
 /**
  * The list's three ways to add something: detect, a group, a service by hand.
@@ -539,12 +541,8 @@ function ServiceRowItem({
           </span>
         )}
 
-        {/* Held visible while the menu is open: the pointer has left the row for the menu, and the
-            ⋯ the menu hangs from would otherwise fade out from under it. */}
         <div
-          className={`flex shrink-0 items-center gap-0.5 focus-within:opacity-100 group-hover/row:opacity-100 ${
-            menu ? "opacity-100" : "opacity-0"
-          }`}
+          className={menu ? OPEN_ROW_ACTIONS_CLASS : ROW_ACTIONS_CLASS}
         >
           {active ? (
             <>
@@ -627,7 +625,7 @@ function ElsewhereRow({ run }: { run: RunningService }) {
           <span className="max-w-[70px] truncate">{workspace.name}</span>
         </button>
       )}
-      <div className="flex shrink-0 items-center gap-0.5 opacity-0 focus-within:opacity-100 group-hover/row:opacity-100">
+      <div className={ROW_ACTIONS_CLASS}>
         <RowButton onClick={() => void stop(run.id)} label={t("services.stop")} danger>
           <Square size={9} />
         </RowButton>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, ArrowUp, Check, ChevronsUpDown, Palette, Pencil, Plus, Shapes, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronsUpDown, MessageSquare, Palette, Pencil, Plus, Shapes, Trash2 } from "lucide-react";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useT } from "../../state/languageStore";
@@ -14,6 +14,8 @@ import { Tooltip } from "../common/Tooltip";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { fieldClass } from "../common/recipes";
 import { INITIALS_ICON, WORKSPACE_ICONS, WorkspaceGlyph } from "./WorkspaceGlyph";
+import { openWorkspaceChatIsland, workspaceChatIslands } from "../../lib/workspaceChatIslands";
+import { useWindowStore } from "../../state/windowStore";
 
 /** The workspaces with a model running in them right now — the dot on their row. */
 function useBusyWorkspaces(): Set<string> {
@@ -32,6 +34,9 @@ function useBusyWorkspaces(): Set<string> {
 /** Fixed, so the list doesn't change width with whatever the workspaces happen to be called — and
  *  so it can be positioned before it has been measured. */
 const MENU_WIDTH = 256;
+const WORKSPACE_CHAT_ISLAND_LABEL = "sidebar.wsChatIsland";
+const OPEN_CHAT_ISLANDS_LABEL = "sidebar.wsChatIslands";
+const CHAT_ISLAND_GLYPH_SIZE = 16;
 
 /**
  * Which workspace everything else on screen belongs to, and the way to change it.
@@ -59,6 +64,8 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
   const addWorkspace = useWorkspaceStore((s) => s.addWorkspace);
   const projectsByWorkspace = useWorkspaceStore((s) => s.projectsByWorkspace);
   const busy = useBusyWorkspaces();
+  const satellites = useWindowStore((state) => state.satellites);
+  const chatIslands = useMemo(() => workspaceChatIslands(satellites), [satellites]);
   const [open, setOpen] = useState(false);
   /** Repositories per workspace, read when the menu opens — the store only holds the ones whose
    *  workspace has been visited. */
@@ -164,6 +171,17 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
     const held = countOf(id) ?? 0;
     const blocked = workspaces.length <= 1 ? t("sidebar.wsDeleteLast") : held > 0 ? t("sidebar.wsDeleteNotEmpty", { n: held }) : null;
     return [
+      {
+        label: t(WORKSPACE_CHAT_ISLAND_LABEL),
+        icon: MessageSquare,
+        onClick: () => {
+          dismiss();
+          void openWorkspaceChatIsland(id, ws.name).catch((error: unknown) => {
+            const message = String(error);
+            pushErrorToast(message);
+          });
+        },
+      },
       { label: t("sidebar.wsRename"), icon: Pencil, onClick: () => setRenaming({ id, name: ws.name }) },
       {
         label: t("sidebar.wsColor"),
@@ -240,7 +258,17 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
   const tile = <WorkspaceGlyph name={name} icon={icon} color={color} size={28} />;
 
   return (
-    <div ref={rootRef} data-tour="workspace-switcher" className={collapsed ? "" : "w-full"}>
+    <div
+      ref={rootRef}
+      data-tour="workspace-switcher"
+      className={collapsed ? "" : "w-full"}
+      onContextMenu={(event) => {
+        if (!activeWorkspaceId) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setRowMenu({ id: activeWorkspaceId, x: event.clientX, y: event.clientY });
+      }}
+    >
       {collapsed ? (
         // Folded there is no room for the name, so the name becomes the tooltip — the same trade
         // every chip in the rail underneath makes, down to the colour dot in front of it: a rail of
@@ -274,7 +302,7 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
           <div
             ref={menuRef}
             style={{ left: at.left, top: at.top, width: MENU_WIDTH }}
-            className="cf-fade-in fixed z-40 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1.5 shadow-[var(--cf-shadow)]"
+            className="cf-fade-in fixed z-40 max-h-[calc(100vh-80px)] overflow-y-auto rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-1.5 shadow-[var(--cf-shadow)]"
           >
             {workspaces.map((ws) =>
               renaming?.id === ws.id ? (
@@ -306,6 +334,7 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
                   onDoubleClick={() => setRenaming({ id: ws.id, name: ws.name })}
                   onContextMenu={(event) => {
                     event.preventDefault();
+                    event.stopPropagation();
                     setRowMenu({ id: ws.id, x: event.clientX, y: event.clientY });
                   }}
                   className={`flex w-full items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] ${
@@ -328,6 +357,35 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
                   )}
                 </button>
               ),
+            )}
+            {chatIslands.length > 0 && (
+              <div className="mt-1 border-t border-[var(--cf-border)] pt-1">
+                <div className="px-2 py-1 text-[11px] font-medium text-[var(--cf-text-faint)]">
+                  {t(OPEN_CHAT_ISLANDS_LABEL)}
+                </div>
+                {chatIslands.map((island) => {
+                  const workspace = workspaces.find((item) => item.id === island.workspaceId);
+                  const title = island.title || workspace?.name || t(OPEN_CHAT_ISLANDS_LABEL);
+                  const workspaceLabel = title === workspace?.name ? undefined : workspace?.name;
+                  return (
+                    <button
+                      key={island.label}
+                      title={title}
+                      onClick={() => {
+                        dismiss();
+                        void useWindowStore.getState().focus(island.label);
+                      }}
+                      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12px] hover:bg-[var(--cf-hover)]"
+                    >
+                      <MessageSquare size={CHAT_ISLAND_GLYPH_SIZE} className="shrink-0" style={{ color: workspace?.color }} />
+                      <span className="min-w-0 flex-1 truncate">{title}</span>
+                      {workspaceLabel && (
+                        <span className="max-w-24 truncate text-[11px] text-[var(--cf-text-faint)]">{workspaceLabel}</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             )}
 
             {creating ? (
