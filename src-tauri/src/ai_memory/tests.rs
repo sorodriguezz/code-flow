@@ -8,6 +8,110 @@ fn db() -> Connection {
     conn
 }
 
+fn memory_tool(conn: &Connection, name: &str, args: serde_json::Value) -> serde_json::Value {
+    serde_json::from_str(&tools::run(conn, Some("w1"), Some("p1"), true, true, name, &args).unwrap()).unwrap()
+}
+
+#[test]
+fn chat_tools_save_explicit_requests_and_keep_suggestions_as_candidates() {
+    use serde_json::json;
+    let conn = db();
+    let saved = memory_tool(&conn, tools::WRITE, json!({"action": "create", "user_requested": true, "title": "Usar pnpm", "body": "Siempre pnpm", "kind": "convention"}));
+    assert_eq!(saved["status"], "approved");
+    let proposal = memory_tool(&conn, tools::WRITE, json!({"action": "create", "user_requested": false, "title": "Usar colas", "body": "Evaluar una cola", "kind": "decision"}));
+    assert_eq!(proposal["status"], "candidate");
+    assert!(tools::run(&conn, Some("w1"), Some("p1"), true, false, tools::WRITE,
+        &json!({"action": "delete", "user_requested": true, "id": saved["id"]})).unwrap_err().contains("read-only"));
+    assert!(tools::run(&conn, Some("w1"), Some("p1"), true, true, tools::WRITE,
+        &json!({"action": "delete", "user_requested": false, "id": saved["id"]})).is_err());
+    assert!(get(&conn, saved["id"].as_str().unwrap()).unwrap().is_some());
+}
+
+#[test]
+fn memory_tools_never_read_or_mutate_other_scopes_or_local_only_text() {
+    use serde_json::json;
+    let conn = db();
+    let mut input = new(Scope::Workspace, Kind::Fact, "Otra organización", "privado", true);
+    input.workspace_id = Some("w2".into());
+    let other = create(&conn, input).unwrap();
+    let mut input = new(Scope::Project, Kind::Fact, "Otro proyecto", "privado", true);
+    input.project_id = Some("p2".into());
+    let other_project = create(&conn, input).unwrap();
+    let mut input = new(Scope::Workspace, Kind::Fact, "Solo local", "privado", true);
+    input.local_only = true;
+    let private = create(&conn, input).unwrap();
+    for m in [&other, &other_project, &private] {
+        for (name, args) in [("read_memory", json!({"id": m.id})), (tools::WRITE, json!({"action": "delete", "user_requested": true, "id": m.id}))] {
+            assert!(tools::run(&conn, Some("w1"), Some("p1"), true, true, name, &args).is_err());
+        }
+    }
+    assert_eq!(memory_tool(&conn, "memory_list", json!({}))["total"], 0);
+    assert!(tools::run(&conn, Some("w1"), None, true, true, tools::WRITE,
+        &json!({"action": "create", "user_requested": true, "title": "Solo local", "body": "No sobrescribir"})).is_err());
+    assert_eq!(get(&conn, &private.id).unwrap().unwrap().body, "privado");
+    assert!(!tools::catalog(&conn, Some("w1"), Some("p1"), true).unwrap().contains("privado"));
+    assert!(tools::run(&conn, Some("w1"), None, false, false, "read_memory", &json!({"id": private.id})).is_ok());
+}
+
+#[test]
+fn long_memory_bodies_are_read_completely_in_unicode_safe_pages() {
+    use serde_json::json;
+    let conn = db();
+    let body = "Arquitectura 🦀 á\n".repeat(2_000);
+    let m = create(&conn, new(Scope::Workspace, Kind::Decision, "Agendamiento", &body, true)).unwrap();
+    assert!(relevant(&conn, Some("w1"), None, "Agendamiento", true, 3_000).unwrap().is_empty(), "too large for the automatic prompt");
+    assert!(tools::catalog(&conn, Some("w1"), None, true).unwrap().contains(&m.id), "still discoverable");
+    let mut offset = 0;
+    let mut read = String::new();
+    loop {
+        let page = memory_tool(&conn, "read_memory", json!({"id": m.id, "offset": offset}));
+        read.push_str(page["body"].as_str().unwrap());
+        match page["nextOffset"].as_u64() { Some(next) => offset = next, None => break }
+    }
+    assert_eq!(read, m.body);
+}
+
+#[test]
+fn live_memory_catalog_changes_after_edits_revocations_and_the_last_deletion() {
+    use serde_json::json;
+    let conn = db();
+    let snapshot = || tools::catalog(&conn, Some("w1"), Some("p1"), true).unwrap();
+    let empty = snapshot();
+    let m = memory_tool(&conn, tools::WRITE, json!({"action": "create", "user_requested": true, "title": "Arquitectura", "body": "Versión uno"}));
+    let first = snapshot();
+    assert_ne!(first, empty);
+    // Usage accounting must not make an unchanged catalog ride every turn.
+    relevant(&conn, Some("w1"), Some("p1"), "Arquitectura", true, 3_000).unwrap();
+    assert_eq!(snapshot(), first);
+    memory_tool(&conn, tools::WRITE, json!({"action": "edit", "user_requested": true, "id": m["id"], "body": "Versión dos"}));
+    assert_ne!(snapshot(), first);
+    assert_eq!(memory_tool(&conn, "read_memory", json!({"id": m["id"]}))["body"], "Versión dos");
+    memory_tool(&conn, tools::WRITE, json!({"action": "revoke", "user_requested": true, "id": m["id"]}));
+    assert_eq!(snapshot(), empty);
+    memory_tool(&conn, tools::WRITE, json!({"action": "approve", "user_requested": true, "id": m["id"]}));
+    assert_ne!(snapshot(), empty);
+    memory_tool(&conn, tools::WRITE, json!({"action": "delete", "user_requested": true, "id": m["id"]}));
+    assert_eq!(snapshot(), empty);
+    assert!(tools::run(&conn, Some("w1"), Some("p1"), true, false, "read_memory", &json!({"id": m["id"]})).is_err());
+    assert_eq!(memory_tool(&conn, "memory_list", json!({}))["total"], 0);
+}
+
+#[test]
+fn workspace_memory_creation_defaults_to_workspace_and_listing_pages_after_scope_filtering() {
+    use serde_json::json;
+    let conn = db();
+    let m: serde_json::Value = serde_json::from_str(&tools::run(&conn, Some("w1"), None, true, true, tools::WRITE,
+        &json!({"action": "create", "user_requested": true, "title": "Agenda", "body": "Decisión compartida"})).unwrap()).unwrap();
+    assert_eq!(get(&conn, m["id"].as_str().unwrap()).unwrap().unwrap().scope, "workspace");
+    create(&conn, new(Scope::Global, Kind::Preference, "Responde en español", "", true)).unwrap();
+    let first = memory_tool(&conn, "memory_list", json!({"limit": 1}));
+    assert_eq!(first["total"], 2);
+    assert_eq!(first["nextOffset"], 1);
+    let second = memory_tool(&conn, "memory_list", json!({"limit": 1, "offset": 1}));
+    assert!(second["nextOffset"].is_null());
+    assert_ne!(first["memories"][0]["id"], second["memories"][0]["id"]);
+}
+
 fn new(scope: Scope, kind: Kind, title: &str, body: &str, approved: bool) -> NewMemory {
     NewMemory {
         scope: Some(scope),

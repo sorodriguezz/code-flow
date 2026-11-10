@@ -161,6 +161,9 @@ pub fn offered(grants: Grants, map: bool, checks: bool, inventory: &Inventory, g
         names.extend(["find_symbol", "find_usages", "outline"]);
     }
     names.push("search_knowledge");
+    if grants.reach > Reach::Project {
+        names.extend(crate::ai_memory::tools::READ);
+    }
     if inventory.references > 0 {
         names.extend(["reference_repos", "read_reference_file"]);
     }
@@ -207,6 +210,7 @@ pub fn offered(grants: Grants, map: bool, checks: bool, inventory: &Inventory, g
         }
     }
     if grants.reach == Reach::Act {
+        names.push(crate::ai_memory::tools::WRITE);
         if inventory.services {
             names.push("service_restart");
         }
@@ -436,6 +440,10 @@ impl Toolbox {
     }
 
     fn schema(&self, name: &str) -> Option<Value> {
+        if crate::ai_memory::tools::is_tool(name) {
+            return crate::ai_memory::tools::schemas(true).into_iter().find(|t| t["name"] == name)
+                .map(|t| json!({"type": "function", "function": {"name": name, "description": t["description"], "parameters": t["inputSchema"]}}));
+        }
         if DATA_TOOLS.contains(&name) {
             return crate::codemap::mcp::db_tools(true)
                 .into_iter()
@@ -682,7 +690,7 @@ impl Toolbox {
                 outcome.content = format!("{warning}{}", outcome.content);
             }
         }
-        if matches!(name, "edit_file" | "write_file" | "run_command" | "run_check") || ACT_TOOLS.contains(&name) {
+        if matches!(name, "edit_file" | "write_file" | "run_command" | "run_check") || name == crate::ai_memory::tools::WRITE || ACT_TOOLS.contains(&name) {
             crate::tool_gateway::audit(crate::tool_gateway::Action {
                 root: &self.root_str,
                 run_ref: crate::ai_runs::current().map(|ctx| ctx.run_id),
@@ -700,6 +708,15 @@ impl Toolbox {
     }
 
     async fn dispatch(&self, name: &str, args: &Value, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Outcome {
+        if crate::ai_memory::tools::is_tool(name) {
+            if !self.offered().contains(&name) {
+                return Outcome::err(format!("there is no tool named {name:?}"));
+            }
+            return match crate::ai_memory::tools::call(&self.root_str, false, self.grants.reach == Reach::Act, name, args).await {
+                Ok(text) => Outcome::ok(text, name.to_string()),
+                Err(error) => Outcome::err(error),
+            };
+        }
         let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
         // What was never offered does not exist — the same answer for a tool this run may not have
         // as for one nobody has, so a model that invents a call learns nothing it was not shown.
@@ -1306,6 +1323,7 @@ impl Toolbox {
 /// what the app reaches — and so is checked for instructions aimed at a model before it reads it.
 fn is_outside_text(name: &str) -> bool {
     matches!(name, "read_file" | "search" | "run_command" | "run_check" | "search_knowledge" | "recall" | "read_note" | "read_context" | "read_reference_file")
+        || crate::ai_memory::tools::READ.contains(&name)
         || OBSERVE_TOOLS.contains(&name)
         || matches!(name, "db_write" | "http_request" | "run_with_secret")
 }

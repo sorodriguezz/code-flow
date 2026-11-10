@@ -2032,13 +2032,18 @@ pub async fn chat_send(
                 ) {
                     learned_memory = Some(memory.title);
                     learned_outcome = Some(outcome);
+                    crate::ai_memory::notify_changed();
                 }
             }
-            if let Ok(found) = crate::ai_memory::relevant_with(&conn, Some(&conversation.workspace_id), None, &asked, true, 3_000, push.memories()) {
+            let cloud = config.provider != crate::local_agent::PROVIDER_ID;
+            if let Ok(found) = crate::ai_memory::relevant_with(&conn, Some(&conversation.workspace_id), None, &asked, cloud, 3_000, push.memories()) {
                 if let Some((note, sources)) = crate::ai_memory::note(&found) {
                     engine_message.push_str(said.say("memories", &note));
                     context_sources.extend(sources);
                 }
+            }
+            if let Ok(catalog) = crate::ai_memory::tools::catalog(&conn, Some(&conversation.workspace_id), None, cloud) {
+                engine_message.push_str(said.say("memory_catalog", &catalog));
             }
         }
         // The engines that take no server for the knowledge — agy, Grok, and any of the others when
@@ -2064,6 +2069,22 @@ pub async fn chat_send(
                         context_sources.extend(sources);
                     }
                 }
+            }
+        }
+    }
+    // Repository-bound conversations in the Chat app need the same live memory state as the
+    // repository panel (`claude_cmd`), including an empty catalog after the last deletion.
+    if let Some(project) = project.as_ref().filter(|_| !workspace_scope) {
+        if let Ok(conn) = db.0.lock() {
+            let cloud = config.provider != crate::local_agent::PROVIDER_ID;
+            if let Ok(found) = crate::ai_memory::relevant(&conn, Some(&conversation.workspace_id), Some(&project.id), &asked, cloud, 3_000) {
+                if let Some((note, sources)) = crate::ai_memory::note(&found) {
+                    engine_message.push_str(said.say("memories", &note));
+                    context_sources.extend(sources);
+                }
+            }
+            if let Ok(catalog) = crate::ai_memory::tools::catalog(&conn, Some(&conversation.workspace_id), Some(&project.id), cloud) {
+                engine_message.push_str(said.say("memory_catalog", &catalog));
             }
         }
     }

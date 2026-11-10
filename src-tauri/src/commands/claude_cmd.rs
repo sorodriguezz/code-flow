@@ -1546,6 +1546,7 @@ pub async fn send_chat_message(
                 ) {
                     learned_memory = Some(memory.title);
                     learned_outcome = Some(outcome);
+                    crate::ai_memory::notify_changed();
                 }
             }
             if let Ok(found) =
@@ -1555,6 +1556,9 @@ pub async fn send_chat_message(
                     engine_message.push_str(said.say("memories", &note));
                     context_sources.extend(sources);
                 }
+            }
+            if let Ok(catalog) = crate::ai_memory::tools::catalog(&conn, Some(&workspace_id), Some(&project_id), cloud) {
+                engine_message.push_str(said.say("memory_catalog", &catalog));
             }
         }
         // A read-only Gemini or Grok run refuses MCP tools, so it cannot call `search_knowledge`:

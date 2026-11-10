@@ -15708,6 +15708,8 @@ const en = {
   "backup.include.aiLearningHint": "Approved memories, knowledge folders, the experiences kept about AI answers and the bench's reports. Indexes and trained adapters are rebuilt on each machine.",
   "settings.searchTermsMemory": "memory, remember, preferences, conventions, decisions, rules",
   "memory.paneTitle": "Memory",
+  "memory.expandBody": "Show full content",
+  "memory.collapseBody": "Show less",
   "memory.hint": "What CodeFlow remembers between conversations, for every engine. Only approved memories reach a model; local-only ones never reach a cloud engine. Say «recuerda que…» in a chat to add one.",
   "memory.learned": "Learned a preference: {title}",
   "memory.where": "Show",

@@ -6,6 +6,11 @@ use tauri::State;
 use crate::ai_memory::{self, Filter, Kind, Memory, NewMemory, Page, Patch, Remembered, Revision};
 use crate::db::Db;
 
+fn changed<T>(result: Result<T, String>) -> Result<T, String> {
+    if result.is_ok() { ai_memory::notify_changed(); }
+    result
+}
+
 /// One page of memories for the pane, filtered and paged in SQL — the pane used to load 500 rows of
 /// every workspace and filter them itself, which both hid the 501st and cost a full table read on
 /// every keystroke of its search.
@@ -30,13 +35,13 @@ pub struct Created {
 pub fn ai_memory_create(db: State<'_, Db>, input: NewMemory) -> Result<Created, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let (memory, outcome) = if input.approved { ai_memory::remember(&conn, input)? } else { ai_memory::propose(&conn, input)? };
-    Ok(Created { memory, outcome })
+    changed(Ok(Created { memory, outcome }))
 }
 
 #[tauri::command]
 pub fn ai_memory_edit(db: State<'_, Db>, id: String, patch: Patch) -> Result<Memory, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    ai_memory::edit(&conn, &id, patch)
+    changed(ai_memory::edit(&conn, &id, patch))
 }
 
 /// `approved` | `revoked` | `candidate`. `kind`, with `approved`: what the user approves it as — an
@@ -44,17 +49,17 @@ pub fn ai_memory_edit(db: State<'_, Db>, id: String, patch: Patch) -> Result<Mem
 #[tauri::command]
 pub fn ai_memory_set_status(db: State<'_, Db>, id: String, status: String, kind: Option<Kind>) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    if status == "approved" {
+    changed(if status == "approved" {
         ai_memory::approve(&conn, &id, kind)
     } else {
         ai_memory::set_status(&conn, &id, &status)
-    }
+    })
 }
 
 #[tauri::command]
 pub fn ai_memory_delete(db: State<'_, Db>, id: String) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    ai_memory::delete(&conn, &id).map_err(|e| e.to_string())
+    changed(ai_memory::delete(&conn, &id).map_err(|e| e.to_string()))
 }
 
 #[tauri::command]
@@ -68,7 +73,7 @@ pub fn ai_memory_revisions(db: State<'_, Db>, id: String) -> Result<Vec<Revision
 #[tauri::command]
 pub fn ai_memory_propose(db: State<'_, Db>, workspace_id: String) -> Result<Vec<Memory>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    ai_memory::propose_from_experiences(&conn, &workspace_id)
+    changed(ai_memory::propose_from_experiences(&conn, &workspace_id))
 }
 
 /// One pass over the workspace's approved memories (`ai_memory::review::run`): anchors the new ones
@@ -83,7 +88,7 @@ pub async fn ai_memory_review(workspace_id: String) -> Result<usize, String> {
 #[tauri::command]
 pub fn ai_memory_confirm(db: State<'_, Db>, id: String) -> Result<Memory, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    ai_memory::confirm(&conn, &id)
+    changed(ai_memory::confirm(&conn, &id))
 }
 
 /// A clash settled: `replaces` — this memory replaces the one it clashes with; otherwise they are
@@ -91,5 +96,5 @@ pub fn ai_memory_confirm(db: State<'_, Db>, id: String) -> Result<Memory, String
 #[tauri::command]
 pub fn ai_memory_settle_clash(db: State<'_, Db>, id: String, replaces: bool) -> Result<Memory, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    ai_memory::settle_clash(&conn, &id, replaces)
+    changed(ai_memory::settle_clash(&conn, &id, replaces))
 }

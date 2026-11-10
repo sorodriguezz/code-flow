@@ -573,6 +573,9 @@ pub fn tools() -> Vec<Value> {
 /// [`call_tool`], plus the tools that are not map queries (`search_knowledge`, `recall`). `cloud`:
 /// the caller is a cloud engine, so knowledge and memories it may not see are left out.
 pub async fn call_tool_as(root: &str, name: &str, args: &Value, cloud: bool) -> Result<String, String> {
+    if crate::ai_memory::tools::READ.contains(&name) {
+        return crate::ai_memory::tools::call(root, cloud, false, name, args).await;
+    }
     let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
     // A map query about a reference repository answers from that repository's own map.
     if MAP_TOOLS.contains(&name) && !text("repo").is_empty() {
@@ -819,6 +822,7 @@ fn grounding_tools() -> Vec<Value> {
 
 pub fn tools_for(acts: bool) -> Vec<Value> {
     let mut all = tools();
+    all.extend(crate::ai_memory::tools::schemas(acts));
     all.extend(app_read_tools().into_iter().map(read_only));
     all.extend(infra_tools());
     if acts {
@@ -1418,6 +1422,7 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
         "tools/list" => {
             let mut own = if access.workspace {
                 let mut own = workspace_tools();
+                own.extend(crate::ai_memory::tools::schemas(access.acts));
                 own.extend(infra_tools());
                 own
             } else if access.grounding {
@@ -1459,6 +1464,15 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
                     Some(Ok(text)) => text_result(id, text, false),
                     Some(Err(error)) => text_result(id, error, true),
                     None => text_result(id, format!("unknown tool {name}"), true),
+                });
+            }
+            if crate::ai_memory::tools::is_tool(name) {
+                if access.grounding {
+                    return Some(text_result(id, format!("{name} is not available to this run"), true));
+                }
+                return Some(match crate::ai_memory::tools::call(&access.root, true, access.acts, name, &args).await {
+                    Ok(text) => text_result(id, text, false),
+                    Err(error) => text_result(id, error, true),
                 });
             }
             let about_a_reference = REFERENCE_TOOLS.contains(&name) || (MAP_TOOLS.contains(&name) && args.get("repo").and_then(Value::as_str).is_some_and(|r| !r.trim().is_empty()));
@@ -1611,7 +1625,7 @@ mod tests {
             .into_iter()
             .filter(|n| !INFRA_TOOLS.contains(&n.as_str()) && !crate::chat_refs::is_tool(n))
             .collect();
-        assert_eq!(own, vec!["search_knowledge", "recall", "read_note"]);
+        assert_eq!(own, vec!["search_knowledge", "recall", "read_note", "memory_list", "read_memory"]);
         assert!(tool_names(&reply).iter().any(|n| n == "chat_read") && !tool_names(&reply).iter().any(|n| n == "chat_send"));
         assert!(reply["result"]["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
 
@@ -1621,6 +1635,23 @@ mod tests {
             assert_eq!(reply["result"]["isError"], true, "{name}: {reply}");
             assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains("workspace chat"), "{name}: {reply}");
         }
+    }
+
+    #[tokio::test]
+    async fn workspace_chats_can_manage_memories_only_when_the_turn_may_act() {
+        let token = format!("memory-workspace-test-{}", uuid::Uuid::new_v4());
+        RUNS.lock().unwrap().insert(token.clone(), Access { workspace: true, ..Access::new("/tmp/workspace-chat/w1", true, &token) });
+        let _grant = Grant { token: token.clone() };
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let (_, reply) = post(&headers, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
+        assert!(tool_names(&reply).contains(&"manage_memory".to_string()));
+        let (reader, _r) = with_access("/tmp/repo", false);
+        let (_, reply) = post(&reader, json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "manage_memory", "arguments": {"action": "create", "user_requested": true, "title": "Regla"}
+        }})).await;
+        assert_eq!(reply["result"]["isError"], true);
+        assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains("read-only"));
     }
 
     #[tokio::test]

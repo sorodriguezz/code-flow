@@ -15549,6 +15549,8 @@ export const es = {
   "backup.include.aiLearningHint": "Memorias aprobadas, carpetas de conocimiento, las experiencias guardadas sobre respuestas de IA y los reportes del banco. Los índices y los adaptadores entrenados se rehacen en cada equipo.",
   "settings.searchTermsMemory": "memoria, recordar, preferencias, convenciones, decisiones, reglas",
   "memory.paneTitle": "Memoria",
+  "memory.expandBody": "Ver contenido completo",
+  "memory.collapseBody": "Ver menos",
   "memory.hint": "Lo que CodeFlow recuerda entre conversaciones, para todos los motores. Solo las memorias aprobadas llegan a un modelo; las de solo local nunca a uno en la nube. Di «recuerda que…» en un chat para agregar una.",
   "memory.learned": "Aprendí una preferencia: {title}",
   "memory.where": "Mostrar",

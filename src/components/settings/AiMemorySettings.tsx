@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { Check, ChevronRight, History, Lightbulb, Pencil, Plus, Search, Trash2, Undo2, X } from "lucide-react";
 import { buttonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
@@ -54,6 +55,23 @@ const SOURCE_KEY: Record<string, TranslationKey> = {
 
 /** Rows per page — the pane pages in SQL instead of loading every memory of every workspace. */
 const PAGE = 50;
+
+/** Keep pasted documents and HTML bounded; expanded text scrolls inside the row. */
+function MemoryBody({ body }: { body: string }) {
+  const t = useT();
+  const [expanded, setExpanded] = useState(false);
+  const long = body.length > 600 || body.split("\n").length > 4;
+  return (
+    <div className="min-w-0 max-w-full">
+      <p className={`whitespace-pre-wrap [overflow-wrap:anywhere] text-[11px] leading-snug text-[var(--cf-text-muted)] ${expanded ? "max-h-64 overflow-y-auto overscroll-contain" : long ? "line-clamp-4" : ""}`}>
+        {expanded || !long ? body : `${body.slice(0, 600)}…`}
+      </p>
+      {long && <button type="button" aria-expanded={expanded} onClick={() => setExpanded((v) => !v)} className={buttonClass({ variant: "ghost", size: "sm" })}>
+        {t(expanded ? "memory.collapseBody" : "memory.expandBody")}
+      </button>}
+    </div>
+  );
+}
 
 /** Which memories the list shows: what applies here (the default), one repository, one workspace, or the global ones. */
 type Where = "all" | "project" | "workspace" | "global";
@@ -302,6 +320,7 @@ export function AiMemorySettings() {
   const [query, setQuery] = useState("");
   const [debounced, setDebounced] = useState("");
   const [rows, setRows] = useState<Memory[]>([]);
+  const loadVersion = useRef(0);
   const [counts, setCounts] = useState({ total: 0, candidates: 0, review: 0 });
   /** Bumped when a pass over the code finished, so the list shows what it found. */
   const [reviewed, setReviewed] = useState(0);
@@ -319,8 +338,10 @@ export function AiMemorySettings() {
   /** Loads the first `size` rows again — after an action, as many as were showing, so the user keeps their place. */
   const reload = useCallback(
     async (size = PAGE) => {
+      const version = ++loadVersion.current;
       try {
         const page = await aiMemoryList({ ...filter, limit: Math.max(PAGE, size), offset: 0 });
+        if (version !== loadVersion.current) return;
         setRows(page.rows);
         setCounts({ total: page.total, candidates: page.candidates, review: page.review });
       } catch (e) {
@@ -333,6 +354,16 @@ export function AiMemorySettings() {
   useEffect(() => {
     void reload();
   }, [reload, reviewed]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen("ai-memory:changed", () => setReviewed((n) => n + 1)).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
 
   // The code may have changed since the last look: anchor new memories, check the anchored ones.
   useEffect(() => {
@@ -430,7 +461,7 @@ export function AiMemorySettings() {
   const filtering = where !== "all" || status !== "" || debounced.trim() !== "";
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex min-w-0 max-w-full flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2">
         <div className="w-[190px]">
           <Select
@@ -535,7 +566,7 @@ export function AiMemorySettings() {
       {rows.length === 0 ? (
         <span className="text-[12px] leading-snug text-[var(--cf-text-muted)]">{t(filtering ? "memory.noMatch" : "memory.empty")}</span>
       ) : (
-        <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
+        <div className="min-w-0 max-w-full overflow-hidden rounded-lg border border-[var(--cf-border)]">
           {rows.map((memory) => (
             <div key={memory.id} className="border-b border-[var(--cf-border)] px-3 py-2 last:border-b-0">
               <div className="flex items-start gap-2">
@@ -604,8 +635,10 @@ export function AiMemorySettings() {
                     </div>
                   ) : (
                     <>
-                      <p className="mt-0.5 text-[12px] text-[var(--cf-text)]">{memory.title}</p>
-                      {memory.body && memory.body !== memory.title && <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">{memory.body}</p>}
+                      {(!memory.body || memory.body === memory.title) && memory.title.length > 200 ? (
+                        <MemoryBody key={memory.updatedAt} body={memory.title} />
+                      ) : <p className="mt-0.5 line-clamp-2 [overflow-wrap:anywhere] text-[12px] text-[var(--cf-text)]">{memory.title}</p>}
+                      {memory.body && memory.body !== memory.title && <MemoryBody key={memory.updatedAt} body={memory.body} />}
                       {(memory.needsReview || (memory.status === "candidate" && memory.conflictsWith)) && (
                         <ReviewStrip
                           memory={memory}
@@ -657,7 +690,7 @@ export function AiMemorySettings() {
                 </div>
               </div>
               {details?.id === memory.id && (
-                <div className="mt-1.5 flex flex-col gap-0.5 pl-1 text-[11px] text-[var(--cf-text-muted)]">
+                <div className="mt-1.5 flex max-h-48 min-w-0 flex-col gap-0.5 overflow-y-auto pl-1 [overflow-wrap:anywhere] text-[11px] text-[var(--cf-text-muted)]">
                   <span>
                     {[
                       t("memory.createdOn", { date: shortDate(memory.createdAt) }),

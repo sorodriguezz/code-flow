@@ -46,6 +46,15 @@ use rusqlite::{params, types::Value as SqlValue, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 pub mod review;
+pub mod tools;
+
+/// Refresh open panes after a memory was changed by a chat or by Settings.
+pub fn notify_changed() {
+    use tauri::Emitter;
+    if let Some(app) = crate::ai_usage::app() {
+        let _ = app.emit("ai-memory:changed", ());
+    }
+}
 
 /// Days without a confirmation after which an approved memory of `kind` waits for review — `None`:
 /// never (a preference is the user's taste, which the code cannot prove wrong). A flag, not a
