@@ -471,6 +471,17 @@ function MainContent() {
     setVisited((prev) => (prev.has(activeView) ? prev : new Set(prev).add(activeView)));
   }, [activeView]);
 
+  // The workspace's embedding backlog, worked through in the background when the app opens and when
+  // the workspace changes — not only when a search happens to need it (user, 2026-11-09). Half a
+  // minute in, so launch is not competing with it; battery saving pauses it (`knowledge::vectorize`).
+  useEffect(() => {
+    if (!workspaceId) return;
+    const timer = window.setTimeout(() => {
+      void import("./lib/tauri/knowledgeCommands").then(({ knowledgeVectorizeBacklog }) => knowledgeVectorizeBacklog(workspaceId)).catch(() => undefined);
+    }, 30_000);
+    return () => window.clearTimeout(timer);
+  }, [workspaceId]);
+
   /**
    * The way out of a tab that stopped existing.
    *

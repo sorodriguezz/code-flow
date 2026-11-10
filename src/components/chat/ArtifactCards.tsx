@@ -1,9 +1,11 @@
-import { useEffect, useState } from "react";
-import { Layers, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Layers, MessageSquare, Trash2 } from "lucide-react";
 import type { ChatArtifactBlock } from "../../lib/chatArtifacts";
-import { chatArtifactDelete, type ChatArtifactSummary } from "../../lib/tauri/chatRefsCommands";
+import { chatArtifactDelete, chatRefsList, type ChatArtifactSummary } from "../../lib/tauri/chatRefsCommands";
 import { NO_ARTIFACTS, useChatArtifactsStore } from "../../state/chatArtifactsStore";
-import { useT } from "../../state/languageStore";
+import { useAiPanelStore } from "../../state/aiPanelStore";
+import { useUiStore } from "../../state/uiStore";
+import { useLanguageStore, useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { ArtifactViewer, artifactIcon } from "./ArtifactViewer";
@@ -105,16 +107,63 @@ export function ChatArtifactsStrip({ workspaceId, conversationId, projectId }: {
   );
 }
 
-/** Every artifact of a workspace — the Inbox's section. Absent while there are none. */
-export function WorkspaceArtifacts({ workspaceId }: { workspaceId: string | null }) {
+/** Opens the chat an artifact came from, wherever it lives: a repository's panel, the workspace
+ *  chat, or the Chat app. */
+async function openSourceChat(a: ChatArtifactSummary): Promise<void> {
+  if (a.surface === "panel" && a.project_id) {
+    useAiPanelStore.getState().open({ kind: "chat", projectId: a.project_id, conversationId: a.conversation_id });
+    useUiStore.getState().openAiPanel();
+    return;
+  }
+  if (a.surface === "ws") {
+    useAiPanelStore.getState().open({ kind: "wsChat", workspaceId: a.workspace_id, conversationId: a.conversation_id });
+    useUiStore.getState().openAiPanel();
+    return;
+  }
+  const { useConversationStore } = await import("../../state/conversationStore");
+  useUiStore.getState().setActiveView("chat");
+  await useConversationStore.getState().loadConversations(true);
+  await useConversationStore.getState().open(a.conversation_id);
+}
+
+/**
+ * «Artefactos», the Inbox's own filter beside Chats and PRs (user, 2026-11-09: «deberían tener su
+ * vista entre chats y PRs… y que digan de qué chat salió»): every artifact of the workspace, newest
+ * first, each with the chat it came from — a link that opens that chat — and its repository.
+ * `query` narrows by name, title or the chat's title.
+ */
+export function ArtifactsList({ workspaceId, query }: { workspaceId: string | null; query: string }) {
   const t = useT();
   const list = useChatArtifactsStore((s) => (workspaceId ? (s.byWorkspace[workspaceId] ?? NO_ARTIFACTS) : NO_ARTIFACTS));
-  const [folded, setFolded] = useState(true);
+  const projects = useWorkspaceStore((s) => (workspaceId ? s.projectsByWorkspace[workspaceId] : undefined));
+  const language = useLanguageStore((s) => s.language);
+  const [chats, setChats] = useState<Record<string, string>>({});
   const [open, setOpen] = useState<ChatArtifactSummary | null>(null);
+
   useEffect(() => {
-    if (workspaceId) void useChatArtifactsStore.getState().loadWorkspace(workspaceId);
+    if (!workspaceId) return;
+    void useChatArtifactsStore.getState().loadWorkspace(workspaceId);
+    let live = true;
+    void chatRefsList(workspaceId)
+      .then((refs) => live && setChats(Object.fromEntries(refs.map((r) => [r.id, r.title.trim()]))))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
   }, [workspaceId]);
-  if (!workspaceId || list.length === 0) return null;
+
+  const needle = query.trim().toLowerCase();
+  const shown = useMemo(() => {
+    const sorted = [...list].sort((a, b) => b.created_at.localeCompare(a.created_at));
+    if (!needle) return sorted;
+    return sorted.filter((a) => [a.title, a.name, chats[a.conversation_id] ?? ""].some((s) => s.toLowerCase().includes(needle)));
+  }, [list, chats, needle]);
+
+  if (!workspaceId) return null;
+  if (shown.length === 0) {
+    return <p className="px-1 py-3 text-center text-[12px] text-[var(--cf-text-faint)]">{needle ? t("ai.noMatches") : t("artifact.none")}</p>;
+  }
+
   const remove = async (a: ChatArtifactSummary) => {
     if (!window.confirm(t("artifact.deleteConfirm", { name: a.name }))) return;
     try {
@@ -125,23 +174,55 @@ export function WorkspaceArtifacts({ workspaceId }: { workspaceId: string | null
       pushErrorToast(String(e));
     }
   };
+
+  const locale = language === "es" ? "es-ES" : "en-US";
   return (
-    <div>
-      <button
-        type="button"
-        onClick={() => setFolded((f) => !f)}
-        className="flex w-full items-center gap-1.5 px-1 py-1 text-left font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--cf-text-faint)]"
-      >
-        <Layers size={11} />
-        {t("artifact.title")} · {list.length}
-      </button>
-      {!folded && (
-        <div className="pb-1">
-          {list.map((a) => (
-            <Row key={a.id} artifact={a} onOpen={() => setOpen(a)} onDelete={() => void remove(a)} />
-          ))}
-        </div>
-      )}
+    <div className="flex flex-col gap-0.5">
+      {shown.map((a) => {
+        const Icon = artifactIcon(a.kind);
+        const chat = chats[a.conversation_id] || t("artifact.untitledChat");
+        const repo = a.project_id ? projects?.find((p) => p.id === a.project_id)?.name : null;
+        const when = new Date(a.created_at);
+        return (
+          <div key={a.id} className="group flex items-start gap-2 rounded-md px-1.5 py-1.5 hover:bg-[var(--cf-hover)]">
+            <button type="button" onClick={() => setOpen(a)} className="mt-0.5 shrink-0 text-[var(--cf-accent)]" aria-label={t("artifact.open")}>
+              <Icon size={14} />
+            </button>
+            <div className="min-w-0 flex-1">
+              <button type="button" onClick={() => setOpen(a)} className="block w-full truncate text-left text-[12.5px] text-[var(--cf-text)]">
+                {a.title || a.name}
+                {a.versions > 1 && <span className="ml-1 font-mono text-[10.5px] text-[var(--cf-text-faint)]">v{a.version}</span>}
+              </button>
+              <div className="flex min-w-0 items-center gap-1 text-[11px] text-[var(--cf-text-muted)]">
+                <MessageSquare size={10} className="shrink-0" />
+                <button
+                  type="button"
+                  onClick={() => void openSourceChat(a).catch((e: unknown) => pushErrorToast(String(e)))}
+                  title={t("artifact.openChat")}
+                  className="min-w-0 truncate hover:text-[var(--cf-accent)] hover:underline"
+                >
+                  {chat}
+                </button>
+                {repo && <span className="shrink-0 truncate text-[var(--cf-text-faint)]">· {repo}</span>}
+                {!Number.isNaN(when.getTime()) && (
+                  <span className="ml-auto shrink-0 tabular-nums text-[var(--cf-text-faint)]">
+                    {when.toLocaleDateString(locale, { day: "numeric", month: "short" })}
+                  </span>
+                )}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => void remove(a)}
+              title={t("artifact.delete")}
+              aria-label={t("artifact.delete")}
+              className="mt-0.5 hidden shrink-0 text-[var(--cf-text-faint)] hover:text-[var(--cf-danger)] group-hover:block"
+            >
+              <Trash2 size={12} />
+            </button>
+          </div>
+        );
+      })}
       {open && <ArtifactViewer workspaceId={workspaceId} name={open.name} projectId={open.project_id} onClose={() => setOpen(null)} />}
     </div>
   );

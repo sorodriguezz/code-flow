@@ -15,7 +15,16 @@ import { useChatContextModeStore, type ChatContextMode } from "../../state/chatC
 import { useUiStore } from "../../state/uiStore";
 import { useConfirmStore } from "../../state/confirmStore";
 import { pushErrorToast } from "../../state/toastStore";
-import { knowledgeSearch, type KnowledgeOverview, type KnowledgeSearchResult, type KnowledgeStatus } from "../../lib/tauri/knowledgeCommands";
+import {
+  knowledgeDropVectorSpace,
+  knowledgeSearch,
+  knowledgeVectorSpaces,
+  SEMANTIC_SYNC_LIMIT,
+  type KnowledgeOverview,
+  type KnowledgeSearchResult,
+  type KnowledgeStatus,
+  type KnowledgeVectorSpace,
+} from "../../lib/tauri/knowledgeCommands";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
 /** What a result's or a source's chip says, by its `source`. */
@@ -154,6 +163,7 @@ export function AiKnowledgeSettings() {
             />
           ))}
         </div>
+        <VectorSpaces key={`${workspaceId}:${overview.space ?? ""}`} />
       </div>
 
       <div className="flex flex-col gap-1.5">
@@ -178,6 +188,7 @@ export function AiKnowledgeSettings() {
             {t("knowledge.clear")}
           </button>
         </div>
+        <ReindexSummaryLine />
         <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
           {overview.repos.map((repo) => (
             <div key={repo.projectId} className="flex flex-col border-b border-[var(--cf-border)] px-3 py-1.5 last:border-b-0">
@@ -396,6 +407,90 @@ function EmbeddingStatus({ workspaceId, overview }: { workspaceId: string; overv
           {overview.embedModels.some((model) => model.installed) && ` ${t("knowledge.embeddingSelect")}`}
         </span>
       )}
+      {/* Past the limit a search embeds on the spot, the semantic half covers only what is done:
+          said, so a miss is not a mystery (user, 2026-11-09). */}
+      {embeddingModel && pendingVectors > SEMANTIC_SYNC_LIMIT && (
+        <span className="text-[11px] leading-snug text-[var(--cf-warning)]">{t("knowledge.semanticPartial", { n: pendingVectors })}</span>
+      )}
+    </div>
+  );
+}
+
+/** «Actualizar índice»'s outcome, summed over the workspace's sources. */
+function ReindexSummaryLine() {
+  const t = useT();
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const last = useKnowledgeStore((s) => s.lastReindex);
+  if (!last || last.workspaceId !== workspaceId) return null;
+  const changed = last.added + last.updated + last.removed;
+  return (
+    <span role="status" className="text-[11px] leading-snug text-[var(--cf-text-muted)]">
+      {changed === 0
+        ? t("knowledge.reindexNothing", { unchanged: last.unchanged })
+        : t("knowledge.reindexDone", { added: last.added, updated: last.updated, removed: last.removed, unchanged: last.unchanged })}
+    </span>
+  );
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+/**
+ * The vectors each embedding model left in the index. A model switched away from keeps them (going
+ * back reuses them); this says what they cost and lets them go — never the model in use. Absent
+ * while only the model in use has vectors.
+ */
+function VectorSpaces() {
+  const t = useT();
+  const ask = useConfirmStore((s) => s.ask);
+  const [spaces, setSpaces] = useState<KnowledgeVectorSpace[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const reload = () => void knowledgeVectorSpaces().then(setSpaces, () => setSpaces([]));
+  useEffect(reload, []);
+  if (!spaces || !spaces.some((s) => !s.current)) return null;
+  const drop = async (space: KnowledgeVectorSpace) => {
+    const ok = await ask({ message: t("knowledge.dropSpaceConfirm", { model: space.label }), confirmLabel: t("knowledge.dropSpace"), danger: true });
+    if (!ok) return;
+    setBusy(space.space);
+    try {
+      await knowledgeDropVectorSpace(space.space);
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+    setBusy(null);
+    reload();
+  };
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-[11px] text-[var(--cf-text-muted)]">{t("knowledge.vectorSpaces")}</span>
+      <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
+        {spaces.map((space) => (
+          <div key={space.space} className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5 text-[12px] last:border-b-0">
+            <span className="min-w-0 flex-1 truncate text-[var(--cf-text)]" title={space.space}>
+              {space.label}
+            </span>
+            <span className="shrink-0 tabular-nums text-[11px] text-[var(--cf-text-muted)]">
+              {t("knowledge.vectorSpaceSize", { n: space.vectors, size: formatBytes(space.bytes) })}
+            </span>
+            {space.current ? (
+              <span className={chipClass("ok")}>{t("knowledge.vectorSpaceCurrent")}</span>
+            ) : (
+              <button
+                type="button"
+                disabled={busy === space.space}
+                onClick={() => void drop(space)}
+                className={buttonClass({ variant: "ghost", size: "sm" })}
+              >
+                {busy === space.space ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                {t("knowledge.dropSpace")}
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

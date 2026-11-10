@@ -1,4 +1,5 @@
-import { WorkspaceArtifacts } from "../chat/ArtifactCards";
+import { ArtifactsList } from "../chat/ArtifactCards";
+import { useChatArtifactsStore } from "../../state/chatArtifactsStore";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
@@ -68,7 +69,7 @@ import type { ChatConversationSummary, Project } from "../../types/domain";
 import { searchAssistantChats, type AssistantChatHit } from "../../lib/tauri/commands";
 import { activitySearchMatch } from "../../lib/activitySearch";
 
-type Filter = "all" | "chat" | "pr" | "analysis";
+type Filter = "all" | "chat" | "artifacts" | "pr" | "analysis";
 type Scope = "repo" | "workspace";
 
 const EMPTY_PROJECTS: Project[] = [];
@@ -242,7 +243,12 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
     });
   }, [entries, filter, matches]);
 
-  const empty = needs.length === 0 && running.length === 0 && entries.length === 0;
+  // A workspace with artifacts and no activity left still has something under «Artefactos».
+  const artifactCount = useChatArtifactsStore((s) => (workspaceId ? (s.byWorkspace[workspaceId]?.length ?? 0) : 0));
+  useEffect(() => {
+    if (workspaceId) void useChatArtifactsStore.getState().loadWorkspace(workspaceId);
+  }, [workspaceId]);
+  const empty = needs.length === 0 && running.length === 0 && entries.length === 0 && artifactCount === 0;
 
   return (
     // Three bands, and only the history scrolls. The scope and the actions, the live rows and
@@ -325,11 +331,6 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
         </div>
       )}
 
-      {/* The workspace's artifacts (`chat_refs::artifacts`), folded — absent while there are none. */}
-      <div className="shrink-0 px-2">
-        <WorkspaceArtifacts workspaceId={workspaceId} />
-      </div>
-
       {!empty && (
         <section className="flex min-h-0 flex-1 flex-col">
           <div className="shrink-0 px-2">
@@ -361,6 +362,9 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
                   [
                     ["all", t("assistant.filterAll")],
                     ["chat", t("assistant.filterChats")],
+                    // The workspace's artifacts (`chat_refs::artifacts`), a list of their own rather
+                    // than a fold above Recent (user, 2026-11-09).
+                    ["artifacts", t("artifact.title")],
                     ["pr", t("assistant.filterPrs")],
                     ["analysis", t("assistant.filterAnalyses")],
                   ] as const
@@ -383,7 +387,11 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
           </div>
           {/* The one part that moves. */}
           <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-            {searching && <p role="status" className="px-1 py-2 text-[12px] text-[var(--cf-text-muted)]">{t("assistant.searchingMessages")}</p>}
+            {filter === "artifacts" ? (
+              <ArtifactsList workspaceId={workspaceId} query={query} />
+            ) : (
+            <>
+            {searching &&<p role="status" className="px-1 py-2 text-[12px] text-[var(--cf-text-muted)]">{t("assistant.searchingMessages")}</p>}
             {searchError && (
               <div role="alert" className="flex items-start gap-2 px-1 py-2 text-[12px] text-[var(--cf-danger)]">
                 <span className="min-w-0 flex-1 break-words">{t("assistant.searchFailed", { error: searchError })}</span>
@@ -399,6 +407,8 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
                 <Loader2 size={13} className="animate-spin" />
                 {t("ai.loadingOlder")}
               </p>
+            )}
+            </>
             )}
           </div>
         </section>

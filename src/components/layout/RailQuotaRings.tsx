@@ -169,7 +169,8 @@ export function RailQuotaRings() {
                 <ProviderGlyph providerId={quota.provider} size={14} className="cf-quota-logo" />
                 <span className="cf-quota-value">{formatUsed(fullest)}</span>
               </span>
-              {severity !== "normal" && <span className="cf-quota-warning" aria-hidden />}
+              {/* No corner dot on a ring in warning: the ring itself already turns amber or red, and
+                  the dot only repeated it (user, 2026-11-09). */}
             </button>
           </Tooltip>
         );

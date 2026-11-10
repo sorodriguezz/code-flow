@@ -257,6 +257,82 @@ pub fn knowledge_vectorizing() -> Option<knowledge::Vectorizing> {
     knowledge::vectorizing()
 }
 
+/// Embeds the workspace's backlog in the background — asked by the main window when the app opens
+/// and when the workspace changes, so passages do not wait for a search to need them (user,
+/// 2026-11-09: 3210 «por procesar» that never moved). A pass nobody asked for: battery saving holds
+/// it, unlike Reindexar's.
+#[tauri::command]
+pub async fn knowledge_vectorize_backlog(db: State<'_, Db>, workspace_id: String) -> Result<(), String> {
+    let (scope, (setting, ollama_url)) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        (workspace_scope(&conn, &workspace_id)?, embed_settings(&conn))
+    };
+    if let Some(space) = embed::Space::resolve(setting.as_deref(), &ollama_url).await {
+        knowledge::vectorize_in_background(scope, space);
+    }
+    Ok(())
+}
+
+/// One embedding model's vectors in the index, for «liberar espacio».
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VectorSpace {
+    pub space: String,
+    /// The model's name when it is one this app knows (bundled), else the space itself.
+    pub label: String,
+    pub vectors: usize,
+    pub bytes: u64,
+    /// The model in use: its vectors cannot be dropped from here.
+    pub current: bool,
+}
+
+/// Every model with vectors in the index, which one is in use, and what each costs.
+#[tauri::command]
+pub async fn knowledge_vector_spaces(db: State<'_, Db>) -> Result<Vec<VectorSpace>, String> {
+    let (setting, ollama_url) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        embed_settings(&conn)
+    };
+    let current = embed::Space::resolve(setting.as_deref(), &ollama_url).await.map(|s| s.name);
+    let usage = tokio::task::spawn_blocking(|| -> Result<_, String> {
+        let index = index::global()?;
+        index::space_usage(&index).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(usage
+        .into_iter()
+        .map(|u| {
+            let label = embedder::EMBED_CATALOGUE
+                .iter()
+                .find(|m| u.space.starts_with(&format!("{}@", m.spec.id)))
+                .map(|m| m.spec.label.to_string())
+                .or_else(|| u.space.strip_prefix("ollama:").map(|rest| format!("{} (Ollama)", rest.split('@').next().unwrap_or(rest))))
+                .unwrap_or_else(|| u.space.clone());
+            VectorSpace { current: current.as_deref() == Some(u.space.as_str()), label, space: u.space, vectors: u.vectors, bytes: u.bytes }
+        })
+        .collect())
+}
+
+/// Drops the vectors of a model that is not in use. Refused for the one in use: that would only
+/// start the whole backlog again.
+#[tauri::command]
+pub async fn knowledge_drop_vector_space(db: State<'_, Db>, space: String) -> Result<usize, String> {
+    let (setting, ollama_url) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        embed_settings(&conn)
+    };
+    if embed::Space::resolve(setting.as_deref(), &ollama_url).await.is_some_and(|s| s.name == space) {
+        return Err("the model in use keeps its vectors".to_string());
+    }
+    tokio::task::spawn_blocking(move || -> Result<usize, String> {
+        let index = index::global()?;
+        index::drop_space(&index, &space).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Re-indexes every repository and folder of the workspace now, then embeds what is new in the
 /// background.
 #[tauri::command]

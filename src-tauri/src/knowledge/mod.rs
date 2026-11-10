@@ -595,7 +595,36 @@ fn need_of(force: bool, meta: Option<&(i64, String)>, head: Option<&str>, watche
 /// Brings the scope's indexes up to date (`force`: walk everything). Blocking: call it off the
 /// async runtime. A collection another refresh is working on is skipped ([`fresh::claim`]).
 pub fn refresh_blocking(scope: &Scope, force: bool) -> Result<Vec<(String, index::Refreshed)>, String> {
-    refresh_with(&Main::App, scope, force)
+    let result = refresh_with(&Main::App, scope, force);
+    // What the refresh added gets its vectors now, not at the next search that happens to need them
+    // (user, 2026-11-09: thousands of passages sat "por procesar" between searches). A pass nobody
+    // asked for: battery saving holds it like any other.
+    if let Ok(done) = &result {
+        if done.iter().any(|(_, refreshed)| refreshed.changed()) {
+            vectorize_after_refresh(scope);
+        }
+    }
+    result
+}
+
+/// Resolves the configured embedding model and starts a background pass over `scope` — nothing
+/// without a local model, or before the app's database is up.
+pub fn vectorize_after_refresh(scope: &Scope) {
+    let scope = scope.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some((setting, url)) = crate::ai_usage::with_conn(|conn| {
+            (
+                crate::db::queries::get_setting(conn, embed::KEY_EMBED_MODEL).ok().flatten(),
+                crate::db::queries::get_setting(conn, crate::hybrid::config::KEY_URL_OLLAMA).ok().flatten(),
+            )
+        }) else {
+            return;
+        };
+        let url = url.unwrap_or_else(|| "http://127.0.0.1:11434".to_string());
+        if let Some(space) = embed::Space::resolve(setting.as_deref(), &url).await {
+            vectorize_in_background(scope, space);
+        }
+    });
 }
 
 /// [`refresh_blocking`] reading the app's rows through `main`. Cheapest first — the app's documents,
@@ -799,10 +828,20 @@ async fn vectorize(mut scope: Scope, mut space: embed::Space) {
     }
 }
 
+/// A pass used to end on the first batch that failed — silently, with nothing in the log — and the
+/// next pass started with that same batch, so one batch the embedder could not answer (a timeout on
+/// a laptop on battery, a passage it refuses) stopped the backlog for good (user report, 2026-11-09:
+/// «partió el embedding pero luego paró»). Now a failed batch is logged and retried one passage at a
+/// time: what goes through is stored, what fails alone is set aside for this pass, and the pass goes
+/// on. Only an embedder that answers nothing at all, [`GIVE_UP_AFTER`] times in a row, ends it.
+const GIVE_UP_AFTER: usize = 3;
+
 async fn vectorize_pass(scope: &Scope, space: &embed::Space) {
     let keys = scope.keys();
     let started = std::time::Instant::now();
     let mut done = 0usize;
+    let mut skipped: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    let mut dead_batches = 0usize;
     loop {
         let switched = NEXT.lock().ok().is_some_and(|next| next.as_ref().is_some_and(|(_, wanted)| wanted.name != space.name));
         if switched {
@@ -817,20 +856,69 @@ async fn vectorize_pass(scope: &Scope, space: &embed::Space) {
         }
         let (pending, left) = match index::global() {
             Ok(index) => (
-                index::pending_vectors(&index, &space.name, &keys, 64).unwrap_or_default(),
+                // Asked for past the ones set aside, which are still "pending" to the index.
+                index::pending_vectors(&index, &space.name, &keys, 64 + skipped.len()).unwrap_or_default(),
                 index::count_pending_vectors(&index, &space.name, &keys).unwrap_or(0),
             ),
-            Err(_) => (Vec::new(), 0),
+            Err(error) => {
+                crate::applog::warn(&format!("knowledge: vectorizing stopped, the index could not be read ({error})"));
+                return;
+            }
         };
+        let pending: Vec<(i64, String)> = pending.into_iter().filter(|(id, _)| !skipped.contains(id)).take(64).collect();
         if pending.is_empty() {
+            if !skipped.is_empty() {
+                crate::applog::warn(&format!("knowledge: vectorizing done; {} passages the embedder refused were left without a vector", skipped.len()));
+            }
             return;
         }
-        set_progress(Some(Vectorizing::now(scope.workspace_id.as_deref(), &space.name, done, done + left, started.elapsed())));
+        set_progress(Some(Vectorizing::now(scope.workspace_id.as_deref(), &space.name, done, done + left.saturating_sub(skipped.len()), started.elapsed())));
         let texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
-        let Ok(vectors) = space.embed_documents(&texts).await else { return };
-        let items: Vec<(i64, Vec<f32>)> = pending.iter().map(|(id, _)| *id).zip(vectors).collect();
+        let items: Vec<(i64, Vec<f32>)> = match space.embed_documents(&texts).await {
+            Ok(vectors) => {
+                dead_batches = 0;
+                pending.iter().map(|(id, _)| *id).zip(vectors).collect()
+            }
+            Err(error) => {
+                crate::applog::warn(&format!("knowledge: a batch of {} passages failed to embed ({error}); retrying one at a time", pending.len()));
+                let mut one_by_one = Vec::new();
+                let mut failed_in_a_row = 0usize;
+                for (id, text) in &pending {
+                    match space.embed_documents(std::slice::from_ref(text)).await {
+                        Ok(mut vector) if vector.len() == 1 => {
+                            failed_in_a_row = 0;
+                            one_by_one.push((*id, vector.remove(0)));
+                        }
+                        _ => {
+                            skipped.insert(*id);
+                            failed_in_a_row += 1;
+                            // Nothing has gone through and three in a row failed: the embedder is
+                            // down, not this passage. The rest of the batch is not set aside — it is
+                            // tried again with the next batch, or the pass gives up below.
+                            if one_by_one.is_empty() && failed_in_a_row >= 3 {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if one_by_one.is_empty() {
+                    dead_batches += 1;
+                    if dead_batches >= GIVE_UP_AFTER {
+                        crate::applog::warn(&format!("knowledge: vectorizing stopped, the embedder answered nothing {GIVE_UP_AFTER} batches in a row ({error})"));
+                        return;
+                    }
+                } else {
+                    dead_batches = 0;
+                }
+                one_by_one
+            }
+        };
+        if items.is_empty() {
+            continue;
+        }
         let stored = index::global().and_then(|mut index| index::store_vectors(&mut index, &space.name, &items).map_err(|e| e.to_string()));
-        if stored.is_err() {
+        if let Err(error) = stored {
+            crate::applog::warn(&format!("knowledge: vectorizing stopped, vectors could not be stored ({error})"));
             return;
         }
         done += items.len();
@@ -1384,6 +1472,14 @@ pub fn render(answer: &Answer) -> String {
             "Indexing is still running for {} — these results are partial. Search again in a moment, or read the files directly.",
             answer.partial.join(", ")
         ));
+    }
+    // The semantic half did not run, or ran over part of the index: say so, so the model can tell the
+    // user why a passage phrased differently (another language, other words) may have been missed
+    // (user, 2026-11-09: a degraded search was invisible).
+    if answer.embedding_fallback == Some(EmbeddingFallback::Indexing) {
+        notices.push("Semantic search is still being built for this workspace: these results come from matching words only, and a passage that says the same thing in other words or another language may be missing. Tell the user so if nothing relevant is found.".to_string());
+    } else if answer.embedding_indexing {
+        notices.push("Part of this workspace is not in the semantic index yet: a passage phrased differently may be missing.".to_string());
     }
     let body = match (answer.found.is_empty(), answer.partial.is_empty()) {
         (false, _) => wrap_untrusted(&as_text(&answer.found)),

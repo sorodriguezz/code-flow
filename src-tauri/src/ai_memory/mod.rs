@@ -1105,14 +1105,46 @@ pub fn note(memories: &[Memory]) -> Option<(String, Vec<crate::context::ContextS
     ))
 }
 
-/// "recuerda que …" / "remember that …" at the start of a sentence: what to remember.
+/// "recuerda que …" / "remember that …": what to remember.
+///
+/// Two shapes, because people say it both ways (user report, 2026-11-09: «no funciona siempre»;
+/// from their own history, «tomemos la decisión nosotros y te lo apuntas en memoria»):
+///
+/// - **The verb first, the rule after** — «recuerda que…», «acuérdate que…», «guarda en memoria
+///   que…», «remember that…». At the start of a sentence, or after a softener («y», «porfa», «oye»,
+///   «también», «please», «also») — «porfa recuerda que…» used to be missed.
+/// - **The rule first, then "save it"** — «los commits van en español, guárdalo en memoria»,
+///   «…y te lo apuntas en memoria». The sentence before the phrase is the rule.
+///
+/// Deliberately not «ten en cuenta que» or «no olvides que»: those are said about *this* turn far
+/// more often than as a standing rule, and each match is saved approved.
 pub fn remember_request(message: &str) -> Option<String> {
-    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let pattern = PATTERN.get_or_init(|| {
-        regex::Regex::new(r"(?im)(?:^|[.!?,:;]\s*)(?:recuerda(?:\s+siempre)?\s+que|recuerda:|acu[eé]rdate\s+de\s+que|(?:always\s+)?remember\s+that|remember:)\s+([^\n]+)").unwrap()
+    static LEADING: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static TRAILING: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let leading = LEADING.get_or_init(|| {
+        regex::Regex::new(concat!(
+            r"(?im)(?:^|[.!?,:;]\s*|\b(?:y|e|porfa|por\s+favor|oye|tambi[eé]n|and|please|also)\s+)",
+            r"(?:recu[eé]rda(?:\s+siempre)?\s+que|recuerda:|acu[eé]rdate(?:\s+de)?\s+que|memoriza\s+que",
+            r"|(?:gu[aá]rda|an[oó]ta|ap[uú]nta)(?:\s+(?:en|como)\s+(?:tu\s+|la\s+)?memoria)\s+que",
+            r"|(?:always\s+)?remember\s+that|remember:|(?:save|store)\s+(?:to|in)\s+memory\s+that)\s+([^\n]+)",
+        ))
+        .unwrap()
     });
-    let rest = pattern.captures(message)?.get(1)?.as_str().trim().trim_end_matches('.').trim().to_string();
-    (rest.chars().count() >= 6).then_some(rest)
+    let trailing = TRAILING.get_or_init(|| {
+        regex::Regex::new(concat!(
+            r"(?im)(?:^|[.!?:;]\s*)([^.!?:;\n]{6,}?)[,;]?\s+(?:y\s+|and\s+)?",
+            r"(?:gu[aá]rdalo|an[oó]talo|ap[uú]ntalo|recu[eé]rdalo|te\s+lo\s+(?:apuntas|anotas|guardas)|save\s+(?:it|this)|remember\s+(?:it|this))",
+            r"\s+(?:en|como|to|in)\s+(?:tu\s+|la\s+|your\s+)?memor(?:ia|y)\b",
+        ))
+        .unwrap()
+    });
+    let clean = |s: &str| s.trim().trim_end_matches(['.', ',']).trim().to_string();
+    let found = leading
+        .captures(message)
+        .and_then(|c| c.get(1))
+        .map(|m| clean(m.as_str()))
+        .or_else(|| trailing.captures(message).and_then(|c| c.get(1)).map(|m| clean(m.as_str())));
+    found.filter(|rest| rest.chars().count() >= 6)
 }
 
 /// Candidates the evidence suggests: AI changes to the same file reverted three or more times in two

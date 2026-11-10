@@ -12,6 +12,7 @@ import {
   knowledgeSetEmbedModel,
   knowledgeUpdateFolder,
   type KnowledgeOverview,
+  type KnowledgeRefreshed,
 } from "../lib/tauri/knowledgeCommands";
 import { onLocalAiDownload, type LocalAiDownloadEvent } from "../lib/tauri/events";
 import { localExecErrorText } from "./localExecStore";
@@ -28,6 +29,9 @@ interface KnowledgeStore {
   workspaceId: string | null;
   overview: KnowledgeOverview | null;
   reindexing: boolean;
+  /** What the last «Actualizar índice» did, summed over every repository and folder — the pane says
+   *  it, so an update that changed three files does not read as "it did nothing" or "it started over". */
+  lastReindex: (ReindexSummary & { workspaceId: string }) | null;
   progress: Record<string, LocalAiDownloadEvent>;
   load: (workspaceId: string) => Promise<void>;
   reindex: () => Promise<void>;
@@ -41,6 +45,21 @@ interface KnowledgeStore {
   download: (id: string) => Promise<void>;
   cancelDownload: (id: string) => Promise<void>;
   removeModel: (id: string) => Promise<void>;
+}
+
+export interface ReindexSummary {
+  added: number;
+  updated: number;
+  removed: number;
+  unchanged: number;
+}
+
+/** One update's counts over all its collections. */
+export function sumRefreshed(list: readonly KnowledgeRefreshed[]): ReindexSummary {
+  return list.reduce<ReindexSummary>(
+    (sum, r) => ({ added: sum.added + r.added, updated: sum.updated + r.updated, removed: sum.removed + r.removed, unchanged: sum.unchanged + r.unchanged }),
+    { added: 0, updated: 0, removed: 0, unchanged: 0 },
+  );
 }
 
 let subscribed = false;
@@ -63,6 +82,7 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => {
     workspaceId: null,
     overview: null,
     reindexing: false,
+    lastReindex: null,
     progress: {},
 
     load: async (workspaceId) => {
@@ -86,8 +106,11 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => {
     reindex: async () => {
       const ws = get().workspaceId;
       if (!ws) return;
-      set({ reindexing: true });
-      await guard(() => knowledgeReindex(ws));
+      set({ reindexing: true, lastReindex: null });
+      await guard(async () => {
+        const done = await knowledgeReindex(ws);
+        if (get().workspaceId === ws) set({ lastReindex: { workspaceId: ws, ...sumRefreshed(done.map(([, r]) => r)) } });
+      });
       set({ reindexing: false });
     },
 

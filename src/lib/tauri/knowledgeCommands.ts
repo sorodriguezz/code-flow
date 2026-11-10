@@ -113,5 +113,22 @@ export interface KnowledgeVectorizing {
   etaSecs: number | null;
 }
 export const knowledgeVectorizing = () => invoke<KnowledgeVectorizing | null>("knowledge_vectorizing");
+/** Embeds the workspace's backlog in the background (paused by battery saving). */
+export const knowledgeVectorizeBacklog = (workspaceId: string) => invoke<void>("knowledge_vectorize_backlog", { workspaceId });
+
+/** One embedding model's vectors in the index (`knowledge_cmd::VectorSpace`). */
+export interface KnowledgeVectorSpace {
+  space: string;
+  label: string;
+  vectors: number;
+  bytes: number;
+  current: boolean;
+}
+export const knowledgeVectorSpaces = () => invoke<KnowledgeVectorSpace[]>("knowledge_vector_spaces");
+export const knowledgeDropVectorSpace = (space: string) => invoke<number>("knowledge_drop_vector_space", { space });
+
+/** Mirrors `knowledge::SYNC_EMBED`: past this many pending passages, a search is lexical only until
+ *  the backlog is embedded. */
+export const SEMANTIC_SYNC_LIMIT = 256;
 export const knowledgeCancelDownload = (modelId: string) => invoke<void>("knowledge_cancel_download", { modelId });
 export const knowledgeDeleteModel = (modelId: string) => invoke<void>("knowledge_delete_model", { modelId });

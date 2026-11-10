@@ -4563,16 +4563,6 @@ html:has(.cf-codi-shell) body {
 .cf-quota-value { font-size: 9px; font-weight: 700; font-variant-numeric: tabular-nums; opacity: 0; scale: .8; }
 .cf-quota-orbit:is(:hover, :focus-visible) .cf-quota-logo { opacity: 0; scale: .7; }
 .cf-quota-orbit:is(:hover, :focus-visible) .cf-quota-value { opacity: 1; scale: 1; }
-.cf-quota-warning {
-  position: absolute;
-  right: 0;
-  top: 0;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--cf-quota-color);
-  border: 1.5px solid var(--cf-surface-raised);
-}
 .cf-quota-segment { transition: stroke-dasharray 600ms, stroke 300ms; animation: cf-quota-fill 650ms var(--cf-quota-delay) both; }
 .cf-quota-plan { font-size: 9px; font-weight: 600; text-transform: uppercase; color: var(--cf-text-muted); border: 1px solid var(--cf-border); border-radius: 4px; padding: 2px 5px; }
 .cf-quota-details { display: block; width: 230px; max-width: 100%; padding-top: 6px; }

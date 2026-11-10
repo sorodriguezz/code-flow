@@ -183,7 +183,7 @@ pub struct Refreshed {
 }
 
 impl Refreshed {
-    fn changed(&self) -> bool {
+    pub(crate) fn changed(&self) -> bool {
         self.added + self.updated + self.removed > 0
     }
 }
@@ -796,7 +796,11 @@ fn row_to_hit(r: &rusqlite::Row<'_>) -> rusqlite::Result<Hit> {
     })
 }
 
-/// Prose chunks of `collections` with no vector in `space` yet, oldest first.
+/// Prose chunks of `collections` with no vector in `space` yet, the most useful first: what semantic
+/// search is for — notes, documents, folders, decision records (`.md`, `.txt`) — before code
+/// comments and commit messages, and within each, what was indexed most recently (a file just
+/// changed) before what has sat there for weeks. It was oldest first: a backlog of thousands spent
+/// its first hour on old code while the new ADR waited (2026-11-09).
 pub fn pending_vectors(conn: &Connection, space: &str, collections: &[String], limit: usize) -> rusqlite::Result<Vec<(i64, String)>> {
     if collections.is_empty() {
         return Ok(Vec::new());
@@ -805,7 +809,14 @@ pub fn pending_vectors(conn: &Connection, space: &str, collections: &[String], l
         "SELECT c.id, c.heading || char(10) || c.text FROM chunks c JOIN sources s ON s.id = c.source_id
          WHERE c.prose = 1 AND s.collection IN ({})
            AND NOT EXISTS (SELECT 1 FROM vectors v WHERE v.chunk_id = c.id AND v.space = ?1)
-         ORDER BY c.id LIMIT {}",
+         ORDER BY
+           CASE WHEN s.collection LIKE 'notes:%' OR s.collection LIKE 'docs:%' OR s.collection LIKE 'folder:%' THEN 0
+                WHEN s.kind IN ('markdown', 'text') THEN 1
+                WHEN s.collection LIKE 'commits:%' THEN 3
+                ELSE 2 END,
+           s.indexed_at DESC,
+           c.id
+         LIMIT {}",
         placeholders(collections.len(), 2),
         limit
     );
@@ -816,6 +827,35 @@ pub fn pending_vectors(conn: &Connection, space: &str, collections: &[String], l
     }
     let rows = stmt.query_map(values.as_slice(), |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+/// The vectors held for one embedding model, across every workspace: how many, and the bytes their
+/// data takes (the index's own overhead aside).
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpaceUsage {
+    pub space: String,
+    pub vectors: usize,
+    pub bytes: u64,
+}
+
+/// Every embedding model with vectors in the index, the largest first. A model switched away from
+/// keeps its vectors (switching back reuses them), and this is how the settings pane can say what
+/// they cost and offer to let them go.
+pub fn space_usage(conn: &Connection) -> rusqlite::Result<Vec<SpaceUsage>> {
+    let mut stmt = conn.prepare("SELECT space, COUNT(*), COALESCE(SUM(LENGTH(data)), 0) FROM vectors GROUP BY space ORDER BY 3 DESC")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(SpaceUsage { space: r.get(0)?, vectors: r.get::<_, i64>(1)?.max(0) as usize, bytes: r.get::<_, i64>(2)?.max(0) as u64 })
+    })?;
+    rows.collect()
+}
+
+/// Drops every vector of one embedding model. The chunks stay — choosing the model again embeds
+/// them anew.
+pub fn drop_space(conn: &Connection, space: &str) -> rusqlite::Result<usize> {
+    let removed = conn.execute("DELETE FROM vectors WHERE space = ?1", params![space])?;
+    written();
+    Ok(removed)
 }
 
 /// How many prose chunks of `collections` still have no vector in `space` — what a vectorizing pass
@@ -1119,6 +1159,24 @@ mod tests {
         assert_eq!(best[0].0.heading, "Storage");
         assert_eq!(status(&conn, "repo:p", Some("s1")).unwrap().vectors, 2);
         assert!(has_vectors(&conn, "s1", &cols).unwrap() && !has_vectors(&conn, "s2", &cols).unwrap());
+    }
+
+    /// What each model's vectors cost, and letting one model's go without touching the other's.
+    #[test]
+    fn a_models_vectors_are_counted_and_dropped_alone() {
+        let (dir, mut conn) = fixture();
+        refresh(&mut conn, "repo:p", &dir.0, &files()).unwrap();
+        let cols = vec!["repo:p".to_string()];
+        let pending = pending_vectors(&conn, "s1", &cols, 100).unwrap();
+        let items: Vec<(i64, Vec<f32>)> = pending.iter().map(|(id, _)| (*id, vec![1.0, 0.0])).collect();
+        store_vectors(&mut conn, "old", &items).unwrap();
+        store_vectors(&mut conn, "new", &items[..1]).unwrap();
+        let usage = space_usage(&conn).unwrap();
+        assert_eq!(usage.iter().map(|u| (u.space.as_str(), u.vectors)).collect::<Vec<_>>(), vec![("old", 2), ("new", 1)]);
+        assert!(usage[0].bytes > 0);
+        assert_eq!(drop_space(&conn, "old").unwrap(), 2);
+        assert_eq!(space_usage(&conn).unwrap().len(), 1);
+        assert_eq!(pending_vectors(&conn, "old", &cols, 100).unwrap().len(), 2, "the chunks stay, to be embedded again");
     }
 
     /// The held copy of a space follows the index: a vector stored after the first search is found

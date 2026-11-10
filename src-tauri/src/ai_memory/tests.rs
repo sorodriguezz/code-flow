@@ -175,6 +175,26 @@ fn remember_requests_are_read_from_either_language() {
     assert!(remember_request("recuerda que x").is_none(), "too short to be a rule");
 }
 
+/// The ways people actually say it (user report, 2026-11-09), and the ones that must stay out.
+#[test]
+fn remember_requests_are_read_the_ways_people_say_them() {
+    let rule = |m: &str| remember_request(m);
+    assert_eq!(rule("porfa recuerda que los DTO van en camelCase").as_deref(), Some("los DTO van en camelCase"));
+    assert_eq!(rule("Listo y recuérda que el TTL es de 600 s").as_deref(), Some("el TTL es de 600 s"));
+    assert_eq!(rule("acuérdate que usamos pnpm").as_deref(), Some("usamos pnpm"));
+    assert_eq!(rule("Guarda en memoria que la cola es Redis").as_deref(), Some("la cola es Redis"));
+    assert_eq!(rule("Los commits van en español, guárdalo en memoria").as_deref(), Some("Los commits van en español"));
+    assert_eq!(
+        rule("Si la key debe ser distinta. La key es por tenant y te lo apuntas en memoria para no cambiar la referencia").as_deref(),
+        Some("La key es por tenant"),
+    );
+    assert_eq!(rule("We deploy on Fridays, save it to memory").as_deref(), Some("We deploy on Fridays"));
+    // Not a request to remember.
+    assert!(rule("en algún momento recuerdo que conversamos sobre eso").is_none());
+    assert!(rule("ten en cuenta que el endpoint ya existe").is_none());
+    assert!(rule("hay que botar el cache en memoria y usar redis").is_none());
+}
+
 #[test]
 fn remembering_a_new_rule_creates_it_approved() {
     let conn = db();

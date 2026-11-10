@@ -389,7 +389,20 @@ pub fn start(app: &AppHandle) {
         // written again, because the port and the token are new every launch.
         let automation = uuid::Uuid::new_v4().to_string();
         let _ = AUTOMATION_TOKEN.set(automation.clone());
-        if crate::ai_usage::setting(automation::ENABLED_KEY).as_deref() == Some("true") {
+        // Read through the app's own `Db`, not `ai_usage::setting`: that one answers `None` until
+        // `ai_usage::attach`, which `setup` reaches well after this task has bound its port — so the
+        // switch read as off on every launch, Settings showed it unticked, and the connection file
+        // kept last launch's port (user report, 2026-11-09: «se desmarca sola»).
+        let enabled = {
+            let mut saved: Option<String> = None;
+            if let Some(db) = app.try_state::<crate::db::Db>() {
+                if let Ok(conn) = db.0.lock() {
+                    saved = crate::db::queries::get_setting(&conn, automation::ENABLED_KEY).ok().flatten();
+                }
+            }
+            saved.as_deref() == Some("true")
+        };
+        if enabled {
             AUTOMATION_ON.store(true, std::sync::atomic::Ordering::SeqCst);
             if let Err(error) = automation::write_connection(port, &automation) {
                 crate::applog::warn(&format!("agentcli: could not write the automation file ({error})"));
@@ -509,9 +522,19 @@ pub fn automation_set_enabled(db: tauri::State<crate::db::Db>, enabled: bool) ->
 }
 
 /// Whether `cf` from outside is on, and the folder its connection file lives in.
+///
+/// The saved choice, not only the live switch: Settings opened in the instant before the endpoint
+/// is up must not show it unticked.
 #[tauri::command]
-pub fn automation_status() -> (bool, String) {
-    (AUTOMATION_ON.load(std::sync::atomic::Ordering::SeqCst), automation::directory().display().to_string())
+pub fn automation_status(db: tauri::State<crate::db::Db>) -> (bool, String) {
+    let saved = db
+        .0
+        .lock()
+        .ok()
+        .and_then(|conn| crate::db::queries::get_setting(&conn, automation::ENABLED_KEY).ok().flatten())
+        .as_deref()
+        == Some("true");
+    (saved || AUTOMATION_ON.load(std::sync::atomic::Ordering::SeqCst), automation::directory().display().to_string())
 }
 
 /// A verb on behalf of a chat's MCP call (`codemap::mcp`) instead of a `cf` in a shell — the same
