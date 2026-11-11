@@ -10,6 +10,7 @@ import type { Rgb } from "./palette";
 const ZERO = 0;
 const ONE = 1;
 const TWO = 2;
+const HALF = 0.5;
 const SEGMENTS = 16;
 const SIZE = 180;
 const QUARTER_TURN = Math.PI / TWO;
@@ -40,8 +41,26 @@ const RED_PREFIX = "rgba(";
 const BLUE_CHANNEL_PATTERN = /^rgba\(0,0,[1-9]/;
 const RED_CHANNEL_PATTERN = /^rgba\([1-9]\d*,0,0,/;
 const MECHANICS_SUITE = "cinema character articulation";
-const TARS_GAIT = "TARS unfolds its four columns into a lower, wider running stance";
+const TARS_GAIT = "TARS opens into a wider fan while retaining an upright supporting column";
 const TARS_FINISH = "TARS finishes without splaying its columns like arms";
+const TARS_IDLE_GAIT = "TARS alternates its compact silhouette with a rigid column fan on the rail";
+const TARS_RIGID_COLUMNS = "keeps four full height rigid columns throughout %j";
+const TARS_COLUMN_WIDTH = 0.105;
+const TARS_COLUMN_HEIGHT = 0.82;
+const TARS_COLUMN_DEPTH = 0.14;
+const TARS_COLUMN_COUNT = 4;
+const TARS_FAN_TIME = 3.2;
+const TARS_STANDING_TIME = 0;
+const TARS_MINIMUM_WIDTH_CHANGE = 8;
+const TARS_MINIMUM_SUPPORT_HEIGHT = 0.7;
+const TARS_FRAME_PX = 32;
+const TARS_ORIENTATION: Point3 = [-0.12, -0.22, 0];
+const TARS_TEST_SCALE = 0.91;
+const TARS_GROUND_TEST = "TARS keeps at least one rigid column on the same ground through its gait";
+const TARS_GAIT_FRAMES = 80;
+const TARS_GAIT_FRAME_SECONDS = 0.1;
+const TARS_GROUND_PRECISION = 5;
+const TARS_GROUND_Y = (HALF + TARS_COLUMN_HEIGHT * HALF * TARS_TEST_SCALE) * TARS_FRAME_PX;
 const WALLE_GAZE = "WALL·E turns its binocular head while the tracks stay planted";
 const R2_GAZE = "R2-D2 follows the pointer by rotating its dome without pitching it";
 const DECAL_TEST = "keeps a front label above its sloping shell through a group transform";
@@ -65,7 +84,7 @@ function tarsBounds(pose: CharacterPose) {
   const mesh = new CharacterMesh(SEGMENTS);
   const { ctx, points } = drawingContext();
   buildTars(mesh, pose);
-  mesh.paint(ctx, 32, [-0.12, -0.22, 0], ROOT, 0.96, WHITE, ZERO, ONE);
+  mesh.paint(ctx, TARS_FRAME_PX, TARS_ORIENTATION, ROOT, TARS_TEST_SCALE, WHITE, ZERO, ONE);
   const xs = points.map(([x]) => x);
   const ys = points.map(([, y]) => y);
   return {
@@ -77,16 +96,34 @@ function tarsBounds(pose: CharacterPose) {
 describe(MECHANICS_SUITE, () => {
   it(TARS_GAIT, () => {
     const standing = tarsBounds({ ...POSE, quiet: ONE });
-    const running = tarsBounds({ ...POSE, work: ONE });
-    expect(running.width - standing.width).toBeGreaterThan(8);
-    expect(standing.height - running.height).toBeGreaterThan(3);
+    const running = tarsBounds({ ...POSE, time: TARS_FAN_TIME, work: ONE });
+    const widthChange = running.width - standing.width;
+    const minimumHeight = standing.height * TARS_MINIMUM_SUPPORT_HEIGHT;
+    expect(widthChange).toBeGreaterThan(TARS_MINIMUM_WIDTH_CHANGE);
+    expect(running.height).toBeGreaterThan(minimumHeight);
   });
 
-  it("TARS alternates upright and spider gaits on the rail without a supplied activity", () => {
-    const standing = tarsBounds({ ...POSE, time: 0 });
-    const crawling = tarsBounds({ ...POSE, time: 1.8 });
-    expect(crawling.width - standing.width).toBeGreaterThan(8);
-    expect(standing.height - crawling.height).toBeGreaterThan(3);
+  it(TARS_IDLE_GAIT, () => {
+    const standing = tarsBounds({ ...POSE, time: TARS_STANDING_TIME });
+    const unfolded = tarsBounds({ ...POSE, time: TARS_FAN_TIME });
+    const widthChange = unfolded.width - standing.width;
+    const minimumHeight = standing.height * TARS_MINIMUM_SUPPORT_HEIGHT;
+    expect(widthChange).toBeGreaterThan(TARS_MINIMUM_WIDTH_CHANGE);
+    expect(unfolded.height).toBeGreaterThan(minimumHeight);
+  });
+
+  it(TARS_GROUND_TEST, () => {
+    for (let frame = ZERO; frame < TARS_GAIT_FRAMES; frame += ONE) {
+      const time = frame * TARS_GAIT_FRAME_SECONDS;
+      const pose = { ...POSE, time, work: ONE };
+      const mesh = new CharacterMesh(SEGMENTS);
+      const { ctx, points } = drawingContext();
+      buildTars(mesh, pose);
+      mesh.paint(ctx, TARS_FRAME_PX, ROOT, ROOT, TARS_TEST_SCALE, WHITE, ZERO, ONE);
+      const ys = points.map((point) => point[Y]);
+      const ground = Math.max(...ys);
+      expect(ground).toBeCloseTo(TARS_GROUND_Y, TARS_GROUND_PRECISION);
+    }
   });
 
   it(TARS_FINISH, () => {
@@ -102,19 +139,21 @@ describe(MECHANICS_SUITE, () => {
   });
 
   it.each([
-    { work: 1 }, { write: 1 }, { done: 1 }, { failed: 1 }, { listen: 1, gazeX: 1 },
-  ])("keeps TARS made of four equal segmented columns for %j", (activity) => {
+    { work: ONE }, { write: ONE }, { done: ONE }, { failed: ONE }, { listen: ONE, gazeX: ONE },
+  ])(TARS_RIGID_COLUMNS, (activity) => {
     const mesh = new CharacterMesh(SEGMENTS);
     const boxes = vi.spyOn(mesh, BOX);
     buildTars(mesh, { ...POSE, ...activity });
-    const columns = new Map<number, number>();
+    const columnPositions = new Set<number>();
     for (const [solid] of boxes.mock.calls) {
       const [center, size] = solid;
-      columns.set(center[X], (columns.get(center[X]) ?? 0) + 1);
-      expect(size[X]).toBeCloseTo(0.102);
-      expect(size[Y]).toBeCloseTo(0.401);
+      columnPositions.add(center[X]);
+      expect(size[X]).toBeCloseTo(TARS_COLUMN_WIDTH);
+      expect(size[Y]).toBeCloseTo(TARS_COLUMN_HEIGHT);
+      expect(size[Z]).toBeCloseTo(TARS_COLUMN_DEPTH);
     }
-    expect([...columns.values()]).toEqual([2, 2, 2, 2]);
+    expect(boxes).toHaveBeenCalledTimes(TARS_COLUMN_COUNT);
+    expect(columnPositions.size).toBe(TARS_COLUMN_COUNT);
   });
 
   it(WALLE_GAZE, () => {

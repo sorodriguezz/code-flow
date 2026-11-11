@@ -51,6 +51,11 @@ import { useFlowVaultStore } from "../../state/flowVaultStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 
+const SCHEDULE_TRIGGER_TYPE = "trigger.schedule";
+const SCHEDULE_MONTH_DAY_PARAM = "monthDay";
+const SCHEDULE_MONTH_DAY_HINT = "flows.schedule.monthDayHint";
+const SCHEDULE_HINT_CLASS = "text-[11.5px] text-[var(--cf-text-muted)]";
+
 const CodeField = lazy(() => import("./CodeField"));
 
 /**
@@ -1326,6 +1331,9 @@ function ParamField({
         {spec.expr && <ExpressionToggle value={value} onChange={onChange} />}
       </div>
       {editor}
+      {typeId === SCHEDULE_TRIGGER_TYPE && spec.name === SCHEDULE_MONTH_DAY_PARAM && (
+        <span className={SCHEDULE_HINT_CLASS}>{t(SCHEDULE_MONTH_DAY_HINT)}</span>
+      )}
       {expression && kind.type === "code" && <ExpressionPreview flowId={flowId} nodeId={nodeId} expression={value} />}
       {typeId === "ai.agent" && spec.name === "access" && <AccessHint params={params} />}
       {typeId === "data.database" && (spec.name === "dbKeys" || spec.name === "dbFields") && !(Array.isArray(value) && value.length > 0) && (

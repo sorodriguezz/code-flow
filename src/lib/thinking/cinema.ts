@@ -10,7 +10,7 @@ import { palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 import { contactShadow } from "./volume";
 import { voiceLevel } from "./voice";
-import { tarsCrawl } from "./tars";
+import { tarsModelScale } from "./tars";
 
 const ZERO = 0;
 const ONE = 1;
@@ -157,8 +157,7 @@ export function createCinemaCharacter(character: CinemaCharacter, canvas: HTMLCa
     if (build) {
       const mesh = new CharacterMesh(segments);
       build(mesh, pose);
-      // Leave room for TARS's unfolded supports, easing with the same gait as the joints.
-      const scale = character === TARS ? MODEL_SCALE * (1 - tarsCrawl(pose) * 0.13) : MODEL_SCALE;
+      const scale = character === TARS ? tarsModelScale(pose) : MODEL_SCALE;
       mesh.paint(ctx, px, angles, offset, scale, tint, tintAmount, alpha);
     } else {
       paintCalcifer(ctx, px, pose, tint, tintAmount, alpha);
@@ -205,7 +204,7 @@ export function createCinemaCharacter(character: CinemaCharacter, canvas: HTMLCa
       paint(false);
     },
     still() {
-      time = STILL_TIME;
+      time = character === TARS ? ZERO : STILL_TIME;
       finish.settle();
       cue.settle();
       update(ONE, true);

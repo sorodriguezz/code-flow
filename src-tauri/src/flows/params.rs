@@ -12,6 +12,8 @@
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
 
+use super::schedule::fields as schedule_fields;
+
 /// How a parameter is edited. Serialised with a `type` tag the frontend switches on.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -495,20 +497,40 @@ const NOTIFY: &[ParamSpec] = &[
 
 // ------------------------------------------------------------------ triggers (milestone 2)
 
+const SCHEDULE_MODE_KIND: Kind = Kind::Select { options: schedule_fields::MODES, raw: false };
+const SCHEDULE_UNIT_KIND: Kind = Kind::Select { options: schedule_fields::UNITS, raw: false };
+const SCHEDULE_INTERVAL_KIND: Kind = Kind::Number { min: Some(schedule_fields::MINIMUM_INTERVAL), max: None };
+const SCHEDULE_DAY_KIND: Kind = Kind::MultiSelect { options: schedule_fields::WEEKDAYS };
+const SCHEDULE_MONTH_DAY_KIND: Kind = Kind::Number {
+    min: Some(schedule_fields::MINIMUM_MONTH_DAY),
+    max: Some(schedule_fields::MAXIMUM_MONTH_DAY),
+};
+const SCHEDULE_START_KIND: Kind = Kind::Text { multiline: false, placeholder: schedule_fields::START_EXAMPLE };
+const SCHEDULE_END_KIND: Kind = Kind::Text { multiline: false, placeholder: schedule_fields::END_EXAMPLE };
+const SCHEDULE_CRON_KIND: Kind = Kind::Text { multiline: false, placeholder: schedule_fields::CRON_EXAMPLE };
+const SCHEDULE_ONCE_KIND: Kind = Kind::Text { multiline: false, placeholder: schedule_fields::ONCE_EXAMPLE };
+const SCHEDULE_ZONE_KIND: Kind = Kind::Text { multiline: false, placeholder: schedule_fields::TIMEZONE_EXAMPLE };
+const SCHEDULE_COUNTRY_KIND: Kind = Kind::Text { multiline: false, placeholder: schedule_fields::COUNTRY_EXAMPLE };
+
 const SCHEDULE: &[ParamSpec] = &[
-    p("mode", select(&["interval", "times", "cron", "once"]), "\"interval\"").literal(),
-    p("every", Kind::Number { min: Some(1.0), max: None }, "15").literal().when("mode", &["interval"]),
-    p("unit", select(&["minutes", "hours", "days"]), "\"minutes\"").literal().when("mode", &["interval"]),
-    p("at", Kind::Strings, "[\"09:00\"]").literal().when("mode", &["times"]),
-    p("days", Kind::MultiSelect { options: &["mon", "tue", "wed", "thu", "fri", "sat", "sun"] }, r#"["mon","tue","wed","thu","fri"]"#)
-        .literal()
-        .when("mode", &["times"]),
-    p("cron", text("*/15 8-19 * * 1-5"), "\"\"").literal().when("mode", &["cron"]),
-    p("onceAt", text("2026-12-24 09:00"), "\"\"").literal().when("mode", &["once"]),
-    p("timezone", text("America/Santiago"), "\"\"").literal(),
-    p("catchUp", Kind::Boolean, "true").literal(),
-    p("skipHolidays", Kind::Boolean, "false").literal().when("mode", &["interval", "times", "cron"]),
-    p("holidayCountry", text("CL"), "\"CL\"").literal().when("skipHolidays", &["true"]),
+    p(schedule_fields::MODE, SCHEDULE_MODE_KIND, schedule_fields::DEFAULT_MODE).literal(),
+    p(schedule_fields::EVERY, SCHEDULE_INTERVAL_KIND, schedule_fields::DEFAULT_EVERY).literal().when(schedule_fields::MODE, schedule_fields::INTERVAL_MODES),
+    p(schedule_fields::UNIT, SCHEDULE_UNIT_KIND, schedule_fields::DEFAULT_UNIT).literal().when(schedule_fields::MODE, schedule_fields::INTERVAL_MODES),
+    p(schedule_fields::INTERVAL_DAYS, SCHEDULE_DAY_KIND, schedule_fields::DEFAULT_INTERVAL_DAYS).literal().when(schedule_fields::MODE, schedule_fields::INTERVAL_MODES),
+    p(schedule_fields::TIME_WINDOW, Kind::Boolean, schedule_fields::FALSE_JSON).literal()
+        .when(schedule_fields::MODE, schedule_fields::INTERVAL_MODES).and_when(schedule_fields::UNIT, schedule_fields::SHORT_UNITS),
+    p(schedule_fields::WINDOW_START, SCHEDULE_START_KIND, schedule_fields::DEFAULT_WINDOW_START).literal().when(schedule_fields::TIME_WINDOW, schedule_fields::ENABLED),
+    p(schedule_fields::WINDOW_END, SCHEDULE_END_KIND, schedule_fields::DEFAULT_WINDOW_END).literal().when(schedule_fields::TIME_WINDOW, schedule_fields::ENABLED),
+    p(schedule_fields::AT, Kind::Strings, schedule_fields::DEFAULT_AT).literal().when(schedule_fields::MODE, schedule_fields::CALENDAR_MODES),
+    p(schedule_fields::DAYS, SCHEDULE_DAY_KIND, schedule_fields::DEFAULT_DAYS).literal().when(schedule_fields::MODE, schedule_fields::TIMES_MODES),
+    p(schedule_fields::WEEK_DAYS, SCHEDULE_DAY_KIND, schedule_fields::DEFAULT_WEEK_DAYS).literal().when(schedule_fields::MODE, schedule_fields::WEEKLY_MODES),
+    p(schedule_fields::MONTH_DAY, SCHEDULE_MONTH_DAY_KIND, schedule_fields::DEFAULT_MONTH_DAY).literal().when(schedule_fields::MODE, schedule_fields::MONTHLY_MODES),
+    p(schedule_fields::CRON, SCHEDULE_CRON_KIND, schedule_fields::EMPTY_JSON).literal().when(schedule_fields::MODE, schedule_fields::CRON_MODES),
+    p(schedule_fields::ONCE_AT, SCHEDULE_ONCE_KIND, schedule_fields::EMPTY_JSON).literal().when(schedule_fields::MODE, schedule_fields::ONCE_MODES),
+    p(schedule_fields::TIMEZONE, SCHEDULE_ZONE_KIND, schedule_fields::EMPTY_JSON).literal(),
+    p(schedule_fields::CATCH_UP, Kind::Boolean, schedule_fields::TRUE_JSON).literal(),
+    p(schedule_fields::SKIP_HOLIDAYS, Kind::Boolean, schedule_fields::FALSE_JSON).literal().when(schedule_fields::MODE, schedule_fields::REPEATING_MODES),
+    p(schedule_fields::HOLIDAY_COUNTRY, SCHEDULE_COUNTRY_KIND, schedule_fields::DEFAULT_COUNTRY).literal().when(schedule_fields::SKIP_HOLIDAYS, schedule_fields::ENABLED),
 ];
 
 const WEBHOOK: &[ParamSpec] = &[

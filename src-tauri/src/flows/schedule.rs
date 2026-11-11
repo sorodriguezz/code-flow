@@ -1,31 +1,15 @@
-//! When a Schedule trigger fires: the arithmetic, with no clock of its own.
-//!
-//! Three ways to say "when", each one a parameter set the node's form writes:
-//! - **every N minutes / hours / days**, counted from midnight in the trigger's zone, so "every 15
-//!   minutes" means :00, :15, :30, :45 rather than "15 minutes after whenever the app happened to
-//!   start" — the schedule a person reads off the form is the one that runs. A step of a day or more
-//!   cannot restart at every midnight, so it is counted from a fixed Monday instead ([`LONG_ANCHOR`]):
-//!   "every 3 days" is the same days whenever the flow is saved or the app is opened;
-//! - **at these times on these days** (`at` + `days`), which is a cron expression the person never
-//!   had to write;
-//! - **a cron expression**, five fields or six with seconds, read by croner.
-//!
-//! Everything is computed in the trigger's IANA zone and returned as UTC instants, so a daily 02:30
-//! survives the night the clocks change: croner settles the hour that does not exist (spring) and
-//! the one that happens twice (autumn), and the tests below pin both.
-//!
-//! **Waking up.** A laptop asleep at 03:00 cannot run the 03:00 backup. [`decide`] is what the loop
-//! asks each time it looks at the clock: nothing yet, fire now, or — when the moment passed long
-//! enough ago that the computer must have been asleep — fire once to catch up (or skip it, when the
-//! trigger says so). Never once per missed occurrence: a week of a 15-minute schedule is not 672
-//! runs on Monday morning.
-
 use std::str::FromStr;
 
-use chrono::{DateTime, Duration, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Duration, TimeZone, Utc};
 use chrono_tz::Tz;
 use croner::Cron;
 use serde_json::Value;
+
+pub(crate) mod fields;
+mod recurrence;
+
+#[cfg(test)]
+mod recurrence_tests;
 
 /// How late a fire may be and still count as on time — the loop's own tick plus room for a busy
 /// machine. Later than this, the occurrence was missed (the computer was asleep).
@@ -36,6 +20,7 @@ pub const ON_TIME: Duration = Duration::seconds(90);
 pub enum Schedule {
     /// Every `step` from midnight in `zone`.
     Every { step: Duration, zone: Tz },
+    Restricted { interval: recurrence::RestrictedInterval },
     Cron { cron: Box<Cron>, zone: Tz },
     /// One moment, once («Una sola vez»).
     Once { at: DateTime<Utc> },
@@ -65,7 +50,8 @@ pub fn zone_of(params: &Value, flow_zone: Option<&str>) -> Result<Tz, String> {
 /// would also match 09:30 and 17:00.
 pub fn parse_all(params: &Value, flow_zone: Option<&str>) -> Result<Vec<Schedule>, String> {
     let zone = zone_of(params, flow_zone)?;
-    match text(params, "mode").as_str() {
+    let mode = text(params, fields::MODE);
+    match mode.as_str() {
         "once" => {
             let raw = text(params, "onceAt");
             if raw.is_empty() {
@@ -82,56 +68,8 @@ pub fn parse_all(params: &Value, flow_zone: Option<&str>) -> Result<Vec<Schedule
             let cron = Cron::from_str(&expression).map_err(|e| format!("\"{expression}\" is not a cron expression: {e}"))?;
             Ok(vec![Schedule::Cron { cron: Box::new(cron), zone }])
         }
-        "times" => {
-            let mut times: Vec<NaiveTime> = Vec::new();
-            for raw in params.get("at").and_then(Value::as_array).into_iter().flatten() {
-                let raw = raw.as_str().unwrap_or_default().trim();
-                if raw.is_empty() {
-                    continue;
-                }
-                let time = NaiveTime::parse_from_str(raw, "%H:%M")
-                    .or_else(|_| NaiveTime::parse_from_str(raw, "%H:%M:%S"))
-                    .map_err(|_| format!("\"{raw}\" is not a time of day (HH:MM)"))?;
-                times.push(time);
-            }
-            if times.is_empty() {
-                return Err("Add at least one time of day".into());
-            }
-            let days: Vec<usize> = params
-                .get("days")
-                .and_then(Value::as_array)
-                .map(|list| {
-                    list.iter()
-                        .filter_map(Value::as_str)
-                        .filter_map(|day| WEEKDAYS.iter().position(|w| *w == day))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if days.is_empty() {
-                return Err("Choose at least one day".into());
-            }
-            // cron counts Sunday as 0; the form counts from Monday.
-            let dow: Vec<String> = days.iter().map(|d| ((d + 1) % 7).to_string()).collect();
-            times
-                .iter()
-                .map(|t| {
-                    let line = format!("{} {} {} * * {}", t.format("%-S"), t.format("%-M"), t.format("%-H"), dow.join(","));
-                    Cron::from_str(&line).map(|cron| Schedule::Cron { cron: Box::new(cron), zone }).map_err(|e| e.to_string())
-                })
-                .collect()
-        }
-        _ => {
-            let every = params.get("every").and_then(Value::as_f64).unwrap_or(15.0);
-            if !(every >= 1.0) {
-                return Err("The interval has to be at least 1".into());
-            }
-            let unit = match text(params, "unit").as_str() {
-                "hours" => Duration::hours(1),
-                "days" => Duration::days(1),
-                _ => Duration::minutes(1),
-            };
-            Ok(vec![Schedule::Every { step: unit * (every.floor().min(100_000.0) as i32), zone }])
-        }
+        fields::TIMES | fields::WEEKLY | fields::MONTHLY => recurrence::parse_calendar(params, zone),
+        _ => recurrence::parse_interval(params, zone),
     }
 }
 
@@ -152,6 +90,7 @@ pub fn once_instant(raw: &str, zone: Tz) -> Option<DateTime<Utc>> {
 pub fn zone_of_schedule(schedules: &[Schedule]) -> Option<Tz> {
     schedules.iter().find_map(|s| match s {
         Schedule::Every { zone, .. } | Schedule::Cron { zone, .. } => Some(*zone),
+        Schedule::Restricted { interval } => Some(interval.zone),
         Schedule::Once { .. } => None,
     })
 }
@@ -160,24 +99,19 @@ impl Schedule {
     /// The first occurrence strictly after `after`.
     pub fn next_after(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
         match self {
+            Schedule::Restricted { interval } => interval.next_after(after),
             Schedule::Once { at } => (*at > after).then_some(*at),
             Schedule::Every { step, zone } if step.num_milliseconds() >= DAY_MS => every_long(*step, *zone, after),
             Schedule::Every { step, zone } => {
                 let local = after.with_timezone(zone);
-                let midnight = zone
-                    .from_local_datetime(&local.date_naive().and_hms_opt(0, 0, 0)?)
-                    .earliest()?
-                    .with_timezone(&Utc);
+                let date = local.date_naive();
+                let midnight = local_midnight(*zone, date)?;
                 let step_ms = step.num_milliseconds().max(1000);
                 let since = (after - midnight).num_milliseconds();
                 let n = since.div_euclid(step_ms) + 1;
                 let candidate = midnight + Duration::milliseconds(n * step_ms);
-                // A step that does not divide the day evenly restarts at the next midnight, so the
-                // schedule is the same every day rather than drifting.
-                let next_midnight = zone
-                    .from_local_datetime(&(local.date_naive() + Duration::days(1)).and_hms_opt(0, 0, 0)?)
-                    .earliest()?
-                    .with_timezone(&Utc);
+                let tomorrow = date.succ_opt()?;
+                let next_midnight = local_midnight(*zone, tomorrow)?;
                 Some(if candidate > next_midnight && step_ms < 86_400_000 { next_midnight } else { candidate })
             }
             Schedule::Cron { cron, zone } => {
@@ -317,7 +251,11 @@ pub fn decide(schedules: &[Schedule], pending: DateTime<Utc>, now: DateTime<Utc>
     }
     let next = next_of(schedules, now);
     let late = now - pending > ON_TIME;
-    if late && !catch_up {
+    let allowed_now = schedules.iter().any(|schedule| match schedule {
+        Schedule::Restricted { interval } => interval.allows(now),
+        _ => true,
+    });
+    if late && (!catch_up || !allowed_now) {
         Decision::Skip { scheduled: pending, next }
     } else {
         Decision::Fire { scheduled: pending, late, next }
@@ -329,6 +267,7 @@ pub fn describe(params: &Value, spanish: bool) -> String {
     let mode = text(params, "mode");
     let holidays = params.get("skipHolidays").and_then(Value::as_bool) == Some(true) && mode != "once";
     let said = describe_when(params, &mode, spanish);
+    let said = recurrence::describe_restrictions(params, said, spanish);
     if holidays {
         let country = text(params, "holidayCountry");
         let country = if country.is_empty() { "CL".to_string() } else { country.to_uppercase() };
@@ -344,14 +283,16 @@ fn describe_when(params: &Value, mode: &str, spanish: bool) -> String {
             if spanish { format!("una vez, {at}") } else { format!("once, {at}") }
         }
         "cron" => text(params, "cron"),
-        "times" => {
+        fields::MONTHLY => recurrence::describe_monthly(params, spanish),
+        fields::TIMES | fields::WEEKLY => {
             let times: Vec<String> = params
                 .get("at")
                 .and_then(Value::as_array)
                 .map(|list| list.iter().filter_map(Value::as_str).map(str::to_string).collect())
                 .unwrap_or_default();
+            let days_key = if mode == fields::WEEKLY { fields::WEEK_DAYS } else { fields::DAYS };
             let days: Vec<&str> = params
-                .get("days")
+                .get(days_key)
                 .and_then(Value::as_array)
                 .map(|list| list.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
