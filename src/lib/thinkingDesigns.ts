@@ -15,7 +15,7 @@ export type ThinkingDesign =
   | "rocky"
   | "ghost"
   | "crab"
-  | "tars"
+  | "baymax"
   | "r2d2"
   | "calcifer"
   | "cloud"
@@ -54,7 +54,7 @@ export const THINKING_DESIGNS: readonly {
   { id: "rocky", labelKey: "thinking.rocky", kind: "canvas", finishMs: 1650 },
   { id: "ghost", labelKey: "thinking.ghost", kind: "canvas", finishMs: 1500 },
   { id: "crab", labelKey: "thinking.crab", kind: "canvas", finishMs: 1600 },
-  { id: "tars", labelKey: "thinking.tars", kind: "canvas", finishMs: CHARACTER_FINISH_MS, voice: true },
+  { id: "baymax", labelKey: "thinking.baymax", kind: "canvas", finishMs: CHARACTER_FINISH_MS, voice: true },
   { id: "r2d2", labelKey: "thinking.r2d2", kind: "canvas", finishMs: CHARACTER_FINISH_MS, voice: true },
   { id: "calcifer", labelKey: "thinking.calcifer", kind: "canvas", finishMs: CHARACTER_FINISH_MS, voice: true },
   { id: "cloud", labelKey: "thinking.cloud", kind: "canvas", finishMs: 1500, voice: true },
@@ -67,7 +67,7 @@ export function isThinkingDesign(value: unknown): value is ThinkingDesign {
   return THINKING_DESIGNS.some((design) => design.id === value);
 }
 
-const SUCCESSORS: Readonly<Record<string, ThinkingDesign>> = { star: "cat", panda: "tars", pixels: "rocky", network: "axolotl", spark: "calcifer", halo: "walle", moon: "tars", atom: "r2d2" };
+const SUCCESSORS: Readonly<Record<string, ThinkingDesign>> = { tars: "baymax", star: "cat", panda: "baymax", pixels: "rocky", network: "axolotl", spark: "calcifer", halo: "walle", moon: "baymax", atom: "r2d2" };
 
 export function storedThinkingDesign(value: unknown): ThinkingDesign {
   const current = isThinkingDesign(value);

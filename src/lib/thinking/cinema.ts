@@ -10,7 +10,6 @@ import { palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
 import { contactShadow } from "./volume";
 import { voiceLevel } from "./voice";
-import { tarsModelScale } from "./tars";
 
 const ZERO = 0;
 const ONE = 1;
@@ -30,6 +29,8 @@ const WRITE_GROUP = "write";
 const DETAIL_THRESHOLD = 44;
 const ICON_SEGMENTS = 16;
 const DETAIL_SEGMENTS = 30;
+const BAYMAX_DETAIL_SEGMENTS = 24;
+const BAYMAX_DETAIL_THRESHOLD = 88;
 const GAZE_EASING = 9;
 const SIGNAL_EASING = 16;
 const STILL_TIME = 1.1;
@@ -40,7 +41,8 @@ const ERROR_TINT = 0.12;
 const SUCCESS_TINT = 0;
 const MODEL_SCALE = 0.96;
 const REST_YAW = -0.36;
-const TARS_YAW = -0.22;
+const BAYMAX_YAW = -0.12;
+const BAYMAX_END_POSE_SECONDS = 0.95;
 const REST_PITCH = -0.12;
 const ROLL_RATE = 2.5;
 const WORK_ROLL = 0.035;
@@ -72,7 +74,7 @@ const BADGE_Y = 0.78;
 const TRANSPARENT = 0;
 const CALCIFER = "calcifer";
 const WALLE = "walle";
-const TARS = "tars";
+const BAYMAX = "baymax";
 const R2D2 = "r2d2";
 const INITIAL_POSE: CharacterPose = {
   time: ZERO, gazeX: ZERO, gazeY: ZERO, work: ZERO, read: ZERO,
@@ -84,8 +86,10 @@ export function createCinemaCharacter(character: CinemaCharacter, canvas: HTMLCa
   const ctx = prepareCanvas(canvas, px);
   const finish = finishClock();
   const cue = cueClock();
-  const detail = px >= DETAIL_THRESHOLD;
-  const segments = detail ? DETAIL_SEGMENTS : ICON_SEGMENTS;
+  const detailThreshold = character === BAYMAX ? BAYMAX_DETAIL_THRESHOLD : DETAIL_THRESHOLD;
+  const detail = px >= detailThreshold;
+  const detailSegments = character === BAYMAX ? BAYMAX_DETAIL_SEGMENTS : DETAIL_SEGMENTS;
+  const segments = detail ? detailSegments : ICON_SEGMENTS;
   const anime = character === CALCIFER;
   const build = anime ? null : CINEMA_BUILDERS[character];
   const pose = { ...INITIAL_POSE };
@@ -122,7 +126,8 @@ export function createCinemaCharacter(character: CinemaCharacter, canvas: HTMLCa
     pose.speak = speaking ? ONE : ZERO;
     pose.listen = listening ? ONE : ZERO;
     pose.quiet = quiet ? ONE : ZERO;
-    const endProgress = frozen ? ONE : Math.min(ONE, finish.fin / END_POSE_SECONDS);
+    const endDuration = character === BAYMAX ? BAYMAX_END_POSE_SECONDS : END_POSE_SECONDS;
+    const endProgress = frozen ? ONE : Math.min(ONE, finish.fin / endDuration);
     pose.done = state === DONE_STATE ? endProgress : ZERO;
     pose.failed = state === FAILED_STATE ? endProgress : ZERO;
     pose.signal = signal;
@@ -145,8 +150,8 @@ export function createCinemaCharacter(character: CinemaCharacter, canvas: HTMLCa
     const offset: Point3 = [ZERO, bob - bounce - wake * WAKE_LIFT + pose.failed * ERROR_SINK, ZERO];
     const workWave = Math.sin(time * ROLL_RATE);
     const workRoll = anime && awake ? workWave * pose.work * WORK_ROLL : ZERO;
-    const failureRoll = character === TARS ? ZERO : pose.failed * ERROR_ROLL;
-    const yaw = character === TARS ? TARS_YAW : REST_YAW;
+    const failureRoll = character === BAYMAX ? ZERO : pose.failed * ERROR_ROLL;
+    const yaw = character === BAYMAX ? BAYMAX_YAW : REST_YAW;
     const angles: Point3 = [REST_PITCH, yaw, workRoll + failureRoll];
     const alpha = state === STOPPING_STATE ? STOPPING_OPACITY : pose.quiet ? PAUSED_OPACITY : ONE;
     const tint = pose.failed ? colors.danger : colors.success;
@@ -157,7 +162,7 @@ export function createCinemaCharacter(character: CinemaCharacter, canvas: HTMLCa
     if (build) {
       const mesh = new CharacterMesh(segments);
       build(mesh, pose);
-      const scale = character === TARS ? tarsModelScale(pose) : MODEL_SCALE;
+      const scale = MODEL_SCALE;
       mesh.paint(ctx, px, angles, offset, scale, tint, tintAmount, alpha);
     } else {
       paintCalcifer(ctx, px, pose, tint, tintAmount, alpha);
@@ -204,7 +209,7 @@ export function createCinemaCharacter(character: CinemaCharacter, canvas: HTMLCa
       paint(false);
     },
     still() {
-      time = character === TARS ? ZERO : STILL_TIME;
+      time = STILL_TIME;
       finish.settle();
       cue.settle();
       update(ONE, true);
@@ -221,8 +226,8 @@ export function createWalle(canvas: HTMLCanvasElement, px: number, gain = DEFAUL
   return createCinemaCharacter(WALLE, canvas, px, gain);
 }
 
-export function createTars(canvas: HTMLCanvasElement, px: number, gain = DEFAULT_GAIN): Painter {
-  return createCinemaCharacter(TARS, canvas, px, gain);
+export function createBaymax(canvas: HTMLCanvasElement, px: number, gain = DEFAULT_GAIN): Painter {
+  return createCinemaCharacter(BAYMAX, canvas, px, gain);
 }
 
 export function createR2d2(canvas: HTMLCanvasElement, px: number, gain = DEFAULT_GAIN): Painter {

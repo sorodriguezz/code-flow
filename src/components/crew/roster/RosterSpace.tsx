@@ -26,6 +26,8 @@ import { ConfigurationExportButton, ConfigurationImportButton } from "../Configu
 import { AGENT_CONFIGURATION } from "../../../lib/agents/shareConfiguration";
 
 const AGENT_CARD_ACTIONS_CLASS = "pointer-events-none absolute inset-x-2 bottom-2 flex translate-y-3 flex-wrap items-center justify-center gap-1 rounded-[12px] border border-[var(--cf-border)] bg-[var(--cf-surface)] p-1 opacity-0 shadow-[var(--cf-shadow)] transition-[opacity,transform] duration-150 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100";
+const ROSTER_GRID_CLASS = "grid w-full auto-rows-fr grid-cols-[repeat(auto-fill,minmax(min(100%,230px),1fr))] gap-3";
+const ROSTER_HINT_CLASS = "mt-4 text-[11.5px] text-[var(--cf-text-faint)]";
 
 function useLibrary() {
   const saved = useLibraryStore((s) => s.saved);
@@ -256,7 +258,7 @@ export function RosterSpace() {
             </Empty>
           ) : (
             <div className="min-h-0 flex-1 overflow-auto p-4">
-              <div className="mx-auto grid max-w-[1300px] auto-rows-fr grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-3">
+              <div className={ROSTER_GRID_CLASS}>
                 {shown.map((agent, index) => (
                   <AgentCard key={agent.id} agent={agent} index={index} onSync={(template) => setSync({ agent, template })} />
                 ))}
@@ -272,7 +274,7 @@ export function RosterSpace() {
                   {l("Nuevo agente", "New agent")}
                 </motion.button>
               </div>
-              <p className="mx-auto mt-4 max-w-[1300px] text-[11.5px] text-[var(--cf-text-faint)]">{l("Arrastra una tarjeta sobre otra para cambiar el orden del dock.", "Drag a card onto another to change the dock's order.")}</p>
+              <p className={ROSTER_HINT_CLASS}>{l("Arrastra una tarjeta sobre otra para cambiar el orden del dock.", "Drag a card onto another to change the dock's order.")}</p>
             </div>
           )}
       </div>

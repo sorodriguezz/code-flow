@@ -15,7 +15,7 @@ import { createCrab } from "../../lib/thinking/crab";
 import { createCloud } from "../../lib/thinking/cloud";
 import { createBulb } from "../../lib/thinking/bulb";
 import { createAlien } from "../../lib/thinking/alien";
-import { createCalcifer, createWalle, createTars, createR2d2 } from "../../lib/thinking/cinema";
+import { createCalcifer, createWalle, createBaymax, createR2d2 } from "../../lib/thinking/cinema";
 import { createNutcracker } from "../../lib/thinking/nutcracker";
 import { useThinkingDesignStore } from "../../state/thinkingDesignStore";
 import { voiceLevel } from "../../lib/thinking/voice";
@@ -197,7 +197,7 @@ const PAINTERS: Partial<Record<ThinkingDesign, (canvas: HTMLCanvasElement, px: n
   rocky: createRocky,
   ghost: createGhost,
   crab: createCrab,
-  tars: createTars,
+  baymax: createBaymax,
   r2d2: createR2d2,
   calcifer: createCalcifer,
   walle: createWalle,

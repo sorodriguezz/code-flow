@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { ArrowLeft, ChevronRight, Search } from "lucide-react";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useTeamStore } from "../../state/teamStore";
+import { isPersonalAgent } from "../../lib/agents/personalAgents";
 import { useSlots } from "./kit/slots";
 import { AgentAvatar, TeamAvatar } from "./kit/Avatar";
 import { useDragSource, useDragStore } from "./kit/drag";
@@ -22,6 +23,7 @@ const STATE_TEXT: Record<string, [string, string]> = {
 /** Width of one dock tile including the gap after it. */
 const SLOT = 48;
 const DIVIDER_SLOT = 17;
+const IDLE_AGENT_STATE = "idle";
 
 /** Busy first: whoever waits on you, then errors, then work in progress — what you look for in a long row. */
 const STATE_ORDER: Record<string, number> = { waiting: 0, error: 1, thinking: 2, idle: 3 };
@@ -284,7 +286,17 @@ export function Dock() {
     return byAgent;
   }, [teams]);
   const agents = useMemo(
-    () => roster.filter((a) => a.enabled).sort((a, b) => (STATE_ORDER[states.get(a.id) ?? "idle"] ?? 3) - (STATE_ORDER[states.get(b.id) ?? "idle"] ?? 3)),
+    () => {
+      const personalAgents = roster.filter(isPersonalAgent);
+      const enabledAgents = personalAgents.filter((agent) => agent.enabled);
+      return enabledAgents.sort((firstAgent, secondAgent) => {
+        const firstState = states.get(firstAgent.id) ?? IDLE_AGENT_STATE;
+        const secondState = states.get(secondAgent.id) ?? IDLE_AGENT_STATE;
+        const firstPriority = STATE_ORDER[firstState] ?? STATE_ORDER.idle;
+        const secondPriority = STATE_ORDER[secondState] ?? STATE_ORDER.idle;
+        return firstPriority - secondPriority;
+      });
+    },
     [roster, states],
   );
 

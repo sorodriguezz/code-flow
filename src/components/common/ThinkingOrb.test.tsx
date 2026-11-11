@@ -20,9 +20,9 @@ const css = readFileSync(new URL("../../index.css", import.meta.url), "utf8");
 // snapshot), so `setState` could never show here whether the orb follows the store.
 const setting = vi.hoisted(() => ({ design: "sphere" }));
 const EXPECTED_DESIGN_COUNT = 21;
-const VOICED_DESIGNS = ["orb", "walle", "axolotl", "wave", "tars", "r2d2", "calcifer", "cloud", "bulb", "alien", "nutcracker"];
+const VOICED_DESIGNS = ["orb", "walle", "axolotl", "wave", "baymax", "r2d2", "calcifer", "cloud", "bulb", "alien", "nutcracker"];
 const CHARACTER_SUCCESSORS = [
-  ["spark", "calcifer"], ["halo", "walle"], ["moon", "tars"], ["atom", "r2d2"],
+  ["tars", "baymax"], ["spark", "calcifer"], ["halo", "walle"], ["moon", "baymax"], ["atom", "r2d2"],
 ] as const;
 const PROTOTYPE_KEYS = ["__proto__", "constructor", "toString"];
 const SUCCESSOR_TEST = "migrates the saved %s selection to %s";
@@ -201,7 +201,7 @@ describe("the thinking designs", () => {
   it("give the avatar time for the finishes built around one, and a brief resolve to the rest", () => {
     const finishing = [
       "orb", "axolotl", "wave", "liquid", "crystal", "cat", "rocky", "ghost", "walle",
-      "crab", "tars", "r2d2", "calcifer", "cloud", "bulb", "alien", "nutcracker",
+      "crab", "baymax", "r2d2", "calcifer", "cloud", "bulb", "alien", "nutcracker",
     ] as const;
     for (const id of finishing) {
       expect(thinkingFinishMs(id), id).toBeGreaterThanOrEqual(1400);
@@ -235,7 +235,7 @@ describe("the thinking designs", () => {
   it("reads a replaced design as its successor, and anything else unknown as the default", () => {
     expect(isThinkingDesign("star")).toBe(false);
     expect(storedThinkingDesign("star")).toBe("cat");
-    expect(storedThinkingDesign("panda")).toBe("tars");
+    expect(storedThinkingDesign("panda")).toBe("baymax");
     expect(isThinkingDesign("pixels")).toBe(false);
     expect(storedThinkingDesign("pixels")).toBe("rocky");
     expect(isThinkingDesign("network")).toBe(false);

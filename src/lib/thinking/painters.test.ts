@@ -17,7 +17,7 @@ import { createCrab } from "./crab";
 import { createCloud } from "./cloud";
 import { createBulb } from "./bulb";
 import { createAlien } from "./alien";
-import { createCalcifer, createWalle, createTars, createR2d2 } from "./cinema";
+import { createCalcifer, createWalle, createBaymax, createR2d2 } from "./cinema";
 import { createNutcracker } from "./nutcracker";
 
 /**
@@ -273,7 +273,7 @@ function fakeCanvas() {
 type Make = (canvas: HTMLCanvasElement, px: number, gain: number) => Painter;
 
 const CINEMA_PAINTERS = [
-  ["calcifer", createCalcifer], ["walle", createWalle], ["tars", createTars], ["r2d2", createR2d2],
+  ["calcifer", createCalcifer], ["walle", createWalle], ["baymax", createBaymax], ["r2d2", createR2d2],
 ] as const;
 const CINEMA_STATES: readonly ThinkingActivity[] = [
   { phase: "think" }, { phase: "read" }, { phase: "edit" }, { phase: "write" },
@@ -323,7 +323,7 @@ const PAINTERS: Record<string, Make> = {
   ghost: createGhost,
   crab: createCrab,
   walle: createWalle,
-  tars: createTars,
+  baymax: createBaymax,
   r2d2: createR2d2,
   calcifer: createCalcifer,
   cloud: createCloud,
@@ -460,7 +460,7 @@ describe("every canvas design", () => {
 });
 
 describe("perspective at the pointer's extremes", () => {
-  const characters = { walle: createWalle, tars: createTars, r2d2: createR2d2, axolotl: createAxolotl, rocky: createRocky, ghost: createGhost, cat: createCat, crab: createCrab, cloud: createCloud, alien: createAlien, calcifer: createCalcifer, bulb: createBulb };
+  const characters = { walle: createWalle, baymax: createBaymax, r2d2: createR2d2, axolotl: createAxolotl, rocky: createRocky, ghost: createGhost, cat: createCat, crab: createCrab, cloud: createCloud, alien: createAlien, calcifer: createCalcifer, bulb: createBulb };
 
   it.each(Object.entries(characters))("keeps %s in view", (_, make) => {
     const run = play(make, ORB_PX.hero, 2.2, [
@@ -486,7 +486,7 @@ describe("perspective at the pointer's extremes", () => {
 });
 
 describe("rail character choreography", () => {
-  it.each([["TARS", createTars], ["nutcracker", createNutcracker]] as const)(
+  it.each([["BAYMAX", createBaymax], ["nutcracker", createNutcracker]] as const)(
     "%s visibly changes silhouette at 32px without an activity phase",
     (_, make) => {
       const px = ORB_PX.card;
@@ -527,7 +527,7 @@ describe("rail character choreography", () => {
     }
   });
 
-  it.each([["TARS", createTars], ["nutcracker", createNutcracker]] as const)(
+  it.each([["BAYMAX", createBaymax], ["nutcracker", createNutcracker]] as const)(
     "%s stops its limb choreography while quiet or stopping",
     (_, make) => {
       for (const activity of [{ quiet: true }, { stopping: true }]) {

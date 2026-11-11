@@ -1,9 +1,9 @@
 import type { CharacterMesh } from "./characterMesh";
 import { buildWalle } from "./walle";
-import { buildTars } from "./tars";
+import { buildBaymax } from "./baymax";
 import { buildR2d2 } from "./r2d2";
 
-export type CinemaCharacter = "calcifer" | "walle" | "tars" | "r2d2";
+export type CinemaCharacter = "calcifer" | "walle" | "baymax" | "r2d2";
 export interface CharacterPose {
   time: number;
   gazeX: number;
@@ -21,6 +21,6 @@ export interface CharacterPose {
 
 export const CINEMA_BUILDERS: Record<Exclude<CinemaCharacter, "calcifer">, (mesh: CharacterMesh, pose: CharacterPose) => void> = {
   walle: buildWalle,
-  tars: buildTars,
+  baymax: buildBaymax,
   r2d2: buildR2d2,
 };

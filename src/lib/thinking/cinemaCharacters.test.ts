@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { CharacterMesh, type Point3, type Solid } from "./characterMesh";
 import type { CharacterPose } from "./cinemaCharacters";
 import { buildWalle } from "./walle";
-import { buildTars } from "./tars";
+import { buildBaymax } from "./baymax";
 import { buildR2d2 } from "./r2d2";
 import { frontPanel } from "./cinemaGeometry";
 import type { Rgb } from "./palette";
@@ -10,10 +10,8 @@ import type { Rgb } from "./palette";
 const ZERO = 0;
 const ONE = 1;
 const TWO = 2;
-const HALF = 0.5;
 const SEGMENTS = 16;
 const SIZE = 180;
-const QUARTER_TURN = Math.PI / TWO;
 const X = 0;
 const Y = 1;
 const Z = 2;
@@ -41,26 +39,19 @@ const RED_PREFIX = "rgba(";
 const BLUE_CHANNEL_PATTERN = /^rgba\(0,0,[1-9]/;
 const RED_CHANNEL_PATTERN = /^rgba\([1-9]\d*,0,0,/;
 const MECHANICS_SUITE = "cinema character articulation";
-const TARS_GAIT = "TARS opens into a wider fan while retaining an upright supporting column";
-const TARS_FINISH = "TARS finishes without splaying its columns like arms";
-const TARS_IDLE_GAIT = "TARS alternates its compact silhouette with a rigid column fan on the rail";
-const TARS_RIGID_COLUMNS = "keeps four full height rigid columns throughout %j";
-const TARS_COLUMN_WIDTH = 0.105;
-const TARS_COLUMN_HEIGHT = 0.82;
-const TARS_COLUMN_DEPTH = 0.14;
-const TARS_COLUMN_COUNT = 4;
-const TARS_FAN_TIME = 3.2;
-const TARS_STANDING_TIME = 0;
-const TARS_MINIMUM_WIDTH_CHANGE = 8;
-const TARS_MINIMUM_SUPPORT_HEIGHT = 0.7;
-const TARS_FRAME_PX = 32;
-const TARS_ORIENTATION: Point3 = [-0.12, -0.22, 0];
-const TARS_TEST_SCALE = 0.91;
-const TARS_GROUND_TEST = "TARS keeps at least one rigid column on the same ground through its gait";
-const TARS_GAIT_FRAMES = 80;
-const TARS_GAIT_FRAME_SECONDS = 0.1;
-const TARS_GROUND_PRECISION = 5;
-const TARS_GROUND_Y = (HALF + TARS_COLUMN_HEIGHT * HALF * TARS_TEST_SCALE) * TARS_FRAME_PX;
+const BAYMAX_FRAME_PX = 32;
+const BAYMAX_ORIENTATION: Point3 = [-0.12, -0.12, 0];
+const BAYMAX_SCALE = 0.96;
+const BAYMAX_DEFLATION_RATIO = 0.65;
+const BAYMAX_PARTIAL_FAILURE = 0.5;
+const BAYMAX_HEAD_Y = -0.3;
+const BAYMAX_GAZE_TEST = "B Max turns its head toward the pointer while keeping its feet planted";
+const BAYMAX_ERROR_TEST = "B Max progressively deflates toward the floor when a run fails";
+const BAYMAX_EYES_TEST = "B Max replaces its round eyes with two crosses on failure";
+const BAYMAX_CROSS_VERTICES = 4;
+const BAYMAX_FACE_INK: Rgb = [19, 23, 28];
+const ELLIPSOID = "ellipsoid";
+const POLYGON = "polygon";
 const WALLE_GAZE = "WALL·E turns its binocular head while the tracks stay planted";
 const R2_GAZE = "R2-D2 follows the pointer by rotating its dome without pitching it";
 const DECAL_TEST = "keeps a front label above its sloping shell through a group transform";
@@ -80,80 +71,64 @@ function drawingContext() {
   return { ctx: context as unknown as CanvasRenderingContext2D, colors, points };
 }
 
-function tarsBounds(pose: CharacterPose) {
+function baymaxBounds(pose: CharacterPose) {
   const mesh = new CharacterMesh(SEGMENTS);
   const { ctx, points } = drawingContext();
-  buildTars(mesh, pose);
-  mesh.paint(ctx, TARS_FRAME_PX, TARS_ORIENTATION, ROOT, TARS_TEST_SCALE, WHITE, ZERO, ONE);
+  buildBaymax(mesh, pose);
+  mesh.paint(ctx, BAYMAX_FRAME_PX, BAYMAX_ORIENTATION, ROOT, BAYMAX_SCALE, WHITE, ZERO, ONE);
   const xs = points.map(([x]) => x);
   const ys = points.map(([, y]) => y);
   return {
     width: Math.max(...xs) - Math.min(...xs),
+    bottom: Math.max(...ys),
     height: Math.max(...ys) - Math.min(...ys),
   };
 }
 
 describe(MECHANICS_SUITE, () => {
-  it(TARS_GAIT, () => {
-    const standing = tarsBounds({ ...POSE, quiet: ONE });
-    const running = tarsBounds({ ...POSE, time: TARS_FAN_TIME, work: ONE });
-    const widthChange = running.width - standing.width;
-    const minimumHeight = standing.height * TARS_MINIMUM_SUPPORT_HEIGHT;
-    expect(widthChange).toBeGreaterThan(TARS_MINIMUM_WIDTH_CHANGE);
-    expect(running.height).toBeGreaterThan(minimumHeight);
+  it(BAYMAX_ERROR_TEST, () => {
+    const standingPose = { ...POSE, quiet: ONE };
+    const halfwayPose = { ...POSE, failed: BAYMAX_PARTIAL_FAILURE };
+    const failedPose = { ...POSE, failed: ONE };
+    const standing = baymaxBounds(standingPose);
+    const halfway = baymaxBounds(halfwayPose);
+    const deflated = baymaxBounds(failedPose);
+    const maximumHeight = standing.height * BAYMAX_DEFLATION_RATIO;
+    expect(halfway.height).toBeLessThan(standing.height);
+    expect(halfway.height).toBeGreaterThan(deflated.height);
+    expect(deflated.height).toBeLessThan(maximumHeight);
+    expect(deflated.bottom).toBeCloseTo(standing.bottom, ONE);
   });
 
-  it(TARS_IDLE_GAIT, () => {
-    const standing = tarsBounds({ ...POSE, time: TARS_STANDING_TIME });
-    const unfolded = tarsBounds({ ...POSE, time: TARS_FAN_TIME });
-    const widthChange = unfolded.width - standing.width;
-    const minimumHeight = standing.height * TARS_MINIMUM_SUPPORT_HEIGHT;
-    expect(widthChange).toBeGreaterThan(TARS_MINIMUM_WIDTH_CHANGE);
-    expect(unfolded.height).toBeGreaterThan(minimumHeight);
+  it(BAYMAX_GAZE_TEST, () => {
+    const restingMesh = new CharacterMesh(SEGMENTS);
+    const restingParts = vi.spyOn(restingMesh, ELLIPSOID);
+    buildBaymax(restingMesh, POSE);
+    const lookingMesh = new CharacterMesh(SEGMENTS);
+    const lookingParts = vi.spyOn(lookingMesh, ELLIPSOID);
+    const groups = vi.spyOn(lookingMesh, GROUP);
+    const lookingPose = { ...POSE, gazeX: LOOK_RIGHT, gazeY: ONE };
+    buildBaymax(lookingMesh, lookingPose);
+    const head = groups.mock.calls.find(([pivot]) => pivot[Y] < BAYMAX_HEAD_Y);
+    const yaw = head?.[ONE][Y] ?? ZERO;
+    expect(yaw).toBeGreaterThan(ZERO);
+    const restingFeet = restingParts.mock.calls.slice(ZERO, TWO);
+    const lookingFeet = lookingParts.mock.calls.slice(ZERO, TWO);
+    expect(lookingFeet).toEqual(restingFeet);
   });
 
-  it(TARS_GROUND_TEST, () => {
-    for (let frame = ZERO; frame < TARS_GAIT_FRAMES; frame += ONE) {
-      const time = frame * TARS_GAIT_FRAME_SECONDS;
-      const pose = { ...POSE, time, work: ONE };
-      const mesh = new CharacterMesh(SEGMENTS);
-      const { ctx, points } = drawingContext();
-      buildTars(mesh, pose);
-      mesh.paint(ctx, TARS_FRAME_PX, ROOT, ROOT, TARS_TEST_SCALE, WHITE, ZERO, ONE);
-      const ys = points.map((point) => point[Y]);
-      const ground = Math.max(...ys);
-      expect(ground).toBeCloseTo(TARS_GROUND_Y, TARS_GROUND_PRECISION);
-    }
-  });
-
-  it(TARS_FINISH, () => {
+  it(BAYMAX_EYES_TEST, () => {
     const mesh = new CharacterMesh(SEGMENTS);
-    const groups = vi.spyOn(mesh, GROUP);
-    const pose = { ...POSE, done: ONE };
-    buildTars(mesh, pose);
-    for (const [, angles] of groups.mock.calls) {
-      const pitch = Math.abs(angles[X]);
-      expect(Math.abs(angles[Z])).toBe(ZERO);
-      expect(pitch).toBeLessThan(QUARTER_TURN);
-    }
-  });
-
-  it.each([
-    { work: ONE }, { write: ONE }, { done: ONE }, { failed: ONE }, { listen: ONE, gazeX: ONE },
-  ])(TARS_RIGID_COLUMNS, (activity) => {
-    const mesh = new CharacterMesh(SEGMENTS);
-    const boxes = vi.spyOn(mesh, BOX);
-    buildTars(mesh, { ...POSE, ...activity });
-    const columnPositions = new Set<number>();
-    for (const [solid] of boxes.mock.calls) {
-      const [center, size] = solid;
-      columnPositions.add(center[X]);
-      expect(size[X]).toBeCloseTo(TARS_COLUMN_WIDTH);
-      expect(size[Y]).toBeCloseTo(TARS_COLUMN_HEIGHT);
-      expect(size[Z]).toBeCloseTo(TARS_COLUMN_DEPTH);
-    }
-    expect(boxes).toHaveBeenCalledTimes(TARS_COLUMN_COUNT);
-    expect(columnPositions.size).toBe(TARS_COLUMN_COUNT);
+    const polygons = vi.spyOn(mesh, POLYGON);
+    const failedPose = { ...POSE, failed: ONE };
+    buildBaymax(mesh, failedPose);
+    const eyeShapes = polygons.mock.calls.filter(([, color]) => {
+      const matchingInk = color.every((channel, index) => channel === BAYMAX_FACE_INK[index]);
+      return matchingInk;
+    });
+    const crosses = eyeShapes.filter(([points]) => points.length === BAYMAX_CROSS_VERTICES);
+    const crossCount = crosses.length - ONE;
+    expect(crossCount).toBe(TWO * TWO);
   });
 
   it(WALLE_GAZE, () => {
