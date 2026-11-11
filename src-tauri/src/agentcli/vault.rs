@@ -336,20 +336,27 @@ fn connections_here(app: &AppHandle, request: &Request) -> Vec<(crate::db::model
         .collect()
 }
 
-/// The connection named `name`, when the user opened it to AI — or the reply that says why not.
-fn usable(app: &AppHandle, request: &Request, name: &str) -> Result<(crate::db::models::DbConnectionRow, AiAccess), Reply> {
-    let row = match pick(connections_here(app, request), name, |(row, _)| row.name.as_str()) {
+const CLOSED_CONNECTION_APPROVAL_KIND: &str = "db";
+const CLOSED_CONNECTION_TARGET_PREFIX: &str = "read-closed";
+
+/// The connection named `name`, with what the model may do on it — a connection closed to AI is
+/// read only after the user approves it in the app — or the reply that says why not.
+async fn usable(app: &AppHandle, request: &Request, name: &str) -> Result<(crate::db::models::DbConnectionRow, AiAccess), Reply> {
+    let candidates = connections_here(app, request);
+    let (row, access) = match pick(candidates, name, |(row, _)| row.name.as_str()) {
         Ok(found) => found,
         Err(names) if names.is_empty() => return Err(Reply::no(format!("no saved database connection named {name} here — db_connections lists them"))),
         Err(names) => return Err(Reply::no(format!("{name} matches several connections: {}", names.join(", ")))),
     };
-    if row.1 == AiAccess::None {
-        return Err(Reply::no(format!(
-            "«{}» is closed to AI. The user opens it in Base de datos › the connection's settings › Opciones › Acceso de IA.",
-            row.0.name
-        )));
+    if access != AiAccess::None {
+        return Ok((row, access));
     }
-    Ok(row)
+    let mut event = AskEvent::new(CLOSED_CONNECTION_APPROVAL_KIND, format!("«{}» — read it (closed to AI)", row.name), &request.cwd);
+    event.detail = format!("Read-only session on «{}». Opening it in Base de datos › Opciones › Acceso de IA stops this question.", row.name);
+    event.always = true;
+    let target = format!("{CLOSED_CONNECTION_TARGET_PREFIX}|{}", row.id);
+    approve(app, request, &target, event).await?;
+    Ok((row, AiAccess::Read))
 }
 
 /// `cf dbs`: the connections a model may use here, and the names of the ones it may not.
@@ -360,9 +367,7 @@ pub fn dbs(request: &Request, app: &AppHandle) -> Reply {
     }
     let (open, closed): (Vec<_>, Vec<_>) = all.into_iter().partition(|(_, access)| *access != AiAccess::None);
     let mut out = String::new();
-    if open.is_empty() {
-        out.push_str("No connection is open to AI. The user opens one in Base de datos › the connection's settings › Opciones › Acceso de IA.\n");
-    } else {
+    if !open.is_empty() {
         out.push_str("Connections open to AI (name · engine · environment · database · access):\n");
         for (row, access) in &open {
             let spec: Value = serde_json::from_str(&row.spec).unwrap_or(Value::Null);
@@ -373,7 +378,10 @@ pub fn dbs(request: &Request, app: &AppHandle) -> Reply {
     }
     if !closed.is_empty() {
         let names: Vec<&str> = closed.iter().map(|(row, _)| row.name.as_str()).collect();
-        out.push_str(&format!("Closed to AI (the user can open them in their settings): {}\n", names.join(", ")));
+        out.push_str(&format!(
+            "Closed to AI — still usable: db_schema and db_read on one ask the user to approve reading it in CodeFlow (read-only; no writes): {}\n",
+            names.join(", ")
+        ));
     }
     Reply::ok(out.trim_end().to_string())
 }
@@ -393,7 +401,7 @@ pub async fn dbschema(request: &Request, app: &AppHandle) -> Reply {
     let schema = take("--schema");
     let Some((name, rest)) = args.split_first() else { return usage() };
     let table = rest.first().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
-    let (row, _) = match usable(app, request, name) {
+    let (row, _) = match usable(app, request, name).await {
         Ok(found) => found,
         Err(refused) => return refused,
     };
@@ -489,7 +497,7 @@ pub async fn db(request: &Request, app: &AppHandle) -> Reply {
     if sql.trim().is_empty() {
         return usage();
     }
-    let (row, access) = match usable(app, request, name) {
+    let (row, access) = match usable(app, request, name).await {
         Ok(found) => found,
         Err(refused) => return refused,
     };

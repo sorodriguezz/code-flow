@@ -65,6 +65,7 @@ export interface ApiTabView {
   graphqlSearch: string;
   streamFilter: string;
   streamAutoScroll: boolean;
+  responseHeight: number | null;
 }
 
 /** What a tab looks at before anyone has told it otherwise. Spread under every patch, so a tab
@@ -77,6 +78,7 @@ export const DEFAULT_TAB_VIEW: ApiTabView = {
   graphqlSearch: "",
   streamFilter: "",
   streamAutoScroll: true,
+  responseHeight: null,
 };
 
 /** A gRPC call's chrome and result, per tab — beside `sending`, for the same reason it is. */

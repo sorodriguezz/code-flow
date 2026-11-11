@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Database, Globe, KeyRound, ListChecks, MessageCircleQuestion, ShieldAlert, type LucideIcon } from "lucide-react";
+import { Database, Globe, KeyRound, ListChecks, MessageCircleQuestion, ShieldAlert, SquareTerminal, type LucideIcon } from "lucide-react";
 import { buttonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { fieldClass } from "../common/recipes";
@@ -178,4 +178,5 @@ const LOOKS: Record<AgentCliAsk["kind"], { icon: LucideIcon; title: TranslationK
   secret: { icon: KeyRound, title: "agentcli.secretTitle", hint: "agentcli.secretHint", approval: true },
   db: { icon: Database, title: "agentcli.dbTitle", hint: "agentcli.dbHint", approval: true },
   http: { icon: Globe, title: "agentcli.httpTitle", hint: "agentcli.httpHint", approval: true },
+  tool: { icon: SquareTerminal, title: "agentcli.toolTitle", hint: "agentcli.toolHint", approval: true },
 };

@@ -379,7 +379,7 @@ export interface AgentCliAsk {
   id: string;
   /** `ask` (yes or no), `choose` (one of `options`), `guard` (a destructive command), or a saved
    *  credential about to be used: `secret`, `db`, `http`. */
-  kind: "ask" | "choose" | "guard" | "secret" | "db" | "http";
+  kind: "ask" | "choose" | "guard" | "secret" | "db" | "http" | "tool";
   question: string;
   /** The folder `cf` ran in. */
   cwd: string;

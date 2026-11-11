@@ -15,6 +15,7 @@ import type { ChatAttachment } from "../../lib/tauri/chatCommands";
 import { McpMenu } from "../chat/McpMenu";
 import { QueuedMessages, type ComposerQueue } from "../chat/QueuedMessages";
 import { chatQueueKey, discardChatQueue, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
+import { cancelQuotaResume, resumeQuotaNow, useQuotaResumeAt } from "../../state/quotaResumeStore";
 import { FOCUS_CHAT_EVENT, SEND_CHAT_EVENT, openChat, openNewChat, takePendingSend } from "../../lib/aiPanelNav";
 import { moveChatToApp } from "../../lib/moveChatToApp";
 import { openTerminal } from "../../lib/tauri/commands";
@@ -446,6 +447,7 @@ export function PanelChat({
   const queueKey = chatQueueKey("panel", conversationId);
   const queuedMessages = useChatQueue(queueKey);
   const queueHeld = useChatQueueHold(queueKey);
+  const autoResumeAt = useQuotaResumeAt(queueKey);
   const queue = useMemo<ComposerQueue>(
     () => ({
       items: queuedMessages,
@@ -462,10 +464,16 @@ export function PanelChat({
         boxRef.current?.focus();
         return item;
       },
-      onResume: () => useChatStore.getState().resumeQueue(conversationId),
+      onResume: () => {
+        const retriedFailedTurn = resumeQuotaNow(queueKey);
+        if (retriedFailedTurn) return;
+        useChatStore.getState().resumeQueue(conversationId);
+      },
       onDiscardAll: () => discardChatQueue(queueKey),
+      autoResumeAt,
+      onCancelAutoResume: () => cancelQuotaResume(queueKey),
     }),
-    [queuedMessages, queueHeld, session.sending, conversationId, tabKey, queueKey],
+    [queuedMessages, queueHeld, session.sending, conversationId, tabKey, queueKey, autoResumeAt],
   );
   /** The `/` menu is open while the draft is one token that begins with a slash. */
   const slash = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).toLowerCase() : null;

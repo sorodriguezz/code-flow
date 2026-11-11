@@ -133,6 +133,8 @@ export const NO_WORKSPACE = "__none__";
 export const MAX_TABS = 8;
 
 export const chatTabKey = (conversationId: string) => `chat:${conversationId}`;
+const AGENT_TASK_CONVERSATION_PREFIX = "agent-";
+const AGENT_TASK_CHAT_KEY_PREFIX = chatTabKey(AGENT_TASK_CONVERSATION_PREFIX);
 export const prTabKey = (projectId: string, prId: number) => `pr:${projectId}:${prId}`;
 export const prLinkTabKey = (url: string) => `prlink:${url}`;
 export const analysisTabKey = (projectId: string) => `analysis:${projectId}`;
@@ -548,7 +550,10 @@ export const useAiPanelStore = create<AiPanelState>((set, get) => ({
   },
 
   markUnread: (key, mark) => {
-    if (isTabVisible(key, mark.workspaceId)) return;
+    const belongsToAgentsApp = key.startsWith(AGENT_TASK_CHAT_KEY_PREFIX);
+    if (belongsToAgentsApp) return;
+    const tabVisible = isTabVisible(key, mark.workspaceId);
+    if (tabVisible) return;
     set((s) => ({ unread: { ...s.unread, [key]: { ...mark, at: Date.now() } } }));
     persistWorkspace(mark.workspaceId ?? NO_WORKSPACE);
   },
@@ -631,8 +636,11 @@ export const useAiPanelStore = create<AiPanelState>((set, get) => ({
         return;
       }
       const stored = Array.isArray(parsed.tabs) ? parsed.tabs.filter(isTab) : [];
-      const storedUnread =
+      const rawUnread =
         parsed.unread && typeof parsed.unread === "object" ? (parsed.unread as Record<string, UnreadMark>) : {};
+      const rawUnreadEntries = Object.entries(rawUnread);
+      const workspaceChatEntries = rawUnreadEntries.filter(([key]) => !key.startsWith(AGENT_TASK_CHAT_KEY_PREFIX));
+      const storedUnread = Object.fromEntries(workspaceChatEntries);
       set((s) => {
         // Tabs opened this session win, and keep their place; the restored ones go in front of them
         // in the order they were left.

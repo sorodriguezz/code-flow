@@ -2167,6 +2167,7 @@ pub async fn chat_send(
                 json_schema: None,
                 extra_dirs: &ws_extra_dirs,
                 text_only: false,
+                asks_tool_permissions: true,
             },
         ))
         .await
@@ -3081,6 +3082,7 @@ async fn summarize(
                 json_schema: None,
                 extra_dirs: &[],
                 text_only: true,
+                asks_tool_permissions: false,
             },
         )
         .await

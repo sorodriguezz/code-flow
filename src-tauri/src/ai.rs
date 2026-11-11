@@ -997,6 +997,7 @@ pub struct AiInvocation<'a> {
     /// the user's own Claude Code is untouched. Set by the chats from
     /// [`crate::claude::CHAT_PLUGINS_OFF_KEY`]; other engines ignore it.
     pub disabled_plugins: Vec<String>,
+    pub asks_tool_permissions: bool,
 }
 
 /// The feature labels recorded against a run's usage.
@@ -1442,6 +1443,7 @@ impl<'a> AiInvocation<'a> {
             text_only: false,
             lean: false,
             disabled_plugins: Vec::new(),
+            asks_tool_permissions: false,
         }
     }
 }
@@ -7583,6 +7585,7 @@ pub struct ChatTurn<'a> {
     /// The turn answers from what it is handed and needs no agent — see
     /// [`AiInvocation::text_only`]. Set by compaction, which reads a transcript and writes a précis.
     pub text_only: bool,
+    pub asks_tool_permissions: bool,
 }
 
 /// Runs one [`ChatTurn`].
@@ -7639,6 +7642,7 @@ pub async fn chat_turn(
     inv.json_schema = turn.json_schema;
     inv.extra_dirs = turn.extra_dirs;
     inv.text_only = turn.text_only;
+    inv.asks_tool_permissions = turn.asks_tool_permissions;
     if engine.id() == "claude" {
         inv.disabled_plugins = crate::claude::chat_plugins_off();
     }
@@ -7734,6 +7738,7 @@ pub async fn chat_with_repo(
     effort: Option<&str>,
 ) -> Result<AiRun, String> {
     let read_only_tools = if read_only { engine.read_only_tools() } else { Vec::new() };
+    let someone_watching = stream_deltas.is_some();
     chat_turn(
         engine,
         binary,
@@ -7757,6 +7762,7 @@ pub async fn chat_with_repo(
             json_schema,
             extra_dirs,
             text_only: false,
+            asks_tool_permissions: someone_watching,
         },
     )
     .await

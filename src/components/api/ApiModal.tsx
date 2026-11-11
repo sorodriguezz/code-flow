@@ -5,6 +5,11 @@ import { X, type LucideIcon } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { buttonClass, iconButtonClass } from "../common/Button";
 
+const DEFAULT_LAYER_CLASS = "z-40";
+const RAISED_LAYER_CLASS = "z-[55]";
+const OVER_DRAWERS_LAYER_CLASS = "z-[70]";
+const DEFAULT_MAX_HEIGHT_CLASS = "max-h-[80vh]";
+
 /**
  * The chrome every API-client modal wears: backdrop, centred panel, titled header with a close
  * button, scrolling body and an optional footer bar.
@@ -51,6 +56,8 @@ export function ApiModal({
   dismissOnBackdrop = true,
   dismissOnEscape = true,
   raised = false,
+  overDrawers = false,
+  maxHeight = DEFAULT_MAX_HEIGHT_CLASS,
   tourAnchor,
   onClose,
   toolbar,
@@ -72,6 +79,8 @@ export function ApiModal({
   /** Set when the dialog is opened from *inside* a root overlay — Settings, chiefly — so it lands
    * above it instead of behind it. See the layer ladder above. */
   raised?: boolean;
+  overDrawers?: boolean;
+  maxHeight?: string;
   /** `data-tour` for the panel, for the dialogs a guided tour spotlights. On the panel rather than
    * the backdrop: the backdrop is the whole window, and a spotlight cut to it is no spotlight. */
   tourAnchor?: string;
@@ -94,19 +103,20 @@ export function ApiModal({
       // trigger, which can't stop this native listener, so the dialog has to yield: otherwise
       // dismissing the engine list would take the half-filled form under it with it.
       if (document.querySelector('[role="listbox"], [role="menu"]')) return;
+      if (overDrawers) e.preventDefault();
       onClose();
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [busy, dismissOnEscape, onClose]);
+    window.addEventListener("keydown", onKeyDown, overDrawers);
+    return () => window.removeEventListener("keydown", onKeyDown, overDrawers);
+  }, [busy, dismissOnEscape, onClose, overDrawers]);
+
+  const layerClass = overDrawers ? OVER_DRAWERS_LAYER_CLASS : raised ? RAISED_LAYER_CLASS : DEFAULT_LAYER_CLASS;
 
   useFocusTrap(panelRef);
 
   return createPortal(
     <div
-      className={`fixed inset-0 flex items-center justify-center bg-black/40 p-6 ${
-        raised ? "z-[55]" : "z-40"
-      }`}
+      className={`fixed inset-0 flex items-center justify-center bg-black/40 p-6 ${layerClass}`}
       onMouseDown={(e) => {
         pressedBackdrop.current = e.target === e.currentTarget;
       }}
@@ -135,7 +145,7 @@ export function ApiModal({
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
-        className={`cf-fade-in flex max-h-[80vh] w-full min-w-0 flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)] ${width} ${height ?? ""}`}
+        className={`cf-fade-in flex ${maxHeight} w-full min-w-0 flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)] ${width} ${height ?? ""}`}
       >
         <div className="flex min-h-[52px] shrink-0 items-center gap-2.5 border-b border-[var(--cf-border)] py-2 pl-4 pr-3">
           <Icon size={15} className="shrink-0 text-[var(--cf-accent)]" />

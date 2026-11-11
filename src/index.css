@@ -5300,6 +5300,11 @@ svg.\-rotate-180 {
   display: block;
 }
 
+.cf-artifact-diagram svg {
+  width: 100%;
+  max-width: 100% !important;
+}
+
 .cf-chat-diagram-error {
   margin: 0.25rem 0 0.5rem;
   font-size: 11px;

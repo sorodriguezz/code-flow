@@ -65,6 +65,14 @@ import type { EditingTurn } from "./chatStore";
 import { learnedKey } from "../lib/memoryToast";
 import { leavesContextAsIs } from "../lib/contextWindow";
 import { useChatLineageStore } from "./chatLineageStore";
+import {
+  cancelQuotaResume,
+  registerQuotaResumeHandler,
+  scheduleQuotaResumeIfLimited,
+  type QuotaResumeEntry,
+} from "./quotaResumeStore";
+
+const WORKSPACE_CHAT_RESUME_SURFACE = "workspaceChat";
 
 /**
  * The assistant panel's **workspace chats** — one conversation that talks to every repository of a
@@ -991,6 +999,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       const trimmed = text.trim();
       const session = get().byConversation[conversationId];
       if (!trimmed || !session || session.sending) return;
+      cancelQuotaResume(wsChatQueueKey(conversationId));
 
       // The images go with this question — a queued one's own, else the composer's, taken off now.
       const files = filesArg ?? get().attachments[conversationId] ?? [];
@@ -1162,6 +1171,16 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
             get().setScope(conversationId, null);
           const cancelled = isCancellation(e);
           holdChatQueue(wsChatQueueKey(conversationId), cancelled ? "stopped" : "error");
+          if (!cancelled) {
+            const failureText = String(e);
+            void scheduleQuotaResumeIfLimited(failureText, {
+              queueKey: wsChatQueueKey(conversationId),
+              surface: WORKSPACE_CHAT_RESUME_SURFACE,
+              conversationId,
+              ownerId: workspaceId,
+              retry: { text: trimmed, attachments: files.length > 0 ? files : undefined, skill: skill ?? undefined },
+            });
+          }
           const trace = snapshotTrace(runId);
           patch(conversationId, (s) => ({
             ...s,
@@ -1248,3 +1267,16 @@ registerTabBusyProbe((tab) => {
     queuedMessages(wsChatQueueKey(tab.conversationId)).length > 0
   );
 });
+
+async function resumeWorkspaceChatAfterQuota(entry: QuotaResumeEntry): Promise<void> {
+  await useWorkspaceChatStore.getState().ensureLoaded(entry.conversationId, entry.ownerId);
+  const session = useWorkspaceChatStore.getState().byConversation[entry.conversationId];
+  if (!session || session.sending) return;
+  const lastMessage = session.messages[session.messages.length - 1];
+  const lastTurnFailed = lastMessage?.isError === true;
+  if (!lastTurnFailed) return;
+  requeueChatMessageFirst(entry.queueKey, entry.retry);
+  useWorkspaceChatStore.getState().resumeQueue(entry.conversationId);
+}
+
+registerQuotaResumeHandler(WORKSPACE_CHAT_RESUME_SURFACE, resumeWorkspaceChatAfterQuota);

@@ -1753,6 +1753,7 @@ mod tests_support {
             text_only: false,
             lean: false,
             disabled_plugins: Vec::new(),
+            asks_tool_permissions: false,
         }
     }
 }

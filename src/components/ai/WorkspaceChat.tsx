@@ -41,6 +41,7 @@ import { useAiAccountsStore } from "../../state/aiAccountsStore";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useChainStore } from "../../state/chainStore";
 import { discardChatQueue, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
+import { cancelQuotaResume, resumeQuotaNow, useQuotaResumeAt } from "../../state/quotaResumeStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useConversationStore } from "../../state/conversationStore";
 import { registerDictationSend } from "../../state/dictationStore";
@@ -452,6 +453,7 @@ export function WorkspaceChat({
   const queueKey = wsChatQueueKey(conversationId);
   const queuedMessages = useChatQueue(queueKey);
   const queueHeld = useChatQueueHold(queueKey);
+  const autoResumeAt = useQuotaResumeAt(queueKey);
   const queue = useMemo<ComposerQueue>(
     () => ({
       items: queuedMessages,
@@ -466,10 +468,16 @@ export function WorkspaceChat({
         boxRef.current?.focus();
         return item;
       },
-      onResume: () => useWorkspaceChatStore.getState().resumeQueue(conversationId),
+      onResume: () => {
+        const retriedFailedTurn = resumeQuotaNow(queueKey);
+        if (retriedFailedTurn) return;
+        useWorkspaceChatStore.getState().resumeQueue(conversationId);
+      },
       onDiscardAll: () => discardChatQueue(queueKey),
+      autoResumeAt,
+      onCancelAutoResume: () => cancelQuotaResume(queueKey),
     }),
-    [queuedMessages, queueHeld, session.sending, conversationId, tabKey, queueKey],
+    [queuedMessages, queueHeld, session.sending, conversationId, tabKey, queueKey, autoResumeAt],
   );
 
   const workspaceName = useWorkspaceStore((s) => s.workspaces.find((w) => w.id === workspaceId)?.name ?? "");

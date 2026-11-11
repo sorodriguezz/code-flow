@@ -55,12 +55,21 @@ import {
   queuedMessages,
   queuedAttachmentIds,
   releaseChatQueue,
+  requeueChatMessageFirst,
   restoreChatQueue,
   shiftChatQueue,
   takeQueuedChatMessage,
   type QueuedChatMessage,
   type QueuedCommand,
 } from "./chatQueueStore";
+import {
+  cancelQuotaResume,
+  registerQuotaResumeHandler,
+  scheduleQuotaResumeIfLimited,
+  type QuotaResumeEntry,
+} from "./quotaResumeStore";
+
+const REPO_CHAT_RESUME_SURFACE = "repoChat";
 
 /**
  * The assistant's queue for one conversation — see `chatQueueStore`.
@@ -870,6 +879,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Only this conversation's own turn blocks — another chat of the same project being mid-answer
     // (or queued) is exactly the case this store exists to allow.
     if (existing?.sending) return;
+    cancelQuotaResume(queueOf(conversationId));
 
     // The images go with this question: a queued one names its own, otherwise the composer's staged
     // ones are taken off the box now — they are the ingredients of the message being sent.
@@ -1083,6 +1093,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
           return;
         }
         const cancelled = isCancellation(e);
+        if (!cancelled) {
+          const failureText = String(e);
+          void scheduleQuotaResumeIfLimited(failureText, {
+            queueKey: queueOf(conversationId),
+            surface: REPO_CHAT_RESUME_SURFACE,
+            conversationId,
+            ownerId: projectId,
+            retry: { text: trimmed, attachments: files.length > 0 ? files : undefined, skill: skill ?? undefined },
+          });
+        }
         const trace = snapshotTrace(runId);
         settle((session) => ({
           ...session,
@@ -1599,3 +1619,16 @@ registerTabBusyProbe((tab) => {
 });
 
 export { EMPTY_CHAT, EMPTY_LIVE };
+
+async function resumeRepoChatAfterQuota(entry: QuotaResumeEntry): Promise<void> {
+  await useChatStore.getState().ensureLoaded(entry.ownerId, entry.conversationId);
+  const session = useChatStore.getState().byConversation[entry.conversationId];
+  if (!session || session.sending) return;
+  const lastMessage = session.messages[session.messages.length - 1];
+  const lastTurnFailed = lastMessage?.isError === true;
+  if (!lastTurnFailed) return;
+  requeueChatMessageFirst(entry.queueKey, entry.retry);
+  useChatStore.getState().resumeQueue(entry.conversationId);
+}
+
+registerQuotaResumeHandler(REPO_CHAT_RESUME_SURFACE, resumeRepoChatAfterQuota);

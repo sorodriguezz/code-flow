@@ -26,6 +26,11 @@ const BILLING_SIGNALS = [
   "org is out of usage",
 ];
 
+export function isBillingRefusal(message: string): boolean {
+  const lower = message.toLowerCase();
+  return BILLING_SIGNALS.some((signal) => lower.includes(signal));
+}
+
 /**
  * A run that failed because the provider is not *set up*, rather than because the model could not
  * answer. Four of them, because the remedy differs and the remedy is the entire point.

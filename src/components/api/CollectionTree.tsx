@@ -48,6 +48,7 @@ import { useApiStore } from "../../state/apiStore";
 import { useApiMockStore } from "../../state/apiMockStore";
 import { startMock, stopMock } from "./mockActions";
 import { useApiRuntimeStore } from "../../state/apiRuntimeStore";
+import { useApiTreeStore } from "../../state/apiTreeStore";
 import { scopeMenuItems } from "../../lib/scopeMenu";
 import { useApiModalStore } from "../../state/apiModalStore";
 import { useCollabStore, type ShareHealth } from "../../state/collabStore";
@@ -778,7 +779,11 @@ export function CollectionTree() {
     return entity ? `${entity.kind}:${entity.entityId}` : null;
   });
 
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const expanded = useApiTreeStore((s) => s.expanded);
+  const toggle = useApiTreeStore((s) => s.toggle);
+  const expand = useApiTreeStore((s) => s.expand);
+  const reveal = useApiTreeStore((s) => s.reveal);
+  const treeRef = useRef<HTMLDivElement>(null);
   const [renaming, setRenaming] = useState<NodeRef | null>(null);
   const [renamingExample, setRenamingExample] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -898,21 +903,17 @@ export function CollectionTree() {
     return map;
   }, [collections, folders, requests]);
 
-  const toggle = useCallback(
-    (id: string) =>
-      setExpanded((prev) => {
-        const next = new Set(prev);
-        if (next.has(id)) next.delete(id);
-        else next.add(id);
-        return next;
-      }),
-    [],
-  );
-
-  const expand = useCallback(
-    (id: string) => setExpanded((prev) => (prev.has(id) ? prev : new Set(prev).add(id))),
-    [],
-  );
+  useEffect(() => {
+    if (!reveal) return;
+    const tree = treeRef.current;
+    if (!tree) return;
+    const escapedId = CSS.escape(reveal.id);
+    const rowSelector = `[data-cf-apirow="${escapedId}"][data-cf-apikind="${reveal.kind}"]`;
+    const row = tree.querySelector<HTMLElement>(rowSelector);
+    row?.scrollIntoView({ block: "center" });
+    row?.focus({ preventScroll: true });
+    useApiTreeStore.getState().consumeReveal(reveal.sequence);
+  }, [reveal]);
 
   /**
    * What clicking a container does: unfold it *and* put its settings on screen.
@@ -1570,7 +1571,7 @@ export function CollectionTree() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div role="tree" className="min-h-0 flex-1 overflow-auto px-2 pb-2.5 pt-0.5">
+      <div ref={treeRef} role="tree" className="min-h-0 flex-1 overflow-auto px-2 pb-2.5 pt-0.5">
         {ordered.length === 0 ? (
           <EmptyState icon={Boxes} title={t("api.noCollections")} />
         ) : (

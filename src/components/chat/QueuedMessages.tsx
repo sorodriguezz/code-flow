@@ -18,7 +18,11 @@ export interface ComposerQueue {
   onResume: () => void;
   /** Drops the whole queue — offered with resume when it came back from a restart. */
   onDiscardAll?: () => void;
+  autoResumeAt?: number | null;
+  onCancelAutoResume?: () => void;
 }
+
+const AUTO_RESUME_TIME_FORMAT: Intl.DateTimeFormatOptions = { hour: "2-digit", minute: "2-digit" };
 
 /**
  * The messages waiting their turn, drawn directly above the box they were written in.
@@ -45,10 +49,15 @@ export interface ComposerQueue {
 export function QueuedMessages({ queue }: { queue: ComposerQueue }) {
   const t = useT();
   const { items, held, busy } = queue;
-  if (items.length === 0) return null;
+  const autoResumeAt = queue.autoResumeAt ?? null;
+  const hasAutoResume = autoResumeAt !== null && !busy;
+  const hasItems = items.length > 0;
+  if (!hasItems && !hasAutoResume) return null;
+  const autoResumeDate = hasAutoResume ? new Date(autoResumeAt) : null;
+  const autoResumeTime = autoResumeDate?.toLocaleTimeString([], AUTO_RESUME_TIME_FORMAT) ?? "";
 
   const waiting = held !== null || !busy;
-  const heading = held ? t("chat.queueHeld") : t("chat.queueTitle");
+  const heading = held || hasAutoResume ? t("chat.queueHeld") : t("chat.queueTitle");
   const why =
     held === "error"
       ? t("chat.queueHeldError")
@@ -92,6 +101,21 @@ export function QueuedMessages({ queue }: { queue: ComposerQueue }) {
           </button>
         )}
       </div>
+      {hasAutoResume && (
+        <div className="mb-1 flex items-center gap-1.5 px-1 text-[11px] text-[var(--cf-text-muted)]">
+          <Clock size={10} className="shrink-0" />
+          <span className="min-w-0 flex-1 truncate">{t("chat.queueAutoResume", { time: autoResumeTime })}</span>
+          {queue.onCancelAutoResume && (
+            <button
+              type="button"
+              onClick={queue.onCancelAutoResume}
+              className="flex shrink-0 items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"
+            >
+              {t("chat.queueAutoResumeCancel")}
+            </button>
+          )}
+        </div>
+      )}
       <ol className="flex flex-col gap-1">
         {items.map((item) => (
           <li

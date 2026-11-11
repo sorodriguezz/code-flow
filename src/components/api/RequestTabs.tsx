@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Boxes, ChevronDown, Copy, Folder, Plus, ShieldAlert, X } from "lucide-react";
+import { Boxes, ChevronDown, Copy, Folder, LocateFixed, Plus, ShieldAlert, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { badgeColor, badgeLabel, protocolIcon } from "./methodStyle";
 import { preventMiddleClickAutoscroll } from "../../lib/pointerDrag";
@@ -10,6 +10,7 @@ import { chipClass, docTabClass, popoverClass } from "../common/recipes";
 import { useShortcutChord } from "../../lib/useShortcutHint";
 import { useApiStore, type ApiEntityTab, type ApiTab } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
+import { useApiTreeStore, type ApiTreeNodeKind } from "../../state/apiTreeStore";
 import { useCollabStore } from "../../state/collabStore";
 import { useRowHoverStore } from "../../state/rowHoverStore";
 import { confirmAction } from "../../state/confirmStore";
@@ -34,6 +35,8 @@ import { API_PROTOCOLS, type ApiProtocol } from "../../types/api";
  * window — the editor's files, these requests, a database's queries — agrees.
  */
 const TAB_W = 220;
+
+const REQUEST_NODE_KIND = "request";
 
 /**
  * The request tabs across the top of the builder.
@@ -100,6 +103,13 @@ export function RequestTabs() {
    * it was opened rather than being herded to one end.
    */
   type StripEntry = { kind: "request"; tab: ApiTab } | { kind: "entity"; tab: ApiEntityTab };
+
+  const treeNodeOf = (entry: StripEntry): { kind: ApiTreeNodeKind; id: string } | null => {
+    if (entry.kind === "entity") return { kind: entry.tab.kind, id: entry.tab.entityId };
+    const requestId = entry.tab.requestId;
+    if (requestId === null) return null;
+    return { kind: REQUEST_NODE_KIND, id: requestId };
+  };
   const strip = tabOrder.flatMap<StripEntry>((id) => {
     const request = openTabs.find((tab) => tab.id === id);
     if (request) return [{ kind: "request", tab: request }];
@@ -123,6 +133,17 @@ export function RequestTabs() {
     const entry = strip.find((candidate) => candidate.tab.id === id);
     if (!entry) return [];
     const items: MenuItem[] = [];
+    const revealTarget = treeNodeOf(entry);
+    if (revealTarget) {
+      items.push({
+        label: t("api.showInCollection"),
+        icon: LocateFixed,
+        onClick: () => {
+          setActiveTab(id);
+          useApiTreeStore.getState().revealNode(revealTarget.kind, revealTarget.id);
+        },
+      });
+    }
     if (entry.kind === "request") {
       items.push({
         label: t("api.cloneTab"),
@@ -132,10 +153,11 @@ export function RequestTabs() {
         onClick: () => useApiStore.getState().cloneTab(id),
       });
     }
+    const hasItemsBeforeClose = items.length > 0;
     items.push({
       label: t("common.close"),
       icon: X,
-      separated: entry.kind === "request",
+      separated: hasItemsBeforeClose,
       onClick: () => void requestClose(entry.tab),
     });
     return items;

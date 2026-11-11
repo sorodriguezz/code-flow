@@ -355,9 +355,9 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
   const sending = useApiRuntimeStore((s) => s.sending[tabId] ?? false);
   // A response still arriving: the send button's Cancel becomes Stop, which keeps what came.
   const streamingLive = useApiRuntimeStore((s) => s.responses[tabId]?.stream?.live ?? false);
-  const responseHeight = useLayoutStore((s) => s.sizes.apiResponseHeight);
-  const setSize = useLayoutStore((s) => s.setSize);
-  const commitSize = useLayoutStore((s) => s.commitSize);
+  const defaultResponseHeight = useLayoutStore((s) => s.sizes.apiResponseHeight);
+  const tabResponseHeight = useApiRuntimeStore((s) => s.tabView[tabId]?.responseHeight ?? null);
+  const responseHeight = tabResponseHeight ?? defaultResponseHeight;
   const pushToast = useToastStore((s) => s.pushToast);
   const chord = useShortcutChord();
   // The code-snippet panel's switch lives here, beside Save; the panel itself is `ApiView`'s right
@@ -1417,8 +1417,8 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
             min={MIN_RESPONSE_HEIGHT}
             max={MAX_RESPONSE_HEIGHT}
             invert
-            onChange={(height) => setSize("apiResponseHeight", height)}
-            onCommit={(height) => commitSize("apiResponseHeight", height)}
+            onChange={(height) => setTabView(tabId, { responseHeight: height })}
+            onCommit={(height) => setTabView(tabId, { responseHeight: height })}
           />
           {/* `height` is the size the user dragged the handle to, but it can't be honoured
               unconditionally: the builder's own height changes underneath it whenever something

@@ -7,6 +7,7 @@ import {
   FileCode2,
   FolderCode,
   Globe,
+  LocateFixed,
   MoreHorizontal,
   Play,
   Plus,
@@ -36,6 +37,7 @@ import { EnvironmentBar } from "./EnvironmentBar";
 import { HistoryList } from "./HistoryList";
 import { useApiStore } from "../../state/apiStore";
 import { useApiModalStore } from "../../state/apiModalStore";
+import { useApiTreeStore, type ApiSidebarSection } from "../../state/apiTreeStore";
 import { useCollabStore } from "../../state/collabStore";
 import { useUiStore } from "../../state/uiStore";
 import { useLayoutStore } from "../../state/layoutStore";
@@ -49,7 +51,7 @@ const WIDTH_MAX = 520;
 /** Beyond this the list stops being a list; the query wants narrowing, not more scrolling. */
 const MAX_RESULTS = 100;
 
-type Section = "collections" | "environments" | "history";
+const REQUEST_NODE_KIND = "request";
 
 /** The explorer's icon buttons: 26px targets (they were 20px), named by the app's own tooltip. */
 function ToolbarButton({
@@ -82,26 +84,58 @@ function ToolbarButton({
 // Search
 // ---------------------------------------------------------------------------
 
-/** `Collection / Folder / Subfolder` — where a hit lives, since a flat result list has dropped
- * the nesting that would otherwise say so. */
-function breadcrumb(
-  request: ApiRequestRow,
-  collections: ApiCollection[],
-  folders: ApiFolder[],
-): string {
+const FOLDER_PATH_SEPARATOR = " / ";
+const UNKNOWN_COLLECTION_ORDER = Number.MAX_SAFE_INTEGER;
+
+interface CollectionHits {
+  collectionId: string;
+  collectionName: string;
+  order: number;
+  requests: ApiRequestRow[];
+}
+
+function folderPath(request: ApiRequestRow, folders: ApiFolder[]): string {
   const names: string[] = [];
   const seen = new Set<string>();
   let current = request.folder_id;
   while (current !== null && !seen.has(current)) {
     seen.add(current);
-    const folder = folders.find((f) => f.id === current);
+    const folderId = current;
+    const folder = folders.find((candidate) => candidate.id === folderId);
     if (!folder) break;
     names.unshift(folder.name);
     current = folder.parent_id;
   }
-  const collection = collections.find((c) => c.id === request.collection_id);
-  if (collection) names.unshift(collection.name);
-  return names.join(" / ");
+  return names.join(FOLDER_PATH_SEPARATOR);
+}
+
+function requestMatches(request: ApiRequestRow, needle: string): boolean {
+  const name = request.name.toLowerCase();
+  const method = request.method.toLowerCase();
+  const url = request.url.toLowerCase();
+  return name.includes(needle) || method.includes(needle) || url.includes(needle);
+}
+
+function groupHitsByCollection(hits: ApiRequestRow[], collections: ApiCollection[]): CollectionHits[] {
+  const groups = new Map<string, CollectionHits>();
+  for (const request of hits) {
+    const existing = groups.get(request.collection_id);
+    if (existing) {
+      existing.requests.push(request);
+      continue;
+    }
+    const collectionIndex = collections.findIndex((collection) => collection.id === request.collection_id);
+    const collection = collections[collectionIndex];
+    const isKnownCollection = collectionIndex >= 0;
+    groups.set(request.collection_id, {
+      collectionId: request.collection_id,
+      collectionName: collection?.name ?? "",
+      order: isKnownCollection ? collectionIndex : UNKNOWN_COLLECTION_ORDER,
+      requests: [request],
+    });
+  }
+  const unordered = [...groups.values()];
+  return unordered.sort((first, second) => first.order - second.order);
 }
 
 function SearchResults({ query }: { query: string }) {
@@ -110,20 +144,26 @@ function SearchResults({ query }: { query: string }) {
   const folders = useApiStore((s) => s.folders);
   const requests = useApiStore((s) => s.requests);
   const openRequest = useApiStore((s) => s.openRequest);
+  const [resultMenu, setResultMenu] = useState<{ x: number; y: number; requestId: string } | null>(null);
 
-  const hits = useMemo(() => {
+  const showInCollection = (requestId: string) => {
+    openRequest(requestId);
+    useApiTreeStore.getState().revealNode(REQUEST_NODE_KIND, requestId);
+  };
+
+  const resultMenuItems = (requestId: string): MenuItem[] => [
+    { label: t("api.open"), icon: FileCode2, onClick: () => openRequest(requestId) },
+    { label: t("api.showInCollection"), icon: LocateFixed, onClick: () => showInCollection(requestId) },
+  ];
+
+  const groups = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return requests
-      .filter(
-        (request) =>
-          request.name.toLowerCase().includes(needle) ||
-          request.method.toLowerCase().includes(needle) ||
-          request.url.toLowerCase().includes(needle),
-      )
-      .slice(0, MAX_RESULTS);
-  }, [requests, query]);
+    const matching = requests.filter((request) => requestMatches(request, needle));
+    const hits = matching.slice(0, MAX_RESULTS);
+    return groupHitsByCollection(hits, collections);
+  }, [requests, collections, query]);
 
-  if (hits.length === 0) {
+  if (groups.length === 0) {
     return (
       <p className="px-4 py-4 text-center text-[12px] text-[var(--cf-text-muted)]">
         {t("api.searchNoResults", { query: query.trim() })}
@@ -133,22 +173,59 @@ function SearchResults({ query }: { query: string }) {
 
   return (
     <div className="min-h-0 flex-1 overflow-auto px-2 pb-2.5 pt-1">
-      {hits.map((request) => (
-        <button
-          key={request.id}
-          type="button"
-          onClick={() => openRequest(request.id)}
-          className={rowClass(false, "py-1.5")}
-        >
-          <MethodBadge protocol={request.protocol} method={request.method} />
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-[13px] text-[var(--cf-text)]">{request.name}</span>
-            <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
-              {breadcrumb(request, collections, folders)}
-            </span>
-          </span>
-        </button>
+      {groups.map((group) => (
+        <section key={group.collectionId} className="mb-1.5">
+          <div className={`${sectionLabelClass} pl-1.5 pr-1.5 pt-1.5`}>
+            <Boxes size={13} className="shrink-0" />
+            <span className="min-w-0 flex-1 truncate">{group.collectionName}</span>
+            <span className="shrink-0 tabular-nums">{group.requests.length}</span>
+          </div>
+          {group.requests.map((request) => {
+            const path = folderPath(request, folders);
+            return (
+              <div key={request.id} className="group/hit relative">
+                <button
+                  type="button"
+                  onClick={() => openRequest(request.id)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    setResultMenu({ x: event.clientX, y: event.clientY, requestId: request.id });
+                  }}
+                  className={rowClass(false, "py-1.5 pr-8")}
+                >
+                  <MethodBadge protocol={request.protocol} method={request.method} />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[13px] text-[var(--cf-text)]">{request.name}</span>
+                    {path && (
+                      <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">{path}</span>
+                    )}
+                  </span>
+                </button>
+                <div className="absolute right-1 top-1/2 -translate-y-1/2 opacity-0 group-hover/hit:opacity-100 focus-within:opacity-100">
+                  <Tooltip label={t("api.showInCollection")}>
+                    <button
+                      type="button"
+                      onClick={() => showInCollection(request.id)}
+                      aria-label={t("api.showInCollection")}
+                      className={iconButtonClass({ size: "xs" })}
+                    >
+                      <LocateFixed size={13} />
+                    </button>
+                  </Tooltip>
+                </div>
+              </div>
+            );
+          })}
+        </section>
       ))}
+      {resultMenu && (
+        <ContextMenu
+          x={resultMenu.x}
+          y={resultMenu.y}
+          items={resultMenuItems(resultMenu.requestId)}
+          onClose={() => setResultMenu(null)}
+        />
+      )}
     </div>
   );
 }
@@ -245,8 +322,10 @@ export function ApiSidebar() {
   const openModal = useApiModalStore((s) => s.openApiModal);
   const conflicts = useCollabStore((s) => s.conflicts);
 
-  const [section, setSection] = useState<Section>("collections");
-  const [query, setQuery] = useState("");
+  const section = useApiTreeStore((s) => s.section);
+  const setSection = useApiTreeStore((s) => s.setSection);
+  const query = useApiTreeStore((s) => s.query);
+  const setQuery = useApiTreeStore((s) => s.setQuery);
   /**
    * The one floating menu this sidebar has room for.
    *
@@ -255,7 +334,7 @@ export function ApiSidebar() {
    */
   const [menu, setMenu] = useState<{ x: number; y: number; items?: MenuItem[] } | null>(null);
 
-  const sections: { id: Section; label: string }[] = [
+  const sections: { id: ApiSidebarSection; label: string }[] = [
     { id: "collections", label: t("api.collections") },
     { id: "environments", label: t("api.environments") },
     { id: "history", label: t("api.history") },

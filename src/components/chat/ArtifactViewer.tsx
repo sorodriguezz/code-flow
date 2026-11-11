@@ -14,6 +14,8 @@ import { pushErrorToast } from "../../state/toastStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 
 const MARKDOWN_ARTIFACT_KIND: ArtifactKind = "markdown";
+const ARTIFACT_MODAL_WIDTH_CLASS = "max-w-[min(1800px,94vw)]";
+const ARTIFACT_MODAL_MAX_HEIGHT_CLASS = "max-h-[92vh]";
 
 export function artifactIcon(kind: ArtifactKind | string): LucideIcon {
   switch (kind) {
@@ -53,7 +55,7 @@ function MermaidView({ source }: { source: string }) {
     };
   }, [source, dark]);
   if (failed) return <p className="text-[12px] text-[var(--cf-danger)]">{t("chat.diagramFailed")}</p>;
-  return svg ? <div className="cf-chat-diagram flex select-text justify-center" dangerouslySetInnerHTML={{ __html: svg }} /> : <p className="text-[12px] text-[var(--cf-text-muted)]">…</p>;
+  return svg ? <div className="cf-chat-diagram cf-artifact-diagram flex select-text justify-center" dangerouslySetInnerHTML={{ __html: svg }} /> : <p className="text-[12px] text-[var(--cf-text-muted)]">…</p>;
 }
 
 function Preview({ kind, content, scripts }: { kind: ArtifactKind; content: string; scripts: boolean }) {
@@ -65,7 +67,7 @@ function Preview({ kind, content, scripts }: { kind: ArtifactKind; content: stri
         sandbox={kind === "html" && scripts ? "allow-scripts" : ""}
         referrerPolicy="no-referrer"
         srcDoc={framed(content, kind === "html" && scripts)}
-        className="h-full min-h-[60vh] w-full rounded-lg border border-[var(--cf-border)] bg-white"
+        className="h-full min-h-[72vh] w-full rounded-lg border border-[var(--cf-border)] bg-white"
       />
     );
   }
@@ -169,7 +171,9 @@ export function ArtifactViewer({
       icon={Icon}
       title={current.title || current.name}
       subtitle={`${current.name} · ${t(`artifact.kind.${current.kind}` as never)}${current.language ? ` · ${current.language}` : ""}`}
-      width="max-w-5xl"
+      width={ARTIFACT_MODAL_WIDTH_CLASS}
+      maxHeight={ARTIFACT_MODAL_MAX_HEIGHT_CLASS}
+      overDrawers
       onClose={onClose}
       toolbar={
         <div className="flex flex-wrap items-center gap-1.5">

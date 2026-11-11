@@ -40,6 +40,9 @@ use crate::ai::{
 /// base model of Haiku 5.5. Keep it in step with `commitMessageModel` in `src/lib/aiProviders.ts`.
 const COMMIT_MESSAGE_MODEL: &str = "claude-haiku-5-5";
 
+const SHELL_TOOL: &str = "Bash";
+const PERMISSION_PROMPT_TOOL_FLAG: &str = "--permission-prompt-tool";
+
 /// Single-line, ASCII, shim-safe stand-in for an ask this engine can't put on the command line as
 /// given — mirrors `codex.rs`'s `POINTER`. The real ask rides on stdin instead, ahead of the usual
 /// skills note and data.
@@ -189,6 +192,10 @@ impl AiEngine for ClaudeEngine {
         // A text-only run gets nothing at all: no built-in tools, no MCP server, and no skills or
         // commands, whose listing alone is thousands of tokens. `--json-schema` still works, since
         // its answer tool is the CLI's own and not one of the built-in set.
+        let app_servers =
+            if inv.text_only { Vec::new() } else { crate::codemap::mcp::loadable(&inv.app_mcp, inv.read_only) };
+        let map_server_loaded = app_servers.iter().any(|server| server.name == crate::codemap::mcp::SERVER_NAME);
+        let host_answers_permissions = inv.asks_tool_permissions && map_server_loaded && !inv.text_only && !inv.lean;
         if inv.text_only || inv.lean {
             // A lean run keeps the app's servers, passed below with `--mcp-config`: strict keeps the
             // user's own out.
@@ -203,19 +210,22 @@ impl AiEngine for ClaudeEngine {
             if inv.allowed_tools.iter().any(|tool| tool == "Skill") {
                 tools.push("Skill".to_string());
             }
+            if host_answers_permissions {
+                tools.push(SHELL_TOOL.to_string());
+            }
             cmd.arg("--tools").arg(tools.join(","));
             cmd.arg("--strict-mcp-config");
         }
-        // The app's own servers this run loads — in a read-only run only the repository map, the one
-        // server that can do nothing but read (`codemap::mcp`).
-        let app_servers =
-            if inv.text_only { Vec::new() } else { crate::codemap::mcp::loadable(&inv.app_mcp, inv.read_only) };
         let mut allowed: Vec<String> = inv.allowed_tools.to_vec();
-        if app_servers.iter().any(|server| server.name == crate::codemap::mcp::SERVER_NAME) {
+        if map_server_loaded {
             allowed.push(crate::codemap::mcp::allow_rule());
         }
         if !allowed.is_empty() {
             cmd.arg("--allowedTools").arg(allowed.join(","));
+        }
+        if host_answers_permissions {
+            let permission_prompt_tool = crate::codemap::mcp::permission_prompt_rule();
+            cmd.arg(PERMISSION_PROMPT_TOOL_FLAG).arg(permission_prompt_tool);
         }
         // The user's servers this conversation keeps out: denied by rule, which also takes their
         // tools off the list the model is shown — context a turn no longer pays for.

@@ -255,6 +255,28 @@ async fn approve(app: &AppHandle, request: &Request, target: &str, event: AskEve
     }
 }
 
+const TOOL_USE_APPROVAL_KIND: &str = "tool";
+
+pub(crate) async fn approve_tool_use(app: &AppHandle, cwd: &str, session: &str, tool_name: &str, detail: &str) -> Result<(), String> {
+    let request = Request {
+        token: String::new(),
+        verb: String::new(),
+        text: String::new(),
+        args: Vec::new(),
+        stdin: String::new(),
+        cwd: cwd.to_string(),
+        session: session.to_string(),
+        agent: String::new(),
+        prompt: String::new(),
+        reply: String::new(),
+        tool: String::new(),
+    };
+    let mut event = AskEvent::new(TOOL_USE_APPROVAL_KIND, tool_name, cwd);
+    event.detail = detail.to_string();
+    event.always = true;
+    approve(app, &request, tool_name, event).await.map_err(|refused| refused.text)
+}
+
 /// `cf ui` — CodeFlow's interface as actions (`codi::ui`): `state` (what every window shows),
 /// `actions [area]` (what can be done), or `<action> [params as JSON]` (doing it). A destructive one
 /// is confirmed by the user first: in Codi's window when Codi asked (its MCP session is `codi:…`),
