@@ -485,6 +485,64 @@ describe("perspective at the pointer's extremes", () => {
   });
 });
 
+describe("rail character choreography", () => {
+  it.each([["TARS", createTars], ["nutcracker", createNutcracker]] as const)(
+    "%s visibly changes silhouette at 32px without an activity phase",
+    (_, make) => {
+      const px = ORB_PX.card;
+      const canvas = fakeCanvas();
+      const painter = make(canvas as unknown as HTMLCanvasElement, px);
+      painter.setActivity(undefined);
+      const widths: number[] = [];
+      for (let frame = 0; frame < 360; frame++) {
+        painter.tick(1 / 60);
+        const box = canvas.ctx!.box;
+        widths.push((box.maxX - box.minX) / DPR);
+        expect(Math.min(box.minX, box.minY)).toBeGreaterThanOrEqual(-1);
+        expect(Math.max(box.maxX, box.maxY)).toBeLessThanOrEqual(px * DPR + 1);
+      }
+      // A subpixel display flicker cannot satisfy this: the actual outline must move.
+      expect(Math.max(...widths) - Math.min(...widths)).toBeGreaterThan(2);
+    },
+  );
+
+  it("the nutcracker lifts both boots during its rail march", () => {
+    const canvas = fakeCanvas();
+    const painter = createNutcracker(canvas as unknown as HTMLCanvasElement, ORB_PX.card);
+    const ctx = canvas.ctx!;
+    const fillRect = ctx.fillRect.bind(ctx);
+    const bootY: number[][] = [[], []];
+    let index = 0;
+    vi.spyOn(ctx, "fillRect").mockImplementation((x, y, w, h) => {
+      if (y > 0.9) {
+        const point = ctx.getTransform().transformPoint({ x: x + w / 2, y: y + h / 2 });
+        bootY[index++ % 2].push(point.y / DPR);
+      }
+      fillRect(x, y, w, h);
+    });
+    painter.setActivity(undefined);
+    for (let frame = 0; frame < 120; frame++) painter.tick(1 / 60);
+    for (const positions of bootY) {
+      expect(Math.max(...positions) - Math.min(...positions)).toBeGreaterThan(1.5);
+    }
+  });
+
+  it.each([["TARS", createTars], ["nutcracker", createNutcracker]] as const)(
+    "%s stops its limb choreography while quiet or stopping",
+    (_, make) => {
+      for (const activity of [{ quiet: true }, { stopping: true }]) {
+        const canvas = fakeCanvas();
+        const painter = make(canvas as unknown as HTMLCanvasElement, ORB_PX.card);
+        painter.setActivity(activity);
+        painter.tick(0.1);
+        const first = { ...canvas.ctx!.box };
+        for (let frame = 0; frame < 180; frame++) painter.tick(1 / 60);
+        expect(canvas.ctx!.box).toEqual(first);
+      }
+    },
+  );
+});
+
 describe(CINEMA_TEST_GROUP, () => {
   it.each(CINEMA_PAINTERS)(ALL_STATES_TEST, (_, make) => {
     const states = CINEMA_STATES.map((activity) => characterFrame(make, activity, null));

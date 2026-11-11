@@ -21,7 +21,6 @@ const BOX = "box";
 const ROOT: Point3 = [0, 0, 0];
 const LOOK_RIGHT = 0.7;
 const TIME = 0.6;
-const LIMB_COUNT = 2;
 const POSE: CharacterPose = {
   time: TIME, gazeX: ZERO, gazeY: ZERO, work: ZERO, read: ZERO,
   write: ZERO, speak: ZERO, listen: ZERO, quiet: ZERO, done: ZERO,
@@ -41,7 +40,7 @@ const RED_PREFIX = "rgba(";
 const BLUE_CHANNEL_PATTERN = /^rgba\(0,0,[1-9]/;
 const RED_CHANNEL_PATTERN = /^rgba\([1-9]\d*,0,0,/;
 const MECHANICS_SUITE = "cinema character articulation";
-const TARS_GAIT = "TARS walks with its slabs turning around their horizontal hinges";
+const TARS_GAIT = "TARS unfolds its four columns into a lower, wider running stance";
 const TARS_FINISH = "TARS finishes without splaying its columns like arms";
 const WALLE_GAZE = "WALL·E turns its binocular head while the tracks stay planted";
 const R2_GAZE = "R2-D2 follows the pointer by rotating its dome without pitching it";
@@ -50,29 +49,44 @@ const DOME_TEST = "colors the dome surface itself without overlapping blue patch
 
 function drawingContext() {
   const colors: string[] = [];
+  const points: number[][] = [];
   const context = {
     fillStyle: RED_PREFIX,
-    beginPath() {}, moveTo() {}, lineTo() {}, closePath() {}, stroke() {},
+    beginPath() {},
+    moveTo(x: number, y: number) { points.push([x, y]); },
+    lineTo(x: number, y: number) { points.push([x, y]); },
+    closePath() {}, stroke() {},
     fill() { colors.push(this.fillStyle); },
   };
-  return { ctx: context as unknown as CanvasRenderingContext2D, colors };
+  return { ctx: context as unknown as CanvasRenderingContext2D, colors, points };
+}
+
+function tarsBounds(pose: CharacterPose) {
+  const mesh = new CharacterMesh(SEGMENTS);
+  const { ctx, points } = drawingContext();
+  buildTars(mesh, pose);
+  mesh.paint(ctx, 32, [-0.12, -0.22, 0], ROOT, 0.96, WHITE, ZERO, ONE);
+  const xs = points.map(([x]) => x);
+  const ys = points.map(([, y]) => y);
+  return {
+    width: Math.max(...xs) - Math.min(...xs),
+    height: Math.max(...ys) - Math.min(...ys),
+  };
 }
 
 describe(MECHANICS_SUITE, () => {
   it(TARS_GAIT, () => {
-    const mesh = new CharacterMesh(SEGMENTS);
-    const groups = vi.spyOn(mesh, GROUP);
-    const pose = { ...POSE, work: ONE };
-    buildTars(mesh, pose);
-    const calls = groups.mock.calls;
-    expect(calls).toHaveLength(LIMB_COUNT);
-    for (const [, angles] of calls) {
-      expect(angles[Y]).toBe(ZERO);
-      expect(angles[Z]).toBe(ZERO);
-    }
-    const leadingPitch = calls[ZERO][ONE][X];
-    const trailingPitch = calls[LIMB_COUNT - ONE][ONE][X];
-    expect(leadingPitch * trailingPitch).toBeLessThan(ZERO);
+    const standing = tarsBounds({ ...POSE, quiet: ONE });
+    const running = tarsBounds({ ...POSE, work: ONE });
+    expect(running.width - standing.width).toBeGreaterThan(8);
+    expect(standing.height - running.height).toBeGreaterThan(3);
+  });
+
+  it("TARS alternates upright and spider gaits on the rail without a supplied activity", () => {
+    const standing = tarsBounds({ ...POSE, time: 0 });
+    const crawling = tarsBounds({ ...POSE, time: 1.8 });
+    expect(crawling.width - standing.width).toBeGreaterThan(8);
+    expect(standing.height - crawling.height).toBeGreaterThan(3);
   });
 
   it(TARS_FINISH, () => {
@@ -82,27 +96,25 @@ describe(MECHANICS_SUITE, () => {
     buildTars(mesh, pose);
     for (const [, angles] of groups.mock.calls) {
       const pitch = Math.abs(angles[X]);
-      expect(angles[Z]).toBe(ZERO);
+      expect(Math.abs(angles[Z])).toBe(ZERO);
       expect(pitch).toBeLessThan(QUARTER_TURN);
     }
   });
 
   it.each([
     { work: 1 }, { write: 1 }, { done: 1 }, { failed: 1 }, { listen: 1, gazeX: 1 },
-  ])("keeps TARS's central block fixed and both limbs on the forward/backward axis for %j", (activity) => {
+  ])("keeps TARS made of four equal segmented columns for %j", (activity) => {
     const mesh = new CharacterMesh(SEGMENTS);
-    const groups = vi.spyOn(mesh, GROUP);
     const boxes = vi.spyOn(mesh, BOX);
     buildTars(mesh, { ...POSE, ...activity });
-    expect(boxes.mock.calls).toHaveLength(3);
-    const [body] = boxes.mock.calls[0];
-    expect(body[0][X]).toBe(0);
-    for (const [pivot, angles] of groups.mock.calls) {
-      expect(Math.abs(pivot[X])).toBeGreaterThan(body[1][X] / 2);
-      expect(angles[Y]).toBe(0);
-      expect(angles[Z]).toBe(0);
+    const columns = new Map<number, number>();
+    for (const [solid] of boxes.mock.calls) {
+      const [center, size] = solid;
+      columns.set(center[X], (columns.get(center[X]) ?? 0) + 1);
+      expect(size[X]).toBeCloseTo(0.102);
+      expect(size[Y]).toBeCloseTo(0.401);
     }
-    expect(groups.mock.calls).toHaveLength(2);
+    expect([...columns.values()]).toEqual([2, 2, 2, 2]);
   });
 
   it(WALLE_GAZE, () => {

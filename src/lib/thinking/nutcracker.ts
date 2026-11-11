@@ -1,7 +1,7 @@
-import { thinkingState, type ThinkingActivity } from "./activity";
+import { phaseGroup, thinkingState, type ThinkingActivity } from "./activity";
 import { cueClock, startle } from "./cue";
 import { blink, INK, lipSync, lookFor, strokeEye, WHITE, type Gaze } from "./face";
-import { finishClock, rgba, TAU } from "./finish";
+import { easeOut, finishClock, rgba, TAU } from "./finish";
 import { listenLevel } from "./listen";
 import { palette, type Rgb } from "./palette";
 import { prepareCanvas, type Painter } from "./ticker";
@@ -22,19 +22,19 @@ const RUN_STATE = "run";
 const DONE_STATE = "done";
 const FAILED_STATE = "failed";
 const QUIET_STATE = "quiet";
+const STOPPING_STATE = "stopping";
 const SPEAK_PHASE = "speak";
 const LISTEN_PHASE = "listen";
-const WORK_PHASES = new Set(["tool", "edit", "run", "work"]);
 const FAILED_EYES = "x";
 const HAPPY_EYES = "happy";
 const CLOSED_EYES = "closed";
 const WAKE_BOB = 0.035;
-const THINK_BOB = 0.009;
+const THINK_BOB = 0.014;
 const BOB_RATE = 3;
 const MARCH_RATE = 7;
-const MARCH_ANGLE = 0.1;
+const MARCH_ANGLE = 0.46;
 const ASK_ANGLE = 0.08;
-const SALUTE_ANGLE = -1.65;
+const SALUTE_ANGLE = -2.25;
 const SLEEP_ANGLE = 0.08;
 const SLEEP_OPACITY = 0.65;
 const FINISH_SECONDS = 1.6;
@@ -76,15 +76,13 @@ const BUTTONS: readonly ToyEllipse[] = [
   [0.411, 0.686, 0.014, 0.014], [0.589, 0.686, 0.014, 0.014],
   [0.411, 0.745, 0.014, 0.014], [0.589, 0.745, 0.014, 0.014],
 ];
-const LEFT_ARM: ToyRect = [0.246, 0.654, 0.07, 0.15];
-const LEFT_CUFF: ToyRect = [0.242, 0.77, 0.078, 0.027];
-const LEFT_HAND: ToyEllipse = [0.281, 0.817, 0.035, 0.034];
+const LEFT_ARM_PIVOT: ToyPoint = [0.281, 0.67];
 const ARM_PIVOT: ToyPoint = [0.7, 0.67];
 const RIGHT_ARM: ToyRect = [-0.035, -0.018, 0.07, 0.15];
 const RIGHT_CUFF: ToyRect = [-0.039, 0.1, 0.078, 0.027];
 const RIGHT_HAND: ToyEllipse = [0, 0.15, 0.035, 0.034];
 const SHOULDERS: readonly ToyRect[] = [[0.24, 0.635, 0.1, 0.04], [0.66, 0.635, 0.1, 0.04]];
-const BEARD: readonly ToyPoint[] = [[0.355, 0.566], [0.645, 0.566], [0.61, 0.639], [0.5, 0.702], [0.39, 0.639]];
+const BEARD: readonly ToyPoint[] = [[0.355, 0.603], [0.645, 0.603], [0.61, 0.639], [0.5, 0.702], [0.39, 0.639]];
 const MOUSTACHE: readonly ToyPoint[] = [
   [0.5, 0.496], [0.45, 0.485], [0.401, 0.514], [0.365, 0.507],
   [0.395, 0.547], [0.452, 0.548], [0.5, 0.524], [0.548, 0.548],
@@ -94,7 +92,7 @@ const MOUTH: ToyRect = [0.412, 0.558, 0.176, 0.045];
 const TEETH: readonly ToyRect[] = [
   [0.424, 0.563, 0.046, 0.026], [0.477, 0.563, 0.046, 0.026], [0.53, 0.563, 0.046, 0.026],
 ];
-const JAW_TRAVEL = 0.025;
+const JAW_TRAVEL = 0.045;
 const JAW_IDLE_RATE = 5;
 const JAW_IDLE_RANGE = 0.25;
 const SNOW: readonly ToyPoint[] = [[0.15, 0.12], [0.83, 0.25], [0.12, 0.56], [0.87, 0.7], [0.77, 0.04]];
@@ -143,11 +141,12 @@ export function createNutcracker(canvas: HTMLCanvasElement, px: number, gain = D
     const activity = clock.act;
     const state = thinkingState(activity);
     const running = state === RUN_STATE;
-    const quiet = state === QUIET_STATE;
+    const quiet = state === QUIET_STATE || state === STOPPING_STATE;
     const done = state === DONE_STATE;
     const failed = state === FAILED_STATE;
     const moving = running && !frozen;
-    const marching = activity?.phase ? WORK_PHASES.has(activity.phase) : false;
+    const group = phaseGroup(activity?.phase);
+    const marching = group === "work" || group === "write";
     const speaking = activity?.phase === SPEAK_PHASE;
     const listening = activity?.phase === LISTEN_PHASE;
     const voice = speaking && moving ? voiceLevel() : ZERO;
@@ -158,10 +157,17 @@ export function createNutcracker(canvas: HTMLCanvasElement, px: number, gain = D
     const jaw = Math.min(ONE, syllable * gain + jawIdle) * JAW_TRAVEL;
     const wake = startle(cue.wake);
     const bobWave = Math.sin(time * BOB_RATE);
-    const bob = moving ? bobWave * THINK_BOB - (wake + hearing) * WAKE_BOB : ZERO;
+    // The rail supplies no phase: keep a toy-soldier march there too, with a periodic salute.
+    // Conversation and reading get quieter poses so the voice and gaze stay readable.
+    const attention = speaking || listening || group === "read";
     const marchWave = Math.sin(time * MARCH_RATE);
-    const salute = done ? SALUTE_ANGLE : moving && marching ? marchWave * MARCH_ANGLE : ZERO;
-    const tilt = quiet ? SLEEP_ANGLE : moving ? cue.ask * ASK_ANGLE : ZERO;
+    const march = moving && !attention ? (marching ? ONE : 0.8) * (ONE - cue.ask * 0.85) : ZERO;
+    const saluteWave = (ONE + Math.sin(time * 1.25 - 1.6)) * HALF;
+    const greeting = moving && !attention ? easeOut((saluteWave - 0.82) / 0.18) : ZERO;
+    const salute = done ? SALUTE_ANGLE : greeting * (SALUTE_ANGLE + Math.sin(time * 11) * 0.12);
+    const bounce = done && !frozen ? Math.sin(clock.fin * 10) * Math.exp(-clock.fin * 3) * 0.035 : ZERO;
+    const bob = (moving ? bobWave * THINK_BOB - Math.abs(marchWave) * march * 0.022 - (wake + hearing) * WAKE_BOB : ZERO) - bounce;
+    const tilt = quiet ? SLEEP_ANGLE : moving ? cue.ask * ASK_ANGLE + marchWave * march * 0.035 : ZERO;
     const look = gaze ?? lookFor(activity?.phase, time);
     const lookX = moving ? look[FIRST_POINT] * GAZE_DISTANCE : ZERO;
     const lookY = moving ? look[NEXT_POINT] * GAZE_DISTANCE : ZERO;
@@ -185,20 +191,34 @@ export function createNutcracker(canvas: HTMLCanvasElement, px: number, gain = D
     ctx.rotate(tilt);
     ctx.translate(-HALF, -HALF);
     ctx.globalAlpha = quiet ? SLEEP_OPACITY : ONE;
-    for (const leg of LEGS) rectangle(leg, navy);
-    for (const boot of BOOTS) rectangle(boot, ink);
+    for (const [index, leg] of LEGS.entries()) {
+      const side = index === 0 ? -ONE : ONE;
+      const step = side * marchWave * march;
+      const pivotX = leg[0] + leg[2] * HALF;
+      ctx.save();
+      ctx.translate(pivotX, leg[1] - Math.max(ZERO, step) * 0.045);
+      ctx.rotate(step * 0.42);
+      ctx.translate(-pivotX, -leg[1]);
+      rectangle(leg, navy);
+      rectangle(BOOTS[index], ink);
+      ctx.restore();
+    }
     rectangle(COAT, coat);
     rectangle(COAT_CENTER, gold);
     rectangle(BELT, ink);
     rectangle(BELT_BUCKLE, gold);
     rectangle(COLLAR, gold);
     for (const button of BUTTONS) ellipse(button, gold);
-    rectangle(LEFT_ARM, coat);
-    rectangle(LEFT_CUFF, gold);
-    ellipse(LEFT_HAND, wood);
+    ctx.save();
+    ctx.translate(...LEFT_ARM_PIVOT);
+    ctx.rotate(-marchWave * march * MARCH_ANGLE - (speaking ? syllable * 0.35 : ZERO));
+    rectangle(RIGHT_ARM, coat);
+    rectangle(RIGHT_CUFF, gold);
+    ellipse(RIGHT_HAND, wood);
+    ctx.restore();
     ctx.save();
     ctx.translate(...ARM_PIVOT);
-    ctx.rotate(salute);
+    ctx.rotate(salute + marchWave * march * MARCH_ANGLE * (ONE - greeting) + (listening ? 0.5 + hearing * 0.3 : ZERO));
     rectangle(RIGHT_ARM, coat);
     rectangle(RIGHT_CUFF, gold);
     ellipse(RIGHT_HAND, wood);
@@ -207,7 +227,6 @@ export function createNutcracker(canvas: HTMLCanvasElement, px: number, gain = D
     for (const curl of HAIR) ellipse(curl, white);
     rectangle(TOY_FACE, wood);
     rectangle(FACE_HIGHLIGHT, woodLight);
-    polygon(BEARD, white);
     rectangle(HAT, coat);
     rectangle(HAT_HIGHLIGHT, redLight);
     rectangle(HAT_TOP, gold);
@@ -226,10 +245,13 @@ export function createNutcracker(canvas: HTMLCanvasElement, px: number, gain = D
     }
     ellipse(FACE_NOSE, nose);
     polygon(MOUSTACHE, ink);
+    // The actual wooden jaw and beard slide together, revealing a dark mouth cavity.
+    rectangle([MOUTH[0], MOUTH[1], MOUTH[2], MOUTH[3] + jaw], ink);
+    for (const tooth of TEETH) rectangle(tooth, white);
     ctx.save();
     ctx.translate(ZERO, jaw);
-    rectangle(MOUTH, ink);
-    for (const tooth of TEETH) rectangle(tooth, white);
+    polygon(BEARD, white);
+    rectangle([0.419, 0.598, 0.162, 0.013], white);
     ctx.restore();
     if (done && !frozen) {
       const progress = clock.fin / FINISH_SECONDS;
