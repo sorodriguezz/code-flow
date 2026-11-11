@@ -80,6 +80,19 @@ const handlers: Record<string, Handler> = {
     const { runSavedRequest } = await import("../api/savedRequest");
     return runSavedRequest(payload as Parameters<typeof runSavedRequest>[0], signal);
   },
+  /** One of the app's own commands, for a chat's model (`app_gateway`: `app_call`). Which commands
+   *  and with what arguments is decided there — the risk, the scope, the user's yes; this only
+   *  makes the call the window would make. */
+  "app.invoke": async (payload) => {
+    const { command, args } = payload as { command: string; args: Record<string, unknown> };
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke(command, args ?? {});
+  },
+  /** A saved request as a complete curl line, nothing sent (`api_request_curl`). */
+  "api.curl": async (payload) => {
+    const { curlSavedRequest } = await import("../api/savedRequest");
+    return curlSavedRequest(payload as Parameters<typeof curlSavedRequest>[0]);
+  },
   /** A whole collection, in the runner's order (`app.apiCollection`). */
   "api.collection": async (payload, signal) => {
     const { runSavedCollection } = await import("../api/savedRequest");

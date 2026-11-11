@@ -1241,7 +1241,11 @@ pub fn diff_mention_note(title: &str, diff: &str) -> String {
 /// The plan mode of the repository chat: the turn runs read-only (the CLI enforces it, as for a
 /// story's analysis) and is asked for a plan instead of the change. Appended, never stored.
 pub const PLAN_MODE_NOTE: &str = "\n\n---\nModo plan (lo activó el usuario): en este turno NO modifiques ningún archivo ni \
-     ejecutes comandos que cambien el repositorio. Investiga lo necesario y responde con un plan concreto: \
+     ejecutes nada que cambie algo — ni en el repositorio ni fuera (git commit/push, kubectl apply, escrituras en bases \
+     de datos, requests que no sean GET). Sí puedes, y debes, investigar a fondo sin pedirle al usuario que ejecute nada: \
+     corre las pruebas y comandos de lectura en la terminal (corren en un sandbox que no deja escribir), mira logs y \
+     configuración de Kubernetes, Azure y contenedores, consulta las bases de datos abiertas a la IA y las requests del \
+     cliente API con las herramientas de CodeFlow, y abre páginas en el navegador. Luego responde con un plan concreto: \
      qué archivos cambiarías, qué cambio harías en cada uno y en qué orden, y los riesgos o dudas que veas. \
      El usuario lo revisará y te pedirá que lo ejecutes.";
 

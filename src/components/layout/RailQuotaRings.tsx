@@ -1,11 +1,11 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { ArrowUpRight, Clock3 } from "lucide-react";
-import { useT } from "../../state/languageStore";
-import { formatResetIn, formatUsed, missingClaudeWeekly, quotaKey, railWindows, useQuotaStore } from "../../state/quotaStore";
+import { useLanguageStore, useT } from "../../state/languageStore";
+import { formatResetAt, formatResetIn, formatUsed, missingClaudeWeekly, quotaKey, railWindows, useQuotaStore } from "../../state/quotaStore";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import { useUiStore } from "../../state/uiStore";
 import { providerDisplayLabel } from "../../lib/aiProviders";
-import { MissingWeeklyQuota, limitLabel, narrowedKinds, quotaAccountLabel } from "../ai/QuotaLimits";
+import { MissingWeeklyQuota, limitLabel, narrowedKinds, quotaAccountLabel, resetAtLabel } from "../ai/QuotaLimits";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { Tooltip } from "../common/Tooltip";
 import type { QuotaLimit } from "../../types/domain";
@@ -186,7 +186,11 @@ function QuotaWindow({ limit, narrowed, inner = false }: { limit: QuotaLimit; na
   const t = useT();
   const used = clampedUsedPercent(limit);
   const style = ringStyleFor(used);
-  const reset = formatResetIn(limit.resets_at);
+  // Like the quota panel: how long, and the clock reading it comes back at, in the app's language.
+  const language = useLanguageStore((s) => s.language);
+  const now = Date.now();
+  const reset = formatResetIn(limit.resets_at, now);
+  const resetAt = formatResetAt(limit.resets_at, now, language);
   return (
     <span className="cf-quota-window" style={{ "--cf-quota-color": style.stroke } as CSSProperties}>
       <span className="cf-quota-window-heading">
@@ -199,7 +203,7 @@ function QuotaWindow({ limit, narrowed, inner = false }: { limit: QuotaLimit; na
       <span className="cf-quota-meter" aria-hidden>
         <span style={{ width: `${used}%` }} />
       </span>
-      {reset && <span className="cf-quota-reset"><Clock3 size={10} aria-hidden />{t("quota.resetsIn", { time: reset })}</span>}
+      {reset && <span className="cf-quota-reset"><Clock3 size={10} aria-hidden />{t("quota.resetsIn", { time: reset })}{resetAt && ` · ${resetAtLabel(resetAt, t)}`}</span>}
     </span>
   );
 }

@@ -5,6 +5,10 @@
 #![cfg_attr(all(windows, test), allow(linker_messages))]
 
 mod ado;
+/// Azure DevOps, read for a chat's model (the map server's `azure_devops` tool).
+mod ado_agent;
+/// Every command of the app, for a chat's model (`app_commands` / `app_call`).
+mod app_gateway;
 mod ai;
 mod applog;
 mod asr;
@@ -36,6 +40,8 @@ mod agentstatus;
 mod chain_memory;
 mod custom;
 mod chat_mcp;
+/// What a chat's model may run in the shell without asking, and plan mode's sandbox.
+mod chat_exec;
 mod chat_refs;
 mod archify_suggest;
 mod codemap;
@@ -914,6 +920,11 @@ pub fn run() {
                 tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)
             ) {
                 window_state::record(window);
+            }
+            // A new appearance rebuilds a see-through window's backdrop with its tint back on, and
+            // full screen (which arrives as a resize) takes its corners away.
+            if matches!(event, tauri::WindowEvent::ThemeChanged(_) | tauri::WindowEvent::Resized(_)) {
+                glass::refresh_backdrop(window);
             }
             // Codi's window opens where it was left (`windows::codi_spot`).
             if matches!(event, tauri::WindowEvent::Moved(_)) && window.label() == windows::codi_label() {

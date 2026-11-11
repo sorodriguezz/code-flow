@@ -406,6 +406,8 @@ pub fn allow_rule() -> String {
 }
 
 const PERMISSION_PROMPT_TOOL: &str = "approve_tool_use";
+/// Claude Code's shell tool, as its permission prompt names it.
+const SHELL_TOOL: &str = "Bash";
 const PERMISSION_TOOL_NAME_KEY: &str = "tool_name";
 const PERMISSION_INPUT_KEY: &str = "input";
 const PERMISSION_COMMAND_KEY: &str = "command";
@@ -456,6 +458,43 @@ async fn answer_permission_prompt(access: &Access, args: &Value) -> String {
         return permission_decision(false, input, CODEFLOW_NOT_READY.to_string());
     };
     let tool_name = args.get(PERMISSION_TOOL_NAME_KEY).and_then(Value::as_str).unwrap_or_default().to_string();
+    // The shell and the browser, by the chat's execution policy (`crate::chat_exec`): a turn that may
+    // act runs everything but what `cf guard` holds; a plan turn runs what looks and is sandboxed.
+    if tool_name == SHELL_TOOL {
+        let command = input.get(PERMISSION_COMMAND_KEY).and_then(Value::as_str).unwrap_or_default().to_string();
+        if access.acts {
+            let Some(reason) = crate::shell_rules::dangerous(&command) else {
+                return permission_decision(true, input, String::new());
+            };
+            return match crate::agentcli::guard(app, &command, reason, &access.root).await {
+                Ok(_) => permission_decision(true, input, String::new()),
+                Err(said) => {
+                    let said = said.trim();
+                    let said = if said.is_empty() || said == "no" || said == "no answer" { String::new() } else { format!(" They said: {said}") };
+                    permission_decision(false, input, format!("The user did not approve this command ({reason}).{said}"))
+                }
+            };
+        }
+        if let Some(reason) = crate::chat_exec::plan_refusal(&command) {
+            return permission_decision(false, input, format!("Not run: {reason}. Say what you would run instead."));
+        }
+        let mut wrapped = input.clone();
+        if let Some(fields) = wrapped.as_object_mut() {
+            fields.insert(PERMISSION_COMMAND_KEY.to_string(), Value::String(crate::chat_exec::sandboxed(&command, &access.root)));
+        }
+        return permission_decision(true, wrapped, String::new());
+    }
+    if let Some(allowed) = crate::chat_exec::browser_allows(&tool_name, access.acts) {
+        return if allowed {
+            permission_decision(true, input, String::new())
+        } else {
+            permission_decision(false, input, "Plan mode reads pages; it does not click, type or submit. Say what you would do instead.".to_string())
+        };
+    }
+    // Anything else a turn that may act asks for runs: the user's call is that it does everything.
+    if access.acts {
+        return permission_decision(true, input, String::new());
+    }
     let detail = permission_detail(&input);
     let approval = crate::agentcli::approve_tool_use(app, &access.root, &access.session, &tool_name, &detail).await;
     match approval {
@@ -465,10 +504,12 @@ async fn answer_permission_prompt(access: &Access, args: &Value) -> String {
     }
 }
 
-/// The servers of `servers` a run may load: all of them normally, only this one in a read-only run
-/// — it is a query over the map and nothing else, the one server such a run can be given safely.
+/// The servers of `servers` a run may load: all of them normally, only this one and the browser in a
+/// read-only run — the map is queries, and the browser's calls are held to reading by the prompt.
 pub fn loadable(servers: &[LiveServer], read_only: bool) -> Vec<LiveServer> {
-    servers.iter().filter(|server| !read_only || server.name == SERVER_NAME).cloned().collect()
+    // The headless browser too: a read-only turn's calls to it are limited to reading pages by the
+    // permission prompt (`chat_exec::browser_allows`).
+    servers.iter().filter(|server| !read_only || server.name == SERVER_NAME || server.name == crate::chat_exec::BROWSER_SERVER).cloned().collect()
 }
 
 /// The server for a CLI run in `cwd`, when that is a repository's working tree and the user has
@@ -885,6 +926,7 @@ pub fn tools_for(acts: bool) -> Vec<Value> {
     all.extend(crate::ai_memory::tools::schemas(acts));
     all.extend(app_read_tools().into_iter().map(read_only));
     all.extend(infra_tools());
+    all.extend(crate::app_gateway::tools(acts));
     if acts {
         all.extend(app_action_tools());
     }
@@ -958,6 +1000,30 @@ fn app_read_tools() -> Vec<Value> {
             "inputSchema": {"type": "object", "properties": {
                 "filter": {"type": "string", "description": "Only requests whose path, name or URL contains this. Optional."}
             }},
+        }),
+        json!({
+            "name": "api_request_curl",
+            "description": "A request saved in CodeFlow's API client as one complete curl command — method, resolved URL, headers, body, the auth it inherits — with every secret as a $CF_SECRET_n placeholder. To see exactly what a request sends; run it with http_request, which puts the secrets back.",
+            "inputSchema": {"type": "object", "properties": {
+                "request": {"type": "string", "description": "Collection/Folder/Request, or the request's name (api_requests lists them)"},
+                "environment": {"type": "string", "description": "The environment to resolve it in (default: the one active in the API client; none for none)"}
+            }, "required": ["request"]},
+        }),
+        json!({
+            "name": "azure_devops",
+            "description": "Read-only Azure DevOps with the user's connection in CodeFlow (defaults: this repository's organization and project): repositories, branches, a folder or file of any repository, commits, pull requests, and Boards work items — search, one in full with its comments, or a WIQL query.",
+            "inputSchema": {"type": "object", "properties": {
+                "action": {"type": "string", "enum": ["projects", "repos", "branches", "tree", "file", "commits", "prs", "pr", "work_items", "work_item", "wiql"], "description": "work_items: search by text or id (empty: assigned to me and open)"},
+                "org": {"type": "string"},
+                "project": {"type": "string"},
+                "repo": {"type": "string", "description": "branches/tree/file/commits/prs: name (default: this repository)"},
+                "branch": {"type": "string", "description": "tree/file/commits: default the repository's default branch"},
+                "path": {"type": "string", "description": "tree/file: path in the repository"},
+                "id": {"type": "integer", "description": "pr / work_item"},
+                "query": {"type": "string", "description": "work_items: text or id; wiql: the WIQL (SELECT only)"},
+                "status": {"type": "string", "enum": ["active", "completed", "abandoned", "all"], "description": "prs (default active)"},
+                "limit": {"type": "integer", "description": "commits/prs/work_items/wiql (default 20, at most 100)"}
+            }, "required": ["action"]},
         }),
         json!({
             "name": "local_llm",
@@ -1210,7 +1276,7 @@ fn db_saved_here(root: &str) -> bool {
     .unwrap_or(false)
 }
 
-const WORKSPACE_APP_READ_TOOLS: &[&str] = &["service_logs", "service_wait", "terminal_output", "api_requests", "local_llm"];
+const WORKSPACE_APP_READ_TOOLS: &[&str] = &["service_logs", "service_wait", "terminal_output", "api_requests", "api_request_curl", "azure_devops", "local_llm"];
 const WORKSPACE_APP_ACTION_TOOLS: &[&str] = &["service_restart", "notify", "write_note", "http_request"];
 
 fn workspace_app_tools(acts: bool) -> Vec<Value> {
@@ -1314,7 +1380,24 @@ fn app_action_tools() -> Vec<Value> {
 /// (`agentcli::run_verb`). `None` for a name that is not one of these.
 async fn app_tool(access: &Access, name: &str, args: &Value) -> Option<Result<String, String>> {
     let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
-    if matches!(name, "pipelines" | "api_requests" | "write_note") {
+    // The whole app: every command the window can call (`crate::app_gateway`).
+    if crate::app_gateway::is_tool(name) {
+        let Some(app) = crate::ai_usage::app() else { return Some(Err("CodeFlow is not ready yet".to_string())) };
+        let place = crate::agentcli::place::of(app, &access.root, &access.session);
+        let scope = crate::app_gateway::Scope {
+            root: &access.root,
+            session: &access.session,
+            acts: access.acts,
+            workspace_id: place.workspace_id.clone(),
+            project: place.project.clone(),
+        };
+        return Some(if name == crate::app_gateway::LIST_TOOL {
+            Ok(crate::app_gateway::list(&scope, args))
+        } else {
+            crate::app_gateway::call(app, &scope, args).await
+        });
+    }
+    if matches!(name, "pipelines" | "api_requests" | "api_request_curl" | "azure_devops" | "write_note") {
         return Some(other_apps(access, name, args).await);
     }
     // The interface: the `cf ui` verb, in-process.
@@ -1505,6 +1588,7 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
                 own.extend(crate::ai_memory::tools::schemas(access.acts));
                 own.extend(workspace_app_tools(access.acts));
                 own.extend(infra_tools());
+                own.extend(crate::app_gateway::tools(access.acts));
                 own
             } else if access.grounding {
                 grounding_tools()
@@ -1561,7 +1645,7 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
                 });
             }
             let about_a_reference = REFERENCE_TOOLS.contains(&name) || (MAP_TOOLS.contains(&name) && args.get("repo").and_then(Value::as_str).is_some_and(|r| !r.trim().is_empty()));
-            let workspace_app_tool = is_workspace_app_tool(name);
+            let workspace_app_tool = is_workspace_app_tool(name) || crate::app_gateway::is_tool(name);
             if access.workspace && !WORKSPACE_TOOLS.contains(&name) && !DB_TOOLS.contains(&name) && !workspace_app_tool && !about_a_reference {
                 let why = if MAP_TOOLS.contains(&name) { "name a reference repository in repo — there is no single repository of its own here" } else { "there is no single repository here" };
                 return Some(text_result(id, format!("{name} is not available in the workspace chat: {why}"), true));
@@ -1704,10 +1788,11 @@ mod tests {
 
         let (_, reply) = post(&headers, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
         // Kubernetes, Azure and the engines are there too where their CLIs are: not counted here.
-        // The other chats and their artifacts (`chat_refs`) ride every token but a grounding one.
+        // The other chats and their artifacts (`chat_refs`) ride every token but a grounding one, and
+        // so does the whole app (`app_gateway`).
         let own: Vec<String> = tool_names(&reply)
             .into_iter()
-            .filter(|n| !INFRA_TOOLS.contains(&n.as_str()) && !crate::chat_refs::is_tool(n) && n != PERMISSION_PROMPT_TOOL)
+            .filter(|n| !INFRA_TOOLS.contains(&n.as_str()) && !crate::chat_refs::is_tool(n) && !crate::app_gateway::is_tool(n) && n != PERMISSION_PROMPT_TOOL)
             .collect();
         let expected: Vec<&str> = ["search_knowledge", "recall", "read_note", "memory_list", "read_memory"].into_iter().chain(WORKSPACE_APP_READ_TOOLS.iter().copied()).collect();
         assert_eq!(own, expected);
@@ -2286,6 +2371,28 @@ async fn other_apps(access: &Access, name: &str, args: &Value) -> Result<String,
                 .map(|(path, r)| format!("{} {} — {}", r.method, path, r.url))
                 .collect();
             Ok(if lines.is_empty() { "No saved requests.".into() } else { lines.join("\n") })
+        }
+        "api_request_curl" => {
+            let mut list = vec![text("request")];
+            if list[0].is_empty() {
+                return Err("request is required — api_requests lists them".into());
+            }
+            if !text("environment").is_empty() {
+                list.extend(["--env".to_string(), text("environment")]);
+            }
+            crate::agentcli::run_verb(app, "curl", list, String::new(), &access.root, &access.session).await
+        }
+        "azure_devops" => {
+            // This repository's organization and project, or — in a workspace chat — the first of its
+            // repositories that is on Azure DevOps.
+            let linked = place.project.clone().filter(|p| p.ado_org.is_some()).or_else(|| {
+                let workspace = place.workspace_id.clone()?;
+                crate::ai_usage::with_conn(|conn| crate::db::queries::list_projects(conn, &workspace).ok())
+                    .flatten()?
+                    .into_iter()
+                    .find(|p| p.ado_org.is_some())
+            });
+            crate::ado_agent::read(linked.as_ref(), args).await
         }
         "write_note" => {
             if !access.acts {

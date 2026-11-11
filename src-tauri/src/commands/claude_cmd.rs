@@ -1632,6 +1632,16 @@ pub async fn send_chat_message(
         crate::commands::chat_cmd::mcp_plan(&db, &workspace_id, &config.provider, &config.binary, &env, &overrides).await
     };
     tools.extend(turn_mcp.allow_rules.iter().cloned());
+    // The chat's execution policy (`crate::chat_exec`), as in the workspace chat: every shell command
+    // reaches CodeFlow's permission prompt — unasked unless destructive, sandboxed in plan mode — so a
+    // blanket `Bash` in the saved tool list is taken out; and a headless browser rides along.
+    if config.provider == "claude" {
+        tools.retain(|tool| tool != "Bash" && tool != "Bash(*)" && tool != "Bash(*:*)");
+    }
+    let theirs = turn_mcp.block.iter().any(|s| s == crate::chat_exec::BROWSER_SERVER)
+        || turn_mcp.allow_rules.contains(&crate::claude::mcp_rule(crate::chat_exec::BROWSER_SERVER))
+        || turn_mcp.app.iter().any(|s| s.name == crate::chat_exec::BROWSER_SERVER);
+    let browser = if config.provider == "claude" && !theirs && step.is_none() { crate::chat_exec::browser_server() } else { None };
 
     // Timed around the engine call only, so it reflects how long the model actually took —
     // not the surrounding DB reads or IPC.
@@ -1679,7 +1689,7 @@ pub async fn send_chat_message(
             stream_deltas,
             analysis,
             turn_mcp.block.clone(),
-            turn_mcp.app.clone(),
+            turn_mcp.app.iter().cloned().chain(browser.clone()).collect(),
             &attachments,
             // A hybrid plan's answer must be the plan's JSON, and a round of the local fix loop the
             // review's; the CLIs that can enforce a schema do.

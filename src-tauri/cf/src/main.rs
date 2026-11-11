@@ -328,6 +328,7 @@ Databases the user opened to AI (Acceso de IA): reads run at once, each write is
 
 Saved credentials: the app uses them and never shows them; every use is approved by the user
   cf http <request> [--env <name>]  send a request saved in the API client (Collection/Folder/Name)
+  cf curl <request> [--env <name>]  the same request as a full curl line (nothing sent, secrets as $CF_SECRET_n)
   cf secret <NAME> -- '<command>'   the app runs the command with the Llavero entry NAME in an
                                     environment variable named after it (GitHub token: $GITHUB_TOKEN;
                                     --env VAR picks another, --field KEY another field) and prints its

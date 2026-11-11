@@ -174,6 +174,10 @@ export function installChatIslands(): void {
           await useWorkspaceChatStore.getState().ensureLoaded(ref.conversationId, ref.workspaceId).catch(() => {});
         }
       })();
+      // Whatever landed while it was away was read in the island: the main window filed it as unread
+      // (the held tab is never "on screen" here), and if the tab is no longer in the strip — a chat
+      // born in the island, or one the cap evicted — nothing below would ever focus it and clear it.
+      useAiPanelStore.getState().markSeen(key);
       // Back where it was, and on screen.
       const workspaceId =
         ref.surface === "panel" ? useWorkspaceStore.getState().workspaceOfProject(ref.projectId) : ref.workspaceId;

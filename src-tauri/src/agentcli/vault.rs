@@ -647,28 +647,37 @@ fn render_statement(result: &crate::datasource::DbStatementResult) -> String {
 /// Headers that carry credentials, never shown to the agent whatever the scrub catches.
 const SECRET_HEADERS: &[&str] = &["authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "api-key"];
 
-/// `cf http <request> [--env <environment>]`: a request saved in the API client, sent the way the API
-/// client sends it — its environment, inherited auth and trusted scripts — and its answer.
-pub async fn http(request: &Request, app: &AppHandle) -> Reply {
-    let usage = || Reply::no("usage: cf http <collection/folder/request or request name> [--env <environment>]");
+/// A saved request a verb names, and the environment it is to be resolved in.
+struct Saved {
+    workspace: String,
+    path: String,
+    saved: crate::db::models::ApiRequestRow,
+    environment_id: String,
+    environment_label: String,
+}
+
+/// The saved request `cf <verb> <request> [--env <environment>]` names in this folder's workspace —
+/// shared by `http` (send it) and `curl` (write it out). `Err` is the reply to give instead.
+fn saved_request(request: &Request, app: &AppHandle, verb: &str) -> Result<Saved, Reply> {
+    let usage = || Reply::no(format!("usage: cf {verb} <collection/folder/request or request name> [--env <environment>]"));
     let mut args = request.args.clone();
     let mut env: Option<String> = None;
     if let Some(at) = args.iter().position(|a| a == "--env") {
-        let Some(name) = args.get(at + 1).cloned() else { return usage() };
+        let Some(name) = args.get(at + 1).cloned() else { return Err(usage()) };
         env = Some(name);
         args.drain(at..at + 2);
     }
     let wanted = args.join(" ");
     if wanted.trim().is_empty() {
-        return usage();
+        return Err(usage());
     }
     let place = place::of(app, &request.cwd, &request.session);
-    let Some(workspace) = place.workspace_id.clone() else { return Reply::no("this folder is not in a project of any workspace") };
+    let Some(workspace) = place.workspace_id.clone() else { return Err(Reply::no("this folder is not in a project of any workspace")) };
     let (tree, environments) = match crate::ai_usage::with_conn(|conn| {
         Ok::<_, rusqlite::Error>((crate::db::api_queries::load_tree(conn, &workspace)?, crate::db::api_queries::list_environments(conn, &workspace)?))
     }) {
         Some(Ok(found)) => found,
-        _ => return Reply::no("the API client's requests could not be read"),
+        _ => return Err(Reply::no("the API client's requests could not be read")),
     };
 
     let paths: Vec<(String, crate::db::models::ApiRequestRow)> = tree.requests.iter().map(|r| (request_path(&tree, r), r.clone())).collect();
@@ -678,20 +687,90 @@ pub async fn http(request: &Request, app: &AppHandle) -> Reply {
     });
     let (path, saved) = match found {
         Ok(found) => found,
-        Err(names) if names.is_empty() => return Reply::no(format!("no saved request named {wanted} in this workspace's API client")),
-        Err(names) => return Reply::no(format!("{wanted} matches several requests: {}", names.join(", "))),
+        Err(names) if names.is_empty() => return Err(Reply::no(format!("no saved request named {wanted} in this workspace's API client"))),
+        Err(names) => return Err(Reply::no(format!("{wanted} matches several requests: {}", names.join(", ")))),
     };
     if !saved.protocol.is_empty() && !saved.protocol.eq_ignore_ascii_case("http") {
-        return Reply::no(format!("{path} is a {} request; cf http sends HTTP ones", saved.protocol));
+        return Err(Reply::no(format!("{path} is a {} request; cf {verb} takes HTTP ones", saved.protocol)));
     }
     let (environment_id, environment_label) = match env.as_deref() {
         None => (String::new(), "the API client's active environment".to_string()),
         Some(name) if name.eq_ignore_ascii_case("none") => ("none".to_string(), "no environment".to_string()),
         Some(name) => match pick(environments.into_iter().filter(|e| !e.is_global).collect(), name, |e| e.name.as_str()) {
             Ok(found) => (found.id, format!("environment {}", found.name)),
-            Err(names) if names.is_empty() => return Reply::no(format!("no environment named {name}")),
-            Err(names) => return Reply::no(format!("{name} matches several environments: {}", names.join(", "))),
+            Err(names) if names.is_empty() => return Err(Reply::no(format!("no environment named {name}"))),
+            Err(names) => return Err(Reply::no(format!("{name} matches several environments: {}", names.join(", ")))),
         },
+    };
+    Ok(Saved { workspace, path, saved, environment_id, environment_label })
+}
+
+/// `cf curl <request> [--env <environment>]`: a saved request as one complete curl line — resolved as
+/// the API client resolves it (environment, variables, inherited auth), nothing sent, so it needs no
+/// approval. Every secret is a `$CF_SECRET_n` placeholder: the line shows what the request is; it is
+/// run with `cf http`, where the app puts the values back without the agent ever reading them.
+pub async fn curl(request: &Request, app: &AppHandle) -> Reply {
+    let Saved { workspace, path, saved, environment_id, environment_label } = match saved_request(request, app, "curl") {
+        Ok(found) => found,
+        Err(reply) => return reply,
+    };
+    let payload = json!({ "workspaceId": workspace, "requestId": saved.id, "environmentId": environment_id, "variables": {} });
+    let answer = match crate::flows::bridge::ask(app, "api.curl", payload, Duration::from_secs(60), tokio_util::sync::CancellationToken::new()).await {
+        Ok(answer) => answer,
+        Err(error) => return Reply::no(error),
+    };
+    let line = answer.get("curl").and_then(Value::as_str).unwrap_or_default();
+    if line.trim().is_empty() {
+        return Reply::no(format!("{path} could not be written as curl"));
+    }
+    let secrets = crate::db::api_secrets::stored_secrets(&app.state::<Db>());
+    let mut text = format!("# {path} ({environment_label})\n{}", mask_curl(line, &secrets));
+    if answer.get("scripted").and_then(Value::as_bool).unwrap_or(false) {
+        text.push_str("\n# Its pre-request script did not run here (it may sign or log in): cf http sends it with the script.");
+    }
+    Reply::ok(text)
+}
+
+/// A curl line with every secret as a `$CF_SECRET_n` placeholder: the values the app keeps, the
+/// credential headers' values whatever they hold, and what the secret scan recognises.
+fn mask_curl(line: &str, secrets: &[String]) -> String {
+    let mut secrets: Vec<&String> = secrets.iter().filter(|s| s.chars().count() >= MIN_SCRUB).collect();
+    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    secrets.dedup();
+    let mut out = line.to_string();
+    let mut n = 0;
+    for secret in secrets {
+        if out.contains(secret.as_str()) {
+            n += 1;
+            out = out.replace(secret.as_str(), &format!("$CF_SECRET_{n}"));
+        }
+    }
+    // `--header 'Authorization: Bearer …'` and the like: the value goes whatever it is.
+    let masked: Vec<String> = out
+        .split('\n')
+        .map(|row| {
+            let lower = row.to_ascii_lowercase();
+            let Some(header) = SECRET_HEADERS.iter().find(|h| lower.contains(&format!("'{h}:")) || lower.contains(&format!("\"{h}:"))) else {
+                return row.to_string();
+            };
+            let at = lower.find(&format!("{header}:")).unwrap_or(0) + header.len() + 1;
+            let close = row[at..].find(['\'', '"']).map_or(row.len(), |i| at + i);
+            if row[at..close].contains("$CF_SECRET_") {
+                return row.to_string();
+            }
+            n += 1;
+            format!("{} $CF_SECRET_{n}{}", &row[..at], &row[close..])
+        })
+        .collect();
+    crate::secret_scan::redact(&masked.join("\n")).0
+}
+
+/// `cf http <request> [--env <environment>]`: a request saved in the API client, sent the way the API
+/// client sends it — its environment, inherited auth and trusted scripts — and its answer.
+pub async fn http(request: &Request, app: &AppHandle) -> Reply {
+    let Saved { workspace, path, saved, environment_id, environment_label } = match saved_request(request, app, "http") {
+        Ok(found) => found,
+        Err(reply) => return reply,
     };
 
     let mut event = AskEvent::new("http", format!("«{path}»"), &request.cwd);

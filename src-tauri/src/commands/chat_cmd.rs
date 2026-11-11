@@ -1778,6 +1778,23 @@ pub async fn chat_send(
         crate::chat_mcp::TurnMcp::default()
     };
     allowed_tools.extend(turn_mcp.allow_rules.iter().cloned());
+    // The chat's execution policy (`crate::chat_exec`): every shell command reaches CodeFlow's
+    // permission prompt, which runs it unasked unless it is destructive (or, in plan mode, unless it
+    // changes something) — so a blanket `Bash` the user's tool list pre-approves is taken out, or it
+    // would let a destructive one through unasked.
+    if config.provider == "claude" {
+        allowed_tools.retain(|tool| tool != "Bash" && tool != "Bash(*)" && tool != "Bash(*:*)");
+    }
+    // A headless browser, for Claude: its calls go through the same prompt (`chat_exec::browser_allows`).
+    // Not when the user's own Claude Code has a server of that name: theirs stands, switched as they set it.
+    let theirs = turn_mcp.block.iter().any(|s| s == crate::chat_exec::BROWSER_SERVER)
+        || turn_mcp.allow_rules.contains(&crate::claude::mcp_rule(crate::chat_exec::BROWSER_SERVER))
+        || turn_mcp.app.iter().any(|s| s.name == crate::chat_exec::BROWSER_SERVER);
+    let browser = if config.provider == "claude" && !theirs {
+        crate::chat_exec::browser_server()
+    } else {
+        None
+    };
     // The workspace chat's knowledge — every repository's files and docs, the workspace's folders,
     // notes and memories — through the map's server, on the engines that take the app's servers per
     // run. Queries only, so a read-only turn has it too — plus a database write, approved statement by
@@ -2163,7 +2180,7 @@ pub async fn chat_send(
                 // engine's CLI enforces — see the module docs, §1, for which ones that is.
                 read_only: !write_access,
                 mcp_block: turn_mcp.block.clone(),
-                app_mcp: turn_mcp.app.iter().cloned().chain(ws_knowledge.as_ref().map(|(server, _)| server.clone())).collect(),
+                app_mcp: turn_mcp.app.iter().cloned().chain(ws_knowledge.as_ref().map(|(server, _)| server.clone())).chain(browser.clone()).collect(),
                 json_schema: None,
                 extra_dirs: &ws_extra_dirs,
                 text_only: false,

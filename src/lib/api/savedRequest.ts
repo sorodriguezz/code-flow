@@ -214,6 +214,44 @@ export async function runSavedRequest(ask: SavedRequestAsk, signal?: AbortSignal
   return (await runRow(loaded, row, ask.environmentId, ask.variables, null, signal)).answer;
 }
 
+/**
+ * One saved request as a complete `curl` line (`cf http`'s sibling for a model: `api_request_curl`):
+ * resolved exactly as a run resolves it — the environment, the collection's variables, the auth it
+ * inherits — and rendered by the API client's own cURL snippet. No script runs: a pre-request script
+ * may log in or sign, which only sending does. The caller (the app) masks every secret before a
+ * model reads it.
+ */
+export async function curlSavedRequest(ask: SavedRequestAsk): Promise<{ name: string; curl: string; scripted: boolean }> {
+  const loaded = await load(ask.workspaceId);
+  const row = loaded.tree.requests.find((request) => request.id === ask.requestId);
+  if (!row) throw new Error("That request is no longer in the API client");
+  const spec = parseSpec(row);
+  if (spec.protocol !== "http") throw new Error(`“${row.name}” is a ${spec.protocol} request, not HTTP`);
+  const { tree, environments, settings, cookies } = loaded;
+  const environment = environmentOf(loaded, ask.environmentId);
+  const globals = environments.find((candidate) => candidate.is_global);
+  const collection = tree.collections.find((candidate) => candidate.id === row.collection_id) ?? null;
+  const ctx: VariableContext = {
+    local: { ...ask.variables },
+    data: {},
+    environment: parseVariables(environment?.variables),
+    collection: parseVariables(collection?.variables),
+    global: parseVariables(globals?.variables),
+    collectionId: row.collection_id,
+  };
+  const authChain = [spec.auth, ...ancestorAuthIn(tree.folders, tree.collections, row.collection_id, row.folder_id)];
+  const owner: ChainOwner = {
+    collection,
+    folders: folderChain(tree.folders, row.folder_id),
+    request: { name: row.name, preScript: spec.preScript, postScript: spec.postScript },
+  };
+  const resolved = await resolveRequest(spec, ctx, authChain, settings, cookies);
+  const { generateSnippet, defaultSnippetOptions } = await import("./codegen");
+  const curl = generateSnippet("shell-curl", resolved, defaultSnippetOptions());
+  if (!curl) throw new Error(`“${row.name}” cannot be written as curl`);
+  return { name: row.name, curl, scripted: chainScripts(owner, "pre").length > 0 };
+}
+
 // ------------------------------------------------------------------------------- a whole collection
 
 export interface SavedCollectionAsk {

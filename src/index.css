@@ -4101,9 +4101,12 @@ body.cf-dragging * {
    Off, none of this exists and every tone is the scheme's own. */
 :root[data-glass] body {
   --cf-glass-ink: #ffffff;
-  --cf-text: color-mix(in oklab, var(--cf-text-solid) 55%, var(--cf-glass-ink));
-  --cf-text-muted: color-mix(in oklab, var(--cf-text-muted-solid) 60%, var(--cf-glass-ink));
-  --cf-text-faint: color-mix(in oklab, var(--cf-text-muted) 85%, var(--cf-surface-solid));
+  /* Leaned further after a second report (2026-11-11: "las grises apenas y se ven… solo en modo
+     transparente"): the faint tone used to step back toward the ground, which over the glass is
+     the backdrop — so it now steps toward the ink, only less far than the muted one. */
+  --cf-text: color-mix(in oklab, var(--cf-text-solid) 30%, var(--cf-glass-ink));
+  --cf-text-muted: color-mix(in oklab, var(--cf-text-muted-solid) 45%, var(--cf-glass-ink));
+  --cf-text-faint: color-mix(in oklab, var(--cf-text-muted-solid) 62%, var(--cf-glass-ink));
   --cf-toast-ink: var(--cf-text-muted);
   --cf-toast-faint: var(--cf-text-faint);
 }

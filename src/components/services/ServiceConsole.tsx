@@ -61,7 +61,7 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
   const stop = useServicesStore((s) => s.stop);
   const restart = useServicesStore((s) => s.restart);
   const projects = useWorkspaceStore((s) => s.projectsByWorkspace[service.workspace_id]);
-  /** The repository on screen, which is where a shell opened from here is filed — see `openShell`. */
+  /** The repository on screen, where a shell opened from here is filed when the service has none — see `openShell`. */
   const shelf = useWorkspaceStore((s) => s.activeProject());
   /** Bumped to remount the pane after the log is cleared, so it replays the now-empty record. */
   const [clearedAt, setClearedAt] = useState(0);
@@ -96,16 +96,18 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
    * A shell standing where the service runs, in the terminal panel: for the command that goes with
    * it — a migration, an install, a `git status` — without a `cd` to get there first.
    *
-   * Filed under the repository on screen, like every shell the dock opens, because the terminal
-   * panel lists that repository's shells and no others: filed under the service's own repository
-   * while another is on screen, it would open out of sight. A new shell each time, as the explorer's
-   * "Open in Integrated Terminal" does; `openNew` turns the dock to the terminals.
+   * Filed under the service's own repository — the terminal panel lists every repository of the
+   * workspace, and `openNew` points the dock at the one it files into, so it opens in sight and
+   * where it belongs. A service with no repository goes under the one on screen. A new shell each
+   * time, as the explorer's "Open in Integrated Terminal" does; `openNew` turns the dock to the
+   * terminals.
    */
   const openShell = () => {
-    if (!shelf || repoGone) return;
+    const owner = project ?? shelf;
+    if (!owner || repoGone) return;
     void useTerminalStore
       .getState()
-      .openNew(shelf.id, folder)
+      .openNew(owner.id, folder)
       .catch((e: unknown) => pushErrorToast(String(e)));
   };
 
@@ -169,20 +171,20 @@ export function ServiceConsole({ service, onEdit }: { service: ServiceRow; onEdi
           label={
             repoGone
               ? t("services.openTerminalRepoGone")
-              : shelf
+              : project ?? shelf
                 ? t("services.openTerminalHint")
                 : t("terminal.noProject")
           }
-          description={shelf && !repoGone ? folder || "~" : undefined}
+          description={(project ?? shelf) && !repoGone ? folder || "~" : undefined}
         >
           {active ? (
-            <ToolbarButton onClick={openShell} label={t("services.openTerminal")} disabled={!shelf || repoGone}>
+            <ToolbarButton onClick={openShell} label={t("services.openTerminal")} disabled={!(project ?? shelf) || repoGone}>
               <TerminalSquare size={12} />
             </ToolbarButton>
           ) : (
             <button
               onClick={openShell}
-              disabled={!shelf || repoGone}
+              disabled={!(project ?? shelf) || repoGone}
               className={buttonClass({ variant: "secondary", size: "sm" })}
             >
               <TerminalSquare size={12} />

@@ -667,6 +667,7 @@ async fn dispatch(request: Request, app: &AppHandle) -> Reply {
         "dbs" => vault::dbs(&request, app),
         "dbschema" => vault::dbschema(&request, app).await,
         "http" => vault::http(&request, app).await,
+        "curl" => vault::curl(&request, app).await,
         "ui" => interface(&request, app).await,
         "k8s" => infra::k8s(&request.args).await,
         "azure" => infra::azure(&request.args).await,

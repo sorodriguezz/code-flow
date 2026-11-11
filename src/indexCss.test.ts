@@ -105,8 +105,8 @@ describe("ink over the glass", () => {
     expect(body).toContain("--cf-text-muted: color-mix(");
     expect(body).toContain("--cf-text-faint: color-mix(");
     // The leaned ink is used nowhere but in that rule.
-    expect(css.split("var(--cf-glass-ink)").length - 1).toBe(2);
-    expect(body.split("var(--cf-glass-ink)").length - 1).toBe(2);
+    expect(css.split("var(--cf-glass-ink)").length - 1).toBe(3);
+    expect(body.split("var(--cf-glass-ink)").length - 1).toBe(3);
   });
 
   it("leans toward black on a light scheme", () => {

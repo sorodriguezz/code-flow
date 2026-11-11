@@ -218,7 +218,7 @@ function LimitRow({ limit, narrowed }: { limit: QuotaLimit; narrowed: Set<string
  * Only today and tomorrow are named in words: those are the two days a reader resolves instantly,
  * and "Thursday" four days out is worse than the date it would replace. Anything further carries its
  * own date, so it needs no wrapping sentence. */
-function resetAtLabel(at: ResetAt, t: Translate): string {
+export function resetAtLabel(at: ResetAt, t: Translate): string {
   if (at.day === "today") return t("quota.resetsAtToday", { time: at.text });
   if (at.day === "tomorrow") return t("quota.resetsAtTomorrow", { time: at.text });
   return at.text;
