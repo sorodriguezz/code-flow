@@ -16,6 +16,7 @@ import { confirmAction } from "../../../state/confirmStore";
 import { emptyTeam, type Team } from "../../../types/team";
 import type { LibraryItem } from "../../../types/crew";
 import type { WorkspaceAgent } from "../../../types/domain";
+import { isPersonalAgent } from "../../../lib/agents/personalAgents";
 import { AgentAvatar, TeamAvatar } from "../kit/Avatar";
 import { useDragSource } from "../kit/drag";
 import { Btn, Empty, Label, Seg, SPRING, field } from "../kit/ui";
@@ -25,6 +26,8 @@ import { OrgCanvas } from "./OrgCanvas";
 import { MemberInspector, TeamInspector } from "./Inspector";
 import { ChecksTab, FlowTab } from "./FlowTab";
 import { chatWithTeam } from "./TeamChatPane";
+import { ConfigurationExportButton, ConfigurationImportButton } from "../ConfigurationSharing";
+import { TEAM_CONFIGURATION } from "../../../lib/agents/shareConfiguration";
 
 function PaletteAgent({ agent, inTeam }: { agent: WorkspaceAgent; inTeam: number }) {
   const l = useL();
@@ -106,7 +109,12 @@ function Palette({ team, width }: { team: Team; width: number }) {
   const templates = useMemo(() => useLibraryStore.getState().all().filter((t) => t.kind === "agent"), [saved, lang]); // eslint-disable-line react-hooks/exhaustive-deps
   const [q, setQ] = useState("");
   const match = (s: string) => s.toLowerCase().includes(q.trim().toLowerCase());
-  const agents = roster.filter((a) => a.enabled && (match(a.name) || match(a.role)));
+  const personalAgents = roster.filter(isPersonalAgent);
+  const agents = personalAgents.filter((agent) => {
+    const matchesName = match(agent.name);
+    const matchesRole = match(agent.role);
+    return agent.enabled && (matchesName || matchesRole);
+  });
   const tpl = templates.filter((t) => match(t.name) || match(t.description));
 
   return (
@@ -191,6 +199,7 @@ function TeamEditor({ teamId }: { teamId: string }) {
           />
           {/* One group, pinned right: on a narrow window it wraps whole, with the panel toggle last. */}
           <div className="ml-auto flex shrink-0 items-center gap-2">
+          <ConfigurationExportButton source={team} />
           <Btn small icon={MessageSquare} disabled={!team.lead} title={team.lead ? l("Conversa con el equipo: el líder responde o delega a sus miembros", "Chat with the team: the lead answers or delegates to its members") : l("Elige un líder para conversar con el equipo", "Choose a lead to chat with the team")} onClick={() => void chatWithTeam(team.id)}>{l("Chat", "Chat")}</Btn>
           <span className="hidden text-[11.5px] text-[var(--cf-text-faint)] 2xl:inline">
             {l(`${team.members.filter((m) => !m.advisor).length} miembros`, `${team.members.filter((m) => !m.advisor).length} members`)}
@@ -292,6 +301,7 @@ export function TeamsSpace() {
     return (
       <Empty icon={Network} title={l("Arma tu primer equipo", "Build your first team")} hint={l("Un líder que planifica y reparte, sub-líderes con su rama, y un asesor que mira desde arriba. Empieza en blanco o desde una plantilla.", "A lead that plans and hands out work, sub-leads with their branch, and an advisor looking from above. Start blank or from a template.")}>
         <div className="mt-2 flex gap-2">
+          <ConfigurationImportButton kind={TEAM_CONFIGURATION} />
           <Btn kind="primary" icon={LayoutTemplate} title={l("Elige un equipo ya armado y ajústalo", "Pick a ready-made team and tweak it")} onClick={() => crew.open({ kind: "teamTemplates" })}>{l("Desde plantilla", "From a template")}</Btn>
           <Btn icon={Plus} title={l("Crea un equipo vacío y arma el organigrama tú", "Creates an empty team; build the chart yourself")} onClick={() => void create()}>{l("En blanco", "Blank")}</Btn>
         </div>
@@ -301,6 +311,7 @@ export function TeamsSpace() {
 
   const actions = (
     <>
+      <ConfigurationImportButton kind={TEAM_CONFIGURATION} />
       <Btn small icon={Plus} title={l("Crea un equipo en blanco", "Creates a blank team")} onClick={() => void create()}>{l("Nuevo", "New")}</Btn>
       <Btn small icon={LayoutTemplate} title={l("Crea un equipo desde una plantilla", "Creates a team from a template")} onClick={() => crew.open({ kind: "teamTemplates" })}>{l("Plantillas", "Templates")}</Btn>
     </>
@@ -403,6 +414,7 @@ function TeamList({ teams, actions, onDuplicate, onRemove }: { teams: Team[]; ac
                   <button type="button" title={t.lead ? l("Chat con el equipo", "Chat with the team") : l("Elige un líder para conversar con el equipo", "Choose a lead to chat with the team")} aria-label={l(`Chat con ${t.name}`, `Chat with ${t.name}`)} disabled={!t.lead} onClick={() => void chatWithTeam(t.id)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-accent)] hover:bg-[var(--cf-hover)] disabled:opacity-40"><MessageSquare className="h-3.5 w-3.5" /></button>
                   <button type="button" title={l("Darle una tarea", "Hand it a task")} disabled={t.members.length === 0} onClick={() => crew.open({ kind: "launch", assignee: { kind: "team", id: t.id } })} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-accent)] hover:bg-[var(--cf-hover)] disabled:opacity-40"><WandSparkles className="h-3.5 w-3.5" /></button>
                   <button type="button" title={l("Duplicar", "Duplicate")} onClick={() => onDuplicate(t)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]"><Copy className="h-3.5 w-3.5" /></button>
+                  <ConfigurationExportButton source={t} compact />
                   <button type="button" title={l("Borrar", "Delete")} onClick={() => onRemove(t)} className="grid h-[26px] w-[26px] place-items-center rounded-[7px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"><Trash2 className="h-3.5 w-3.5" /></button>
                 </span>
               </div>

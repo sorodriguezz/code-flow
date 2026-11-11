@@ -13,6 +13,7 @@ import { useTeamStore } from "../../../state/teamStore";
 import { confirmAction } from "../../../state/confirmStore";
 import { pushErrorToast, pushSuccessToast } from "../../../state/toastStore";
 import { templateSyncPlan, type AgentTemplateBody, type SyncChange } from "../../../lib/agents/builtinTemplates";
+import { isPersonalAgent } from "../../../lib/agents/personalAgents";
 import { ProviderGlyph } from "../../ai/ProviderGlyph";
 import type { WorkspaceAgent } from "../../../types/domain";
 import type { LibraryItem } from "../../../types/crew";
@@ -21,6 +22,10 @@ import { useDragSource, useDropTarget } from "../kit/drag";
 import { Btn, Chip, Empty, IconBtn, Modal, SPRING, field } from "../kit/ui";
 import { lNow, money, useAgentStates, useCrewStore, useL } from "../state";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
+import { ConfigurationExportButton, ConfigurationImportButton } from "../ConfigurationSharing";
+import { AGENT_CONFIGURATION } from "../../../lib/agents/shareConfiguration";
+
+const AGENT_CARD_ACTIONS_CLASS = "pointer-events-none absolute inset-x-2 bottom-2 flex translate-y-3 flex-wrap items-center justify-center gap-1 rounded-[12px] border border-[var(--cf-border)] bg-[var(--cf-surface)] p-1 opacity-0 shadow-[var(--cf-shadow)] transition-[opacity,transform] duration-150 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100";
 
 function useLibrary() {
   const saved = useLibraryStore((s) => s.saved);
@@ -200,17 +205,20 @@ function AgentCard({ agent, index, onSync }: { agent: WorkspaceAgent; index: num
         )}
       </div>
       {/* The actions slide up on hover or focus: nothing turns, nothing spins. */}
-      <div className="pointer-events-none absolute inset-x-2 bottom-2 flex translate-y-3 items-center justify-center gap-1 rounded-[12px] border border-[var(--cf-border)] bg-[var(--cf-surface)] p-1 opacity-0 shadow-[var(--cf-shadow)] transition-[opacity,transform] duration-150 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100">
+      <div className={AGENT_CARD_ACTIONS_CLASS}>
         <Btn small kind="primary" icon={WandSparkles} title={l("Dale una tarea a este agente", "Hand this agent a task")} onClick={() => crew.open({ kind: "launch", assignee: { kind: "agent", id: agent.id } })}>{l("Tarea", "Task")}</Btn>
         <IconBtn title={l("Conversa con este agente en el repositorio activo, como en el chat del repositorio: preguntas, imágenes, su modelo y su forma de trabajar", "Chat with this agent in the active repository, like the repository chat: questions, images, its model and its way of working")} onClick={() => void chatWith(agent)} icon={MessageSquare} />
         <IconBtn title={l("Editar", "Edit")} onClick={() => crew.open({ kind: "wizard", agentId: agent.id })} icon={Pencil} />
         <IconBtn title={l("Duplicar", "Duplicate")} onClick={() => void useAgentsStore.getState().duplicateAgent(agent.id)} icon={Copy} />
         <IconBtn title={l("Guardar como plantilla", "Save as template")} onClick={() => void saveAsTemplate()} icon={BookMarked} />
+        <ConfigurationExportButton source={agent} compact />
         <IconBtn title={l("Borrar", "Delete")} onClick={() => void remove()} icon={Trash2} danger />
       </div>
     </motion.div>
   );
 }
+
+const EMPTY_AGENT_COUNT = 0;
 
 export function RosterSpace() {
   const l = useL();
@@ -218,7 +226,14 @@ export function RosterSpace() {
   const roster = useAgentsStore((s) => s.roster);
   const [q, setQ] = useState("");
   const [sync, setSync] = useState<{ agent: WorkspaceAgent; template: LibraryItem } | null>(null);
-  const shown = roster.filter((a) => `${a.name} ${a.role} ${a.model}`.toLowerCase().includes(q.trim().toLowerCase()));
+  const personalAgents = roster.filter(isPersonalAgent);
+  const trimmedQuery = q.trim();
+  const normalizedQuery = trimmedQuery.toLowerCase();
+  const shown = personalAgents.filter((agent) => {
+    const searchableText = `${agent.name} ${agent.role} ${agent.model}`;
+    const normalizedText = searchableText.toLowerCase();
+    return normalizedText.includes(normalizedQuery);
+  });
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -227,12 +242,13 @@ export function RosterSpace() {
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--cf-text-faint)]" />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={l("Buscar agentes", "Search agents")} title={l("Filtra por nombre, papel o modelo", "Filter by name, role or model")} className={`${field} !w-[220px] pl-8`} />
         </label>
-        <span className="text-[12px] text-[var(--cf-text-faint)]" title={l("Agentes en este workspace", "Agents in this workspace")}>{roster.length}</span>
+        <span className="text-[12px] text-[var(--cf-text-faint)]" title={l("Agentes en este workspace", "Agents in this workspace")}>{personalAgents.length}</span>
         <span className="flex-1" />
+        <ConfigurationImportButton kind={AGENT_CONFIGURATION} />
         <Btn small kind="primary" icon={Plus} title={l("Crea un agente en blanco o desde una plantilla", "Creates an agent, blank or from a template")} onClick={() => crew.open({ kind: "wizard" })}>{l("Nuevo agente", "New agent")}</Btn>
       </div>
       <div className="flex min-h-0 flex-1 flex-col">
-          {roster.length === 0 ? (
+          {personalAgents.length === EMPTY_AGENT_COUNT ? (
             <Empty icon={Bot} title={l("Todavía no hay agentes", "No agents yet")} hint={l("Empieza por una plantilla (Tech lead, Backend, QA, Asesor…) y ajústala, o créalo en blanco.", "Start from a template (Tech lead, Backend, QA, Advisor…) and tweak it, or build one from scratch.")}>
               <div className="mt-2 flex gap-2">
                 <Btn kind="primary" icon={Plus} title={l("Abre el asistente: empieza eligiendo una plantilla o en blanco", "Opens the wizard: start from a template or blank")} onClick={() => crew.open({ kind: "wizard" })}>{l("Crear agente", "Create agent")}</Btn>

@@ -11,7 +11,7 @@ a backlog, and let AI write your commits, find your bugs and resolve your confli
 native app. Then test the endpoint you just changed, query the database behind it and SSH into the
 box it runs on without leaving the window. **You decide which model does what.**
 
-![version](https://img.shields.io/badge/version-2.8.21-6C5CE7)
+![version](https://img.shields.io/badge/version-2.8.22-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
@@ -212,6 +212,10 @@ and reused. The documenter on a cheap model, the reviewer on the best one you ha
 touching your global settings. It's the same roster the chat's agent picker uses, so there aren't
 two lists to keep in step.
 
+- **Share configured agents and teams.** Export from their cards or the team editor to a
+  `.codeflow.json` file. Teams include their agents, hierarchy, workflow and policies. Use **Import**
+  in the matching view, review instructions and commands, and map repositories to your workspace.
+  Imports create new copies; accounts and credentials are excluded, and importing runs no tasks.
 - **Tasks** — hand an agent a goal and a repository, then walk away. It keeps running while you
   switch views or workspaces, and waits at **Your turn** when it needs an answer from you.
 - **Chains** — several agents in a row, each handed the previous one's work: architect →

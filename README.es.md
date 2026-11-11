@@ -12,7 +12,7 @@ una sola app nativa y rápida. Después prueba el endpoint que acabas de cambiar
 datos que hay detrás y entra por SSH a la máquina donde corre, sin salir de la ventana. **Tú decides
 qué modelo hace qué.**
 
-![versión](https://img.shields.io/badge/versión-2.8.21-6C5CE7)
+![versión](https://img.shields.io/badge/versión-2.8.22-6C5CE7)
 ![plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
 ![proveedores](https://img.shields.io/badge/IA-7%20motores-00B894)
 ![idiomas](https://img.shields.io/badge/idiomas-EN%20%7C%20ES-0984E3)
@@ -214,6 +214,11 @@ escritas una vez y reutilizadas. El documentador en un modelo barato, el revisor
 tengas — sin tocar tus ajustes globales. Es la misma lista que usa el selector de agentes del chat,
 así que no hay dos listas que mantener sincronizadas.
 
+- **Comparte agentes y equipos configurados.** Exporta desde sus tarjetas o desde el editor de un
+  equipo a un archivo `.codeflow.json`. El equipo incluye sus agentes, jerarquía, flujo y reglas.
+  Usa **Importar** en la vista correspondiente, revisa las instrucciones y los comandos, y vincula
+  los repositorios con los de tu workspace. Se crean copias nuevas; las cuentas y credenciales no
+  viajan y no se ejecuta ninguna tarea al importar.
 - **Tareas** — dale a un agente un objetivo y un repositorio, y vete. Sigue corriendo mientras cambias
   de vista o de workspace, y espera en **Tu turno** cuando necesita una respuesta tuya.
 - **Cadenas** — varios agentes en fila, cada uno recibiendo el trabajo del anterior: arquitecto →

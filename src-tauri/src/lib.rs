@@ -1945,6 +1945,7 @@ sharded_invoke_handler! {
         runner::governor::governor_status,
         runner::governor::governor_set,
         commands::crew_cmd::save_workspace_agent,
+        commands::crew_share_cmd::crew_import_configuration,
         commands::crew_cmd::reorder_workspace_agents,
         commands::crew_cmd::library_list,
         commands::crew_cmd::library_save,

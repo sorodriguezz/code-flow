@@ -263,6 +263,17 @@ async function runInTerminal(runId: string, dispatch: TeamDispatch, get: () => T
   }
 }
 
+const TEAM_IMPORTED_EVENT = "crew:team-imported";
+
+void listen<Team>(TEAM_IMPORTED_EVENT, (event) => {
+  const team = event.payload;
+  useTeamStore.setState((state) => {
+    if (state.workspaceId !== team.workspace_id) return state;
+    const remaining = state.teams.filter((existing) => existing.id !== team.id);
+    return { teams: [...remaining, team] };
+  });
+});
+
 function upsertRun(runs: TeamRun[], run: TeamRun): TeamRun[] {
   const others = runs.filter((r) => r.id !== run.id);
   return [run, ...others].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
