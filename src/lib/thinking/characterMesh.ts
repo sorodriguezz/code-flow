@@ -3,9 +3,9 @@ import { mix, type Rgb } from "./palette";
 
 export type Point3 = readonly [number, number, number];
 export type Solid = readonly [Point3, Point3];
-type Face = { points: Point3[]; color: Rgb; light: number };
+type Face = { points: Point3[]; color: Rgb; light: number; anchor?: Point3; layer?: number };
 type ProjectedFace = { points: Point3[]; color: string; depth: number };
-type SurfaceFace = { points: Point3[]; light: number };
+type SurfaceFace = { points: Point3[]; light: number; normal: Point3 };
 
 const ZERO = 0;
 const ONE = 1;
@@ -22,7 +22,9 @@ const AMBIENT_LIGHT = 0.64;
 const DIFFUSE_LIGHT = 0.36;
 const LIGHT_DIRECTION: Point3 = [-0.4, -0.65, 0.65];
 const BLACK: Rgb = [0, 0, 0];
-const EDGE_WIDTH = 0.001;
+const EDGE_WIDTH = 0.003;
+const SURFACE_DEPTH_BIAS = 0.0001;
+const DECAL_LAYER_DEPTH = 0.0000001;
 const ROUND_JOIN = "round";
 const BOX_CORNERS: readonly Point3[] = [
   [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
@@ -91,7 +93,7 @@ function ellipsoidSurface(segments: number, dome: boolean): readonly SurfaceFace
       const sinLongitude = Math.sin(middleLongitude);
       const normal: Point3 = [sinMiddle * cosLongitude, -cosMiddle, sinMiddle * sinLongitude];
       const light = illumination(normal);
-      faces.push({ points, light });
+      faces.push({ points, light, normal });
     }
   }
   ELLIPSOID_SURFACES.set(key, faces);
@@ -126,11 +128,12 @@ export class CharacterMesh {
     }
   }
 
-  ellipsoid([center, radius]: Solid, color: Rgb, dome = false) {
+  ellipsoid([center, radius]: Solid, color: Rgb, dome = false, material?: (point: Point3) => Rgb) {
     const surface = ellipsoidSurface(this.segments, dome);
     for (const face of surface) {
       const points = face.points.map((point): Point3 => [center[X] + point[X] * radius[X], center[Y] + point[Y] * radius[Y], center[Z] + point[Z] * radius[Z]]);
-      this.faces.push({ points, color, light: face.light });
+      const surfaceColor = material ? material(face.normal) : color;
+      this.faces.push({ points, color: surfaceColor, light: face.light });
     }
   }
 
@@ -166,6 +169,16 @@ export class CharacterMesh {
     this.polygon(bottomCap, color, bottomNormal);
   }
 
+  decal(anchor: Point3, build: () => void) {
+    const start = this.faces.length;
+    build();
+    // Coplanar details keep their drawing order even when their centers have different depths.
+    for (let index = start; index < this.faces.length; index += ONE) {
+      this.faces[index].anchor = anchor;
+      this.faces[index].layer = index - start;
+    }
+  }
+
   group(pivot: Point3, angles: Point3, build: () => void) {
     const start = this.faces.length;
     const rotate = pointRotation(pivot, angles);
@@ -173,6 +186,7 @@ export class CharacterMesh {
     for (let index = start; index < this.faces.length; index += ONE) {
       const face = this.faces[index];
       face.points = face.points.map(rotate);
+      if (face.anchor) face.anchor = rotate(face.anchor);
     }
   }
 
@@ -193,7 +207,9 @@ export class CharacterMesh {
       }
       if (area <= MINIMUM_FACE_AREA) continue;
       const depthSum = points.reduce((sum, point) => sum + point[Z], ZERO);
-      const depth = depthSum / points.length;
+      const rotatedAnchor = face.anchor ? rotate(face.anchor) : null;
+      const actualDepth = depthSum / points.length;
+      const depth = rotatedAnchor ? rotatedAnchor[Z] + SURFACE_DEPTH_BIAS + (face.layer ?? ZERO) * DECAL_LAYER_DEPTH : actualDepth;
       const shaded = mix(BLACK, face.color, face.light);
       const tinted = mix(shaded, tint, tintAmount);
       const color = rgba(tinted, alpha);

@@ -14171,6 +14171,7 @@ export const es = {
   "artifact.kind.html": "página",
   "artifact.kind.markdown": "documento",
   "artifact.diagramFailed": "No se pudo dibujar este diagrama. Revisa su contenido en la pestaña Código.",
+  "chat.localImageFailed": "No se pudo mostrar la imagen o el archivo local",
   "artifact.kind.mermaid": "diagrama",
   "artifact.kind.svg": "imagen",
   "artifact.kind.code": "código",

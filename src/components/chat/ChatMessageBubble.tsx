@@ -5,7 +5,8 @@ import { speakNow } from "../../lib/speech/speakAnswer";
 import { useSpeechStore } from "../../state/speechStore";
 import { speakable } from "../../lib/speech/speakable";
 import { splitAttachmentNote } from "../../lib/attachmentNote";
-import { renderMarkdown } from "../../lib/markdown";
+import { renderChatMarkdown } from "../../lib/chatMarkdown";
+import { useChatLocalFiles } from "./useChatLocalFiles";
 import { useRichChatBlocks } from "./richBlocks";
 import { parseClaudeError } from "../../lib/claudeError";
 import { modelDisplayLabel, providerDisplayLabel } from "../../lib/aiProviders";
@@ -29,8 +30,6 @@ import { ArtifactCards } from "./ArtifactCards";
 import { QuestionCard } from "./QuestionCard";
 import { ContextBars } from "./ContextBars";
 import { useConversationStore } from "../../state/conversationStore";
-import { useUiStore } from "../../state/uiStore";
-import { focusEditorOn } from "../../lib/editorIslands";
 import { markCodeRefs, pathsFromToolArgs, resolveCodeRef } from "../../lib/codeRefs";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { parseRunSteps, touchedFiles } from "../../lib/runSteps";
@@ -269,7 +268,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   const html = useMemo(
     () =>
       message.role === "assistant" && !message.isError && !streaming
-        ? markCodeRefs(renderMarkdown(emptyReply ? `*${emptyText ?? t("chat.emptyReply")}*` : body))
+        ? markCodeRefs(renderChatMarkdown(emptyReply ? `*${emptyText ?? t("chat.emptyReply")}*` : body))
         : null,
     [message.role, message.isError, streaming, body, emptyReply, emptyText, t],
   );
@@ -313,23 +312,8 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
     apply: t("chat.applyCode"),
   }, codeTarget);
 
-  // A `path:line` in inline code opens in the editor, when the conversation belongs to a repository.
-  // The caller's own repository wins: the store lookup names the Chat app's active conversation,
-  // which is the wrong repository for an answer in the assistant panel.
   const storeRepoId = useConversationStore((s) => (s.activeId ? (s.byConversation[s.activeId]?.projectId ?? null) : null));
   const repoId = codeTarget?.projectId ?? storeRepoId;
-  useEffect(() => {
-    const el = bodyRef.current;
-    if (!el || !repoId) return;
-    const onClick = (event: MouseEvent) => {
-      const target = event.target instanceof Element ? event.target.closest<HTMLElement>("code[data-ref]") : null;
-      if (!target?.dataset.ref || window.getSelection()?.toString()) return;
-      const line = target.dataset.line ? Number(target.dataset.line) : undefined;
-      void focusEditorOn(repoId).then(() => useUiStore.getState().openInEditor(target.dataset.ref!, line));
-    };
-    el.addEventListener("click", onClick);
-    return () => el.removeEventListener("click", onClick);
-  }, [bodyRef, repoId, markup]);
 
   // Hovering a reference shows the full path it names, the way the source chips under the answer
   // do — resolved against the files this turn read or changed, then any path its commands and
@@ -349,6 +333,10 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
       if (found) return found.local_path;
     }
     return null;
+  });
+  useChatLocalFiles(bodyRef, markup, repoRoot, {
+    loading: t("editor.loading"),
+    failed: t("chat.localImageFailed"),
   });
   useEffect(() => {
     const el = bodyRef.current;

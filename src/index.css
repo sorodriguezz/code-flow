@@ -3473,6 +3473,10 @@ body.cf-dragging * {
   color: var(--cf-accent);
   text-decoration: underline;
 }
+.cf-markdown-preview .cf-local-file {
+  color: var(--cf-accent);
+  cursor: text;
+}
 .cf-markdown-preview code {
   font-family: var(--font-mono);
   font-size: 0.9em;
@@ -5325,9 +5329,8 @@ svg.\-rotate-180 {
   border: 0;
 }
 
-/* An inline `path:line` in an answer that opens in the editor (see lib/codeRefs). */
 .cf-markdown-preview code.cf-code-ref {
-  cursor: pointer;
+  cursor: text;
   text-decoration: underline dotted;
   text-underline-offset: 3px;
 }

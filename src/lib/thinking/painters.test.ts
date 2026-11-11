@@ -301,10 +301,13 @@ function characterFrame(make: Make, activity: ThinkingActivity, gaze: Gaze): str
   const context = canvas.ctx!;
   const lines = vi.spyOn(context, CHARACTER_LINE_METHOD);
   const arcs = vi.spyOn(context, CHARACTER_ARC_METHOD);
+  const ellipses = vi.spyOn(context, "ellipse");
+  const curves = vi.spyOn(context, "bezierCurveTo");
+  const quadratics = vi.spyOn(context, "quadraticCurveTo");
   painter.setActivity(activity);
   painter.setGaze?.(gaze);
   painter.still();
-  const calls = [lines.mock.calls, arcs.mock.calls];
+  const calls = [lines.mock.calls, arcs.mock.calls, ellipses.mock.calls, curves.mock.calls, quadratics.mock.calls];
   return JSON.stringify(calls);
 }
 

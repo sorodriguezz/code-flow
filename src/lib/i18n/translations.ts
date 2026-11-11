@@ -14330,6 +14330,7 @@ const en = {
   "artifact.kind.html": "page",
   "artifact.kind.markdown": "document",
   "artifact.diagramFailed": "This diagram could not be drawn. Check its source in the Code tab.",
+  "chat.localImageFailed": "Could not display the local image or file",
   "artifact.kind.mermaid": "diagram",
   "artifact.kind.svg": "image",
   "artifact.kind.code": "code",

@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { ArrowUpRight, Clock3 } from "lucide-react";
 import { useT } from "../../state/languageStore";
-import { formatResetIn, formatUsed, missingClaudeWeekly, quotaKey, railWindows, severityOf, useQuotaStore } from "../../state/quotaStore";
+import { formatResetIn, formatUsed, missingClaudeWeekly, quotaKey, railWindows, useQuotaStore } from "../../state/quotaStore";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import { useUiStore } from "../../state/uiStore";
 import { providerDisplayLabel } from "../../lib/aiProviders";
@@ -12,69 +12,87 @@ import type { QuotaLimit } from "../../types/domain";
 
 const SIZE = 36;
 const STROKE = 2.5;
-/** Outer ring: the week (or the provider's longer window). */
 const R_OUTER = SIZE / 2 - STROKE / 2 - 0.5;
-/** Inner ring: the session, one stroke and a hairline inside the outer one. */
 const R_INNER = R_OUTER - STROKE - 1.25;
-
-/** How each severity paints. Normal follows whatever accent the theme uses, but softened, so the
- * warnings are the only strong colour on the ring — even with an orange or red accent, a ring that
- * turns amber or red reads as a change rather than as more of the same. */
-const RING_STYLE: Record<ReturnType<typeof severityOf>, { stroke: string; width: number; glow?: string }> = {
-  normal: { stroke: "color-mix(in oklab, var(--cf-accent) 60%, transparent)", width: STROKE },
-  low: { stroke: "#f59e0b", width: STROKE + 0.5, glow: "drop-shadow(0 0 2px rgba(245,158,11,0.7))" },
-  critical: { stroke: "#ef4444", width: STROKE + 0.5, glow: "drop-shadow(0 0 2px rgba(239,68,68,0.75))" },
+const MIN_USED_PERCENT = 0;
+const MAX_USED_PERCENT = 100;
+const YELLOW_THRESHOLD_PERCENT = 50;
+const ORANGE_THRESHOLD_PERCENT = 75;
+const WARNING_STROKE = STROKE + 0.5;
+const RING_STYLE = {
+  normal: { severity: "normal", stroke: "color-mix(in oklab, var(--cf-accent) 60%, transparent)", width: STROKE, glow: undefined },
+  yellow: { severity: "yellow", stroke: "#eab308", width: WARNING_STROKE, glow: "drop-shadow(0 0 2px rgba(234,179,8,0.7))" },
+  orange: { severity: "orange", stroke: "#f97316", width: WARNING_STROKE, glow: "drop-shadow(0 0 2px rgba(249,115,22,0.7))" },
+  red: { severity: "critical", stroke: "#ef4444", width: WARNING_STROKE, glow: "drop-shadow(0 0 2px rgba(239,68,68,0.75))" },
 };
-
-/** Each ring is cut into ten segments of 10% each, so the reading is exact at a glance: a segment
- * fills proportionally (8% → most of the first one; 99% → nine full and the tenth almost full), and
- * a ring only looks complete when it really is at 100%. */
-const SEGMENTS = 10;
-/** Gap between segments along the ring, in user units. */
+const SESSION_SEGMENTS = 5;
+const WEEKLY_SEGMENTS = 10;
 const GAP = 1.6;
-/** Smallest visible fill for a non-zero value, so 1% still shows a sliver. */
 const MIN_FILL = 0.8;
+const RING_CENTER = SIZE / 2;
+const FULL_TURN = 2 * Math.PI;
+const HALF_GAP = GAP / 2;
+const FULL_FRACTION = 1;
+const EMPTY_TRACK_OPACITY = 0.4;
+const SEGMENT_DELAY_MS = 24;
+const SVG_NO_FILL = "none";
+const TRACK_STROKE = "var(--cf-border)";
+const SEGMENT_CLASS_NAME = "cf-quota-segment";
 
-function Ring({ r, limit }: { r: number; limit: QuotaLimit | null }) {
-  const c = 2 * Math.PI * r;
-  const step = c / SEGMENTS;
+function ringStyleFor(used: number) {
+  if (used >= MAX_USED_PERCENT) return RING_STYLE.red;
+  if (used >= ORANGE_THRESHOLD_PERCENT) return RING_STYLE.orange;
+  if (used >= YELLOW_THRESHOLD_PERCENT) return RING_STYLE.yellow;
+  return RING_STYLE.normal;
+}
+
+function clampedUsedPercent(limit: QuotaLimit | null) {
+  if (!limit) return MIN_USED_PERCENT;
+  const nonNegativeUsed = Math.max(MIN_USED_PERCENT, limit.used_percent);
+  return Math.min(MAX_USED_PERCENT, nonNegativeUsed);
+}
+
+function Ring({ r, limit, segments }: { r: number; limit: QuotaLimit | null; segments: number }) {
+  const c = FULL_TURN * r;
+  const step = c / segments;
   const seg = step - GAP;
-  const used = limit ? Math.min(100, Math.max(0, limit.used_percent)) : 0;
-  const style = RING_STYLE[severityOf(used)];
-  const perSegment = 100 / SEGMENTS;
+  const used = clampedUsedPercent(limit);
+  const style = ringStyleFor(used);
+  const perSegment = MAX_USED_PERCENT / segments;
   return (
     <>
-      {/* Track: ten dashes of `seg`, each followed by a gap, starting half a gap past the top. */}
       <circle
-        cx={SIZE / 2}
-        cy={SIZE / 2}
+        cx={RING_CENTER}
+        cy={RING_CENTER}
         r={r}
-        fill="none"
-        stroke="var(--cf-border)"
+        fill={SVG_NO_FILL}
+        stroke={TRACK_STROKE}
         strokeWidth={STROKE}
         strokeDasharray={`${seg} ${GAP}`}
-        strokeDashoffset={-GAP / 2}
-        opacity={limit ? 1 : 0.4}
+        strokeDashoffset={-HALF_GAP}
+        opacity={limit ? FULL_FRACTION : EMPTY_TRACK_OPACITY}
       />
       {limit &&
-        used > 0 &&
-        Array.from({ length: SEGMENTS }, (_, i) => {
-          const fraction = Math.min(1, Math.max(0, (used - i * perSegment) / perSegment));
-          if (fraction <= 0) return null;
+        used > MIN_USED_PERCENT &&
+        Array.from({ length: segments }, (_, i) => {
+          const remainingFraction = (used - i * perSegment) / perSegment;
+          const nonNegativeFraction = Math.max(MIN_USED_PERCENT, remainingFraction);
+          const fraction = Math.min(FULL_FRACTION, nonNegativeFraction);
+          if (fraction <= MIN_USED_PERCENT) return null;
           const len = Math.max(seg * fraction, MIN_FILL);
           return (
             <circle
               key={i}
-              cx={SIZE / 2}
-              cy={SIZE / 2}
+              cx={RING_CENTER}
+              cy={RING_CENTER}
               r={r}
-              fill="none"
+              fill={SVG_NO_FILL}
               stroke={style.stroke}
               strokeWidth={style.width}
               strokeDasharray={`${len} ${c}`}
-              strokeDashoffset={-(i * step + GAP / 2)}
-              style={{ filter: style.glow, animationDelay: `calc(var(--cf-quota-delay) + ${i * 24}ms)` }}
-              className="cf-quota-segment"
+              strokeDashoffset={-(i * step + HALF_GAP)}
+              style={{ filter: style.glow, animationDelay: `calc(var(--cf-quota-delay) + ${i * SEGMENT_DELAY_MS}ms)` }}
+              className={SEGMENT_CLASS_NAME}
             />
           );
         })}
@@ -82,18 +100,6 @@ function Ring({ r, limit }: { r: number; limit: QuotaLimit | null }) {
   );
 }
 
-/**
- * One ring per account at the foot of the rail — the plan limits, readable without opening
- * anything. The session fills the inner ring and the week the outer one, both clockwise from the
- * top, in the same colours as the bars in the panel. Hovering names the provider and the account
- * (two Claude accounts draw the same glyph, so the tooltip is what tells them apart) and spells the
- * two numbers out with their resets; a click opens Settings → Plan limits.
- *
- * Opt-in (`railRings`, the check in the limits panel and in Settings). With it off, or with no
- * account reporting a number yet, nothing is rendered and the rail is exactly what it was. It sits
- * in the rail's fixed foot, so it takes room from the app list — which scrolls — rather than
- * overlapping it.
- */
 export function RailQuotaRings() {
   const t = useT();
   const enabled = useQuotaStore((s) => s.railRings);
@@ -104,13 +110,11 @@ export function RailQuotaRings() {
   const nameOf = useAccountName();
   const watch = useQuotaStore((s) => s.watch);
 
-  // Its own watch, so the poll keeps running for the rings even if the status bar is hidden.
   useEffect(() => (enabled ? watch() : undefined), [enabled, watch]);
   const anyAccount = providers.some((quota) => quota.account_id);
   useEffect(() => {
     if (enabled && anyAccount) void ensureAccounts();
   }, [enabled, anyAccount, ensureAccounts]);
-  // The countdowns in the tooltips go stale on their own.
   const [, setTick] = useState(0);
   useEffect(() => {
     if (!enabled) return;
@@ -131,7 +135,7 @@ export function RailQuotaRings() {
         const who = account ? `${providerDisplayLabel(quota.provider, t)} · ${account}` : providerDisplayLabel(quota.provider, t);
         const narrowed = narrowedKinds(quota);
         const fullest = Math.max(session?.used_percent ?? 0, long?.used_percent ?? 0);
-        const severity = severityOf(fullest);
+        const style = ringStyleFor(fullest);
         const summary = [session, long].filter((limit) => limit !== null)
           .map((limit) => `${limitLabel(limit, narrowed, t)}: ${t("quota.used", { percent: formatUsed(limit.used_percent) })}`)
           .join(" · ");
@@ -158,19 +162,17 @@ export function RailQuotaRings() {
               aria-label={`${t("quota.title")} · ${who} · ${summary}`}
               onClick={() => useUiStore.getState().openSettingsAt("claude", "limits")}
               className="cf-quota-orbit relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
-              data-severity={severity}
-              style={{ "--cf-quota-color": RING_STYLE[severity].stroke, "--cf-quota-delay": `${Math.min(index, 5) * 65}ms` } as CSSProperties}
+              data-severity={style.severity}
+              style={{ "--cf-quota-color": style.stroke, "--cf-quota-delay": `${Math.min(index, 5) * 65}ms` } as CSSProperties}
             >
               <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`} className="absolute inset-0 -rotate-90" aria-hidden>
-                <Ring r={R_OUTER} limit={long} />
-                <Ring r={R_INNER} limit={session} />
+                <Ring r={R_OUTER} limit={long} segments={WEEKLY_SEGMENTS} />
+                <Ring r={R_INNER} limit={session} segments={SESSION_SEGMENTS} />
               </svg>
               <span className="cf-quota-core" aria-hidden>
                 <ProviderGlyph providerId={quota.provider} size={14} className="cf-quota-logo" />
                 <span className="cf-quota-value">{formatUsed(fullest)}</span>
               </span>
-              {/* No corner dot on a ring in warning: the ring itself already turns amber or red, and
-                  the dot only repeated it (user, 2026-11-09). */}
             </button>
           </Tooltip>
         );
@@ -180,13 +182,13 @@ export function RailQuotaRings() {
   );
 }
 
-/** The tooltip mirrors the rings: an outlined marker is the outer window, a filled one the inner. */
 function QuotaWindow({ limit, narrowed, inner = false }: { limit: QuotaLimit; narrowed: Set<string>; inner?: boolean }) {
   const t = useT();
-  const used = Math.min(100, Math.max(0, limit.used_percent));
+  const used = clampedUsedPercent(limit);
+  const style = ringStyleFor(used);
   const reset = formatResetIn(limit.resets_at);
   return (
-    <span className="cf-quota-window" style={{ "--cf-quota-color": RING_STYLE[severityOf(used)].stroke } as CSSProperties}>
+    <span className="cf-quota-window" style={{ "--cf-quota-color": style.stroke } as CSSProperties}>
       <span className="cf-quota-window-heading">
         <span className="cf-quota-window-name">
           <span className={`cf-quota-key ${inner ? "cf-quota-key-inner" : ""}`} aria-hidden />
