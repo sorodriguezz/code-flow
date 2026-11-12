@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { AssistantInbox } from "./AssistantInbox";
 import { AnalysisDocument } from "./AnalysisDocument";
@@ -73,7 +73,6 @@ export function AiPanel() {
     if (workspaceId !== NO_WORKSPACE) void useChatLineageStore.getState().load(workspaceId);
   }, [workspaceId]);
   const tabsByWorkspace = useAiPanelStore((s) => s.tabsByWorkspace);
-  const wide = useAiPanelStore((s) => s.wide);
   const load = useAiPanelStore((s) => s.load);
   const activeProject = useWorkspaceStore((s) => s.activeProject());
 
@@ -105,13 +104,6 @@ export function AiPanel() {
     return keys.includes(activeKey) ? keys : [activeKey, ...keys];
   }, [recent, workspaceId, open, activeKey]);
 
-  const storedWidth = useLayoutStore((s) => s.sizes.aiPanelWidth);
-  const maxWidth = useMaxPanelWidth();
-  // Wide is half the window — the most a panel may take. Otherwise what was chosen, clamped only
-  // while the window is too small to honour it.
-  const width = wide ? maxWidth : Math.min(storedWidth, maxWidth);
-  const setSize = useLayoutStore((s) => s.setSize);
-  const commitSize = useLayoutStore((s) => s.commitSize);
   // The easing that opens and closes the panel is off while dragging, or the edge would swim after
   // the pointer instead of tracking it.
   const [checkpointsOpen, setCheckpointsOpen] = useState(false);
@@ -131,6 +123,55 @@ export function AiPanel() {
     // left more space between the rail and the chat than between the view and the rail (user
     // report, 2026-10-08: "deja en común el más pequeño").
     <div className="flex shrink-0 overflow-hidden pr-1.5 pb-1.5 pt-px">
+      <SizedSheet>
+        <PanelTabStrip
+          workspaceId={workspaceId}
+          tabs={tabs}
+          activeKey={activeKey}
+          onOpenCheckpoints={activeProject ? () => setCheckpointsOpen(true) : null}
+        />
+        <div className="relative min-h-0 flex-1">
+          {mounted.map((key) => (
+            <div key={`${workspaceId}|${key}`} hidden={key !== activeKey} className="absolute inset-0 flex flex-col">
+              <TabBody
+                tabKey={key}
+                tab={tabs.find((tab) => tab.key === key) ?? null}
+                workspaceId={workspaceId}
+                active={key === activeKey}
+              />
+            </div>
+          ))}
+        </div>
+      </SizedSheet>
+      {checkpointsOpen && activeProject && (
+        <CheckpointsModal repoPath={activeProject.local_path} onClose={() => setCheckpointsOpen(false)} />
+      )}
+    </div>
+  );
+}
+
+/**
+ * The sheet's width and the handle that drags it — the only part of the panel that depends on the
+ * window's size.
+ *
+ * Its own component so that a window resize re-renders this and nothing under it. The ceiling is half
+ * the window, so it moves on every `resize` event of a drag, and when it lived in `AiPanel` each one
+ * rebuilt the whole panel — the chat transcript, the inbox — on the main thread in the middle of the
+ * live resize: the rail and the panel trailed behind the window's edge instead of riding it. The
+ * contents arrive as `children`, elements `AiPanel` built, so re-rendering here hands React the very
+ * same elements and it skips them.
+ */
+function SizedSheet({ children }: { children: ReactNode }) {
+  const wide = useAiPanelStore((s) => s.wide);
+  const storedWidth = useLayoutStore((s) => s.sizes.aiPanelWidth);
+  const maxWidth = useMaxPanelWidth();
+  // Wide is half the window — the most a panel may take. Otherwise what was chosen, clamped only
+  // while the window is too small to honour it.
+  const width = wide ? maxWidth : Math.min(storedWidth, maxWidth);
+  const setSize = useLayoutStore((s) => s.setSize);
+  const commitSize = useLayoutStore((s) => s.commitSize);
+  return (
+    <>
       <ResizeHandle
         axis="x"
         value={width}
@@ -151,29 +192,9 @@ export function AiPanel() {
         // No `border-l`, and no margin: the handle to its left sits on this sheet's own hairline.
         className="cf-sheet flex shrink-0 flex-col"
       >
-        <PanelTabStrip
-          workspaceId={workspaceId}
-          tabs={tabs}
-          activeKey={activeKey}
-          onOpenCheckpoints={activeProject ? () => setCheckpointsOpen(true) : null}
-        />
-        <div className="relative min-h-0 flex-1">
-          {mounted.map((key) => (
-            <div key={`${workspaceId}|${key}`} hidden={key !== activeKey} className="absolute inset-0 flex flex-col">
-              <TabBody
-                tabKey={key}
-                tab={tabs.find((tab) => tab.key === key) ?? null}
-                workspaceId={workspaceId}
-                active={key === activeKey}
-              />
-            </div>
-          ))}
-        </div>
+        {children}
       </aside>
-      {checkpointsOpen && activeProject && (
-        <CheckpointsModal repoPath={activeProject.local_path} onClose={() => setCheckpointsOpen(false)} />
-      )}
-    </div>
+    </>
   );
 }
 

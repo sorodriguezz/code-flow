@@ -27,3 +27,13 @@ export function useMotionLevel(): MotionLevel {
 export function scrollBehavior(): ScrollBehavior {
   return motionOff() ? "auto" : "smooth";
 }
+
+/**
+ * How long a modal takes to leave — what `useExitPresence` keeps it mounted for. Keep in step with
+ * `cf-modal-out` / `cf-scrim-out` in `index.css` (0.14s, and 0.22s at the full level). A beat
+ * shorter than the arrival: what is leaving is no longer what the user is looking at.
+ */
+export function modalExitMs(): number {
+  const level = motionLevel();
+  return level === "off" ? 0 : level === "full" ? 220 : 140;
+}

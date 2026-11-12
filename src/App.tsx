@@ -93,6 +93,8 @@ import { useChatHistoryStore } from "./state/activityStore";
 import { useChatStore } from "./state/chatStore";
 import type { TranslationKey } from "./lib/i18n/translations";
 import { useGlobalShortcuts } from "./lib/useGlobalShortcuts";
+import { useExitPresence } from "./lib/useExitPresence";
+import { modalExitMs } from "./lib/motion";
 import { startWindowBoundsTracking } from "./lib/windowControls";
 import { backgroundFetch } from "./lib/backgroundFetch";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
@@ -585,6 +587,14 @@ const ShellSidebar = memo(Sidebar);
 const ShellMainContent = memo(MainContent);
 const ShellAppRail = memo(AppRail);
 const ShellStatusBar = memo(StatusBar);
+/**
+ * The AI panel takes no props either, and is the heaviest of them: a chat transcript, the inbox, a
+ * pull request. `AiEdge` renders twice on every toggle — once for `aiPanelOpen`, once more to enter
+ * `sliding` — and both used to rebuild that whole tree inside the very frames the slide starts in, so
+ * the first stretch of the close (the fastest one, on this easing) was dropped and the panel seemed to
+ * hold its width and then snap shut.
+ */
+const ShellAiPanel = memo(AiPanel);
 
 /**
  * The AI panel's way in and out: it grows by its real width, in the flow, and the work column gives
@@ -598,9 +608,15 @@ function slideAiPanel(edge: HTMLElement | null, opening: boolean): EdgeSlide | n
   const panel = edge?.lastElementChild;
   if (!edge || !panel || edge.childElementCount < 2) return null;
   const width = panel.getBoundingClientRect().width;
-  const [from, to] = opening ? [0, width] : [width, 0];
+  // The padding moves with the width. The panel is `border-box` with `pr-1.5`, and a width under its
+  // own padding computes to the padding: "0px" held a 6px strip of nothing beside the view until the
+  // panel unmounted, and opening started with that strip already there — the gap that stood empty for
+  // a moment and then collapsed.
+  const padding = getComputedStyle(panel).paddingRight;
+  const shut = { width: "0px", paddingRight: "0px" };
+  const full = { width: `${width}px`, paddingRight: padding };
   const settle = beginEdgeResize();
-  return { animations: [panel.animate([{ width: `${from}px` }, { width: `${to}px` }], slideTiming())], settle };
+  return { animations: [panel.animate(opening ? [shut, full] : [full, shut], slideTiming())], settle };
 }
 
 /** The window's right edge: the app rail, and the AI panel beside it while it is open. */
@@ -611,7 +627,7 @@ function AiEdge() {
   return (
     <div ref={edgeRef} className="flex shrink-0">
       <ShellAppRail />
-      {phase !== "closed" && <AiPanel key="ai-panel" />}
+      {phase !== "closed" && <ShellAiPanel key="ai-panel" />}
     </div>
   );
 }
@@ -654,6 +670,9 @@ export default function App() {
   // Read here, not only inside `SettingsView`, because the panel is a lazy chunk now and this is
   // the flag that decides whether that chunk is ever asked for. See the render below.
   const settingsOpen = useUiStore((s) => s.settingsOpen);
+  /** Settings stays mounted for its way out once closed — `SettingsView` plays it while mounted
+   *  with `settingsOpen` false. It used to just vanish (user report, 2026-11-12). */
+  const settingsMounted = useExitPresence(settingsOpen, modalExitMs);
 
   useGlobalShortcuts();
 
@@ -1363,7 +1382,7 @@ export default function App() {
           avoided. Checked before moving it: the Escape handler inside `SettingsView` already
           starts with `if (!open) return`, so it never listened while closed and nothing about the
           Escape key changes. */}
-      {settingsOpen && (
+      {settingsMounted && (
         <Suspense fallback={<SettingsSkeleton />}>
           <SettingsView />
         </Suspense>

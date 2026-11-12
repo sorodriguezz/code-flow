@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { AnimatePresence, LayoutGroup, motion } from "framer-motion";
 import { ActiveMarker, ActivePill, useSlide } from "../common/ActivePill";
+import { EASE_OUT } from "../../lib/motion";
 import {
   Archive,
   ArrowUpRight,
@@ -2495,7 +2496,7 @@ function SidebarFoot({ collapsed }: { collapsed: boolean }) {
   const servicesRunning = deriveRunning(runtime, workspaceId).length > 0;
   useEffect(() => ensureServicesSync(), []);
 
-  const items = [
+  const dockItems = [
     {
       tour: "toggle-terminal",
       open: dockOpen && dockView === "terminal",
@@ -2522,15 +2523,39 @@ function SidebarFoot({ collapsed }: { collapsed: boolean }) {
       tip: t("services.toggle"),
       running: servicesRunning,
     },
-    {
-      tour: "open-settings",
-      open: settingsOpen,
-      onClick: toggleSettings,
-      icon: <Settings size={17} />,
-      label: t("statusbar.settings"),
-      tip: hint("app.settings", t("statusbar.settings")),
-    },
   ];
+  const settingsItem: FootItem = {
+    tour: "open-settings",
+    open: settingsOpen,
+    onClick: toggleSettings,
+    icon: <Settings size={17} />,
+    label: t("statusbar.settings"),
+    tip: hint("app.settings", t("statusbar.settings")),
+  };
+
+  /**
+   * The three dock buttons share one box that slides between them (user, 2026-11-12: «quiero ver
+   * una animación de desplazamiento pero que se vea fluida»), instead of each lighting its own.
+   * Only one dock panel is open at a time, so there is only ever one box to move; settings opens a
+   * window, not the dock, and can be lit together with one of them, so it keeps a box of its own.
+   *
+   * One element moved by `transform` on a CSS transition — not a framer `layoutId` pill
+   * (`ActivePill`): that one measures both rects on every change, and here the geometry is fixed —
+   * 32px rows 2px apart — so the place is plain arithmetic, the move is compositor-only, and nothing
+   * but this foot re-renders. `data-motion="off"` zeroes the transition like every other.
+   *
+   * Closing the lit one fades the box where it stands rather than sending it anywhere; opening one
+   * from nothing jumps the (invisible) box to it and fades in there — sliding in from wherever the
+   * last panel was would be a move from a place nothing is.
+   */
+  const openAt = dockItems.findIndex((item) => item.open);
+  const lastAt = useRef(Math.max(openAt, 0));
+  const wasOpenAt = useRef(openAt);
+  const fromNothing = wasOpenAt.current === -1 && openAt !== -1;
+  if (openAt !== -1) lastAt.current = openAt;
+  useEffect(() => {
+    wasOpenAt.current = openAt;
+  }, [openAt]);
 
   return (
     <>
@@ -2540,38 +2565,76 @@ function SidebarFoot({ collapsed }: { collapsed: boolean }) {
         }
       />
       <div className={`flex shrink-0 flex-col gap-0.5 pb-2 pt-2 ${collapsed ? "items-center" : "px-3"}`}>
-        {items.map((item) => (
-          <Tooltip key={item.tour} side="right" label={item.tip}>
-            <button
-              onClick={item.onClick}
-              data-tour={item.tour}
-              aria-label={item.label}
-              aria-pressed={item.open}
-              // Open is a box, not only a colour (user, 2026-11-03): the accent's soft fill and a ring,
-              // the same in the folded rail.
-              className={`flex h-8 shrink-0 items-center rounded-lg border transition-colors duration-100 ${
-                collapsed ? "w-8 justify-center" : "w-full pr-2"
-              } ${
-                item.open
-                  ? "border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                  : `border-transparent text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] ${collapsed ? "hover:text-[var(--cf-accent)]" : "hover:text-[var(--cf-text)]"}`
-              }`}
-            >
-              {collapsed ? (
-                <FootIcon icon={item.icon} running={item.running} />
-              ) : (
-                <>
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center">
-                    <FootIcon icon={item.icon} running={item.running} />
-                  </span>
-                  <span className="min-w-0 truncate text-[13px] font-medium">{item.label}</span>
-                </>
-              )}
-            </button>
-          </Tooltip>
-        ))}
+        <div className={`relative flex flex-col gap-0.5 ${collapsed ? "items-center" : ""}`}>
+          <span
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 top-0 h-8 rounded-lg border border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] bg-[var(--cf-accent-soft)]"
+            style={{
+              // `h-8` plus `gap-0.5` per row above it.
+              transform: `translateY(${lastAt.current * 2.125}rem)`,
+              opacity: openAt === -1 ? 0 : 1,
+              transition: fromNothing
+                ? "opacity 160ms ease-out"
+                : `transform 240ms ${EASE_OUT}, opacity 160ms ease-out`,
+            }}
+          />
+          {dockItems.map((item) => (
+            <FootButton key={item.tour} item={item} collapsed={collapsed} boxed={false} />
+          ))}
+        </div>
+        <FootButton item={settingsItem} collapsed={collapsed} boxed />
       </div>
     </>
+  );
+}
+
+interface FootItem {
+  tour: string;
+  open: boolean;
+  onClick: () => void;
+  icon: ReactNode;
+  label: string;
+  tip: ReactNode;
+  running?: boolean;
+}
+
+/**
+ * One of the foot's buttons. `boxed`: it draws its own open box; the dock's three leave theirs to
+ * the sliding one behind them and only take its colour. `relative` either way, so a button paints
+ * above that box rather than under it.
+ */
+function FootButton({ item, collapsed, boxed }: { item: FootItem; collapsed: boolean; boxed: boolean }) {
+  return (
+    <Tooltip side="right" label={item.tip}>
+      <button
+        onClick={item.onClick}
+        data-tour={item.tour}
+        aria-label={item.label}
+        aria-pressed={item.open}
+        // Open is a box, not only a colour (user, 2026-11-03): the accent's soft fill and a ring,
+        // the same in the folded rail.
+        className={`relative flex h-8 shrink-0 items-center rounded-lg border transition-colors duration-100 ${
+          collapsed ? "w-8 justify-center" : "w-full pr-2"
+        } ${
+          item.open
+            ? boxed
+              ? "border-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+              : "border-transparent text-[var(--cf-accent)]"
+            : `border-transparent text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] ${collapsed ? "hover:text-[var(--cf-accent)]" : "hover:text-[var(--cf-text)]"}`
+        }`}
+      >
+        {collapsed ? (
+          <FootIcon icon={item.icon} running={item.running} />
+        ) : (
+          <>
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center">
+              <FootIcon icon={item.icon} running={item.running} />
+            </span>
+            <span className="min-w-0 truncate text-[13px] font-medium">{item.label}</span>
+          </>
+        )}
+      </button>
+    </Tooltip>
   );
 }
 

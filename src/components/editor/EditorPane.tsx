@@ -10,6 +10,8 @@ import type { editor as MonacoEditorNS } from "monaco-editor";
 // the bundled editor, wires the language workers and defines the themes. The one name taken from it
 // is the code face, which both editors below draw in.
 import { CODE_FONT_FAMILY } from "../../lib/monacoSetup";
+import { paintOnLayout } from "../../lib/monacoPaintOnLayout";
+import { followViewState } from "../../lib/monacoViewState";
 import {
   Camera,
   ChevronRight,
@@ -2405,6 +2407,11 @@ export function EditorPane({
     // Typing or clicking in a pane is what makes it the active group — the same "focus follows
     // the editor you touched" rule VS Code uses to decide where the next file opens.
     editorInstance.onDidFocusEditorWidget(() => onFocusRef.current());
+    // Redraw in the frame the size changed, so the minimap is never painted blank while the window,
+    // a split or a side panel resizes the editor — see `paintOnLayout`. Owned by the editor's own
+    // emitter, so it goes when the editor does.
+    paintOnLayout(editorInstance);
+    followViewState(editorInstance);
     // An action with an id rather than `addCommand` with a chord baked in. Still registered on the
     // editor, so it only ever fires with the caret in the code and Monaco swallows it before the
     // browser or another panel sees it — but the *key* now comes from the shortcut registry via
@@ -3271,6 +3278,11 @@ export function EditorPane({
                   original={diffSides.original}
                   modified={diffSides.modified}
                   theme={monacoTheme}
+                  // Both halves carry a minimap, and both blanked for a frame on every resize step.
+                  onMount={(diff) => {
+                    paintOnLayout(diff.getOriginalEditor());
+                    paintOnLayout(diff.getModifiedEditor());
+                  }}
                   options={{
                     readOnly: true,
                     fontSize,

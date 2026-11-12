@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   ChevronDown,
@@ -82,6 +82,7 @@ import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
 import { lockWheelAxis } from "../../lib/axisLockedWheel";
 import { useMinimumSpin } from "../../lib/useMinimumSpin";
+import { recallExplorer, rememberExplorer } from "../../lib/editorMemory";
 import { useCompareStore } from "../../state/compareStore";
 
 /** Repo-relative path of the directory holding `path` ("" for a top-level entry). */
@@ -806,6 +807,50 @@ export function FileTree({
     const element = scrollerRef.current;
     return element ? lockWheelAxis(element) : undefined;
   }, []);
+  /**
+   * How far down the tree is scrolled, followed from its own scroll events rather than read when the
+   * repository is left: that can happen while the Editor is a hidden view, and a hidden scroller
+   * reads 0 — which is where the tree would then come back.
+   */
+  const scrollTopRef = useRef(0);
+  useEffect(() => {
+    const element = scrollerRef.current;
+    if (!element) return;
+    const onScroll = () => {
+      scrollTopRef.current = element.scrollTop;
+      // Not while a remembered scroll is still owed: the listings being swapped under it clamp the
+      // scroller to the top first, and that 0 is not where the user left this repository.
+      if (pendingScrollRef.current === null) saveExplorerRef.current();
+    };
+    element.addEventListener("scroll", onScroll, { passive: true });
+    return () => element.removeEventListener("scroll", onScroll);
+  }, []);
+  /** A remembered scroll position still owed to the tree, applied once its listings are drawn. */
+  const pendingScrollRef = useRef<number | null>(null);
+  /** `nestOpen` for the cleanup that remembers it — see `expandedRef` for why a ref. (`focus` has
+   *  its own `focusRef` further down, assigned during render the same way.) */
+  const nestOpenRef = useRef(nestOpen);
+  nestOpenRef.current = nestOpen;
+  /** The open set a restore has handed to `setExpanded` and not yet seen rendered — see below. */
+  const restoringRef = useRef<Set<string> | null>(null);
+  /** The tree as it stands, remembered for the repository it is showing — from refs, so the scroll
+   *  listener and the cleanups that call it never read a render's stale copy. */
+  const saveExplorerRef = useRef(() => {
+    // Nothing until the remembered tree has actually been drawn: before that, the state here is the
+    // previous repository's or the empty first render's, and writing it would replace the very memory
+    // being restored — which StrictMode's mount, unmount, mount in development does every time.
+    const restoring = restoringRef.current;
+    if (restoring) {
+      if (expandedRef.current !== restoring) return;
+      restoringRef.current = null;
+    }
+    rememberExplorer(activeRepoRef.current, {
+      expanded: [...expandedRef.current],
+      nestOpen: [...nestOpenRef.current],
+      focus: focusRef.current,
+      scrollTop: scrollTopRef.current,
+    });
+  });
   const childrenRef = useRef(childrenByDir);
   // Listings are async, so a switch to another project can land while one is in flight —
   // every write compares against this before touching state.
@@ -870,13 +915,24 @@ export function FileTree({
   useEffect(() => {
     activeRepoRef.current = repoPath;
     let cancelled = false;
+    /**
+     * The tree as this repository last left it (`lib/editorMemory`) — folders open, nests unfolded,
+     * the row clicked, the scroll — or a fresh one. A switch to another repository or workspace and
+     * back used to close every folder (user report, 2026-11-12).
+     */
+    const memory = recallExplorer(repoPath);
     setChildrenByDir(new Map());
-    setExpanded(new Set());
-    setNestOpen(new Set());
-    setFocus({ path: "", isDir: true });
+    const restoredExpanded = new Set(memory?.expanded);
+    restoringRef.current = restoredExpanded;
+    setExpanded(restoredExpanded);
+    setNestOpen(new Set(memory?.nestOpen));
+    setFocus(memory?.focus ?? { path: "", isDir: true });
     // A selection is a list of paths in the repository being left. Carrying it across would mark
-    // rows in the new tree purely because the two projects happen to share a filename.
-    setMarked(EMPTY_SELECTION);
+    // rows in the new tree purely because the two projects happen to share a filename. The row
+    // this repository had clicked is its own, and comes back.
+    setMarked(memory?.focus.path ? new Set([memory.focus.path]) : EMPTY_SELECTION);
+    pendingScrollRef.current = memory?.scrollTop ?? null;
+    scrollTopRef.current = memory?.scrollTop ?? 0;
     anchorRef.current = null;
     setDraft(null);
     setRenaming(null);
@@ -885,13 +941,53 @@ export function FileTree({
     // and leaving the target standing would have the effect below re-run on every listing of the
     // new project looking for a path that belongs to the old one.
     setRevealTarget(null);
-    void listDir(repoPath).then((entries) => {
-      if (!cancelled) setChildrenByDir(new Map([["", entries]]));
+    // The root and every remembered folder, in one go — the same sweep `refresh` makes. A folder
+    // that is gone since drops out of the open set rather than failing the rest.
+    const dirs = ["", ...(memory?.expanded ?? [])];
+    void Promise.all(
+      dirs.map((dir) =>
+        listDir(repoPath, dir || undefined).then(
+          (entries) => [dir, entries] as [string, FileEntry[]],
+          () => null,
+        ),
+      ),
+    ).then((results) => {
+      if (cancelled) return;
+      const loaded = results.filter((r): r is [string, FileEntry[]] => r !== null);
+      setChildrenByDir(new Map(loaded));
+      if (loaded.length < dirs.length) {
+        const listed = new Set(loaded.map(([dir]) => dir));
+        setExpanded((prev) => new Set([...prev].filter((dir) => listed.has(dir))));
+      }
     });
     return () => {
       cancelled = true;
+      saveExplorerRef.current();
     };
   }, [repoPath]);
+
+  /**
+   * Also remembered as it changes, not only when the repository is left: a quit never unmounts the
+   * tree, and the next launch reads whatever was written last (`lib/editorMemory`).
+   *
+   * Keyed on the state alone, never on `repoPath`. In the render that switches repository these are
+   * still the old one's values — the effect above has only *scheduled* the new ones — so a save keyed
+   * on the path would file the old tree under the new name. Unchanged, they do not fire it; the next
+   * render, with the new repository's own state, does.
+   */
+  useEffect(() => {
+    saveExplorerRef.current();
+  }, [expanded, nestOpen, focus]);
+
+  // The remembered scroll, once the listings it was measured against are drawn. Only while the
+  // scroller is showing (a hidden one has no height to scroll), and only once.
+  useLayoutEffect(() => {
+    const element = scrollerRef.current;
+    const top = pendingScrollRef.current;
+    if (top === null || !element || childrenByDir.size === 0 || element.clientHeight === 0) return;
+    pendingScrollRef.current = null;
+    element.scrollTop = top;
+  }, [childrenByDir]);
 
   /**
    * A file opened from *outside* this tree drops the multi-selection.

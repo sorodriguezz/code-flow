@@ -290,8 +290,8 @@ function FileRow({
   /** Place in the list it arrives with, which is all the entry animation needs to stagger. */
   at?: number;
   displayName?: string;
-  /** Drawn by `WindowedRows`: built only near the viewport, so it neither rises in (it would rise
-   *  again every time it scrolled back into view) nor needs `content-visibility`. */
+  /** Drawn by `WindowedRows`: built only near the viewport, so it never rises in — it would rise
+   *  again every time it scrolled back into view. */
   windowed?: boolean;
 }) {
   const t = useT();
@@ -303,28 +303,24 @@ function FileRow({
       onClick={onSelect}
       onContextMenu={onContextMenu}
       /**
-       * `content-visibility` lets the browser skip rendering a row that is nowhere near the
-       * viewport and use the reserved 26px instead. A branch switch that lands two thousand changed
-       * files used to build and lay out two thousand rows before the first frame; now it builds the
-       * screenful you can see. Nothing is dropped from the DOM — the rows are all still there for
-       * find-in-page, for the scrollbar and for selection.
+       * Only the first `RISE_ROWS` rise in, and no row here carries `content-visibility`.
        *
-       * It also happens to fix the `cf-rise` stagger for free, and this is the reason to prefer it
-       * over any cap on the animation: a skipped row does not run its animation at all, so the two
-       * thousand simultaneous animations become the dozen on screen, and every row the user can
-       * actually watch still rises exactly as it always did.
+       * These rows used to have both, and together they were the scroll lag (user report,
+       * 2026-11-12: «demora en cargar los cambios si hago scroll»). A row the browser skipped never
+       * started its animation; it started it the moment the scroll brought it into view — so every
+       * row you scrolled to sat invisible (`backwards` fill) for up to the stagger's 360ms and then
+       * faded up, in both directions, and the list always looked a beat behind the scrollbar.
        *
-       * `auto` before the size so the browser swaps in each row's real height after its first
-       * render; 26px is what one of these rows measures (13px text, `py-1`, a 13px glyph).
-       *
-       * Chromium has this; Safari only from 18.0, where it is a silent no-op and the panel behaves
-       * exactly as before. The win is Windows and current macOS.
+       * What `content-visibility` was there for — a branch switch landing thousands of rows — is
+       * `WindowedRows`' job now: from `WINDOW_FROM` rows on the list is windowed and this branch is
+       * never taken. Below that, every row is built anyway, and laying out a few hundred 26px rows
+       * at mount is cheap; painting them all up front is what makes scrolling instant.
        */
       style={{
         ...(depth ? { paddingLeft: depth * 14 } : null),
-        ...(windowed ? { height: ROW_HEIGHT } : { ...riseDelay(at), contentVisibility: "auto", containIntrinsicSize: "auto 26px" }),
+        ...(windowed ? { height: ROW_HEIGHT } : rises(at) ? riseDelay(at) : null),
       }}
-      className={`${windowed ? "" : "cf-rise "}group flex items-center gap-2 rounded-md px-2 py-1 text-[13px] cursor-pointer ${
+      className={`${!windowed && rises(at) ? "cf-rise " : ""}group flex items-center gap-2 rounded-md px-2 py-1 text-[13px] cursor-pointer ${
         selected ? "bg-[var(--cf-accent-soft)]" : "hover:bg-[var(--cf-hover)]"
       }`}
     >
@@ -403,6 +399,10 @@ const ROW_HEIGHT = 26;
 const WINDOW_FROM = 300;
 /** Rows built beyond each edge of the viewport, so a fast scroll does not show blank space. */
 const OVERSCAN = 20;
+/** How many rows of an unwindowed list rise in when it arrives — a tall screenful. The rest are
+ *  simply there: they are off screen at mount, and an animation nobody sees is only cost. */
+const RISE_ROWS = 40;
+const rises = (at: number) => at < RISE_ROWS;
 
 /**
  * A long list, built only where it can be seen. `content-visibility` already spared the browser

@@ -392,9 +392,12 @@ export function SettingsView() {
 
   // Every opening starts with an empty box and the nav unfolded: a search left over from last time
   // makes the window open on a filtered list with no obvious cause, and a nav folded last visit is
-  // not how the user wants the next one to start.
+  // not how the user wants the next one to start. Reset on the way *in*, not out: closed, the window
+  // is still on screen playing its way out (`useExitPresence` in `App`), and clearing the search
+  // then would swap the results for a section under the fade. An ordinary opening mounts fresh
+  // anyway; this is for the one that reopens it mid-exit.
   useEffect(() => {
-    if (open) return;
+    if (!open) return;
     setQuery("");
     setCollapsed(false);
   }, [open]);
@@ -443,10 +446,18 @@ export function SettingsView() {
   // the one where walking out of it into the view behind was easiest to do by accident.
   useFocusTrap(panelRef, open);
 
-  if (!open) return null;
+  /**
+   * Mounted while closed is the way out: `App` keeps the window for `modalExitMs()` after it closes
+   * (`useExitPresence`), and `cf-settings-closing` plays the arrival backwards over that time —
+   * Escape, × and ⌘, alike, since all three only flip the store. `inert` hands the window back the
+   * moment it starts to leave: nothing in a fading dialog can be clicked, focused or typed into, so
+   * the app behind is usable from the first frame of the exit, not the last. Escape and the focus
+   * trap above are keyed on `open`, so they are already off.
+   */
+  const closing = !open;
 
   return (
-    <div className="fixed inset-0 z-50">
+    <div className={`fixed inset-0 z-50${closing ? " cf-settings-closing" : ""}`} inert={closing}>
       {/* Acrylic, so what is behind reads as out of reach — see `.cf-settings-scrim`. And the
           window's drag handle while it covers the title bar: it took the drag with the clicks, and
           the window could not be moved with Settings open (user report, 2026-10-09). A double click

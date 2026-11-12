@@ -126,6 +126,7 @@ import {
   parkedAfterSwitch,
   type ParkedEditor as ParkedEditorOf,
 } from "../../lib/parkedEditors";
+import { editorShape, recallEditor, rememberEditor, type RememberedEditor } from "../../lib/editorMemory";
 import { onRepoFsChanged } from "../../lib/tauri/events";
 import { isDiagramPath, openFileInDiagrams } from "../../lib/dbmlBridge";
 import { sendToNotes } from "../../lib/notesBridge";
@@ -230,6 +231,18 @@ function loadingTab(path: string, preview: boolean): OpenTab {
     encoding: null,
     diskChanged: false,
     diskText: null,
+  };
+}
+
+/**
+ * A remembered editor (`lib/editorMemory`) as the editor to show: every tab loading, to be read
+ * again from disk — the effect keyed on `restoredParked` does the reading.
+ */
+function editorFromMemory(memory: RememberedEditor): { tabs: OpenTab[]; groups: EditorGroup[]; activeGroupId: string } {
+  return {
+    tabs: memory.tabs.map((tab) => ({ ...loadingTab(tab.path, tab.preview), viewMode: tab.viewMode as OpenTab["viewMode"] })),
+    groups: memory.groups,
+    activeGroupId: memory.activeGroupId,
   };
 }
 
@@ -395,18 +408,29 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     return paths.size;
   }, [status]);
 
+  /**
+   * What this editor starts as: the repository's remembered editor when there is one (see
+   * `lib/editorMemory`), or nothing open. Mounting is not only the app starting — a workspace switch
+   * unmounts every repository view for a moment (`App`), and this is how the editor survives that.
+   * A floating editor holds the one file it was handed, never a remembered set.
+   */
+  const [initialEditor] = useState(() => {
+    const memory = islandPath === null ? recallEditor(project?.local_path) : undefined;
+    return memory ? editorFromMemory(memory) : null;
+  });
   /** Every open file, once, however many groups are showing it. */
-  const [tabs, setTabs] = useState<OpenTab[]>([]);
-  const [groups, setGroups] = useState<EditorGroup[]>(() => [newGroup()]);
-  const [activeGroupId, setActiveGroupId] = useState<string>(() => groups[0].id);
+  const [tabs, setTabs] = useState<OpenTab[]>(() => initialEditor?.tabs ?? []);
+  const [groups, setGroups] = useState<EditorGroup[]>(() => initialEditor?.groups ?? [newGroup()]);
+  const [activeGroupId, setActiveGroupId] = useState<string>(() => initialEditor?.activeGroupId ?? groups[0].id);
   const [saving, setSaving] = useState(false);
   /** Editors set aside in projects this window has left with unsaved tabs — see `ParkedEditor`.
    *  Keyed by the project's local path, the key the draft journal files them under too. */
   const [parked, setParked] = useState<Record<string, ParkedEditor>>({});
   /** A project just left with unsaved tabs, waiting for the question the switch owes the user. */
   const [leaving, setLeaving] = useState<{ repoPath: string; to: string | null } | null>(null);
-  /** Bumped when a parked editor comes back — see the effect that re-reads its unfinished tabs. */
-  const [restoredParked, setRestoredParked] = useState(0);
+  /** Bumped when a parked or remembered editor comes back — see the effect that re-reads its
+   *  unfinished tabs. Starts at 1 when the editor mounted with a remembered one. */
+  const [restoredParked, setRestoredParked] = useState(() => (initialEditor ? 1 : 0));
   const [paletteOpen, setPaletteOpen] = useState(false);
   /** The palette opened as «Abrir reciente»: the files last opened here, only. */
   const [paletteRecent, setPaletteRecent] = useState(false);
@@ -640,7 +664,10 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     }
     // Another project's tab of the same name is not this file.
     if (projectRef.current?.local_path !== current.local_path) return;
-    setTabs((prev) => prev.map((tab) => (tab.path === path ? withLoaded(tab, loaded) : tab)));
+    // Only over a tab still waiting for it. Two reads of one file can be in flight — a remembered
+    // editor coming back starts one, and the draft journal restoring that same file waits on its
+    // own (see below) — and the slower one must not land over a draft already laid on the first.
+    setTabs((prev) => prev.map((tab) => (tab.path === path && tab.loading ? withLoaded(tab, loaded) : tab)));
   }, []);
 
   const openFile = useCallback(
@@ -895,9 +922,12 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       if (cancelled || drafts.length === 0) return;
       const restored: string[] = [];
       for (const draft of drafts) {
-        // Already open: a parked editor came back with this very buffer in it (see `ParkedEditor`),
-        // and re-applying the journal over it would at best change nothing and announce it anyway.
-        if (tabsRef.current.some((tab) => tab.path === draft.path)) continue;
+        // Already open with unsaved text: a parked editor came back with this very buffer in it (see
+        // `ParkedEditor`), and re-applying the journal over it would at best change nothing and
+        // announce it anyway. Open and clean is a remembered editor (`lib/editorMemory`) that put the
+        // file back without its text — the draft still belongs on it.
+        const existing = tabsRef.current.find((tab) => tab.path === draft.path);
+        if (existing && isDirtyTab(existing)) continue;
         // Or open in a floating editor, which has the buffer this entry is a copy of.
         if (islandHolding(project.id, draft.path) !== null) continue;
         // What the file holds now — which may have moved on, or may already be this exact text. A
@@ -905,6 +935,11 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
         const onDisk = await readEditorFile(repoPath, draft.path).catch(() => null);
         if (cancelled) return;
         if (onDisk?.kind !== "text" || onDisk.text === draft.content) continue;
+        // A tab still reading the disk would lay that read over the draft the moment it landed: let
+        // it land first. `readInto` only ever fills a tab that is still loading, so whichever of the
+        // two reads answers first is the one that counts.
+        if (tabsRef.current.find((tab) => tab.path === draft.path)?.loading) await readInto(draft.path);
+        if (cancelled) return;
         await openFile(draft.path, { pin: true });
         if (cancelled) return;
         // `originalContent` stays whatever the file holds, so the tab is dirty against disk and the
@@ -920,7 +955,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     return () => {
       cancelled = true;
     };
-  }, [project, openFile, patchTab, islandPath]);
+  }, [project, openFile, patchTab, readInto, islandPath]);
 
   const revealInTree = useCallback(
     (path: string) => {
@@ -1869,7 +1904,12 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
   if (projectPath !== (lastProject?.local_path ?? null)) {
     const left = lastProject;
     const current = { tabs, groups, activeGroupId };
-    const { editor, restored } = editorAfterSwitch(parked, projectPath, () => newGroup());
+    const afterSwitch = editorAfterSwitch(parked, projectPath, () => newGroup());
+    // No parked editor to come back to — the repository was left with nothing unsaved — so the
+    // remembered one, when there is one: the same files and groups, read again from disk.
+    const memory = afterSwitch.restored || islandPath !== null ? undefined : recallEditor(projectPath);
+    const editor = memory ? editorFromMemory(memory) : afterSwitch.editor;
+    const restored = afterSwitch.restored || memory !== undefined;
     setLastProject(project);
     setParked((prev) => parkedAfterSwitch(prev, current, left, projectPath));
     setTabs(editor.tabs);
@@ -1882,6 +1922,24 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     // project parked later is named as it is called now.
     setLastProject(project);
   }
+
+  /**
+   * The editor's shape, remembered for its repository as it changes (see `lib/editorMemory`) — on
+   * every change rather than at the switch, because the switch is not always seen: a workspace switch
+   * unmounts this view, and the last thing it ran is the last thing it can have remembered.
+   *
+   * Keyed on what is remembered, not on `tabs`, which re-identifies on every keystroke. Scratch tabs
+   * are left out: there is no file to read one back from.
+   */
+  const shapeKey = tabs.map((tab) => `${tab.path}\0${tab.preview}\0${tab.viewMode}`).join("\n");
+  useEffect(() => {
+    if (!project || islandPath !== null) return;
+    rememberEditor(
+      project.local_path,
+      editorShape({ tabs: tabsRef.current, groups, activeGroupId }, (path) => !isScratchPath(path)),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project?.local_path, islandPath, shapeKey, groups, activeGroupId]);
 
   // The diff cache is per repository by key, so once the project has changed nothing in it can be
   // hit again — it is pure residency, and an entry is a whole file's worth of `DiffLine` objects.

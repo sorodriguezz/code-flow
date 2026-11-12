@@ -4343,6 +4343,37 @@ html:has(.cf-codi-shell) body {
   }
 }
 
+/* Settings leaving: the arrival played backwards, on an accelerating curve and a beat shorter
+   (user report, 2026-11-12: «desaparece y ya»). `App` keeps the window mounted for exactly that
+   long (`modalExitMs`, `useExitPresence`) — keep the durations in step. `forwards`, so the last
+   frame holds until the unmount rather than snapping back for one.
+
+   The scrim does not fade its opacity, for the reason it does not on the way in (WebKit drops a
+   backdrop blur under an animating opacity, and the acrylic would vanish on the first frame): its
+   tint goes and its blur eases off with it, so the window behind comes back into focus instead of
+   popping sharp at the end. The panel does fade, glass mode included — unlike its arrival, which
+   only settles there. Leaving, its own blur dropping is over a scrim that is still frosted, and a
+   leaving panel that only shrank would have to vanish at its last frame anyway. */
+@keyframes cf-modal-out {
+  to {
+    opacity: 0;
+    scale: 0.98;
+  }
+}
+@keyframes cf-scrim-out {
+  to {
+    background-color: transparent;
+    -webkit-backdrop-filter: blur(0px) saturate(1);
+    backdrop-filter: blur(0px) saturate(1);
+  }
+}
+.cf-settings-closing .cf-settings-scrim {
+  animation: cf-scrim-out 0.14s cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+.cf-settings-closing [class~="shadow-[var(--cf-shadow-modal)]"] {
+  animation: cf-modal-out 0.14s cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .cf-panel-in,
   .cf-fade-in,
@@ -4376,13 +4407,21 @@ html:has(.cf-codi-shell) body {
   scale: .9;
   transition: opacity 180ms, scale 220ms;
 }
+/* Everything the hover paints stays inside the rail's 48px column — the 36px orbit at 1.08 leaves
+   ~4.5px a side, so the lift's shadow reaches 3px and the focus ring sits 2px out. It used to be
+   `0 3px 10px` and a 4px ring offset, which bled ~5px into the AI panel beside the rail (user
+   report, 2026-11-12: hovering the limits made the activity list's text "move or change
+   brightness"). While the `scale` transition runs the orbit is a compositing layer, and WebKit
+   promotes whatever later sibling overlaps one — here the AI panel's whole sheet — so its text was
+   re-rasterised into a layer of its own (thinner, re-snapped) for the length of the transition,
+   and back again when it ended. Kept in the column, nothing overlaps and nothing is promoted. */
 .cf-quota-orbit:is(:hover, :focus-visible) {
   scale: 1.08;
   background: var(--cf-surface-raised);
-  box-shadow: 0 3px 10px color-mix(in oklab, var(--cf-accent) 16%, transparent);
+  box-shadow: 0 2px 3px color-mix(in oklab, var(--cf-accent) 22%, transparent);
 }
 .cf-quota-orbit:is(:hover, :focus-visible)::before { opacity: .3; scale: 1; }
-.cf-quota-orbit:focus-visible { outline: 2px solid var(--cf-accent); outline-offset: 4px; }
+.cf-quota-orbit:focus-visible { outline: 2px solid var(--cf-accent); outline-offset: 2px; }
 .cf-quota-orbit:active { scale: .96; }
 .cf-quota-core {
   display: grid;
@@ -4471,6 +4510,22 @@ html:has(.cf-codi-shell) body {
 }
 :root[data-motion="full"] .cf-settings-scrim {
   animation-duration: 0.32s;
+}
+/* Leaving at full: further and longer, the reverse of `cf-modal-in-full` without its overshoot —
+   0.22s, as `modalExitMs` says. Spelled out with the scrim's own full rule above in mind, which
+   would otherwise outrank the closing one and stretch the exit past the unmount. */
+@keyframes cf-modal-out-full {
+  to {
+    opacity: 0;
+    scale: 0.95;
+    translate: 0 10px;
+  }
+}
+:root[data-motion="full"] .cf-settings-closing .cf-settings-scrim {
+  animation: cf-scrim-out 0.22s cubic-bezier(0.4, 0, 1, 1) forwards;
+}
+:root[data-motion="full"] .cf-settings-closing [class~="shadow-[var(--cf-shadow-modal)]"] {
+  animation: cf-modal-out-full 0.22s cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
 /* Battery saving (`powerSaveStore`, `data-power-save` 1–3 on the root). The motion level is capped
