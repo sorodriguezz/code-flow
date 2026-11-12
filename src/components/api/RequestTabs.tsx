@@ -201,7 +201,6 @@ export function RequestTabs() {
               }}
               role="tab"
               aria-selected={active}
-              title={kind === "request" ? tab.draft.url || tab.name || t("api.untitledRequest") : tab.name}
               onPointerEnter={() => useRowHoverStore.getState().enter(hoverKey)}
               onPointerLeave={() => useRowHoverStore.getState().leave(hoverKey)}
               // Kills press-and-sweep text selection without costing the `click` that follows.

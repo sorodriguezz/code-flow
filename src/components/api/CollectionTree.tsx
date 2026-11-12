@@ -343,7 +343,6 @@ function TreeRowBase({
       data-cf-apiparent={node.parentId ?? ""}
       role="treeitem"
       aria-expanded={isContainer || onToggle ? expanded : undefined}
-      title={node.name}
       // A div rather than a button because the row carries its own "…" button, and a button
       // inside a button is invalid — so focus and the Enter/Space activation come back by hand.
       tabIndex={renaming ? -1 : 0}
@@ -625,7 +624,6 @@ function ExampleRow({
   return (
     <div
       role="treeitem"
-      title={example.name}
       tabIndex={renaming ? -1 : 0}
       onPointerEnter={() => useRowHoverStore.getState().enter(hoverKey)}
       onPointerLeave={() => useRowHoverStore.getState().leave(hoverKey)}
