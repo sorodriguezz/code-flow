@@ -998,6 +998,12 @@ pub struct AiInvocation<'a> {
     /// [`crate::claude::CHAT_PLUGINS_OFF_KEY`]; other engines ignore it.
     pub disabled_plugins: Vec<String>,
     pub asks_tool_permissions: bool,
+    /// The chat's «Completo» permissions: a turn that acts asks the user nothing — no guard on
+    /// destructive commands, no approval for a saved credential or a destructive app action. Claude
+    /// runs with `--permission-mode bypassPermissions`, Codex outside its workspace sandbox, and the
+    /// app's MCP grant and own agent answer every approval yes (`agentcli::FULL_ACCESS`). Ignored on
+    /// a read-only run: plan mode stays plan mode. Only the chats set it, from the composer.
+    pub full_access: bool,
 }
 
 /// The feature labels recorded against a run's usage.
@@ -1448,6 +1454,7 @@ impl<'a> AiInvocation<'a> {
             lean: false,
             disabled_plugins: Vec::new(),
             asks_tool_permissions: false,
+            full_access: false,
         }
     }
 }
@@ -3077,7 +3084,7 @@ async fn run_engine(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) 
             // A run that is not read-only also gets the app's action tools (`codemap::mcp::Access`) —
             // except a run that reads someone else's material, which gets the queries alone.
             let grounding = GROUNDING_TASKS.contains(&inv.task);
-            crate::codemap::mcp::for_repository(cwd, !inv.read_only && !grounding, grounding).map(|(server, grant)| {
+            crate::codemap::mcp::for_repository(cwd, !inv.read_only && !grounding, inv.full_access, grounding).map(|(server, grant)| {
                 inv.app_mcp.push(server);
                 grant
             })
@@ -7590,6 +7597,8 @@ pub struct ChatTurn<'a> {
     /// [`AiInvocation::text_only`]. Set by compaction, which reads a transcript and writes a précis.
     pub text_only: bool,
     pub asks_tool_permissions: bool,
+    /// The composer's «Completo» permissions — see [`AiInvocation::full_access`].
+    pub full_access: bool,
 }
 
 /// Runs one [`ChatTurn`].
@@ -7647,6 +7656,7 @@ pub async fn chat_turn(
     inv.extra_dirs = turn.extra_dirs;
     inv.text_only = turn.text_only;
     inv.asks_tool_permissions = turn.asks_tool_permissions;
+    inv.full_access = turn.full_access && !turn.read_only;
     if engine.id() == "claude" {
         inv.disabled_plugins = crate::claude::chat_plugins_off();
     }
@@ -7740,6 +7750,7 @@ pub async fn chat_with_repo(
     json_schema: Option<&str>,
     extra_dirs: &[String],
     effort: Option<&str>,
+    full_access: bool,
 ) -> Result<AiRun, String> {
     let read_only_tools = if read_only { engine.read_only_tools() } else { Vec::new() };
     let someone_watching = stream_deltas.is_some();
@@ -7767,6 +7778,7 @@ pub async fn chat_with_repo(
             extra_dirs,
             text_only: false,
             asks_tool_permissions: someone_watching,
+            full_access,
         },
     )
     .await

@@ -238,6 +238,7 @@ async fn run_headless(app: AppHandle, team_run_id: String, dispatch: Dispatch) {
         Some(dispatch.effort.clone()).filter(|e| !e.is_empty()),
         Some(false),
         None,
+        None,
     )
     .await;
     state().turns.remove(&item_id);

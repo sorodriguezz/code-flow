@@ -1772,6 +1772,8 @@ export const sendChatMessage = (
   plan?: boolean,
   /** The editor's state for this question — see `lib/editorContext`. */
   editor?: EditorContextPayload | null,
+  /** The composer's permissions: `"full"` («Completo») asks nothing — see `lib/chatPermissions`. */
+  permissions?: "full" | null,
 ) =>
   invoke<ChatReply>("send_chat_message", {
     projectId,
@@ -1789,6 +1791,7 @@ export const sendChatMessage = (
     effort: effort || null,
     plan: plan ?? null,
     editor: editor ?? null,
+    permissions: permissions ?? null,
   });
 
 // ---------- pull requests (Azure DevOps / GitHub / GitLab) ----------

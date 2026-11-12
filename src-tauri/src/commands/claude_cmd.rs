@@ -1203,8 +1203,12 @@ pub async fn send_chat_message(
     // The editor's state when the question was sent: open file, selection, unsaved buffers,
     // diagnostics — see `crate::context`.
     editor: Option<crate::context::EditorContext>,
+    // The composer's permissions: `"full"` («Completo») asks the user nothing on a turn that acts —
+    // see `ai::AiInvocation::full_access`. Anything else is «Restringido», as every turn ran before.
+    permissions: Option<String>,
 ) -> Result<ChatReply, String> {
     let plan = plan.unwrap_or(false);
+    let full_access = !plan && permissions.as_deref() == Some(super::chat_cmd::FULL_PERMISSIONS);
     let editor = editor.unwrap_or_default();
     let mut context_sources: Vec<crate::context::ContextSource> = Vec::new();
     let mut learned_memory: Option<String> = None;
@@ -1700,6 +1704,8 @@ pub async fn send_chat_message(
             }),
             &extra_dirs,
             effort.as_deref().map(str::trim).filter(|e| ai::effort::valid(e)),
+            // A read-only turn (plan, a team member's worktree) keeps every question it has.
+            full_access && !analysis,
         ))
         .await
     })))

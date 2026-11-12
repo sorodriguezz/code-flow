@@ -1,3 +1,4 @@
+import { DEFAULT_CHAT_PERMISSIONS, permissionsArg, type ChatPermissions } from "../lib/chatPermissions";
 import { create } from "zustand";
 import { speakAnswer } from "../lib/speech/speakAnswer";
 import { isRepoBusy } from "../lib/tauri/commands";
@@ -129,6 +130,9 @@ export interface WsChatSession {
   /** Plan mode: each turn runs read-only and answers with a plan. Kept in memory, like the
    *  repository chat's. */
   plan: boolean;
+  /** The permissions selector beside «Plan» — see `lib/chatPermissions`. Kept in memory with
+   *  plan mode, and «Restringido» on every session that starts. */
+  permissions: ChatPermissions;
   /**
    * What the engine said it was holding at the end of its last turn, or `null` when none has said.
    *
@@ -195,6 +199,7 @@ interface WsChatState {
   applyCaveman: (conversationId: string, argument: string) => Promise<boolean>;
   setCaveman: (conversationId: string, level: string) => Promise<void>;
   setPlan: (conversationId: string, on: boolean) => void;
+  setPermissions: (conversationId: string, permissions: ChatPermissions) => void;
   /** Conversations whose summary is being written right now — the meter's spinner. */
   compacting: Record<string, boolean>;
   /**
@@ -262,6 +267,7 @@ export const EMPTY_WS_CHAT: WsChatSession = {
   streamText: "",
   restored: null,
   plan: false,
+  permissions: DEFAULT_CHAT_PERMISSIONS,
   contextTokens: null,
   // Nothing has been measured yet, so there is nothing to be stale about; the meter falls back to
   // the estimate and says so.
@@ -467,6 +473,7 @@ export function pruneSessions(max = MAX_LIVE_SESSIONS): void {
       !session.sending &&
       session.persisted &&
       !session.plan &&
+      session.permissions === DEFAULT_CHAT_PERMISSIONS &&
       !session.messages.some((m) => m.isCancelled || m.isError) &&
       queuedMessages(wsChatQueueKey(id)).length === 0
     );
@@ -710,6 +717,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
                   })
                 : (live?.messages ?? []),
               plan: live?.plan ?? false,
+              permissions: live?.permissions ?? DEFAULT_CHAT_PERMISSIONS,
               loaded: true,
               ...(running
                 ? { sending: true, adopted: true, runId: running.runId, runStartedAt: running.startedAtMs }
@@ -786,6 +794,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
     },
 
     setPlan: (conversationId, on) => patch(conversationId, (s) => ({ ...s, plan: on })),
+    setPermissions: (conversationId, permissions) => patch(conversationId, (s) => ({ ...s, permissions })),
 
     compacting: {},
 
@@ -1081,6 +1090,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
           skill ?? null,
           plan,
           scope,
+          permissionsArg(get().byConversation[conversationId]?.permissions, plan),
         );
       };
 

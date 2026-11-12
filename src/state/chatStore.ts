@@ -1,3 +1,4 @@
+import { permissionsArg, type ChatPermissions } from "../lib/chatPermissions";
 import { parseTurnUsage } from "../lib/wsChatTurnNotes";
 import {
   collectEditorContext,
@@ -573,6 +574,8 @@ interface ConversationPrefs {
   engine?: ChatEngine;
   effort?: string;
   plan?: boolean;
+  /** Only «Completo» is stored: «Restringido» is the default and needs no entry. */
+  permissions?: ChatPermissions;
 }
 let prefsLoad: Promise<void> | null = null;
 let prefsTimer: ReturnType<typeof setTimeout> | null = null;
@@ -602,6 +605,7 @@ function parsePrefs(raw: string | null): Record<string, ConversationPrefs> {
       }
       if (typeof v.effort === "string" && v.effort) prefs.effort = v.effort;
       if (v.plan === true) prefs.plan = true;
+      if (v.permissions === "full") prefs.permissions = "full";
       out[id] = prefs;
     }
   } catch {
@@ -619,6 +623,7 @@ export function loadConversationPrefs(): Promise<void> {
         const engineByConversation = { ...s.engineByConversation };
         const effortByConversation = { ...s.effortByConversation };
         const planByConversation = { ...s.planByConversation };
+        const permissionsByConversation = { ...s.permissionsByConversation };
         for (const [id, prefs] of Object.entries(stored)) {
           if (prefs.engine && !(id in engineByConversation))
             engineByConversation[id] = prefs.engine;
@@ -626,11 +631,14 @@ export function loadConversationPrefs(): Promise<void> {
             effortByConversation[id] = prefs.effort;
           if (prefs.plan && !(id in planByConversation))
             planByConversation[id] = true;
+          if (prefs.permissions && !(id in permissionsByConversation))
+            permissionsByConversation[id] = prefs.permissions;
         }
         return {
           engineByConversation,
           effortByConversation,
           planByConversation,
+          permissionsByConversation,
         };
       });
     })();
@@ -649,6 +657,7 @@ function persistPrefs(): void {
         ...Object.keys(s.engineByConversation),
         ...Object.keys(s.effortByConversation),
         ...Object.keys(s.planByConversation),
+        ...Object.keys(s.permissionsByConversation),
       ]);
       const entries: [string, ConversationPrefs][] = [];
       for (const id of ids) {
@@ -658,6 +667,7 @@ function persistPrefs(): void {
         if (s.effortByConversation[id])
           prefs.effort = s.effortByConversation[id];
         if (s.planByConversation[id]) prefs.plan = true;
+        if (s.permissionsByConversation[id] === "full") prefs.permissions = "full";
         if (Object.keys(prefs).length > 0) entries.push([id, prefs]);
       }
       await setSetting(
@@ -686,6 +696,10 @@ interface ChatState {
   /** Plan mode, per conversation: while on, each turn runs read-only and answers with a plan. */
   planByConversation: Record<string, boolean>;
   setPlan: (conversationId: string, on: boolean) => void;
+  /** The permissions selector beside «Plan», per conversation — absent is «Restringido». See
+   *  `lib/chatPermissions`. Rides every turn of that conversation that is not a plan turn. */
+  permissionsByConversation: Record<string, ChatPermissions>;
+  setPermissions: (conversationId: string, permissions: ChatPermissions) => void;
   /**
    * Asks `message` in `conversationId` — the conversation the assistant tab names, created on its
    * first question.
@@ -819,6 +833,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   engineByConversation: {},
   effortByConversation: {},
   planByConversation: {},
+  permissionsByConversation: {},
   attachments: {},
   editing: {},
 
@@ -979,6 +994,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().effortByConversation[conversationId] ?? null,
         plan,
         collectEditorContext(projectId, trimmed),
+        permissionsArg(get().permissionsByConversation[conversationId], plan),
       ),
     )
       .then((reply) => {
@@ -1526,6 +1542,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         s.effortByConversation;
       const { [conversationId]: _plan, ...planByConversation } =
         s.planByConversation;
+      const { [conversationId]: _permissions, ...permissionsByConversation } =
+        s.permissionsByConversation;
       const { [conversationId]: _editing, ...editing } = s.editing;
       return {
         byConversation,
@@ -1533,6 +1551,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         attachments,
         effortByConversation,
         planByConversation,
+        permissionsByConversation,
         editing,
       };
     });
@@ -1566,6 +1585,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setPlan: (conversationId, on) => {
     set((s) => ({
       planByConversation: { ...s.planByConversation, [conversationId]: on },
+    }));
+    persistPrefs();
+  },
+
+  setPermissions: (conversationId, permissions) => {
+    set((s) => ({
+      permissionsByConversation: { ...s.permissionsByConversation, [conversationId]: permissions },
     }));
     persistPrefs();
   },

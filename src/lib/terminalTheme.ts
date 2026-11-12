@@ -47,6 +47,10 @@ const SELECTION = { light: "#3b82f659", dark: "#60a5fa66" } as const;
  * code. In a see-through window it is cleared, as the editor's is, and the sheet's glass shows
  * through; `allowTransparency` must be on for xterm to honour that. The cursor's accent — the glyph
  * drawn inside a block cursor — stays the solid ground either way, or it would vanish into the glass.
+ *
+ * The cleared ground relies on `patches/@xterm__addon-webgl@0.19.0.patch`: unpatched, the WebGL
+ * renderer paints a dimmed cell's default background opaque, and `#00000000` at full alpha is the
+ * black bars that showed behind restored sessions and dim output (Prisma's, `zsh`'s).
  */
 export function terminalTheme(scheme: CodeTheme, glass: boolean): ITheme {
   const ansi = scheme.ansi ?? VSCODE_ANSI[scheme.mode];

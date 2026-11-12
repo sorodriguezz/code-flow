@@ -15,3 +15,11 @@ overrides:
   browserslist@<4.28.7: ^4.28.7
   postcss@<8.5.23: ^8.5.23
   source-map-js@<1.2.2: ^1.2.2
+
+# The terminal's WebGL renderer drew every cell carrying a background *flag* (dim, an underline
+# style, a link) as an opaque rectangle of the theme background with its alpha forced to 1 — on the
+# see-through terminal (`#00000000`) that is a black box behind dimmed text and restored scrollback.
+# The patch keeps the theme background's own alpha for default-background cells; explicit and
+# inverse colours stay opaque. Drop it once xterm fixes `RectangleRenderer._updateRectangle`.
+patchedDependencies:
+  '@xterm/addon-webgl@0.19.0': patches/@xterm__addon-webgl@0.19.0.patch

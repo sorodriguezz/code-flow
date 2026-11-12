@@ -938,7 +938,10 @@ async fn agent(
         let matched = question.clone().unwrap_or_else(|| memory_question(inv));
         memories_for(root, &matched, memory_budget(rough_input), &asked, push.memories())
     };
-    let toolbox = tools::Toolbox::new(root, grants)?.with_model(&session.live.model).with_given_memories(memory_count);
+    let toolbox = tools::Toolbox::new(root, grants)?
+        .with_model(&session.live.model)
+        .with_given_memories(memory_count)
+        .with_full_access(inv.full_access && !inv.read_only);
     log(ctx, json!({ "event": "note", "text": format!("access {}", toolbox.level().as_str()) }));
     // The same switch that keeps the map from the CLI agents (Settings › Herramientas de IA › MCP).
     let toolbox = if crate::codemap::mcp::enabled() { toolbox } else { toolbox.without_map() };
@@ -1754,6 +1757,7 @@ mod tests_support {
             lean: false,
             disabled_plugins: Vec::new(),
             asks_tool_permissions: false,
+            full_access: false,
         }
     }
 }

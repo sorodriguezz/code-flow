@@ -280,6 +280,10 @@ const REPO_LESS_WRITABLE_NOTE: &str =
 /// older, narrower behaviour back.
 pub const CHAT_FILE_GENERATION_KEY: &str = "chat_file_generation";
 
+/// What the composers send as `permissions` for «Completo»: a turn that acts and asks nothing
+/// (`ai::AiInvocation::full_access`). Shared with the panel's `send_chat_message`.
+pub const FULL_PERMISSIONS: &str = "full";
+
 /// The interpreters an engine reaches for when it has to build a binary file, in the order it tends
 /// to try them.
 const RUNTIMES: [&str; 6] = ["node", "npm", "python3", "python", "pip3", "pip"];
@@ -1423,8 +1427,13 @@ pub async fn chat_send(
     // empty is all of them, as before; an id that is not a repository of the conversation's own
     // workspace refuses the turn. Ignored by every other conversation.
     repos: Option<Vec<String>>,
+    // The composer's permissions: `"full"` («Completo») runs a turn that may act without asking for
+    // anything — see `ai::AiInvocation::full_access`. Anything else, or none, is «Restringido»: the
+    // destructive command, the saved credential and the destructive app action are each asked.
+    permissions: Option<String>,
 ) -> Result<ChatReply, String> {
     let plan = plan.unwrap_or(false);
+    let full_access = !plan && permissions.as_deref() == Some(FULL_PERMISSIONS);
     let conversation = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         chat_queries::get_conversation(&conn, &conversation_id)
@@ -1801,7 +1810,7 @@ pub async fn chat_send(
     // statement, on a turn that may write. Held until the turn ends: dropping the grant
     // revokes its token. Agy and Grok get the best passages with the question instead, below.
     let ws_knowledge = if workspace_scope && matches!(config.provider.as_str(), "claude" | "codex" | "opencode" | "cline") {
-        crate::codemap::mcp::for_workspace_chat_without(&conversation.workspace_id, may_write, &ws_excluded)
+        crate::codemap::mcp::for_workspace_chat_without(&conversation.workspace_id, may_write, full_access, &ws_excluded)
     } else {
         None
     };
@@ -2185,6 +2194,9 @@ pub async fn chat_send(
                 extra_dirs: &ws_extra_dirs,
                 text_only: false,
                 asks_tool_permissions: true,
+                // «Completo» in the composer: this turn asks nothing (`AiInvocation::full_access`).
+                // A turn that may not write keeps every question it has.
+                full_access: full_access && write_access,
             },
         ))
         .await
@@ -3100,6 +3112,7 @@ async fn summarize(
                 extra_dirs: &[],
                 text_only: true,
                 asks_tool_permissions: false,
+                full_access: false,
             },
         )
         .await

@@ -40,6 +40,8 @@ import { ChatModelPicker } from "./ChatModelPicker";
 import { ChatLineageButtons, SubchatRow } from "./ChatLineage";
 import { useChatLineageStore } from "../../state/chatLineageStore";
 import { AnswerLengthPicker } from "../chat/AnswerLengthPicker";
+import { PermissionsPicker } from "../chat/PermissionsPicker";
+import { DEFAULT_CHAT_PERMISSIONS } from "../../lib/chatPermissions";
 import { EffortPicker } from "../chat/EffortPicker";
 import { useEffortSupported } from "../../lib/useEffortSupport";
 import { EMPTY_CHAT, engineFor, loadConversationPrefs, useChatStore, type ChatEngine, type ChatSkillPick } from "../../state/chatStore";
@@ -305,6 +307,7 @@ export function PanelChat({
   }, [tabKey]);
   /** Plan mode: each turn runs read-only and answers with a plan (see `ai::PLAN_MODE_NOTE`). */
   const planMode = useChatStore((s) => s.planByConversation[conversationId] ?? false);
+  const permissions = useChatStore((s) => s.permissionsByConversation[conversationId] ?? DEFAULT_CHAT_PERMISSIONS);
   // The skill staged for the next question — dropped when the engine changes, since a skill is one
   // CLI's and the next engine may not have it.
   const [skill, setSkill] = useState<ChatSkillPick | null>(null);
@@ -1020,6 +1023,12 @@ export function PanelChat({
               {/* The label gives way when the panel is narrow: the icon, title and name stay. */}
               <span className="hidden @[26rem]:inline">{t("assistant.planMode")}</span>
             </button>
+            {/* Restringido (destructive things ask) or Completo (nothing asks) — `lib/chatPermissions`. */}
+            <PermissionsPicker
+              value={permissions}
+              planMode={planMode}
+              onPick={(next) => useChatStore.getState().setPermissions(conversationId, next)}
+            />
             {/* The CLI's own MCP servers, switched for this repository. */}
             <McpMenu provider={provider} scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId }} />
             {/* Always here now: every engine can read a file it is given the path to, so the button

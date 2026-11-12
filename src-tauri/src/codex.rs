@@ -122,12 +122,19 @@ impl AiEngine for CodexEngine {
         }
         // Read-only unless the flow may write (chat / fix) — and always for a run marked read-only,
         // whatever else it says. `workspace-write` is the documented successor to the deprecated
-        // `--full-auto`, and stays scoped to the repo rather than the whole machine —
-        // `danger-full-access` is deliberately never used. The sandbox is the operating system's
-        // (Seatbelt, Landlock), which is why this engine's read-only is a guarantee rather than a
-        // request: see [`AiEngine::enforces_read_only`].
+        // `--full-auto`, and stays scoped to the repo rather than the whole machine. The sandbox is
+        // the operating system's (Seatbelt, Landlock), which is why this engine's read-only is a
+        // guarantee rather than a request: see [`AiEngine::enforces_read_only`].
+        //
+        // `danger-full-access` only when the user chose «Completo» in the chat's composer
+        // (`AiInvocation::full_access`) — never as a default, never for a run that may not write.
         let writes = inv.auto_approve_edits && !inv.read_only;
-        cmd.arg("--sandbox").arg(if writes { "workspace-write" } else { "read-only" });
+        let sandbox = match (writes, inv.full_access) {
+            (true, true) => "danger-full-access",
+            (true, false) => "workspace-write",
+            (false, _) => "read-only",
+        };
+        cmd.arg("--sandbox").arg(sandbox);
         // Headless runs can't answer an approval prompt — without this the agent can stop and wait
         // forever. Set through `-c` rather than `--ask-for-approval`, which `codex exec` dropped
         // (it errors with "unexpected argument" on 0.145+); the config key works on every version.
@@ -949,6 +956,26 @@ mod tests {
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(args.windows(2).any(|pair| pair == ["--sandbox", "read-only"]), "{args:?}");
+    }
+
+    /// «Completo» leaves the workspace sandbox — only for a run that may write. Plan mode (read-only)
+    /// keeps the read-only sandbox whatever the composer said, and the default stays the workspace.
+    #[test]
+    fn full_access_leaves_the_sandbox_only_when_writing() {
+        let sandbox = |write: bool, read_only: bool, full: bool| {
+            let mut inv = AiInvocation::new("hazlo", "");
+            inv.auto_approve_edits = write;
+            inv.read_only = read_only;
+            inv.full_access = full;
+            let args: Vec<String> =
+                CodexEngine.build_command("codex", &inv).as_std().get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            let at = args.iter().position(|a| a == "--sandbox").expect("a sandbox");
+            args[at + 1].clone()
+        };
+        assert_eq!(sandbox(true, false, true), "danger-full-access");
+        assert_eq!(sandbox(true, false, false), "workspace-write");
+        assert_eq!(sandbox(true, true, true), "read-only");
+        assert_eq!(sandbox(false, false, true), "read-only");
     }
 
     #[test]

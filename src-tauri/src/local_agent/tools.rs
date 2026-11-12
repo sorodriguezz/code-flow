@@ -267,6 +267,11 @@ pub struct Toolbox {
     given_memories: usize,
     /// Where the app tools and the guard's question go.
     door: Door,
+    /// The run's session, as its approvals know it (`codeflow:<run>`).
+    session: String,
+    /// The chat's «Completo» permissions for this run, held as long as the toolbox — see
+    /// [`Toolbox::with_full_access`].
+    _full: Option<crate::agentcli::FullAccess>,
 }
 
 /// One tool call's result: the text the model reads, and a short line for the run log.
@@ -306,7 +311,9 @@ impl Toolbox {
         // keys a chat's: an allowance lasts the turn it was given in.
         let session = format!("codeflow:{}", crate::ai_runs::current().map(|ctx| ctx.run_id).unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()));
         Ok(Self {
-            door: app_door(root_str.clone(), session),
+            door: app_door(root_str.clone(), session.clone()),
+            session,
+            _full: None,
             root_str,
             root: root_path,
             git,
@@ -357,6 +364,16 @@ impl Toolbox {
     /// The model driving the run, for the audit log.
     pub fn with_model(mut self, model: &str) -> Self {
         self.model = model.to_string();
+        self
+    }
+
+    /// «Completo» (`AiInvocation::full_access`): the guard's destructive commands, the saved
+    /// credentials and the destructive app actions are all a yes without a question. Only for a run
+    /// that may write — a read-only one keeps every question it has.
+    pub fn with_full_access(mut self, on: bool) -> Self {
+        if on && self.grants.write {
+            self._full = crate::agentcli::FullAccess::grant(&self.session);
+        }
         self
     }
 
@@ -1434,7 +1451,13 @@ fn app_door(root: String, session: String) -> Door {
             let Some(app) = crate::ai_usage::app() else { return Err("CodeFlow is not ready yet".to_string()) };
             match call {
                 // The reason as the modal's question and the command verbatim as what is approved.
-                AppCall::Guard { command, reason } => crate::agentcli::guard(app, &command, reason, &root).await,
+                AppCall::Guard { command, reason } => {
+                    // «Completo»: the user chose a run that does not stop to ask.
+                    if crate::agentcli::has_full_access(&session) {
+                        return Ok(String::new());
+                    }
+                    crate::agentcli::guard(app, &command, reason, &root).await
+                }
                 AppCall::Verb { verb, args, stdin } => crate::agentcli::run_verb(app, verb, args, stdin, &root, &session).await,
             }
         })

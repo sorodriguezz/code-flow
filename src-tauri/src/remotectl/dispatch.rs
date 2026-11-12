@@ -1120,6 +1120,8 @@ pub async fn dispatch(
                     None,
                     // Nor an editor: no open file, selection or unsaved buffer to tell about.
                     None,
+                    // Nor the permissions selector: a phone's turn keeps every question (restricted).
+                    None,
                 )
                 .await?,
                 Invalidate::Chat,

@@ -254,7 +254,12 @@ impl AiEngine for ClaudeEngine {
                 None => cmd.arg("--settings").arg(&settings),
             };
         }
-        if inv.auto_approve_edits && !inv.read_only {
+        // «Completo» (`AiInvocation::full_access`): nothing is asked — not the shell, not a tool, not
+        // a file outside the folder. The permission prompt above is then never consulted, which is
+        // the point: the user chose a turn that does not stop for them.
+        if inv.full_access && !inv.read_only && !inv.text_only {
+            cmd.arg("--permission-mode").arg("bypassPermissions");
+        } else if inv.auto_approve_edits && !inv.read_only {
             cmd.arg("--permission-mode").arg("acceptEdits");
         }
         if let Some(id) = inv.resume_session_id {
@@ -1443,6 +1448,23 @@ mod tests {
         // An ordinary run is untouched by any of it.
         let plain = command_args(&ClaudeEngine.build_command("claude", &AiInvocation::new("hola", "")));
         assert!(!plain.iter().any(|a| a == "--tools" || a == "--strict-mcp-config"), "{plain:?}");
+    }
+
+    /// «Completo» asks nothing: `bypassPermissions` in place of `acceptEdits`. A read-only (plan)
+    /// run never gets it, whatever the composer said, and a restricted one keeps `acceptEdits`.
+    #[test]
+    fn full_access_bypasses_permissions_only_on_a_run_that_writes() {
+        let mode = |read_only: bool, full: bool| {
+            let mut inv = AiInvocation::new("hazlo", "");
+            inv.auto_approve_edits = true;
+            inv.read_only = read_only;
+            inv.full_access = full;
+            let args = command_args(&ClaudeEngine.build_command("claude", &inv));
+            args.iter().position(|a| a == "--permission-mode").map(|at| args[at + 1].clone())
+        };
+        assert_eq!(mode(false, true).as_deref(), Some("bypassPermissions"));
+        assert_eq!(mode(false, false).as_deref(), Some("acceptEdits"));
+        assert_eq!(mode(true, true), None);
     }
 
     /// The repository map is the one server a read-only run still loads — read-only itself, and

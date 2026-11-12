@@ -542,6 +542,8 @@ export const chatSend = (
   /** The workspace chat's scope: project ids of the repositories this turn may reach. `null`/empty =
    *  all of them. An id outside the conversation's workspace rejects the send. */
   repos?: string[] | null,
+  /** The composer's permissions: `"full"` («Completo») asks nothing — see `lib/chatPermissions`. */
+  permissions?: "full" | null,
 ) =>
   invoke<ChatReply>("chat_send", {
     conversationId,
@@ -554,6 +556,7 @@ export const chatSend = (
     skill: skill ?? null,
     plan: plan ?? null,
     repos: repos && repos.length > 0 ? repos : null,
+    permissions: permissions ?? null,
   });
 
 /** What each turn of a workspace chat changed, per repository: message id → the checkpoints JSON

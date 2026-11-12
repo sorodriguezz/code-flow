@@ -69,6 +69,10 @@ struct Access {
     /// The AI run the token was granted inside, when there was one — how the chat tools
     /// (`crate::chat_refs`) know which chat is asking.
     run: Option<String>,
+    /// The chat's «Completo» permissions: a run that acts and asks the user nothing — every shell
+    /// command, destructive or not, every tool, every saved credential. Only with [`acts`](Self::acts);
+    /// a plan turn stays a plan turn. See `agentcli::FULL_ACCESS`.
+    full: bool,
 }
 
 impl Access {
@@ -82,6 +86,7 @@ impl Access {
             codi: false,
             excluded_projects: Vec::new(),
             run: crate::ai_runs::current().map(|ctx| ctx.run_id),
+            full: false,
         }
     }
 
@@ -125,6 +130,8 @@ const REFERENCE_TOOLS: &[&str] = &["reference_repos", "read_reference_file"];
 /// A run's access to the map of its repository. Dropping it revokes the token.
 pub struct Grant {
     token: String,
+    /// The run's full permissions, given up with the grant — see [`Access::full`].
+    _full: Option<crate::agentcli::FullAccess>,
 }
 
 impl Drop for Grant {
@@ -138,8 +145,8 @@ impl Drop for Grant {
 /// The server entry for a run in `root`, and the grant that keeps it valid — `None` when the
 /// webhook server cannot listen (its port is taken), in which case the run simply goes without.
 /// `acts`: the run may act, so it gets the app's action tools as well as the queries.
-pub fn for_run(root: &str, acts: bool) -> Option<(LiveServer, Grant)> {
-    serve(|token| Access::new(root, acts, token))
+pub fn for_run(root: &str, acts: bool, full: bool) -> Option<(LiveServer, Grant)> {
+    serve(|token| Access { full: acts && full, ..Access::new(root, acts, token) })
 }
 
 /// The server for one of «Codi»'s turns, in its working folder `root`: the interface's tools only, and
@@ -158,19 +165,21 @@ fn for_grounding_run(root: &str) -> Option<(LiveServer, Grant)> {
 /// when the user switched the map off or the webhook server cannot listen. `acts`: the turn may
 /// write, so a database write (approved one by one) is offered too. `excluded`: the project ids of
 /// a chat limited to some of the workspace's repositories, which `search_knowledge` does not search.
-pub fn for_workspace_chat_without(workspace_id: &str, acts: bool, excluded: &[String]) -> Option<(LiveServer, Grant)> {
+pub fn for_workspace_chat_without(workspace_id: &str, acts: bool, full: bool, excluded: &[String]) -> Option<(LiveServer, Grant)> {
     if !enabled() {
         return None;
     }
     let root = crate::workspace_chat::working_dir(workspace_id).to_string_lossy().to_string();
-    serve(|token| Access { workspace: true, excluded_projects: excluded.to_vec(), ..Access::new(&root, acts, token) })
+    serve(|token| Access { workspace: true, excluded_projects: excluded.to_vec(), full: acts && full, ..Access::new(&root, acts, token) })
 }
 
 fn serve(access: impl FnOnce(&str) -> Access) -> Option<(LiveServer, Grant)> {
     let app = crate::ai_usage::app()?;
     crate::flows::triggers::webhook::ensure_server(app).ok()?;
     let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
-    RUNS.lock().ok()?.insert(token.clone(), access(&token));
+    let access = access(&token);
+    let full = (access.full && access.acts).then(|| crate::agentcli::FullAccess::grant(&access.session)).flatten();
+    RUNS.lock().ok()?.insert(token.clone(), access);
     let server = LiveServer {
         name: SERVER_NAME.to_string(),
         transport: "http".to_string(),
@@ -180,7 +189,7 @@ fn serve(access: impl FnOnce(&str) -> Access) -> Option<(LiveServer, Grant)> {
         url: format!("http://127.0.0.1:{}{PATH}", crate::flows::triggers::webhook::port()),
         headers: vec![("Authorization".to_string(), format!("Bearer {token}"))],
     };
-    Some((server, Grant { token }))
+    Some((server, Grant { token, _full: full }))
 }
 
 /// Whether the map is on (Settings › Herramientas de IA › MCP) — one switch for every agent: the
@@ -457,6 +466,11 @@ async fn answer_permission_prompt(access: &Access, args: &Value) -> String {
     let Some(app) = crate::ai_usage::app() else {
         return permission_decision(false, input, CODEFLOW_NOT_READY.to_string());
     };
+    // «Completo»: the user chose a turn that asks nothing — every command, destructive ones included,
+    // and every tool. Only ever on a turn that acts (`Access::full`).
+    if access.acts && access.full {
+        return permission_decision(true, input, String::new());
+    }
     let tool_name = args.get(PERMISSION_TOOL_NAME_KEY).and_then(Value::as_str).unwrap_or_default().to_string();
     // The shell and the browser, by the chat's execution policy (`crate::chat_exec`): a turn that may
     // act runs everything but what `cf guard` holds; a plan turn runs what looks and is sandboxed.
@@ -514,9 +528,10 @@ pub fn loadable(servers: &[LiveServer], read_only: bool) -> Vec<LiveServer> {
 
 /// The server for a CLI run in `cwd`, when that is a repository's working tree and the user has
 /// not switched it off (Settings › Herramientas de IA › MCP). The grant must outlive the run.
-/// `acts`: the run is not read-only — see [`Access::acts`]. `grounding`: the run reads material
+/// `acts`: the run is not read-only — see [`Access::acts`]. `full`: it asks the user nothing — see
+/// [`Access::full`]; ignored unless it acts. `grounding`: the run reads material
 /// someone else wrote and gets the queries alone — see [`Access::grounding`]; it never acts.
-pub fn for_repository(cwd: &str, acts: bool, grounding: bool) -> Option<(LiveServer, Grant)> {
+pub fn for_repository(cwd: &str, acts: bool, full: bool, grounding: bool) -> Option<(LiveServer, Grant)> {
     if !enabled() {
         return None;
     }
@@ -524,7 +539,7 @@ pub fn for_repository(cwd: &str, acts: bool, grounding: bool) -> Option<(LiveSer
     if grounding {
         for_grounding_run(&root)
     } else {
-        for_run(&root, acts)
+        for_run(&root, acts, full)
     }
 }
 
@@ -1694,7 +1709,7 @@ mod tests {
         RUNS.lock().unwrap().insert(token.clone(), Access::new(root, acts, &token));
         let mut headers = HeaderMap::new();
         headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
-        (headers, Grant { token })
+        (headers, Grant { token, _full: None })
     }
 
     async fn post(headers: &HeaderMap, body: Value) -> (StatusCode, Value) {
@@ -1782,7 +1797,7 @@ mod tests {
     async fn a_workspace_chat_token_opens_the_knowledge_and_the_workspace_apps_but_nothing_of_one_repository() {
         let token = "test-token-".to_string() + &uuid::Uuid::new_v4().simple().to_string();
         RUNS.lock().unwrap().insert(token.clone(), Access { workspace: true, ..Access::new("/tmp/workspace-chat/w1", false, &token) });
-        let _grant = Grant { token: token.clone() };
+        let _grant = Grant { token: token.clone(), _full: None };
         let mut headers = HeaderMap::new();
         headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
 
@@ -1811,7 +1826,7 @@ mod tests {
     async fn workspace_chats_can_manage_memories_only_when_the_turn_may_act() {
         let token = format!("memory-workspace-test-{}", uuid::Uuid::new_v4());
         RUNS.lock().unwrap().insert(token.clone(), Access { workspace: true, ..Access::new("/tmp/workspace-chat/w1", true, &token) });
-        let _grant = Grant { token: token.clone() };
+        let _grant = Grant { token: token.clone(), _full: None };
         let mut headers = HeaderMap::new();
         headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
         let (_, reply) = post(&headers, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
@@ -1841,7 +1856,7 @@ mod tests {
     async fn a_grounding_token_opens_the_queries_and_none_of_the_app() {
         let token = "grounding-test-token-0123456789abcdef".to_string();
         RUNS.lock().unwrap().insert(token.clone(), Access { grounding: true, ..Access::new("/tmp/grounding-repo", false, &token) });
-        let _grant = Grant { token: token.clone() };
+        let _grant = Grant { token: token.clone(), _full: None };
         let mut headers = HeaderMap::new();
         headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
 
@@ -2095,7 +2110,7 @@ mod live {
                 url: format!("http://127.0.0.1:{port}{PATH}"),
                 headers: vec![("Authorization".to_string(), format!("Bearer {token}"))],
             };
-            (server, Grant { token })
+            (server, Grant { token, _full: None })
         };
         let mut inv = AiInvocation::new(PROMPT, "");
         inv.model = model;

@@ -203,6 +203,45 @@ impl AskEvent {
 /// Uses a terminal has been allowed for the rest of the app's run: `session|kind|target`.
 static ALLOWED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
 
+/// The sessions running with the chat's **full** permissions («Completo» in the composer): a turn
+/// whose user chose to be asked nothing. Every approval that would go through this module for one of
+/// them — the guard's destructive commands, a saved credential, a destructive app action — is a yes
+/// without a question. Held by a [`FullAccess`] for as long as the turn's grant lives, so nothing
+/// outlives the turn it was chosen for. Never set for a shell the user opened: only a chat turn's
+/// MCP grant or the app's own agent register here.
+static FULL_ACCESS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+fn full_sessions() -> &'static Mutex<std::collections::HashSet<String>> {
+    FULL_ACCESS.get_or_init(Default::default)
+}
+
+/// Whether `session` runs with full permissions — see [`FULL_ACCESS`]. An empty session never does.
+pub(crate) fn has_full_access(session: &str) -> bool {
+    !session.is_empty() && full_sessions().lock().is_ok_and(|held| held.contains(session))
+}
+
+/// A session's full permissions, for as long as this value lives — see [`FULL_ACCESS`].
+#[derive(Debug)]
+pub(crate) struct FullAccess(String);
+
+impl FullAccess {
+    pub(crate) fn grant(session: &str) -> Option<Self> {
+        if session.is_empty() {
+            return None;
+        }
+        full_sessions().lock().ok()?.insert(session.to_string());
+        Some(FullAccess(session.to_string()))
+    }
+}
+
+impl Drop for FullAccess {
+    fn drop(&mut self) {
+        if let Ok(mut held) = full_sessions().lock() {
+            held.remove(&self.0);
+        }
+    }
+}
+
 /// Puts a question in front of the user and waits for the answer — the one door every verb that needs
 /// a human goes through. `None` when nobody answered in [`ASK_TIMEOUT`] or the window went away.
 async fn ask_user(app: &AppHandle, event: AskEvent) -> Option<Answer> {
@@ -234,6 +273,9 @@ async fn ask_user(app: &AppHandle, event: AskEvent) -> Option<Answer> {
 /// this terminal" answer lets the same terminal use the same target again without asking. A shell
 /// with no session is keyed by its folder.
 async fn approve(app: &AppHandle, request: &Request, target: &str, event: AskEvent) -> Result<(), Reply> {
+    if has_full_access(&request.session) {
+        return Ok(());
+    }
     let who = if request.session.is_empty() { request.cwd.as_str() } else { request.session.as_str() };
     let key = format!("{who}|{}|{target}", event.kind);
     let allowed = || ALLOWED.get_or_init(Default::default);
@@ -305,7 +347,10 @@ async fn interface(request: &Request, app: &AppHandle) -> Reply {
                     _ => return Reply::no(format!("the params must be a JSON object, not {raw}")),
                 }
             };
-            match ui::act(app, action, params.clone(), asker, false).await {
+            // A turn with full permissions was told to be asked nothing: its destructive actions are
+            // already confirmed. Codi's own turns never register (`FULL_ACCESS`).
+            let confirmed = asker == Asker::Agent && has_full_access(&request.session);
+            match ui::act(app, action, params.clone(), asker, confirmed).await {
                 Ok(result) => {
                     if asker == Asker::Codi {
                         crate::codi::brain::noted(crate::codi::Acted {
@@ -813,5 +858,18 @@ mod tests {
         if ENDPOINT.get().is_none() {
             assert!(shell_env().is_empty());
         }
+    }
+
+    /// Full permissions belong to one session and last as long as the value that holds them: a
+    /// terminal's session, or the same chat's next turn, is asked again.
+    #[test]
+    fn full_access_is_one_sessions_and_ends_with_its_holder() {
+        assert!(!has_full_access(""), "an empty session is nobody's");
+        assert!(FullAccess::grant("").is_none());
+        let held = FullAccess::grant("mcp:test-full-1").expect("granted");
+        assert!(has_full_access("mcp:test-full-1"));
+        assert!(!has_full_access("mcp:test-full-2"), "another session keeps its questions");
+        drop(held);
+        assert!(!has_full_access("mcp:test-full-1"), "gone with the turn");
     }
 }

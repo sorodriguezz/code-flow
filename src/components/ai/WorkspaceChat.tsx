@@ -7,6 +7,7 @@ import { ChatModelPicker } from "./ChatModelPicker";
 import { menuRowClass, useDismiss } from "./docParts";
 import { AttachmentBar } from "../chat/AttachmentBar";
 import { AnswerLengthPicker } from "../chat/AnswerLengthPicker";
+import { PermissionsPicker } from "../chat/PermissionsPicker";
 import { CavemanChip } from "../chat/CavemanChip";
 import { ChatFindBar, useChatFind } from "../chat/ChatFind";
 import { ChatArtifactsStrip } from "../chat/ArtifactCards";
@@ -814,6 +815,12 @@ export function WorkspaceChat({
                 {/* The label gives way when the panel is narrow: the icon, title and name stay. */}
                 <span className="hidden @[26rem]:inline">{t("assistant.planMode")}</span>
               </button>
+              {/* Restringido (destructive things ask) or Completo (nothing asks) — `lib/chatPermissions`. */}
+              <PermissionsPicker
+                value={session.permissions}
+                planMode={session.plan}
+                onPick={(next) => useWorkspaceChatStore.getState().setPermissions(conversationId, next)}
+              />
               {/* The CLI's own MCP servers, switched for this conversation once it exists. */}
               <McpMenu
                 provider={provider}
