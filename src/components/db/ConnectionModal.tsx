@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Search,
   Server,
+  Share2,
   SlidersHorizontal,
   Trash2,
   TriangleAlert,
@@ -30,6 +31,7 @@ import { Select } from "../common/Select";
 import { Segmented } from "../common/Segmented";
 import { DriverMenu, menuAnchor } from "./DriverMenu";
 import { DriversView } from "./DriversView";
+import { ImportConnectionDialog, ShareConnectionDialog } from "./ConnectionShareDialogs";
 import { UNGROUPED, parseSpec, redactUrl, urlHasPassword, useDbStore } from "../../state/dbStore";
 import { dbHasPassword, dbSchemaCatalog } from "../../lib/tauri/dbCommands";
 import { isUnknownHostKeyError } from "../../lib/hostKey";
@@ -275,6 +277,9 @@ export function ConnectionModal({
   const [picking, setPicking] = useState(false);
   /** The SSH host-key dialog, opened over this one by a failed test — `busy` for the same reason. */
   const hostKeyOpen = useHostKeyStore((s) => s.target !== null);
+  /** The share and import dialogs, opened over this one — `busy` while they are up, like the picker. */
+  const [sharing, setSharing] = useState(false);
+  const [importing, setImporting] = useState(false);
 
   const driverId = connectionDriverId(config);
   const driverDef = useDriverDef(driverId);
@@ -497,7 +502,12 @@ export function ConnectionModal({
 
   /** Points the right-hand pane at another entry, discarding whatever the old one held. */
   const load = (id: string | null, driverForDraft: string | null) => {
-    const next = editorState(connections.find((c) => c.id === id) ?? null, driverForDraft);
+    // From the store rather than this render's `connections`: a connection just imported is loaded
+    // from a callback that was created before it existed.
+    const next = editorState(
+      useDbStore.getState().connections.find((c) => c.id === id) ?? null,
+      driverForDraft,
+    );
     setSelected(id);
     setDraftDriver(driverForDraft);
     setName(next.name);
@@ -659,6 +669,13 @@ export function ConnectionModal({
     if (copy) load(copy.id, null);
   };
 
+  /** "Import shared connection…" from the `+`. It lands on the new connection, which is a way out
+   *  of this one, so it asks first like any other. */
+  const startImport = async () => {
+    if (dirty && !(await confirmAction(t("db.discardConnectionChanges")))) return;
+    setImporting(true);
+  };
+
   /** `−`: drops the draft, or deletes the saved connection after asking. */
   const remove = async () => {
     if (!row) {
@@ -701,7 +718,7 @@ export function ConnectionModal({
       tourAnchor="db-data-sources"
       width="max-w-5xl"
       height="h-[80vh]"
-      busy={saving || picking || hostKeyOpen}
+      busy={saving || picking || hostKeyOpen || sharing || importing}
       // A dozen fields and a password, none of it drafted anywhere: a click on the backdrop must not
       // be what throws it away. Close, Cancel and Escape stay.
       dismissOnBackdrop={false}
@@ -789,6 +806,10 @@ export function ConnectionModal({
                 </IconButton>
                 <IconButton onClick={() => void clone()} title={t("db.duplicate")}>
                   <Copy size={12} />
+                </IconButton>
+                {/* A draft has nothing saved to send yet. */}
+                <IconButton onClick={() => setSharing(true)} title={t("db.share.title")} disabled={!row}>
+                  <Share2 size={12} />
                 </IconButton>
                 {/* No ordering controls here. This list is flat and the estate is not — since
                     connections were filed into groups, a pair of arrows acting on a flat list could
@@ -1429,7 +1450,20 @@ export function ConnectionModal({
           current={driverMenu.change ? driverId : undefined}
           onPick={(id) => (driverMenu.change ? setDriver(id) : void select(null, id))}
           onManage={() => setView("drivers")}
+          onImport={driverMenu.change ? undefined : () => void startImport()}
           onClose={() => setDriverMenu(null)}
+        />
+      )}
+
+      {sharing && row && (
+        <ShareConnectionDialog row={row} unsaved={dirty} raised onClose={() => setSharing(false)} />
+      )}
+      {importing && (
+        <ImportConnectionDialog
+          group={newGroup}
+          raised
+          onImported={(id) => load(id, null)}
+          onClose={() => setImporting(false)}
         />
       )}
 

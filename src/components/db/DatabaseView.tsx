@@ -28,6 +28,7 @@ import { DocumentEditorModal } from "./DocumentEditorModal";
 import { DiagramPanel } from "./DiagramPanel";
 import { SchemaPanel } from "./SchemaPanel";
 import { ConnectionModal } from "./ConnectionModal";
+import { ImportConnectionDialog, ShareConnectionDialog } from "./ConnectionShareDialogs";
 import { ImportCsvModal } from "./ImportCsvModal";
 import { ParamsModal, SnippetsModal } from "./ConsoleModals";
 import { SessionsModal } from "./SessionsModal";
@@ -158,6 +159,17 @@ export function DatabaseView() {
           newDriver={modal.kind === "newConnection" ? modal.driver : null}
           newGroup={modal.kind === "newConnection" ? modal.group ?? "" : ""}
           initialDriver={modal.kind === "drivers" ? modal.driverId ?? "" : undefined}
+          onClose={closeModal}
+        />
+      )}
+      {modal?.kind === "shareConnection" && <ShareFromTree connectionId={modal.connectionId} onClose={closeModal} />}
+      {modal?.kind === "importConnection" && (
+        <ImportConnectionDialog
+          // Keyed on the text so a second link opened from outside while this is up replaces it.
+          key={modal.text ?? ""}
+          initialText={modal.text}
+          group={modal.group}
+          onImported={(id) => useDbStore.getState().selectConnection(id)}
           onClose={closeModal}
         />
       )}
@@ -483,6 +495,7 @@ function DbEmptyState() {
           y={driverMenu.y}
           onPick={(driver) => openModal({ kind: "newConnection", driver })}
           onManage={() => openModal({ kind: "drivers" })}
+          onImport={() => openModal({ kind: "importConnection" })}
           onClose={() => setDriverMenu(null)}
         />
       )}
@@ -963,4 +976,13 @@ function PreviewModal({
       </ul>
     </ApiModal>
   );
+}
+
+/** The share dialog for a connection in the tree — gone, with the dialog, if the row is deleted. */
+function ShareFromTree({ connectionId, onClose }: { connectionId: string; onClose: () => void }) {
+  const row = useDbStore((s) => s.connections.find((c) => c.id === connectionId) ?? null);
+  useEffect(() => {
+    if (!row) onClose();
+  }, [row, onClose]);
+  return row ? <ShareConnectionDialog row={row} onClose={onClose} /> : null;
 }

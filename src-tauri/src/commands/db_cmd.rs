@@ -243,6 +243,82 @@ pub fn db_has_password(connection_id: String) -> Result<bool, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Sharing a connection
+// ---------------------------------------------------------------------------
+
+/// What a share link starts with — the same prefix `lib/db/connectionShare.ts` writes and reads.
+const SHARE_LINK_PREFIX: &str = "codeflow://connection?d=";
+
+/// How long a link carrying a password stays on the clipboard: long enough to switch to a chat and
+/// paste it, short enough that it isn't still there at the end of the day.
+const SHARE_LINK_CLEAR_SECS: u64 = 120;
+
+/// A share link for `payload` with the connection's keychain password added to it.
+fn share_link_with_password(
+    mut payload: serde_json::Value,
+    password: &str,
+) -> Result<String, String> {
+    use base64::Engine as _;
+    let object = payload
+        .as_object_mut()
+        .ok_or("the shared connection is not an object")?;
+    object.insert("password".into(), serde_json::Value::String(password.to_string()));
+    let json = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "{SHARE_LINK_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
+    ))
+}
+
+/// Copies a share link for a connection *with its password* to the clipboard.
+///
+/// The one place a stored database password leaves the keychain on purpose, and it still never
+/// reaches the webview: the frontend sends the settings it already has (`payload`, without
+/// password), the password is added here and the finished link goes straight to the clipboard —
+/// hidden from clipboard history and cleared after two minutes, the way a vault secret is
+/// (`secret_clipboard`). Nothing comes back. A link without the password is built in the frontend,
+/// which needs nothing from here for it.
+#[tauri::command]
+pub async fn db_copy_share_link_with_password(
+    connection_id: String,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    let password = secrets::get_secret(&crate::datasource::password_key(&connection_id))?
+        .filter(|value| !value.is_empty())
+        .ok_or("this connection has no saved password")?;
+    let link = share_link_with_password(payload, &password)?;
+    let delay = std::time::Duration::from_secs(SHARE_LINK_CLEAR_SECS);
+    tokio::task::spawn_blocking(move || crate::secret_clipboard::copy(&link, delay))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// A `codeflow://connection?…` link opened from outside — clicked in a chat, say — waiting for the
+/// main window to take it. Held here rather than sent in the event because the link may carry a
+/// password, and an event reaches every window; and because a link that *launched* the app arrives
+/// before the frontend is listening.
+static PENDING_SHARE_LINK: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Takes a `codeflow://connection` link opened by the OS: keeps it for the main window, tells the
+/// window, and brings it forward. `false` for any other link, which is someone else's to handle.
+pub fn handle_share_link(app: &AppHandle, url: &str) -> bool {
+    if !url.starts_with("codeflow://connection") {
+        return false;
+    }
+    *PENDING_SHARE_LINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(url.to_string());
+    let _ = app.emit("db:connection-link", ());
+    crate::tray::show_main_window(app);
+    true
+}
+
+/// The connection link opened from outside, once — `None` when there is none waiting. The frontend
+/// reads it, asks the user, and only then saves anything.
+#[tauri::command]
+pub fn db_take_shared_credential_link() -> Option<String> {
+    PENDING_SHARE_LINK.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+// ---------------------------------------------------------------------------
 // Consoles
 // ---------------------------------------------------------------------------
 
@@ -1324,6 +1400,22 @@ pub fn db_backup_cancel(run_id: String) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::datasource::{DbDiagramColumn, DbDiagramEdge, DbDiagramTable};
+
+    /// The frontend's `decodeShareLink` reads this shape: its prefix, then the payload plus
+    /// `password` as URL-safe base64 with no padding.
+    #[test]
+    fn a_share_link_with_password_is_the_payload_plus_the_password() {
+        use base64::Engine as _;
+        let payload = serde_json::json!({"v": 1, "name": "Agendamiento", "spec": {"kind": "sqlserver", "host": "localhost"}});
+        let link = share_link_with_password(payload, "s3cr3t/ñ?").unwrap();
+        let data = link.strip_prefix(SHARE_LINK_PREFIX).expect("the prefix");
+        assert!(data.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        let json = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(data).unwrap();
+        let back: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back["password"], "s3cr3t/ñ?");
+        assert_eq!(back["spec"]["host"], "localhost");
+        assert!(share_link_with_password(serde_json::json!("nope"), "x").is_err());
+    }
 
     fn column(name: &str, ty: &str, pk: bool, fk: bool, nullable: bool) -> DbDiagramColumn {
         DbDiagramColumn {

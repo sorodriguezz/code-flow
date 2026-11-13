@@ -136,6 +136,17 @@ export const dbSetPassword = (connectionId: string, password: string) =>
 export const dbHasPassword = (connectionId: string) =>
   invoke<boolean>("db_has_password", { connectionId });
 
+/**
+ * Copies a share link for the connection *with* its keychain password straight to the clipboard —
+ * the backend adds the password to `payload` (the settings, without it) and returns nothing, so the
+ * password still never enters this heap. See `lib/db/connectionShare`.
+ */
+export const dbCopyShareLinkWithPassword = (connectionId: string, payload: unknown) =>
+  invoke<void>("db_copy_share_link_with_password", { connectionId, payload });
+
+/** A `codeflow://connection` link opened from outside, once; `null` when none is waiting. */
+export const dbTakeSharedCredentialLink = () => invoke<string | null>("db_take_shared_credential_link");
+
 // ---------- consoles ----------
 
 export const dbCreateConsole = (

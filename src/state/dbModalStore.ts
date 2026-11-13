@@ -26,6 +26,11 @@ export type DbModal =
   /** The connection dialog with nothing in particular selected — "manage my connections", which is
    * how it opens from the workspace rather than from one connection's menu. */
   | { kind: "connections" }
+  /** A saved connection as a link to send to someone, with or without its password. */
+  | { kind: "shareConnection"; connectionId: string }
+  /** A link someone shared, saved as a new connection after a preview. `text` prefills the box (a
+   * link opened from outside); `group` is where it lands. */
+  | { kind: "importConnection"; text?: string; group?: string }
   /** The name filter on one level of the tree. `target` *is* the scope — it comes from whatever was
    * right-clicked, and the dialog neither asks about it nor offers to change it. */
   | { kind: "objectFilter"; connectionId: string; target: DbFilterTarget }

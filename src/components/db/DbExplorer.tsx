@@ -28,6 +28,7 @@ import {
   RefreshCw,
   Search,
   Settings2,
+  Share2,
   Table2,
   Trash2,
   Wand2,
@@ -1189,6 +1190,11 @@ function ConnectionBranch({
       onClick: () => void store.duplicateConnection(row.id),
     },
     {
+      label: t("db.share.action"),
+      icon: Share2,
+      onClick: () => openModal({ kind: "shareConnection", connectionId: row.id }),
+    },
+    {
       label: `${t("db.moveToGroup")}…`,
       icon: FolderCode,
       separated: true,
@@ -1773,6 +1779,7 @@ function GroupSection({
           y={driverMenu.y}
           onPick={(driver) => openModal({ kind: "newConnection", driver, group })}
           onManage={() => openModal({ kind: "drivers" })}
+          onImport={() => openModal({ kind: "importConnection", group })}
           onClose={() => setDriverMenu(null)}
         />
       )}
@@ -2217,6 +2224,7 @@ export function DbExplorer() {
           y={driverMenu.y}
           onPick={(driver) => openModal({ kind: "newConnection", driver })}
           onManage={() => openModal({ kind: "drivers" })}
+          onImport={() => openModal({ kind: "importConnection" })}
           onClose={() => setDriverMenu(null)}
         />
       )}

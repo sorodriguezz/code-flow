@@ -1671,6 +1671,8 @@ mod tests {
         "set_github_token",
         "remote_get_password",
         "db_set_password",
+        "db_copy_share_link_with_password",
+        "db_take_shared_credential_link",
         "supabase_share_token",
         "keyvault_get_item",
         "keyvault_read_blob",

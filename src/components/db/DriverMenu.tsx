@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Check, Download, Search, Settings2 } from "lucide-react";
+import { Check, ClipboardPaste, Download, Search, Settings2 } from "lucide-react";
 import { DriverGlyph } from "./DbLogo";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import {
@@ -35,6 +35,7 @@ export function DriverMenu({
   current,
   onPick,
   onManage,
+  onImport,
   onClose,
 }: {
   x: number;
@@ -44,6 +45,9 @@ export function DriverMenu({
   onPick: (driverId: string) => void;
   /** "Manage drivers…", when the opener can show the Drivers list. */
   onManage?: () => void;
+  /** "Import shared connection…": a connection someone sent as a link, rather than one built here
+   *  from a driver. In this menu because it is the other answer to "add a connection". */
+  onImport?: () => void;
   onClose: () => void;
 }) {
   const t = useT();
@@ -199,6 +203,19 @@ export function DriverMenu({
         })}
       </div>
 
+      {onImport && (
+        <button
+          type="button"
+          onClick={() => {
+            onClose();
+            onImport();
+          }}
+          className="flex shrink-0 items-center gap-2 border-t border-[var(--cf-border)] px-3.5 py-2 text-left text-[12px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        >
+          <ClipboardPaste size={13} className="opacity-70" />
+          {t("db.share.importAction")}
+        </button>
+      )}
       {onManage && (
         <button
           type="button"

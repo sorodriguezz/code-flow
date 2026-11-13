@@ -1012,6 +1012,12 @@ export default function App() {
   // offers to quit instead. See `lib/closeNotice.ts` and `tray::close_action`.
   useEffect(() => installCloseNotice(), []);
 
+  // A shared database connection clicked outside the app (`codeflow://connection?…`) opens the import
+  // dialog here, whatever view is on screen. See `lib/db/shareLinks.ts`.
+  useEffect(() => {
+    void import("./lib/db/shareLinks").then(({ startConnectionShareLinks }) => startConnectionShareLinks());
+  }, []);
+
   useEffect(() => {
     // Everything the working tree changing implies, still refreshed — an external change can just
     // as easily be a branch switch, a stash or a merge, all of which used to go stale until

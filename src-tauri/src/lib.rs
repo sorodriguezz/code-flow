@@ -530,7 +530,12 @@ pub fn run() {
             // delivers it to the running app through the deep-link plugin (see `setup`).
             let links: Vec<&String> = argv.iter().filter(|arg| arg.starts_with("codeflow://")).collect();
             if !links.is_empty() {
-                links.into_iter().for_each(|link| crate::flows::triggers::watchers::handle_url(app, link));
+                links.into_iter().for_each(|link| {
+                    // A shared database connection is the database workspace's; anything else is a flow.
+                    if !crate::commands::db_cmd::handle_share_link(app, link) {
+                        crate::flows::triggers::watchers::handle_url(app, link);
+                    }
+                });
                 return;
             }
             tray::show_main_window(app);
@@ -654,14 +659,24 @@ pub fn run() {
                     shutdown::run_outside_runtime(|| shutdown::shutdown_cleanup(&handle));
                 });
             }
-            // A `codeflow://flow/<name>` link opened by the OS while the app is running (macOS), or the one
+            // A `codeflow://flow/<name>` (or `codeflow://connection?…`) link opened by the OS while the app is running (macOS), or the one
             // that launched it. Only ever starts a flow whose trigger asks first by default.
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
                 let handle = app.handle().clone();
+                // A shared connection's link that launched the app (Windows and Linux pass it as an
+                // argument to the first launch too): held for the main window, which takes it once it
+                // is listening. A flow link at launch keeps its old behaviour.
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    for url in urls {
+                        crate::commands::db_cmd::handle_share_link(app.handle(), url.as_str());
+                    }
+                }
                 app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
-                        crate::flows::triggers::watchers::handle_url(&handle, url.as_str());
+                        if !crate::commands::db_cmd::handle_share_link(&handle, url.as_str()) {
+                            crate::flows::triggers::watchers::handle_url(&handle, url.as_str());
+                        }
                     }
                 });
             }
@@ -2603,6 +2618,8 @@ sharded_invoke_handler! {
         commands::db_cmd::db_move_group_to_workspace,
         commands::db_cmd::db_set_password,
         commands::db_cmd::db_has_password,
+        commands::db_cmd::db_copy_share_link_with_password,
+        commands::db_cmd::db_take_shared_credential_link,
         commands::db_cmd::db_create_console,
         commands::db_cmd::db_update_console,
         commands::db_cmd::db_delete_console,
