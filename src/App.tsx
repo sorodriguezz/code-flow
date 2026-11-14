@@ -1,4 +1,5 @@
 import { Suspense, lazy, memo, useEffect, useRef, useState, type ReactElement } from "react";
+import { SharedChatJoinHost } from "./components/ai/SharedChat";
 import { FolderGit2, GitBranchPlus, Loader2, Trash2, Unlink } from "lucide-react";
 import { useT } from "./state/languageStore";
 import { TitleBar } from "./components/layout/TitleBar";
@@ -1017,6 +1018,11 @@ export default function App() {
   useEffect(() => {
     void import("./lib/db/shareLinks").then(({ startConnectionShareLinks }) => startConnectionShareLinks());
   }, []);
+  // An invitation to a shared workspace chat (`codeflow://chat-join?…`) opens the join dialog. See
+  // `lib/sharedChatLinks.ts`.
+  useEffect(() => {
+    void import("./lib/sharedChatLinks").then(({ startSharedChatLinks }) => startSharedChatLinks());
+  }, []);
 
   useEffect(() => {
     // Everything the working tree changing implies, still refreshed — an external change can just
@@ -1459,6 +1465,7 @@ export default function App() {
       <CreatedCards />
       <ConfirmModal />
       <PromptModal />
+      <SharedChatJoinHost />
       {/* A question an agent asked with `cf ask`. Beside the other two because it is the same kind
           of thing: a process is blocked on the answer. See `agentCliStore`. */}
       <AgentAskModal />

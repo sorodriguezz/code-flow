@@ -16,6 +16,7 @@ import {
   Search,
   Server,
   Share2,
+  ClipboardCopy,
   SlidersHorizontal,
   Trash2,
   TriangleAlert,
@@ -32,6 +33,8 @@ import { Segmented } from "../common/Segmented";
 import { DriverMenu, menuAnchor } from "./DriverMenu";
 import { DriversView } from "./DriversView";
 import { ImportConnectionDialog, ShareConnectionDialog } from "./ConnectionShareDialogs";
+import { connectionText } from "../../lib/db/connectionText";
+import { writeClipboardText } from "../../lib/clipboard";
 import { UNGROUPED, parseSpec, redactUrl, urlHasPassword, useDbStore } from "../../state/dbStore";
 import { dbHasPassword, dbSchemaCatalog } from "../../lib/tauri/dbCommands";
 import { isUnknownHostKeyError } from "../../lib/hostKey";
@@ -483,6 +486,29 @@ export function ConnectionModal({
     if (config.kind === "iris") return `jdbc:IRIS://${where}${path}${via}`;
     return `${where}${path}${via}`;
   }, [urlMode, config, engine.defaultPort, engine.file, jdbc, driverDef, local, t]);
+
+  /** «Copiar datos»: host, port, user and database as lines for a chat, from what the form shows. */
+  const copyDetails = async () => {
+    const text = connectionText({
+      kind: config.kind,
+      mode: urlMode ? "url" : "fields",
+      url: config.url,
+      host: config.host,
+      port: config.port || null,
+      defaultPort: (driverDef?.defaultPort ?? engine.defaultPort) || null,
+      user: !jdbc || jdbc.credentials ? config.user : "",
+      database: config.database,
+      file: local,
+      extras: jdbc && driverDef ? jdbc.extra.map((field) => ({ label: field.label, value: fieldValue(config, driverDef, field.name) })) : [],
+    });
+    if (!text) return;
+    try {
+      await writeClipboardText(text);
+      useToastStore.getState().pushToast(t("db.copyDetails.done"), "success");
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
 
   /** What `save` would write, which is what "has this changed?" has to be asked about. */
   const pending = useMemo(
@@ -963,10 +989,18 @@ export function ConnectionModal({
                               }}
                             />
                           )}
-                          <GhostButton onClick={() => setPicking(true)} title={t("vault.pick.action")}>
-                            <KeyRound size={12} />
-                            {t("vault.pick.action")}
-                          </GhostButton>
+                          <span className="flex items-center gap-1">
+                            {/* The plain-text sibling of «Compartir»: where the database is, to paste
+                                in a chat. Never the password — see `lib/db/connectionText`. */}
+                            <GhostButton onClick={() => void copyDetails()} title={t("db.copyDetails.title")}>
+                              <ClipboardCopy size={12} />
+                              {t("db.copyDetails")}
+                            </GhostButton>
+                            <GhostButton onClick={() => setPicking(true)} title={t("vault.pick.action")}>
+                              <KeyRound size={12} />
+                              {t("vault.pick.action")}
+                            </GhostButton>
+                          </span>
                         </div>
 
                         {urlMode ? (

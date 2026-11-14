@@ -2,6 +2,8 @@ import { DEFAULT_CHAT_PERMISSIONS, permissionsArg, type ChatPermissions } from "
 import { create } from "zustand";
 import { speakAnswer } from "../lib/speech/speakAnswer";
 import { isRepoBusy } from "../lib/tauri/commands";
+import { COLLAB_BUSY_MARKER } from "../lib/tauri/collabCommands";
+import { markWaitingForTurn } from "./sharedChatStore";
 import {
   chatAttachBytes,
   chatAttachFile,
@@ -1172,6 +1174,15 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
               skill: skill ?? undefined,
             });
             holdChatQueue(wsChatQueueKey(conversationId), "error");
+            const collabAt = String(e).indexOf(COLLAB_BUSY_MARKER);
+            if (collabAt >= 0) {
+              // Another person's turn holds a repository of this shared chat: the question waits and
+              // goes out by itself when that turn ends.
+              const holder = String(e).slice(collabAt + COLLAB_BUSY_MARKER.length).trim() || "?";
+              markWaitingForTurn(conversationId);
+              pushErrorToast(`Turno de ${holder} en curso: tu mensaje sale cuando termine.`);
+              return;
+            }
             pushErrorToast(translate("assistant.wsChatBusy"));
             return;
           }

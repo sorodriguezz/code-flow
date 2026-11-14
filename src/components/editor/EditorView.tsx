@@ -112,6 +112,7 @@ import { formatWithPrettier, prettierCanFormat } from "../../lib/formatting";
 import { useProblemsStore } from "../../state/problemsStore";
 import { useEditorPanelStore } from "../../state/editorPanelStore";
 import { useEditorFormatStore } from "../../state/editorFormatStore";
+import { useLiveStore } from "../../state/liveStore";
 import { useEditorDisplayStore } from "../../state/editorDisplayStore";
 import { useRecentFilesStore } from "../../state/recentFilesStore";
 import { applySaveRules, editorConfigFor, forgetEditorConfigs, saveRulesFor } from "../../lib/editorConfig";
@@ -1800,6 +1801,22 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     const timer = setTimeout(() => void autoSaveDirty(), 1000);
     return () => clearTimeout(timer);
   }, [autoSave, tabs, autoSaveDirty]);
+  /**
+   * Files open live in a shared session (`lib/collabLive`) save themselves, whatever the auto save
+   * setting: their text is the shared document's, which other people change too, and this machine's
+   * worktree must follow it — the sync round and the engine's turns read the disk. A file whose disk
+   * changed under it (an agent wrote it) keeps its strip instead.
+   */
+  const livePaths = useLiveStore((s) => (project ? s.openFiles[project.id] : undefined));
+  useEffect(() => {
+    if (!livePaths?.length) return;
+    const pending = tabs.filter((tab) => livePaths.includes(tab.path) && isDirtyTab(tab) && isWritable(tab) && !tab.diskChanged);
+    if (pending.length === 0) return;
+    const timer = setTimeout(() => {
+      for (const tab of pending) void save(tab.path, { interactive: false, format: false });
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [livePaths, tabs, save]);
   const leftPathRef = useRef<string | null>(null);
   useEffect(() => {
     const left = leftPathRef.current;

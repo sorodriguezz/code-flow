@@ -121,7 +121,7 @@ pub struct ConnectionCheck {
     pub schema_outdated: bool,
 }
 
-fn trimmed_url(url: &str) -> String {
+pub(crate) fn trimmed_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
 }
 
@@ -142,7 +142,7 @@ fn function_missing(status: reqwest::StatusCode, body: &str, function: &str) -> 
     status == reqwest::StatusCode::NOT_FOUND || (!status.is_success() && body.contains(function))
 }
 
-fn client() -> Result<reqwest::Client, String> {
+pub(crate) fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -166,7 +166,7 @@ fn request(
 
 /// PostgREST errors are `{message, hint, details}`; surfacing `message` is the difference between
 /// "400 Bad Request" and "relation cf_items does not exist".
-fn describe(status: reqwest::StatusCode, body: &str) -> String {
+pub(crate) fn describe(status: reqwest::StatusCode, body: &str) -> String {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
         if let Some(message) = value.get("message").and_then(|m| m.as_str()) {
             let hint = value.get("hint").and_then(|h| h.as_str()).unwrap_or("");
@@ -181,7 +181,7 @@ fn describe(status: reqwest::StatusCode, body: &str) -> String {
     format!("{status}: {excerpt}")
 }
 
-async fn read_body(response: reqwest::Response) -> Result<String, String> {
+pub(crate) async fn read_body(response: reqwest::Response) -> Result<String, String> {
     let status = response.status();
     let body = response.text().await.map_err(|e| e.to_string())?;
     if status.is_success() {

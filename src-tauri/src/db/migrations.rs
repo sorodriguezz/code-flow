@@ -2083,6 +2083,8 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     crate::chat_lineage::migrate(conn)?;
     // Chat artifacts, versioned by name per workspace (`chat_refs::artifacts`).
     crate::chat_refs::migrate(conn)?;
+    // Shared workspace chats: sessions, their worktrees and the last agreed state per file (`collab`).
+    crate::collab::store::migrate(conn)?;
     Ok(())
 }
 

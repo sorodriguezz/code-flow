@@ -26,6 +26,10 @@ const INJECTED = /^(?:tauri::)?(?:State|AppHandle|Window|WebviewWindow|Webview)\
 
 const SECRET = /(?:secret|(?:^|_)pats?(?:_|$)|token|password|passwd|credential|keychain|keyvault|key_vault|vault|llavero|oauth|private_key|api_key|apikey|decrypt|passphrase|mfa|totp|biometric|(?:^|_)otp(?:_|$)|(?:^|_)(?:anon_)?key$|_set_key|set_.*_key|reveal(?!_in_file_manager|_folder)|cookie|repo_env_(?:reveal|service_files|add_key)|service_env_files|parse_azure_connection|connection_string)/;
 
+/** Commands that mint, hand back or spend a shared chat's single-use invitation (the link is the
+ *  token). A model holding one could let somebody into the person's session. */
+const INVITATION = /^collab_(?:share|invite|join|join_preview|take_join_link|live_connection)$/;
+
 /** What a model must never call: the doors it is itself held at — answering its own approval,
  *  the window's replies to the app's questions, the interface it already drives through `ui_act`. */
 const SELF = /^(?:agentcli_|flows_bridge_|codi_act_result|codi_register|codi_ui_|mcp_trust|log_frontend_error)/;
@@ -84,7 +88,7 @@ const NOUNS = [
 
 /** How risky a command is, from the words of its name — the area prefix (`ado_`, `db_`) says nothing. */
 export function riskOf(name) {
-  if (SECRET.test(name) || SELF.test(name)) return "blocked";
+  if (SECRET.test(name) || SELF.test(name) || INVITATION.test(name)) return "blocked";
   let plain = name;
   for (const [noun, word] of NOUNS) plain = plain.replace(noun, word);
   const words = plain.split("_").filter(Boolean);

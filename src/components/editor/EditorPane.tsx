@@ -37,6 +37,7 @@ import { MarkdownPreview } from "./MarkdownPreview";
 import { DbmlDiagram } from "./DbmlDiagram";
 import { FileNoticeView } from "./FileNoticeView";
 import { isWritable, type FileNotice, type ReadOnlyReason } from "../../lib/editorFiles";
+import { useLiveEditing } from "./useLiveEditing";
 import type { DiskVersion } from "../../lib/tauri/commands";
 import { EditorTabs, type EditorTabItem, type TabMenuActions } from "./EditorTabs";
 import { InlineEditWidget } from "./InlineEditWidget";
@@ -995,6 +996,15 @@ export function EditorPane({
   });
 
   const activeTab = useMemo(() => tabs.find((tab) => tab.path === activePath) ?? null, [tabs, activePath]);
+
+  // A shared session's file: the buffer on one text with everyone who has it open, and their cursors.
+  useLiveEditing(
+    editorReady ? editorRef.current : null,
+    editorReady ? monacoRef.current : null,
+    project,
+    activeTab?.path ?? null,
+    !!activeTab && !activeTab.loading && !activeTab.notice && isWritable(activeTab) && !isScratchPath(activeTab.path),
+  );
   const content = activeTab?.content ?? "";
   /** The model's path, which is also what a separator picked for this one file is filed under. */
   const activeModelPath = activeTab ? modelPathFor(project, activeTab.path) : undefined;

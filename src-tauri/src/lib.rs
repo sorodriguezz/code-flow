@@ -151,6 +151,7 @@ mod skill_builder;
 mod skill_meta;
 mod skills_registry;
 mod supabase;
+mod collab;
 mod sysload;
 mod keep_awake;
 mod keyvault;
@@ -532,7 +533,9 @@ pub fn run() {
             if !links.is_empty() {
                 links.into_iter().for_each(|link| {
                     // A shared database connection is the database workspace's; anything else is a flow.
-                    if !crate::commands::db_cmd::handle_share_link(app, link) {
+                    if !crate::commands::db_cmd::handle_share_link(app, link)
+                        && !crate::commands::collab_cmd::handle_join_link(app, link)
+                    {
                         crate::flows::triggers::watchers::handle_url(app, link);
                     }
                 });
@@ -669,12 +672,16 @@ pub fn run() {
                 // is listening. A flow link at launch keeps its old behaviour.
                 if let Ok(Some(urls)) = app.deep_link().get_current() {
                     for url in urls {
-                        crate::commands::db_cmd::handle_share_link(app.handle(), url.as_str());
+                        if !crate::commands::db_cmd::handle_share_link(app.handle(), url.as_str()) {
+                            crate::commands::collab_cmd::handle_join_link(app.handle(), url.as_str());
+                        }
                     }
                 }
                 app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
-                        if !crate::commands::db_cmd::handle_share_link(&handle, url.as_str()) {
+                        if !crate::commands::db_cmd::handle_share_link(&handle, url.as_str())
+                            && !crate::commands::collab_cmd::handle_join_link(&handle, url.as_str())
+                        {
                             crate::flows::triggers::watchers::handle_url(&handle, url.as_str());
                         }
                     }
@@ -2741,6 +2748,22 @@ sharded_invoke_handler! {
         commands::api_cmd::supabase_has_key,
         commands::api_cmd::supabase_anon_key,
         commands::api_cmd::supabase_share_token,
+        commands::collab_cmd::collab_take_join_link,
+        commands::collab_cmd::collab_share_preview,
+        commands::collab_cmd::collab_share,
+        commands::collab_cmd::collab_invite,
+        commands::collab_cmd::collab_join_preview,
+        commands::collab_cmd::collab_join,
+        commands::collab_cmd::collab_session_for_chat,
+        commands::collab_cmd::collab_sessions,
+        commands::collab_cmd::collab_tick,
+        commands::collab_cmd::collab_live_connection,
+        commands::collab_cmd::collab_thread,
+        commands::collab_cmd::collab_resolve,
+        commands::collab_cmd::collab_commit,
+        commands::collab_cmd::collab_leave,
+        commands::collab_cmd::collab_remove_person,
+        commands::collab_cmd::collab_install_sql,
         commands::api_cmd::supabase_check,
         commands::api_cmd::supabase_probe,
         commands::api_cmd::supabase_share,

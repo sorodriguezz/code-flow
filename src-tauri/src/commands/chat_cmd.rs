@@ -1528,6 +1528,13 @@ pub async fn chat_send(
     // the live block, `--add-dir`, the presence locks, the restore points, the knowledge and the
     // `@` mentions all see the same set.
     let (ws_projects, ws_excluded) = select_repos(ws_projects, repos.as_deref().filter(|_| workspace_scope))?;
+    // A shared chat (`crate::collab`) works in this person's session worktrees, and only in the
+    // repositories of the session, never in their own checkouts.
+    let shared = if workspace_scope { crate::collab::chat::session_of(db.inner(), &conversation_id)? } else { None };
+    let ws_projects = match &shared {
+        Some((_, session_repos)) => crate::collab::chat::in_session(ws_projects, session_repos),
+        None => ws_projects,
+    };
     // Outside the lock: every repository is opened to read its branch.
     let ws_repos = crate::workspace_chat::repo_lines(ws_projects);
     let ws_extra_dirs = crate::workspace_chat::extra_dirs(&ws_repos);
@@ -1551,6 +1558,21 @@ pub async fn chat_send(
         let name = if conversation.title.trim().is_empty() { &conversation_id } else { &conversation.title };
         format!("{}{name}", ai_locks::BUSY_MARKER)
     })?;
+    // A shared turn takes its repositories for everyone (one turn at a time per repository), hears
+    // what the others did since this machine's last turn, and posts the question to the thread.
+    // Dropped without `finish` (an early return), it releases its locks on its own.
+    let mut shared_turn = match shared {
+        Some((session, session_repos)) => {
+            let keys: Vec<String> = session_repos
+                .iter()
+                .filter(|r| ws_repos.iter().any(|line| line.id == r.project_id))
+                .map(|r| r.repo_key.clone())
+                .collect();
+            let turn_id = uuid::Uuid::new_v4().to_string();
+            Some(crate::collab::chat::begin(db.inner(), session, keys, &turn_id, &message).await?)
+        }
+        None => None,
+    };
     let presence = project.as_ref().map(|project| ai_locks::enter(&project.local_path, &ai::chat_presence_label(&message)));
     // A workspace chat is listed in every repository it can reach, so the turns working in any of
     // them know it is there — and it hears who else is in them.
@@ -1945,6 +1967,12 @@ pub async fn chat_send(
         Some(rules) => format!("{message}\n\n{rules}"),
         None => message.clone(),
     };
+    // What the others in a shared chat did since this engine last heard (`collab::chat`).
+    if let Some(block) = shared_turn.as_ref().and_then(|t| t.context.clone()) {
+        engine_message = format!("{block}
+
+{engine_message}");
+    }
     // How long to answer, and how to ask the user something back — `ai::chat_turn_rules`.
     if let Ok(conn) = db.0.lock() {
         engine_message.push_str(said.say("rules", &ai::chat_turn_rules(&conn)));
@@ -2291,6 +2319,9 @@ pub async fn chat_send(
                     &chat_queries::TurnNotes { context: context_sources.clone(), usage: None, unprotected_dirs: ws_unprotected.clone() },
                 );
             }
+            if let Some(t) = shared_turn.take() {
+                crate::collab::chat::finish(t, None, &config.provider, serde_json::Value::Null).await;
+            }
             return Err(e);
         }
     };
@@ -2384,6 +2415,10 @@ pub async fn chat_send(
             asked,
             crate::chat_title::Target::Chat { conversation_id: conversation_id.clone() },
         );
+    }
+    if let Some(t) = shared_turn.take() {
+        let changes = crate::collab::chat::changes_of(turn_checkpoints.as_deref());
+        crate::collab::chat::finish(t, Some(&run.text), &config.provider, changes).await;
     }
 
     Ok(ChatReply {

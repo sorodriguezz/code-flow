@@ -320,6 +320,13 @@ pub const NEVER_BACKED_UP: &[&str] = &[
     // What Codi remembers across sessions: its own notes, forgettable with one button, and not a
     // thing a restore should bring back after the user cleared them.
     "codi_recollections",
+    // Shared chat sessions: each row points at worktrees on this machine's disk and at credentials
+    // kept in this machine's keyring, neither of which a backup carries. Restored, a session would
+    // sync from folders that are not there with keys that are not there.
+    "collab_sessions",
+    "collab_repos",
+    "collab_agreed",
+    "collab_conflicts",
 ];
 
 // ---------------------------------------------------------------------------

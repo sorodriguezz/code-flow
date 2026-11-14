@@ -51,6 +51,10 @@ import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { EMPTY_WS_CHAT, EMPTY_WS_LIST, pinWsChat, useWorkspaceChatStore, wsChatQueueKey, type WsChatMessage } from "../../state/workspaceChatStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { ChatLineageButtons, SubchatRow } from "./ChatLineage";
+import { LiveOtherTurn, OtherTurn, SharedChatBar } from "./SharedChat";
+import { useLiveStore } from "../../state/liveStore";
+import { interleave } from "../../lib/sharedChat";
+import { othersOf, useSharedChatStore } from "../../state/sharedChatStore";
 
 const STICK_PX = 48;
 const MAX_COMPOSER_HEIGHT = 180;
@@ -129,6 +133,20 @@ export function WorkspaceChat({
   }, [active, session.sending, workspaceId, projectsKey]);
   const rows = useMemo(() => repoRows(projects, snapshot?.repos), [projects, snapshot?.repos]);
   const scope = useWorkspaceChatStore((s) => s.scopeRepos[conversationId] ?? null);
+  // A shared chat (`SharedChat.tsx`): the other people's turns, slotted between this machine's own.
+  const sharedView = useSharedChatStore((s) => s.byChat[conversationId]);
+  const sharedThread = useSharedChatStore((s) => (sharedView ? s.live[sharedView.session.id]?.thread : undefined));
+  // Others' answers still being written, streamed over the live channel; a minute without news is a
+  // turn whose end was missed (the thread will have it), not one still going.
+  const liveTurnsRaw = useLiveStore((s) => (sharedView ? s.sessions[sharedView.session.id]?.turns : undefined));
+  const liveTurns = useMemo(
+    () => Object.entries(liveTurnsRaw ?? {}).filter(([, turn]) => turn.text && Date.now() - turn.at < 60_000),
+    [liveTurnsRaw],
+  );
+  const transcript = useMemo(
+    () => interleave(session.messages, sharedView && sharedThread ? othersOf(sharedThread, sharedView.session.personId) : []),
+    [session.messages, sharedView, sharedThread],
+  );
   const focusChain = useChainStore((s) => (focus ? (s.chains.find((c) => c.id === focus) ?? null) : null));
 
   // ── Engine, level and role ─────────────────────────────────────────────────────────────────
@@ -562,6 +580,7 @@ export function WorkspaceChat({
           persisted={session.persisted && session.messages.length > 0}
         />
       </div>
+      <SharedChatBar workspaceId={workspaceId} chatId={conversationId} title={session.title} persisted={session.persisted && session.messages.length > 0} />
       <SubchatRow scope={lineage} />
       <ChatArtifactsStrip workspaceId={workspaceId} conversationId={conversationId} />
       <div ref={scrollRef} onScroll={onScroll} tabIndex={-1} onContextMenu={textMenu.onText} className="cf-paper-scroll relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none">
@@ -598,7 +617,9 @@ export function WorkspaceChat({
               </button>
             </div>
           )}
-          {session.messages.map((message, i) => {
+          {transcript.map((row) => {
+            if (row.kind === "other") return <OtherTurn key={`other-${row.message.seq}`} message={row.message} />;
+            const { message, index: i } = row;
             const day = dayDivider(message, session.messages[i - 1], locale);
             return (
               <Fragment key={message.id}>
@@ -649,6 +670,9 @@ export function WorkspaceChat({
               </Fragment>
             );
           })}
+          {liveTurns.map(([id, turn]) => (
+            <LiveOtherTurn key={`live-${id}`} id={id} turn={turn} />
+          ))}
           {waitingResets.map((reset) => (
             <ResetLine key={`${reset.reason}-${reset.turn}`} reset={reset} />
           ))}

@@ -22,6 +22,7 @@ pub mod tests_cmd;
 pub mod claude_cmd;
 pub mod fix_verify;
 pub mod codemap_cmd;
+pub mod collab_cmd;
 pub mod db_cmd;
 pub mod deps_cmd;
 pub mod debug_cmd;
