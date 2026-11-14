@@ -213,6 +213,8 @@ export const useSharedChatStore = create<CollabState>((set, get) => {
 
     join: async (workspaceId, link, nick) => {
       const view = await collabJoin(workspaceId, link, nick);
+      // A shared run has no chat and no worktrees of its own: `sharedRunStore` runs its rounds.
+      if (view.kind === "run") return view;
       set((s) => ({ byChat: { ...s.byChat, [view.session.chatId]: view } }));
       void useWorkspaceStore.getState().loadProjects(workspaceId);
       startLoop(view.session.id);

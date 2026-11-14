@@ -21,6 +21,8 @@ import { Lanes } from "./Lanes";
 import { Channel } from "./Channel";
 import { Insights } from "./Insights";
 import { GateCard, ItemPanel } from "./RunParts";
+import { GuestRunPage, RunShareControls, SharedWithYou } from "./SharedRun";
+import { useSharedRunStore } from "../../../state/sharedRunStore";
 
 function useWide(query = "(min-width: 1180px)") {
   const [wide, setWide] = useState(() => (typeof window === "undefined" ? true : window.matchMedia(query).matches));
@@ -125,6 +127,7 @@ function RunHeader({ state }: { state: TeamRunState }) {
             <span className="max-w-[140px] truncate">{card.title}</span>
           </Btn>
         )}
+        <RunShareControls state={state} />
         {run.status === "running" && <Btn small icon={Pause} title={l("Detiene a todos los miembros sin perder el trabajo", "Stops every member without losing work")} onClick={() => void store.control(run.id, "pause")}>{l("Pausar", "Pause")}</Btn>}
         {run.status === "paused" && <Btn small kind="primary" icon={Play} title={l("Reanuda la corrida donde quedó", "Resumes the run where it stopped")} onClick={() => void store.control(run.id, "resume")}>{l("Seguir", "Resume")}</Btn>}
         {runIsLive(run) && (
@@ -234,6 +237,11 @@ export function LiveSpace() {
   const states = useTeamStore((s) => s.states);
   const selectedRunId = useTeamStore((s) => s.selectedRunId);
   const loading = useTeamStore((s) => s.loading);
+  const openGuest = useSharedRunStore((s) => s.openGuest);
+
+  if (openGuest) {
+    return <GuestRunPage key={openGuest} sessionId={openGuest} />;
+  }
 
   if (selectedRunId) {
     const state = states[selectedRunId];
@@ -255,11 +263,19 @@ export function LiveSpace() {
 
   if (runs.length === 0) {
     return (
+      <div className="flex min-h-0 flex-1 flex-col">
+      <SharedWithYou />
       <Empty icon={Activity} title={l("Nada en marcha", "Nothing running")} hint={l("Cuando un equipo trabaje, aquí lo verás crecer: el plan, quién hace qué en paralelo, lo que se dicen y lo que cuesta.", "When a team works, you will see it grow here: the plan, who does what in parallel, what they tell each other and what it costs.")}>
         <Btn kind="primary" icon={WandSparkles} title={l("Abre el lanzador para asignar una tarea a un equipo", "Opens the launcher to assign a task to a team")} onClick={() => crew.open({ kind: "launch" })}>{l("Dale una tarea a un equipo", "Hand a team a task")}</Btn>
       </Empty>
+      </div>
     );
   }
 
-  return <RunList runs={runs} states={states} />;
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <SharedWithYou />
+      <RunList runs={runs} states={states} />
+    </div>
+  );
 }

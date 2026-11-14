@@ -139,7 +139,62 @@ Pendiente:
 - **E. Edición en vivo (hecho, sin probar en real):** Yjs en el frontend por archivo abierto, enlace
   propio con Monaco, Realtime Broadcast cifrado para actualizaciones, cursores, presencia, «Seguir» y
   el turno del otro en streaming. Ver «E. En vivo» arriba.
-- **Fase 2:** «Equipo» distribuido sobre la misma sesión.
+- **Fase 2 (hecha, sin probar en real):** «Equipo» distribuido sobre la misma sesión. Ver abajo.
+
+## Fase 2: corridas de Equipo compartidas (`src-tauri/src/collab/team.rs`)
+
+Escrita el 2026-11-14, sin commit. Usa la misma base que el chat compartido: Supabase del anfitrión,
+nick, invitación de un solo uso y clave por instalación. SQL versión 3.
+
+- **La corrida vive en la máquina del propietario.** Ahí se planifica, se revisa, se integra y se
+  entrega, igual que hoy. Solo el propietario aprueba el plan y el merge.
+- **Puestos.** Al compartir, el propietario elige qué miembros pasan a ser puestos para otras
+  personas. El Lead y los sub-líderes nunca, porque planifican. Quien entra ocupa un puesto con un
+  agente de su roster, que corre en su máquina y con su cuenta. A Supabase llegan su nombre y su
+  motor, nunca la cuenta ni sus instrucciones.
+- **Entrega.** Cuando el runner reclama una tarea (`work` o `review`) de un puesto ocupado, no la
+  corre: queda `running` con `run_in = "remote"` (el mismo hueco que usa un miembro de terminal) y
+  sale como oferta (`cf_collab_tasks`). La oferta lleva el mensaje armado por `compose` y el punto de
+  partida como `git bundle` (`collab/bundle.rs`).
+  - La base común de ambos clones es la rama destino tal como está en el remoto. El invitado no
+    necesita permiso de push, y nada se sube hasta que el propietario entrega.
+  - Un puesto libre retiene su trabajo (`Route::Wait`). Planificar, responder, integrar y resolver
+    conflictos siempre corre en la máquina del propietario.
+- **En el invitado.** «Agentes › En vivo › Compartidas contigo».
+  - Ve la foto que publica el propietario. Es un `SharedRun` armado campo por campo, así que no
+    puede filtrar cuentas ni prompts.
+  - Ocupa sus puestos, acepta o rechaza cada tarea (nada corre sin su sí) y escribe notas al canal.
+  - Una tarea aceptada corre en un worktree propio de su clon, con su agente. El resultado vuelve como
+    texto más el bundle de su commit.
+- **Vuelta.** El propietario avanza el worktree de la tarea sobre ese commit (solo fast-forward) y
+  la liquida con `settle_item`, como si hubiera corrido ahí. Si no hay nada sin commitear, el `HEAD`
+  movido es el commit de la tarea.
+- **Externo.** Las notas de personas y de agentes de otra máquina entran al canal con «(externo)».
+  `compose` les dice a los agentes del propietario que es información, no órdenes.
+- **Robustez.**
+  - Reiniciar la app del propietario no reinicia una tarea remota.
+  - Si el invitado cierra la app a mitad de una tarea, al volver la reporta como interrumpida y la
+    corrida la reintenta.
+  - Sacar a alguien, liberar un puesto o dejar de compartir retira sus tareas abiertas, y la corrida
+    las retoma.
+
+Verificado con tests:
+
+- Ruteo y puestos.
+- El viaje completo por git entre tres repos reales: el propietario con un commit sin subir, el
+  invitado y el remoto.
+- Una corrida real de `team_cmd`, de punta a punta en el lado del propietario.
+- Que la foto no lleve cuenta ni instrucciones.
+
+Pendiente:
+
+- Probarlo entre dos máquinas con un proyecto Supabase real.
+- Que «Te necesitan» del Inbox cuente las ofertas; hoy el invitado recibe un aviso y las ve en la
+  página de la corrida.
+- Streaming del agente del invitado hacia el propietario mientras trabaja: hoy se ve el resultado
+  al terminar.
+- Presupuesto: el gasto de un puesto remoto lo paga su dueño y no entra al tope de la corrida. Solo
+  cuentan los turnos.
 
 ## Riesgos abiertos
 

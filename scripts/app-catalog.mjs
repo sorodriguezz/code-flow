@@ -28,7 +28,7 @@ const SECRET = /(?:secret|(?:^|_)pats?(?:_|$)|token|password|passwd|credential|k
 
 /** Commands that mint, hand back or spend a shared chat's single-use invitation (the link is the
  *  token). A model holding one could let somebody into the person's session. */
-const INVITATION = /^collab_(?:share|invite|join|join_preview|take_join_link|live_connection)$/;
+const INVITATION = /^collab_(?:share|invite|join|join_preview|take_join_link|live_connection|run_share|run_accept|run_decline|run_take_seat)$/;
 
 /** What a model must never call: the doors it is itself held at — answering its own approval,
  *  the window's replies to the app's questions, the interface it already drives through `ui_act`. */

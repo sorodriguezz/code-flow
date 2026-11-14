@@ -15,6 +15,8 @@ import { SelectBox, Btn, Chip, ToggleChip, field } from "../kit/ui";
 import { useL } from "../state";
 import { MESSAGE_KIND } from "./look";
 import { Markdown } from "../../common/Markdown";
+import { ExternalTag } from "./SharedRun";
+import { authorName } from "../../../lib/team/externalNotes";
 import { readableTeamText } from "../../../lib/team/teamText";
 
 function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; compact?: boolean }) {
@@ -68,10 +70,11 @@ function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; c
       )}
       <div className={`min-w-0 max-w-[88%] rounded-[12px] border px-2.5 py-1.5 ${asking ? "cf-crew-waiting border-[var(--cf-warning)] bg-[color-mix(in_oklab,var(--cf-warning)_8%,var(--cf-surface))]" : fromUser ? "border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)]" : "border-[var(--cf-border)] bg-[var(--cf-surface-raised)]"}`} style={{ ["--cf-crew-c" as string]: "var(--cf-warning)" }}>
         <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-          <b>{fromUser ? l("Tú", "You") : m.from_name}</b>
+          <b>{fromUser ? l("Tú", "You") : authorName(m.from_name)}</b>
           <ArrowRight className="h-2.5 w-2.5 text-[var(--cf-text-faint)]" />
           <span className="text-[var(--cf-text-muted)]">{m.to_id === "user" ? l("ti", "you") : m.to_id === "all" ? l("todos", "everyone") : m.to_name}</span>
           <Chip tone={tone} title={l("Tipo de mensaje", "Message type")} className="!h-[18px] !px-1.5 !text-[10px]">{l(kes, ken)}</Chip>
+          <ExternalTag fromName={m.from_name} />
           <span className="ml-auto text-[10px] text-[var(--cf-text-faint)]">{new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
         </div>
         <Markdown source={readableTeamText(m.body)} className={`cf-markdown-chat cf-crew-msg mt-0.5 select-text break-words text-[12.5px] ${compact ? "line-clamp-6" : ""}`} />

@@ -331,6 +331,12 @@ begin
     update cf_collab_people set removed_at = now()
         where id = p_person and session_id = p_session and role <> 'owner';
     delete from cf_collab_locks where session_id = p_session and person_id = p_person;
+    -- Their seats in a shared run are free again, and what they had not finished goes back to the run.
+    -- (Those tables come later in the script: plpgsql resolves names when the function runs.)
+    update cf_collab_tasks set status = 'withdrawn', updated_at = now()
+        where session_id = p_session and person_id = p_person and status in ('offered', 'accepted');
+    update cf_collab_seats set person_id = null, agent = '', engine = '', taken_at = null
+        where session_id = p_session and person_id = p_person;
     -- They knew the live channel: a new one, which only the people still in learn.
     update cf_collab_sessions
         set channel_key = replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '')
@@ -490,8 +496,218 @@ begin
 end
 $$;
 
+-- ---------------------------------------------------------------------------
+-- Shared «Equipo» runs (version 3)
+-- ---------------------------------------------------------------------------
+--
+-- A run lives on its owner's machine; the owner's CodeFlow is the only one that plans, merges and
+-- lands. Some of its members are SEATS that other people fill with agents of their own, which run on
+-- their machines with their accounts. The owner OFFERS a seat's task here (the message its agent
+-- starts from, and where in the history it starts); the seat's person accepts or declines it on
+-- their machine and REPORTS the answer, with their commit as a git bundle in cf_collab_blobs. The
+-- owner also publishes a picture of the run (cf_collab_runs) so the others can follow it.
+--
+-- Nothing about an agent beyond its name and engine reaches this project: not its account, not its
+-- instructions.
+
+alter table cf_collab_sessions add column if not exists kind text not null default 'chat';
+
+create table if not exists cf_collab_seats (
+    session_id  uuid not null references cf_collab_sessions(id) on delete cascade,
+    member_id   text not null check (char_length(member_id) between 1 and 80),
+    name        text not null,
+    role        text not null default '',
+    person_id   uuid references cf_collab_people(id) on delete set null,
+    agent       text not null default '' check (char_length(agent) <= 80),
+    engine      text not null default '' check (char_length(engine) <= 40),
+    taken_at    timestamptz,
+    primary key (session_id, member_id)
+);
+
+create table if not exists cf_collab_tasks (
+    session_id     uuid not null references cf_collab_sessions(id) on delete cascade,
+    item_id        text not null check (char_length(item_id) between 1 and 80),
+    attempt        integer not null default 1,
+    member_id      text not null,
+    person_id      uuid not null references cf_collab_people(id) on delete cascade,
+    repo_key       text not null,
+    kind           text not null check (kind in ('work', 'review')),
+    title          text not null,
+    message        text not null,
+    writes         boolean not null,
+    target         text not null,
+    start_sha      text not null check (start_sha ~ '^[0-9a-f]{40}$'),
+    start_bundle   text check (start_bundle is null or start_bundle ~ '^[0-9a-f]{64}$'),
+    status         text not null default 'offered'
+                   check (status in ('offered', 'accepted', 'done', 'failed', 'declined', 'withdrawn')),
+    result_text    text,
+    error          text,
+    result_sha     text check (result_sha is null or result_sha ~ '^[0-9a-f]{40}$'),
+    result_bundle  text check (result_bundle is null or result_bundle ~ '^[0-9a-f]{64}$'),
+    created_at     timestamptz not null default now(),
+    updated_at     timestamptz not null default now(),
+    primary key (session_id, item_id)
+);
+
+create table if not exists cf_collab_runs (
+    session_id  uuid primary key references cf_collab_sessions(id) on delete cascade,
+    state       jsonb not null,
+    updated_at  timestamptz not null default now()
+);
+
+alter table cf_collab_seats enable row level security;
+alter table cf_collab_tasks enable row level security;
+alter table cf_collab_runs  enable row level security;
+
+drop policy if exists cf_collab_seats_read on cf_collab_seats;
+create policy cf_collab_seats_read on cf_collab_seats for select using (cf_collab_me(session_id) is not null);
+drop policy if exists cf_collab_tasks_read on cf_collab_tasks;
+create policy cf_collab_tasks_read on cf_collab_tasks for select using (cf_collab_me(session_id) is not null);
+drop policy if exists cf_collab_runs_read on cf_collab_runs;
+create policy cf_collab_runs_read on cf_collab_runs for select using (cf_collab_me(session_id) is not null);
+
+-- The owner says which members are seats (`[{"member_id","name","role"}]`). Seats no longer listed
+-- go, and with them any task still waiting on them.
+create or replace function cf_collab_open_seats(p_session uuid, p_owner_secret text, p_seats jsonb) returns void
+    language plpgsql security definer
+    set search_path = public
+    as $$
+begin
+    if not cf_collab_is_owner(p_session, p_owner_secret) then raise exception 'cf_not_owner'; end if;
+    update cf_collab_sessions set kind = 'run' where id = p_session;
+    insert into cf_collab_seats (session_id, member_id, name, role)
+        select p_session, s ->> 'member_id', coalesce(s ->> 'name', ''), coalesce(s ->> 'role', '')
+        from jsonb_array_elements(coalesce(p_seats, '[]'::jsonb)) s
+        on conflict (session_id, member_id) do update set name = excluded.name, role = excluded.role;
+    update cf_collab_tasks set status = 'withdrawn', updated_at = now()
+        where session_id = p_session and status in ('offered', 'accepted')
+          and member_id not in (select s ->> 'member_id' from jsonb_array_elements(coalesce(p_seats, '[]'::jsonb)) s);
+    delete from cf_collab_seats
+        where session_id = p_session
+          and member_id not in (select s ->> 'member_id' from jsonb_array_elements(coalesce(p_seats, '[]'::jsonb)) s);
+end
+$$;
+
+-- A person fills a free seat (or changes the agent on their own).
+create or replace function cf_collab_take_seat(p_session uuid, p_member text, p_agent text, p_engine text) returns void
+    language plpgsql security definer
+    set search_path = public
+    as $$
+declare
+    v_me uuid := cf_collab_me(p_session);
+begin
+    if v_me is null then raise exception 'cf_not_member'; end if;
+    update cf_collab_seats
+        set person_id = v_me, agent = left(coalesce(p_agent, ''), 80), engine = left(coalesce(p_engine, ''), 40), taken_at = now()
+        where session_id = p_session and member_id = p_member and (person_id is null or person_id = v_me);
+    if not found then raise exception 'cf_seat_taken'; end if;
+end
+$$;
+
+-- A seat given back: by the person in it, or by the owner (`p_owner_secret`) for anyone's.
+-- Its open tasks are withdrawn, so the owner's run takes them back.
+create or replace function cf_collab_free_seat(p_session uuid, p_member text, p_owner_secret text) returns void
+    language plpgsql security definer
+    set search_path = public
+    as $$
+declare
+    v_me uuid := cf_collab_me(p_session);
+    v_owner boolean := cf_collab_is_owner(p_session, p_owner_secret);
+begin
+    if v_me is null and not v_owner then raise exception 'cf_not_member'; end if;
+    update cf_collab_tasks set status = 'withdrawn', updated_at = now()
+        where session_id = p_session and member_id = p_member and status in ('offered', 'accepted')
+          and (v_owner or person_id = v_me);
+    update cf_collab_seats set person_id = null, agent = '', engine = '', taken_at = null
+        where session_id = p_session and member_id = p_member and (v_owner or person_id = v_me);
+end
+$$;
+
+-- The owner offers a seat's task to whoever is in the seat. Offering an item again (a retry) starts
+-- it over under its new attempt number.
+create or replace function cf_collab_offer(p_session uuid, p_owner_secret text, p_task jsonb) returns void
+    language plpgsql security definer
+    set search_path = public
+    as $$
+declare
+    v_person uuid;
+begin
+    if not cf_collab_is_owner(p_session, p_owner_secret) then raise exception 'cf_not_owner'; end if;
+    select person_id into v_person from cf_collab_seats where session_id = p_session and member_id = p_task ->> 'member_id';
+    if v_person is null then raise exception 'cf_seat_free'; end if;
+    insert into cf_collab_tasks (session_id, item_id, attempt, member_id, person_id, repo_key, kind, title, message,
+                                 writes, target, start_sha, start_bundle, status)
+    values (p_session, p_task ->> 'item_id', coalesce((p_task ->> 'attempt')::integer, 1), p_task ->> 'member_id', v_person,
+            p_task ->> 'repo_key', p_task ->> 'kind', left(p_task ->> 'title', 300), p_task ->> 'message',
+            coalesce((p_task ->> 'writes')::boolean, true), p_task ->> 'target', p_task ->> 'start_sha',
+            nullif(p_task ->> 'start_bundle', ''), 'offered')
+    on conflict (session_id, item_id) do update set
+        attempt = excluded.attempt, member_id = excluded.member_id, person_id = excluded.person_id,
+        repo_key = excluded.repo_key, kind = excluded.kind, title = excluded.title, message = excluded.message,
+        writes = excluded.writes, target = excluded.target, start_sha = excluded.start_sha,
+        start_bundle = excluded.start_bundle, status = 'offered', result_text = null, error = null,
+        result_sha = null, result_bundle = null, updated_at = now();
+end
+$$;
+
+create or replace function cf_collab_withdraw(p_session uuid, p_owner_secret text, p_item text) returns void
+    language plpgsql security definer
+    set search_path = public
+    as $$
+begin
+    if not cf_collab_is_owner(p_session, p_owner_secret) then raise exception 'cf_not_owner'; end if;
+    update cf_collab_tasks set status = 'withdrawn', updated_at = now()
+        where session_id = p_session and item_id = p_item and status in ('offered', 'accepted');
+end
+$$;
+
+-- The seat's person moves their task on: offered → accepted | declined, accepted → done | failed.
+-- Only for the attempt they were offered, so a late answer to an old attempt changes nothing.
+create or replace function cf_collab_report(
+    p_session uuid, p_item text, p_attempt integer, p_status text,
+    p_text text, p_error text, p_sha text, p_bundle text
+) returns void
+    language plpgsql security definer
+    set search_path = public
+    as $$
+declare
+    v_me uuid := cf_collab_me(p_session);
+    v_task cf_collab_tasks;
+begin
+    if v_me is null then raise exception 'cf_not_member'; end if;
+    select * into v_task from cf_collab_tasks
+        where session_id = p_session and item_id = p_item and person_id = v_me for update;
+    if v_task.item_id is null or v_task.attempt <> p_attempt then raise exception 'cf_task_gone'; end if;
+    if not ((v_task.status = 'offered' and p_status in ('accepted', 'declined'))
+         or (v_task.status = 'accepted' and p_status in ('done', 'failed'))) then
+        raise exception 'cf_task_gone';
+    end if;
+    update cf_collab_tasks set
+        status = p_status,
+        result_text = case when p_status in ('done', 'failed') then left(p_text, 200000) else result_text end,
+        error = case when p_status in ('failed', 'declined') then left(p_error, 4000) else null end,
+        result_sha = nullif(p_sha, ''),
+        result_bundle = nullif(p_bundle, ''),
+        updated_at = now()
+    where session_id = p_session and item_id = p_item;
+end
+$$;
+
+-- The owner's picture of the run, for everyone else's screen.
+create or replace function cf_collab_publish_run(p_session uuid, p_owner_secret text, p_state jsonb) returns void
+    language plpgsql security definer
+    set search_path = public
+    as $$
+begin
+    if not cf_collab_is_owner(p_session, p_owner_secret) then raise exception 'cf_not_owner'; end if;
+    if octet_length(p_state::text) > 2000000 then raise exception 'cf_too_large'; end if;
+    insert into cf_collab_runs (session_id, state, updated_at) values (p_session, p_state, now())
+        on conflict (session_id) do update set state = excluded.state, updated_at = now();
+end
+$$;
+
 create or replace function cf_collab_version() returns integer
     language sql immutable
     as $$
-        select 2
+        select 3
     $$;

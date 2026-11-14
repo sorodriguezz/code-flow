@@ -3,6 +3,7 @@
  * what waits for it, and what it already handed over. A lane opens the member's chat.
  */
 import { Hourglass, MessageSquare, SquareTerminal } from "lucide-react";
+import { SeatTag } from "./SharedRun";
 import { useAgentsStore } from "../../../state/agentsStore";
 import { AiRunLog } from "../../ai/AiRunLog";
 import { ProviderGlyph } from "../../ai/ProviderGlyph";
@@ -38,6 +39,7 @@ export function Lanes({ state, onOpenItem }: { state: TeamRunState; onOpenItem: 
                   {m.model}
                   {m.effort ? ` · ${m.effort}` : ""}
                   {m.run_in === "terminal" && <SquareTerminal className="h-3 w-3" />}
+                  <SeatTag runId={run.id} memberId={m.id} />
                 </span>
               </span>
               <button type="button" onClick={() => crew.open({ kind: "chat", runId: run.id, memberId: m.id })} title={l("Su chat", "Its chat")} className="grid h-7 w-7 place-items-center rounded-[8px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)]">

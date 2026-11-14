@@ -2085,6 +2085,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     crate::chat_refs::migrate(conn)?;
     // Shared workspace chats: sessions, their worktrees and the last agreed state per file (`collab`).
     crate::collab::store::migrate(conn)?;
+    crate::collab::team::migrate(conn)?;
     Ok(())
 }
 

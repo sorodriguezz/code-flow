@@ -1023,6 +1023,13 @@ export default function App() {
   useEffect(() => {
     void import("./lib/sharedChatLinks").then(({ startSharedChatLinks }) => startSharedChatLinks());
   }, []);
+  // Shared «Equipo» runs need their rounds whether or not their page is open: the owner's round is
+  // what hands seats' work off, a guest's is what shows them a task to accept.
+  const sharedRunsWorkspace = useWorkspaceStore((s) => s.activeWorkspaceId);
+  useEffect(() => {
+    if (!sharedRunsWorkspace) return;
+    void import("./state/sharedRunStore").then(({ useSharedRunStore }) => useSharedRunStore.getState().load(sharedRunsWorkspace));
+  }, [sharedRunsWorkspace]);
 
   useEffect(() => {
     // Everything the working tree changing implies, still refreshed — an external change can just

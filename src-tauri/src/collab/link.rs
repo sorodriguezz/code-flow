@@ -26,6 +26,16 @@ pub struct Invitation {
     pub name: String,
     pub host: String,
     pub repos: Vec<LinkRepo>,
+    /// What is shared: `""` a workspace chat (and every link made before runs could be shared),
+    /// `"run"` an «Equipo» run.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+}
+
+impl Invitation {
+    pub fn is_run(&self) -> bool {
+        self.kind == "run"
+    }
 }
 
 pub fn encode(invitation: &Invitation) -> String {
@@ -68,7 +78,18 @@ mod tests {
             name: "Reintentos SAP".into(),
             host: "Dev A".into(),
             repos: vec![LinkRepo { key: "github.com/acme/api".into(), name: "api".into() }],
+            kind: String::new(),
         }
+    }
+
+    #[test]
+    fn a_run_invitation_says_so_and_an_old_link_is_a_chat() {
+        let run = Invitation { kind: "run".into(), ..sample() };
+        assert!(decode(&encode(&run)).unwrap().is_run());
+        // A link minted before runs could be shared has no `kind` at all.
+        let old = serde_json::json!({ "v": 1, "url": "https://abc.supabase.co", "key": "k", "token": "t", "name": "n", "host": "h", "repos": [] });
+        let link = format!("{PREFIX}?d={}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(old.to_string()));
+        assert!(!decode(&link).unwrap().is_run());
     }
 
     #[test]

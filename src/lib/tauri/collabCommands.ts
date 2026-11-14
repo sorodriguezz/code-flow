@@ -42,6 +42,10 @@ export interface CollabSessionView {
   session: CollabSession;
   repos: CollabRepo[];
   isOwner: boolean;
+  /** `chat`, or `run` for a shared «Equipo» run (`collabRunCommands.ts`). */
+  kind: "chat" | "run";
+  /** For a run, on its owner's machine: the local run id. */
+  runId: string;
 }
 
 export type CollabSkipReason = "dependencies" | "build_output" | "secret" | "symlink" | "too_large" | "unportable";
@@ -130,6 +134,7 @@ export interface CollabJoinPreview {
   host: string;
   projectUrl: string;
   repos: { key: string; name: string; projectId: string | null; path: string | null }[];
+  kind: "chat" | "run";
 }
 
 export interface CollabCommitted {

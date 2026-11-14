@@ -146,6 +146,18 @@ async fn pump_once(app: &AppHandle, run_id: &str) {
     };
     let _ = app.emit("team:changed", serde_json::json!({ "runId": run_id }));
     for dispatch in dispatches {
+        if dispatch.run_in == crate::collab::team::RUN_IN_REMOTE {
+            // A seat someone else took: it goes out with the shared run's next round and settles
+            // when their machine answers (`collab::team`).
+            let queued = {
+                let db = app.state::<Db>();
+                crate::collab::team::queue_offer(db.inner(), run_id, &dispatch)
+            };
+            if let Err(error) = queued {
+                settle(app, run_id, &dispatch.item.id, "error", "", &format!("no se pudo entregar al puesto: {error}")).await;
+            }
+            continue;
+        }
         if dispatch.run_in == "terminal" {
             // The bench lives in the main window, hidden or not; it opens the CLI and `cf done`
             // settles the item from there.

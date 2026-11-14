@@ -25,6 +25,7 @@
 
 #![allow(dead_code)] // Stage A: wired into commands, the chat and the UI in stages B–D.
 
+pub mod bundle;
 pub mod chat;
 pub mod exclude;
 pub mod link;
@@ -33,6 +34,7 @@ pub mod reconcile;
 pub mod remote;
 pub mod store;
 pub mod sync;
+pub mod team;
 pub mod worktree;
 
 /// The Supabase script for sessions. CodeFlow has no Supabase of its own: every host runs this, once,
@@ -42,7 +44,7 @@ pub const SCHEMA_SQL: &str = include_str!("collab_schema.sql");
 
 /// What `cf_collab_version()` returns for this build's script. Sharing checks the host's project
 /// against it first, so a project without the script, or with an older one, is told so in words.
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 #[cfg(test)]
 mod tests {
@@ -56,7 +58,7 @@ mod tests {
     fn every_table_has_rls_and_none_is_forced() {
         let tables = statements().filter(|l| l.starts_with("create table if not exists cf_collab_")).count();
         let enabled = statements().filter(|l| l.starts_with("alter table cf_collab_") && l.ends_with("enable row level security;")).count();
-        assert_eq!(tables, 8);
+        assert_eq!(tables, 11);
         assert_eq!(enabled, tables, "a table without row-level security would be world-readable");
         // Forcing it would hold the security-definer functions to the policies and make
         // cf_collab_me recurse through cf_collab_people's own policy.

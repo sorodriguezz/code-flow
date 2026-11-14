@@ -31,6 +31,10 @@ pub struct SessionView {
     pub session: store::Session,
     pub repos: Vec<store::Repo>,
     pub is_owner: bool,
+    /// `chat` or `run` (a shared «Equipo» run, `collab::team`).
+    pub kind: String,
+    /// For a run: the local run on the owner's machine (`''` on a guest's).
+    pub run_id: String,
 }
 
 fn view(db: &Db, session_id: &str) -> Result<SessionView, String> {
@@ -38,7 +42,10 @@ fn view(db: &Db, session_id: &str) -> Result<SessionView, String> {
     let session = store::session(&conn, session_id).map_err(|e| e.to_string())?.ok_or("sesión desconocida")?;
     let repos = store::repos(&conn, session_id).map_err(|e| e.to_string())?;
     let is_owner = session.role == "owner";
-    Ok(SessionView { session, repos, is_owner })
+    let run = crate::collab::team::run_of_session(&conn, session_id).map_err(|e| e.to_string())?;
+    let kind = if run.is_some() { "run" } else { "chat" }.to_string();
+    let run_id = run.map(|(id, _)| id).unwrap_or_default();
+    Ok(SessionView { session, repos, is_owner, kind, run_id })
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
@@ -239,12 +246,17 @@ pub async fn collab_share(
     Ok(Shared { view: view(&db, &session_id)?, link })
 }
 
-async fn mint_link(db: &Db, session_id: &str, remote: &Remote, owner_secret: &str) -> Result<String, String> {
+pub(crate) async fn mint_link(db: &Db, session_id: &str, remote: &Remote, owner_secret: &str) -> Result<String, String> {
     let v = view(db, session_id)?;
     let token = store::mint_secret();
     remote.invite(session_id, owner_secret, &token, 24).await?;
     let anon = crate::supabase::public_anon_key(&v.session.project_url)?.ok_or("falta la anon key del proyecto")?;
+    let is_run = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        crate::collab::team::is_run_session(&conn, session_id)
+    };
     Ok(link::encode(&link::Invitation {
+        kind: if is_run { "run".into() } else { String::new() },
         v: 1,
         url: v.session.project_url.clone(),
         key: anon,
@@ -297,6 +309,8 @@ pub struct JoinPreview {
     pub host: String,
     pub project_url: String,
     pub repos: Vec<JoinRepo>,
+    /// `chat` or `run`.
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -335,7 +349,8 @@ pub async fn collab_join_preview(db: State<'_, Db>, workspace_id: String, link_t
     let ws = workspace_id.clone();
     let db_inner = db.inner();
     let repos = match_repos(db_inner, &ws, &invitation)?;
-    Ok(JoinPreview { name: invitation.name, host: invitation.host, project_url: invitation.url, repos })
+    let kind = if invitation.is_run() { "run" } else { "chat" }.to_string();
+    Ok(JoinPreview { name: invitation.name, host: invitation.host, project_url: invitation.url, repos, kind })
 }
 
 /// Joins with a nick: spends the invitation, makes this person's session worktree for each
@@ -343,6 +358,9 @@ pub async fn collab_join_preview(db: State<'_, Db>, workspace_id: String, link_t
 #[tauri::command]
 pub async fn collab_join(db: State<'_, Db>, workspace_id: String, link_text: String, nick: String) -> Result<SessionView, String> {
     let invitation = link::decode(&link_text)?;
+    if invitation.is_run() {
+        return join_run(&db, &workspace_id, &invitation, &nick).await;
+    }
     let matched = match_repos(&db, &workspace_id, &invitation)?;
     let missing: Vec<&str> = matched.iter().filter(|r| r.project_id.is_none()).map(|r| r.name.as_str()).collect();
     if !missing.is_empty() {
@@ -541,7 +559,15 @@ pub struct Left {
 /// or a push); otherwise the worktree and its branch are discarded. The host leaving ends the session
 /// for everyone.
 #[tauri::command]
-pub async fn collab_leave(db: State<'_, Db>, session_id: String, keep: bool) -> Result<Vec<Left>, String> {
+pub async fn collab_leave(app: AppHandle, db: State<'_, Db>, session_id: String, keep: bool) -> Result<Vec<Left>, String> {
+    let is_run = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        crate::collab::team::is_run_session(&conn, &session_id)
+    };
+    if is_run {
+        leave_run(&app, &db, &session_id).await?;
+        return Ok(Vec::new());
+    }
     let (session, repos) = sync::load(&db, &session_id)?;
     if session.role == "owner" {
         if let (Ok(remote), Ok(secret)) = (sync::remote_for(&session), store::owner_secret(&session_id)) {
@@ -589,4 +615,317 @@ pub async fn collab_remove_person(db: State<'_, Db>, session_id: String, person_
 #[tauri::command]
 pub fn collab_install_sql() -> String {
     crate::collab::SCHEMA_SQL.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Shared «Equipo» runs (`collab::team`)
+// ---------------------------------------------------------------------------
+
+/// A member of a run as the share dialog offers it: may it be a seat, and why not.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatCandidate {
+    pub member_id: String,
+    pub name: String,
+    pub role: String,
+    pub engine: String,
+    /// Why it cannot be a seat (the lead and sub-leads plan, and planning stays with the run).
+    pub fixed: Option<String>,
+}
+
+#[tauri::command]
+pub fn collab_run_candidates(db: State<'_, Db>, run_id: String) -> Result<Vec<SeatCandidate>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let run = crate::team::get_run(&conn, &run_id).map_err(|e| e.to_string())?.ok_or("la corrida ya no existe")?;
+    Ok(run
+        .members
+        .iter()
+        .map(|m| SeatCandidate {
+            member_id: m.member.id.clone(),
+            name: m.member.name.clone(),
+            role: m.member.role.clone(),
+            engine: m.provider.clone(),
+            fixed: if m.member.id == run.lead {
+                Some("lidera la corrida".into())
+            } else if m.member.leads {
+                Some("planifica una rama del equipo".into())
+            } else {
+                None
+            },
+        })
+        .collect())
+}
+
+/// Shares an «Equipo» run: opens a session of kind `run` on the owner's Supabase project, makes the
+/// chosen members seats for others, and mints the first invitation. Nothing about the run changes
+/// until someone takes a seat.
+#[tauri::command]
+pub async fn collab_run_share(
+    app: AppHandle,
+    db: State<'_, Db>,
+    run_id: String,
+    project_url: String,
+    nick: String,
+    seats: Vec<String>,
+) -> Result<Shared, String> {
+    let nick = nick.trim().to_string();
+    if nick.is_empty() {
+        return Err("Escribe un nick.".into());
+    }
+    let (run, repos) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        if crate::collab::team::session_of_run(&conn, &run_id).map_err(|e| e.to_string())?.is_some() {
+            return Err("Esta corrida ya está compartida.".into());
+        }
+        let run = crate::team::get_run(&conn, &run_id).map_err(|e| e.to_string())?.ok_or("la corrida ya no existe")?;
+        let repos = crate::team::list_repos(&conn, &run_id).map_err(|e| e.to_string())?;
+        (run, repos)
+    };
+    if matches!(run.status.as_str(), "done" | "aborted" | "failed") {
+        return Err("La corrida ya terminó.".into());
+    }
+    let allowed: Vec<String> = crate::collab::team::seatable(&run).into_iter().map(|m| m.member.id.clone()).collect();
+    let seats: Vec<String> = seats.into_iter().filter(|s| allowed.contains(s)).collect();
+    if seats.is_empty() {
+        return Err("Elige al menos un puesto para otra persona.".into());
+    }
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let person_key = store::mint_secret();
+    let owner_secret = store::mint_secret();
+    let remote = Remote::new(&project_url, &person_key)?;
+    remote.check_schema().await?;
+
+    // Every repository needs a commit both machines have: its target branch on the shared remote.
+    let checked = blocking(move || {
+        let mut out = Vec::new();
+        for r in repos {
+            let key = crate::repo_identity::primary_remote(&r.local_path)
+                .and_then(|url| crate::repo_identity::canonical_remote(&url))
+                .ok_or_else(|| format!("{}: no tiene remoto", r.name))?;
+            let tip = if r.integration_branch.is_empty() { r.target_branch.clone() } else { r.integration_branch.clone() };
+            let basis = crate::collab::bundle::basis(&r.local_path, &tip, &r.target_branch).map_err(|e| format!("{}: {e}", r.name))?;
+            out.push((r, key, basis));
+        }
+        Ok(out)
+    })
+    .await?;
+
+    let title = if run.title.trim().is_empty() { run.team_name.clone() } else { run.title.clone() };
+    let person_id = remote.create(&session_id, &title, &owner_secret, &nick).await.map_err(crate::collab::remote::friendly)?;
+    for (r, key, basis) in &checked {
+        remote.add_repo(&session_id, &owner_secret, key, &r.name, basis).await?;
+    }
+    let seat_rows: Vec<(String, String, String)> = run
+        .members
+        .iter()
+        .filter(|m| seats.contains(&m.member.id))
+        .map(|m| (m.member.id.clone(), m.member.name.clone(), m.member.role.clone()))
+        .collect();
+    remote.open_seats(&session_id, &owner_secret, &seat_rows).await?;
+    store::set_person_key(&session_id, &person_key)?;
+    store::set_owner_secret(&session_id, &owner_secret)?;
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        store::insert_session(&conn, &store::Session {
+            id: session_id.clone(),
+            project_url: crate::supabase::trimmed_url(&project_url),
+            name: title.clone(),
+            role: "owner".into(),
+            nick: nick.clone(),
+            person_id: person_id.clone(),
+            workspace_id: run.workspace_id.clone(),
+            chat_id: String::new(),
+            status: "active".into(),
+            last_seq: 0,
+            created_at: String::new(),
+        })
+        .map_err(|e| e.to_string())?;
+        crate::collab::team::record_share(&conn, &session_id, &run, &seats)?;
+        for (r, key, basis) in &checked {
+            store::insert_repo(&conn, &store::Repo {
+                session_id: session_id.clone(),
+                repo_key: key.clone(),
+                name: r.name.clone(),
+                project_id: r.project_id.clone(),
+                checkout_path: r.local_path.clone(),
+                worktree_path: String::new(),
+                branch: String::new(),
+                base_sha: basis.clone(),
+                epoch: 0,
+                session_project_id: String::new(),
+            })
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    let _ = app.emit("team:changed", serde_json::json!({ "runId": run.id }));
+    let link = mint_link(&db, &session_id, &remote, &owner_secret).await?;
+    Ok(Shared { view: view(&db, &session_id)?, link })
+}
+
+/// The shared session of a run, on its owner's machine.
+#[tauri::command]
+pub fn collab_run_for(db: State<'_, Db>, run_id: String) -> Result<Option<SessionView>, String> {
+    let id = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        crate::collab::team::session_of_run(&conn, &run_id).map_err(|e| e.to_string())?
+    };
+    id.map(|id| view(&db, &id)).transpose()
+}
+
+/// Every shared run of a workspace this machine is in, as its owner or as a guest: each needs its
+/// round running (the owner's is what hands work off), whether or not its view is open.
+#[tauri::command]
+pub fn collab_run_sessions(db: State<'_, Db>, workspace_id: String) -> Result<Vec<SessionView>, String> {
+    let ids: Vec<String> = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT s.id FROM collab_sessions s JOIN collab_runs r ON r.session_id = s.id
+                 WHERE s.workspace_id = ?1 AND s.status = 'active' ORDER BY s.created_at",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([&workspace_id], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
+    ids.iter().map(|id| view(&db, id)).collect()
+}
+
+/// One round of a shared run: the owner's or a guest's, by this machine's role in it.
+#[tauri::command]
+pub async fn collab_run_tick(app: AppHandle, db: State<'_, Db>, session_id: String) -> Result<crate::collab::team::RunTick, String> {
+    let (session, _) = sync::load(&db, &session_id)?;
+    if session.role == "owner" {
+        crate::collab::team::owner_tick(&app, &db, &session_id).await
+    } else {
+        crate::collab::team::guest_tick(&db, &session_id).await
+    }
+}
+
+/// The owner changes which members are seats.
+#[tauri::command]
+pub async fn collab_run_set_seats(app: AppHandle, db: State<'_, Db>, session_id: String, seats: Vec<String>) -> Result<(), String> {
+    let (session, _) = sync::load(&db, &session_id)?;
+    let remote = sync::remote_for(&session)?;
+    let secret = store::owner_secret(&session_id)?;
+    let run = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let (run_id, _) = crate::collab::team::run_of_session(&conn, &session_id).map_err(|e| e.to_string())?.ok_or("no es una corrida compartida")?;
+        crate::team::get_run(&conn, &run_id).map_err(|e| e.to_string())?.ok_or("la corrida ya no existe")?
+    };
+    let allowed: Vec<&crate::team::MemberSnap> = crate::collab::team::seatable(&run).into_iter().filter(|m| seats.contains(&m.member.id)).collect();
+    let rows: Vec<(String, String, String)> = allowed.iter().map(|m| (m.member.id.clone(), m.member.name.clone(), m.member.role.clone())).collect();
+    remote.open_seats(&session_id, &secret, &rows).await?;
+    // The next round takes the seats in; withdrawn tasks come back with it.
+    crate::collab::team::owner_tick(&app, &db, &session_id).await.map(|_| ())
+}
+
+#[tauri::command]
+pub async fn collab_run_take_seat(db: State<'_, Db>, session_id: String, member_id: String, agent_id: String) -> Result<(), String> {
+    crate::collab::team::take_seat(&db, &session_id, &member_id, &agent_id).await
+}
+
+#[tauri::command]
+pub async fn collab_run_free_seat(db: State<'_, Db>, session_id: String, member_id: String) -> Result<(), String> {
+    crate::collab::team::free_seat(&db, &session_id, &member_id).await
+}
+
+#[tauri::command]
+pub async fn collab_run_accept(app: AppHandle, session_id: String, item_id: String) -> Result<(), String> {
+    crate::collab::team::accept(&app, &session_id, &item_id).await
+}
+
+#[tauri::command]
+pub async fn collab_run_decline(db: State<'_, Db>, session_id: String, item_id: String, reason: Option<String>) -> Result<(), String> {
+    crate::collab::team::decline(&db, &session_id, &item_id, reason.as_deref().unwrap_or_default()).await
+}
+
+#[tauri::command]
+pub async fn collab_run_note(db: State<'_, Db>, session_id: String, to: String, text: String) -> Result<(), String> {
+    crate::collab::team::note(&db, &session_id, &to, &text).await
+}
+
+/// Joins a shared run: spends the invitation, and records which local clone is each repository.
+/// No worktree is made yet: each accepted task gets its own.
+async fn join_run(db: &Db, workspace_id: &str, invitation: &link::Invitation, nick: &str) -> Result<SessionView, String> {
+    let matched = match_repos(db, workspace_id, invitation)?;
+    let missing: Vec<&str> = matched.iter().filter(|r| r.project_id.is_none()).map(|r| r.name.as_str()).collect();
+    if !missing.is_empty() {
+        return Err(format!("Faltan repositorios en este workspace: {}. Agrégalos o clónalos y vuelve a abrir el link.", missing.join(", ")));
+    }
+    let nick = nick.trim().to_string();
+    if nick.is_empty() {
+        return Err("Escribe un nick.".into());
+    }
+    let person_key = store::mint_secret();
+    let remote = Remote::with_key(&invitation.url, &invitation.key, &person_key);
+    let joined = remote.join(&invitation.token, &nick).await?;
+    if crate::supabase::public_anon_key(&invitation.url)?.is_none() {
+        crate::supabase::set_credentials(&invitation.url, &invitation.key)?;
+    }
+    store::set_person_key(&joined.session_id, &person_key)?;
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        store::insert_session(&conn, &store::Session {
+            id: joined.session_id.clone(),
+            project_url: crate::supabase::trimmed_url(&invitation.url),
+            name: joined.name.clone(),
+            role: "editor".into(),
+            nick,
+            person_id: joined.person_id.clone(),
+            workspace_id: workspace_id.to_string(),
+            chat_id: String::new(),
+            status: "active".into(),
+            last_seq: 0,
+            created_at: String::new(),
+        })
+        .map_err(|e| e.to_string())?;
+        crate::collab::team::record_join(&conn, &joined.session_id, &joined.name)?;
+        for theirs in &joined.repos {
+            let Some(mine) = matched.iter().find(|m| m.key == theirs.repo_key) else { continue };
+            store::insert_repo(&conn, &store::Repo {
+                session_id: joined.session_id.clone(),
+                repo_key: theirs.repo_key.clone(),
+                name: theirs.name.clone(),
+                project_id: mine.project_id.clone().unwrap_or_default(),
+                checkout_path: mine.path.clone().unwrap_or_default(),
+                worktree_path: String::new(),
+                branch: String::new(),
+                base_sha: theirs.base_sha.clone(),
+                epoch: theirs.epoch,
+                session_project_id: String::new(),
+            })
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    view(db, &joined.session_id)
+}
+
+/// Leaves a shared run. The owner ends it for everyone and every task out on another machine comes
+/// back to be retried here; a guest gives their seats back.
+async fn leave_run(app: &AppHandle, db: &Db, session_id: &str) -> Result<(), String> {
+    let (session, _) = sync::load(db, session_id)?;
+    let remote = sync::remote_for(&session).ok();
+    if session.role == "owner" {
+        if let (Some(remote), Ok(secret)) = (remote.as_ref(), store::owner_secret(session_id)) {
+            let _ = remote.end(session_id, &secret).await;
+        }
+        crate::collab::team::stop_sharing(app, db, session_id).await?;
+    } else {
+        let mine: Vec<String> = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            crate::collab::team::seats(&conn, session_id).map_err(|e| e.to_string())?.into_iter().filter(|s| s.person_id == session.person_id).map(|s| s.member_id).collect()
+        };
+        if let Some(remote) = remote.as_ref() {
+            for member in mine {
+                let _ = remote.free_seat(session_id, &member, None).await;
+            }
+        }
+    }
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        store::set_status(&conn, session_id, if session.role == "owner" { "ended" } else { "left" }).map_err(|e| e.to_string())?;
+    }
+    store::forget_credentials(session_id);
+    Ok(())
 }

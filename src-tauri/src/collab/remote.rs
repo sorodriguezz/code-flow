@@ -314,6 +314,10 @@ pub fn friendly(message: String) -> String {
         ("cf_nick_required", "Escribe un nick."),
         ("cf_not_member", "Ya no eres parte de esta sesión."),
         ("cf_not_owner", "Solo el anfitrión puede hacer esto."),
+        ("cf_seat_taken", "Ese puesto ya lo ocupó otra persona."),
+        ("cf_seat_free", "Ese puesto quedó libre: nadie puede tomar su tarea ahora."),
+        ("cf_task_gone", "Esa tarea ya no te espera: el anfitrión la retiró o la volvió a ofrecer."),
+        ("cf_too_large", "La corrida es demasiado grande para publicarla entera."),
     ];
     known.iter().find(|(code, _)| message.contains(code)).map(|(_, text)| text.to_string()).unwrap_or(message)
 }
@@ -420,6 +424,174 @@ pub struct Lock {
     pub turn_id: String,
     #[serde(alias = "expires_at")]
     pub expires_at: String,
+}
+
+// ---------------------------------------------------------------------------
+// Shared «Equipo» runs (schema 3)
+// ---------------------------------------------------------------------------
+
+/// A member of a shared run that someone other than its owner fills.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Seat {
+    #[serde(alias = "member_id")]
+    pub member_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub role: String,
+    /// Who is in it, `None` while it is free.
+    #[serde(alias = "person_id")]
+    pub person_id: Option<String>,
+    /// The agent's name on its person's machine, and its engine id. Nothing else about it.
+    #[serde(default)]
+    pub agent: String,
+    #[serde(default)]
+    pub engine: String,
+}
+
+/// One seat's task, as the owner offered it and as its person answered.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteTask {
+    #[serde(alias = "item_id")]
+    pub item_id: String,
+    pub attempt: i64,
+    #[serde(alias = "member_id")]
+    pub member_id: String,
+    #[serde(alias = "person_id")]
+    pub person_id: String,
+    #[serde(alias = "repo_key")]
+    pub repo_key: String,
+    /// `work` or `review`.
+    pub kind: String,
+    pub title: String,
+    pub message: String,
+    /// Whether the task changes code (`work`); a review only reads.
+    pub writes: bool,
+    /// The run's target branch: the basis both machines share is on it.
+    pub target: String,
+    #[serde(alias = "start_sha")]
+    pub start_sha: String,
+    #[serde(alias = "start_bundle", default)]
+    pub start_bundle: Option<String>,
+    /// `offered`, `accepted`, `done`, `failed`, `declined` or `withdrawn`.
+    pub status: String,
+    #[serde(alias = "result_text", default)]
+    pub result_text: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(alias = "result_sha", default)]
+    pub result_sha: Option<String>,
+    #[serde(alias = "result_bundle", default)]
+    pub result_bundle: Option<String>,
+    #[serde(alias = "updated_at", default)]
+    pub updated_at: String,
+}
+
+/// What the owner offers: a [`RemoteTask`] before anyone answered it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Offer<'a> {
+    pub item_id: &'a str,
+    pub attempt: i64,
+    pub member_id: &'a str,
+    pub repo_key: &'a str,
+    pub kind: &'a str,
+    pub title: &'a str,
+    pub message: &'a str,
+    pub writes: bool,
+    pub target: &'a str,
+    pub start_sha: &'a str,
+    pub start_bundle: Option<&'a str>,
+}
+
+const TASK_COLS: &str = "item_id,attempt,member_id,person_id,repo_key,kind,title,message,writes,target,start_sha,start_bundle,status,result_text,error,result_sha,result_bundle,updated_at";
+
+impl Remote {
+    pub async fn open_seats(&self, session: &str, owner_secret: &str, seats: &[(String, String, String)]) -> Result<(), String> {
+        let seats: Vec<Value> = seats.iter().map(|(id, name, role)| json!({ "member_id": id, "name": name, "role": role })).collect();
+        self.rpc("cf_collab_open_seats", json!({ "p_session": session, "p_owner_secret": owner_secret, "p_seats": seats }))
+            .await
+            .map(|_| ())
+            .map_err(friendly)
+    }
+
+    pub async fn seats(&self, session: &str) -> Result<Vec<Seat>, String> {
+        let value = self
+            .select(&format!("cf_collab_seats?session_id=eq.{session}&select=member_id,name,role,person_id,agent,engine&order=member_id.asc"))
+            .await?;
+        serde_json::from_value(value).map_err(|e| e.to_string())
+    }
+
+    pub async fn take_seat(&self, session: &str, member: &str, agent: &str, engine: &str) -> Result<(), String> {
+        self.rpc("cf_collab_take_seat", json!({ "p_session": session, "p_member": member, "p_agent": agent, "p_engine": engine }))
+            .await
+            .map(|_| ())
+            .map_err(friendly)
+    }
+
+    /// Gives a seat back: one's own, or (with the owner secret) anyone's.
+    pub async fn free_seat(&self, session: &str, member: &str, owner_secret: Option<&str>) -> Result<(), String> {
+        self.rpc("cf_collab_free_seat", json!({ "p_session": session, "p_member": member, "p_owner_secret": owner_secret.unwrap_or("") }))
+            .await
+            .map(|_| ())
+            .map_err(friendly)
+    }
+
+    pub async fn offer(&self, session: &str, owner_secret: &str, offer: &Offer<'_>) -> Result<(), String> {
+        self.rpc("cf_collab_offer", json!({ "p_session": session, "p_owner_secret": owner_secret, "p_task": offer }))
+            .await
+            .map(|_| ())
+            .map_err(friendly)
+    }
+
+    pub async fn withdraw(&self, session: &str, owner_secret: &str, item: &str) -> Result<(), String> {
+        self.rpc("cf_collab_withdraw", json!({ "p_session": session, "p_owner_secret": owner_secret, "p_item": item }))
+            .await
+            .map(|_| ())
+    }
+
+    /// Every task of the session, or only those offered to `person`.
+    pub async fn tasks(&self, session: &str, person: Option<&str>) -> Result<Vec<RemoteTask>, String> {
+        let filter = person.map(|p| format!("&person_id=eq.{p}")).unwrap_or_default();
+        let value = self.select(&format!("cf_collab_tasks?session_id=eq.{session}{filter}&select={TASK_COLS}&order=created_at.asc")).await?;
+        serde_json::from_value(value).map_err(|e| e.to_string())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn report(
+        &self,
+        session: &str,
+        item: &str,
+        attempt: i64,
+        status: &str,
+        text: &str,
+        error: &str,
+        sha: &str,
+        bundle: &str,
+    ) -> Result<(), String> {
+        self.rpc(
+            "cf_collab_report",
+            json!({
+                "p_session": session, "p_item": item, "p_attempt": attempt, "p_status": status,
+                "p_text": text, "p_error": error, "p_sha": sha, "p_bundle": bundle
+            }),
+        )
+        .await
+        .map(|_| ())
+        .map_err(friendly)
+    }
+
+    pub async fn publish_run(&self, session: &str, owner_secret: &str, state: &Value) -> Result<(), String> {
+        self.rpc("cf_collab_publish_run", json!({ "p_session": session, "p_owner_secret": owner_secret, "p_state": state }))
+            .await
+            .map(|_| ())
+    }
+
+    /// The owner's latest picture of the run, `None` before the first.
+    pub async fn run_state(&self, session: &str) -> Result<Option<Value>, String> {
+        let value = self.select(&format!("cf_collab_runs?session_id=eq.{session}&select=state")).await?;
+        Ok(value.get(0).and_then(|row| row.get("state")).cloned())
+    }
 }
 
 #[cfg(test)]

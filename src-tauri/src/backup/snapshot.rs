@@ -327,6 +327,9 @@ pub const NEVER_BACKED_UP: &[&str] = &[
     "collab_repos",
     "collab_agreed",
     "collab_conflicts",
+    "collab_runs",
+    "collab_run_seats",
+    "collab_run_jobs",
 ];
 
 // ---------------------------------------------------------------------------

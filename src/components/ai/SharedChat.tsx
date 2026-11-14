@@ -50,7 +50,7 @@ const primary =
   "inline-flex h-[28px] items-center gap-1.5 rounded-md bg-[var(--cf-accent)] px-3 text-[12px] font-semibold text-[var(--cf-on-accent)] hover:opacity-90 disabled:opacity-45";
 const chip = "inline-flex h-[20px] items-center gap-1 rounded-md px-1.5 text-[10.5px] font-semibold";
 
-async function copy(text: string, done: string): Promise<void> {
+export async function copy(text: string, done: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text);
     pushSuccessToast(done);
@@ -125,7 +125,7 @@ function reasonLabel(reason: CollabSkipReason, l: (es: string, en: string) => st
 }
 
 /** The Supabase project to use: the API client's ready ones first, then whatever the user types. */
-function useProjectChoice() {
+export function useProjectChoice() {
   const projects = useApiStore((s) => s.settings.supabaseProjects ?? []);
   const ready = projects.filter((p) => p.ready).map((p) => p.url);
   const [url, setUrl] = useState(ready[0] ?? "");
@@ -363,7 +363,20 @@ export function JoinChatDialog({ workspaceId, initialLink, onClose }: { workspac
     setBusy(true);
     try {
       const view = await useSharedChatStore.getState().join(workspaceId, text, nick);
-      openWorkspaceChat(workspaceId, { conversationId: view.session.chatId });
+      if (view.kind === "run") {
+        // A shared «Equipo» run: it lives in Agents › En vivo, where its seats wait to be filled.
+        const [{ useSharedRunStore }, { useCrewStore }, { useUiStore }] = await Promise.all([
+          import("../../state/sharedRunStore"),
+          import("../crew/crewStore"),
+          import("../../state/uiStore"),
+        ]);
+        await useSharedRunStore.getState().load(workspaceId);
+        useSharedRunStore.getState().openGuestRun(view.session.id);
+        useCrewStore.getState().setSpace("en-vivo");
+        useUiStore.getState().setActiveView("agents");
+      } else {
+        openWorkspaceChat(workspaceId, { conversationId: view.session.chatId });
+      }
       pushSuccessToast(l(`Entraste a «${view.session.name}»`, `You joined «${view.session.name}»`));
       onClose();
     } catch (e) {
@@ -401,7 +414,11 @@ export function JoinChatDialog({ workspaceId, initialLink, onClose }: { workspac
         <>
           <div className="rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 py-2">
             <b className="block text-[13px]">{preview.name}</b>
-            <span className="text-[11.5px] text-[var(--cf-text-muted)]">{l(`Te invita ${preview.host}`, `Invited by ${preview.host}`)}</span>
+            <span className="text-[11.5px] text-[var(--cf-text-muted)]">
+              {preview.kind === "run"
+                ? l(`${preview.host} te invita a una corrida de Equipo: ocuparás puestos con agentes tuyos, en tu máquina y con tu cuenta`, `${preview.host} invites you to a team run: you will fill seats with your own agents, on your machine and account`)
+                : l(`Te invita ${preview.host}`, `Invited by ${preview.host}`)}
+            </span>
           </div>
           <span className="text-[10.5px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">{l("Repos que necesitas", "Repositories you need")}</span>
           {preview.repos.map((r) => (

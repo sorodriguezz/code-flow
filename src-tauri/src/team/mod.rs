@@ -1224,9 +1224,10 @@ pub fn running_item_at(conn: &Connection, folder: &str) -> Option<(String, Strin
 /// After a restart: nothing is running any more. Items that said so go back to pending (their turn
 /// died with the app), and runs that were moving park as paused until the user resumes them.
 pub fn recover_after_restart(conn: &Connection) -> rusqlite::Result<()> {
+    // An item out on another machine (a shared run's seat, `collab::team`) is still running there.
     conn.execute(
         "UPDATE agent_team_items SET status = 'pending', last_error = 'team.interrupted', terminal_session = ''
-         WHERE status = 'running'",
+         WHERE status = 'running' AND run_in <> 'remote'",
         [],
     )?;
     conn.execute(

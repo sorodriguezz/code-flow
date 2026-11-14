@@ -157,7 +157,7 @@ pub fn session_for_chat(conn: &Connection, chat_id: &str) -> rusqlite::Result<Op
 
 pub fn active_sessions(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<Session>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {SESSION_COLS} FROM collab_sessions WHERE workspace_id = ?1 AND status = 'active' ORDER BY created_at"
+        "SELECT {SESSION_COLS} FROM collab_sessions WHERE workspace_id = ?1 AND status = 'active' AND chat_id <> '' ORDER BY created_at"
     ))?;
     let rows = stmt.query_map([workspace_id], session_row)?;
     rows.collect()
