@@ -926,7 +926,7 @@
 {"name":"collab_run_note","area":"collab","risk":"write","args":[{"name":"sessionId","type":"String","optional":false},
 {"name":"to","type":"String","optional":false},
 {"name":"text","type":"String","optional":false}],"returns":"Result<(), String>","doc":""},
-{"name":"collab_run_sessions","area":"collab","risk":"write","args":[{"name":"workspaceId","type":"String","optional":false}],"returns":"Result<Vec<SessionView>, String>","doc":"The runs shared with this person (as a guest) in a workspace."},
+{"name":"collab_run_sessions","area":"collab","risk":"write","args":[{"name":"workspaceId","type":"String","optional":false}],"returns":"Result<Vec<SessionView>, String>","doc":"Every shared run of a workspace this machine is in, as its owner or as a guest: each needs its round running (the owner's is what hands work off), whether or not its view is open."},
 {"name":"collab_run_set_seats","area":"collab","risk":"write","args":[{"name":"sessionId","type":"String","optional":false},
 {"name":"seats","type":"Vec<String>","optional":false}],"returns":"Result<(), String>","doc":"The owner changes which members are seats."},
 {"name":"collab_run_share","area":"collab","risk":"blocked","args":[{"name":"runId","type":"String","optional":false},
