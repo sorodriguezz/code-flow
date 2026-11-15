@@ -76,3 +76,6 @@ public/drawio/
 *.db
 *.db-wal
 *.db-shm
+
+# TypeScript incremental build state
+*.tsbuildinfo
