@@ -1674,13 +1674,20 @@ Not redistributed, and in no installer: if you turn on local completion, the app
 model you pick into your own data directory. They are listed here because the app offers them.
 
 The catalogue in [`src-tauri/src/localai/catalogue.rs`](src-tauri/src/localai/catalogue.rs) offers only weights under a licence the app
-can point at, and a test there fails the build for any other. The conversions are published at
-<https://huggingface.co/ggml-org>.
+can point at, and a test there fails the build for any other. Each row links the repository its
+conversion is downloaded from.
 
 | Model | Licence (SPDX) | Published at |
 |---|---|---|
+| Qwen2.5-Coder 0.5B (CPU) | Apache-2.0 | <https://huggingface.co/bartowski/Qwen2.5-Coder-0.5B-GGUF> |
 | Qwen2.5-Coder 0.5B | Apache-2.0 | <https://huggingface.co/ggml-org/Qwen2.5-Coder-0.5B-Q8_0-GGUF> |
+| DeepSeek-Coder 1.3B (CPU) | DeepSeek-License | <https://huggingface.co/TheBloke/deepseek-coder-1.3b-base-GGUF> |
+| Qwen2.5-Coder 1.5B (CPU) | Apache-2.0 | <https://huggingface.co/mradermacher/Qwen2.5-Coder-1.5B-GGUF> |
+| CodeGemma 2B (CPU) | Gemma | <https://huggingface.co/bartowski/codegemma-2b-GGUF> |
 | Qwen2.5-Coder 1.5B | Apache-2.0 | <https://huggingface.co/ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF> |
+| StarCoder2 3B (CPU) | BigCode-OpenRAIL-M | <https://huggingface.co/mradermacher/starcoder2-3b-GGUF> |
+| Mellum 4B (CPU) | Apache-2.0 | <https://huggingface.co/mradermacher/Mellum-4b-base-GGUF> |
+| Qwen2.5-Coder 7B (CPU) | Apache-2.0 | <https://huggingface.co/mradermacher/Qwen2.5-Coder-7B-GGUF> |
 | Qwen2.5-Coder 7B | Apache-2.0 | <https://huggingface.co/ggml-org/Qwen2.5-Coder-7B-Q8_0-GGUF> |
 
 ### Speech: dictation, meetings and reading aloud

@@ -28,6 +28,8 @@ export interface LocalAiModelRow {
   /** e.g. "1.5B · Q8_0". Shown verbatim; it is the model's own description, not a sentence of ours. */
   params: string;
   licence: string;
+  /** Link to the licence text when `licence` is not an SPDX identifier. */
+  licence_url: string | null;
   size_bytes: number;
   min_ram_gb: number;
   installed: boolean;

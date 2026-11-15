@@ -8,20 +8,37 @@
 //!    and wraps the code in a fence, and both of those land in the middle of the user's file. The
 //!    `ggml-org/*` repos below are the base conversions, and they are the same files llama.cpp's
 //!    own `--fim-qwen-*` presets pull (`common/arg.cpp`), which is the strongest available
-//!    evidence that they are the ones the FIM path is exercised against.
+//!    evidence that they are the ones the FIM path is exercised against. The other families —
+//!    DeepSeek-Coder, CodeGemma, StarCoder2, Mellum — are their `-base` / plain releases, never
+//!    `-instruct`, `-it` or `-sft`.
 //!
 //! 2. **Native FIM tokens in the GGUF.** [`crate::localai::engine`] never writes `<|fim_prefix|>`
 //!    and friends; it posts plain prefix and suffix to `/infill` and llama-server assembles the
 //!    prompt from the model's own vocabulary. A model whose GGUF lacks those tokens is rejected by
 //!    the server with "Infill is not supported by this model", so a wrong entry here fails loudly
-//!    at the first keystroke rather than quietly producing prose.
+//!    at the first keystroke rather than quietly producing prose. llama.cpp finds them by name
+//!    (`llama-vocab.cpp`) for every family here: `<|fim_prefix|>` (Qwen, CodeGemma),
+//!    `<fim_prefix>` (StarCoder2, Mellum) and `<｜fim▁begin｜>` (DeepSeek).
 //!
 //! 3. **A licence this app can point at.** Which is why there is a hole where the 3B should be:
 //!    Qwen2.5-Coder-3B is published under `qwen-research`, not Apache-2.0, alone among its
 //!    siblings — 0.5B, 1.5B, 7B and 14B are all Apache-2.0. A non-commercial licence is not
 //!    something to hand a user of a commercial desktop app from a menu, so the jump is 1.5B → 7B
-//!    even though 3B is exactly the size most laptops would want. If that gap ever needs filling,
-//!    StarCoder2-3B is the candidate to check, not the 3B Qwen.
+//!    even though 3B is exactly the size most laptops would want. The gap is filled by StarCoder2
+//!    3B and Mellum 4B instead. Besides SPDX (Apache-2.0, MIT), since 2026-11-15 — the user's
+//!    decision, as the executor catalogue's NVIDIA licences were — the model licences that allow
+//!    commercial use under a use policy are accepted too: BigCode OpenRAIL-M, Gemma and the
+//!    DeepSeek licence. Each always carries the link [`licence_url`] gives the row.
+//!
+//! **CPU variants.** Each model is offered at Q4_K_M (the Qwen sizes also at Q8_0). On a
+//! CPU, token generation is bound by memory bandwidth — every token reads the whole set of weights
+//! — so a file roughly half the size of the Q8_0 is roughly twice as quick per token, at a small
+//! cost in accuracy. Those come from community conversions of the *base* repos (bartowski,
+//! mradermacher, TheBloke; checked against their `base_model` tag) because `ggml-org` and the
+//! vendors publish only Q8_0 or nothing — and Google's own CodeGemma GGUF is gated behind a login
+//! the downloader does not have. Qwen3-Coder-30B-A3B, the other CPU-friendly choice (3B
+//! active), is deliberately not here: its Q4_K_M is already in [`super::exec_catalogue`] under the
+//! same filename, and at 18 GB it is not what anyone means by a fast completion model.
 //!
 //! `size_bytes` and `sha256` were not copied from a model card. Each was read from
 //! `https://huggingface.co/api/models/{repo}/tree/main`, whose `lfs.oid` is the file's SHA-256, and
@@ -90,6 +107,18 @@ impl ModelSpec {
 /// hesitant user reads first is the one that will certainly work on their machine.
 pub const CATALOGUE: &[ModelSpec] = &[
     ModelSpec {
+        id: "qwen2.5-coder-0.5b-q4",
+        label: "Qwen2.5-Coder 0.5B (CPU)",
+        tier: Tier::Light,
+        repo: "bartowski/Qwen2.5-Coder-0.5B-GGUF",
+        file: "Qwen2.5-Coder-0.5B-Q4_K_M.gguf",
+        size_bytes: 397_808_128,
+        sha256: "fefe9d34df79d3ad3db33519d81112be76096626a5fdb87a98092035dc79ad68",
+        params: "0.5B · Q4_K_M",
+        min_ram_gb: 1,
+        licence: "Apache-2.0",
+    },
+    ModelSpec {
         id: "qwen2.5-coder-0.5b",
         label: "Qwen2.5-Coder 0.5B",
         tier: Tier::Light,
@@ -102,6 +131,42 @@ pub const CATALOGUE: &[ModelSpec] = &[
         licence: "Apache-2.0",
     },
     ModelSpec {
+        id: "deepseek-coder-1.3b-q4",
+        label: "DeepSeek-Coder 1.3B (CPU)",
+        tier: Tier::Balanced,
+        repo: "TheBloke/deepseek-coder-1.3b-base-GGUF",
+        file: "deepseek-coder-1.3b-base.Q4_K_M.gguf",
+        size_bytes: 873_582_624,
+        sha256: "2ad96fe419b897dab9da8c8d0503047dd3ad9b30b7c11f65e0d69bba821e3a9c",
+        params: "1.3B · Q4_K_M",
+        min_ram_gb: 2,
+        licence: "DeepSeek-License",
+    },
+    ModelSpec {
+        id: "qwen2.5-coder-1.5b-q4",
+        label: "Qwen2.5-Coder 1.5B (CPU)",
+        tier: Tier::Balanced,
+        repo: "mradermacher/Qwen2.5-Coder-1.5B-GGUF",
+        file: "Qwen2.5-Coder-1.5B.Q4_K_M.gguf",
+        size_bytes: 986_048_960,
+        sha256: "b5fa4d99dd9aa4d5c36f2bd9c60eb189d10809d547a336e6cba8a4f45d178dc8",
+        params: "1.5B · Q4_K_M",
+        min_ram_gb: 3,
+        licence: "Apache-2.0",
+    },
+    ModelSpec {
+        id: "codegemma-2b-q4",
+        label: "CodeGemma 2B (CPU)",
+        tier: Tier::Balanced,
+        repo: "bartowski/codegemma-2b-GGUF",
+        file: "codegemma-2b-Q4_K_M.gguf",
+        size_bytes: 1_630_262_400,
+        sha256: "4747caaf4dc51a6e7ad6df5fe26f4c485d847998bd58933eaf011f76e5273c14",
+        params: "2B · Q4_K_M",
+        min_ram_gb: 3,
+        licence: "Gemma",
+    },
+    ModelSpec {
         id: "qwen2.5-coder-1.5b",
         label: "Qwen2.5-Coder 1.5B",
         tier: Tier::Balanced,
@@ -111,6 +176,42 @@ pub const CATALOGUE: &[ModelSpec] = &[
         sha256: "29871c94d15727a6e243f79a37113d4ae625a6215b5e800bf41a23af2da32832",
         params: "1.5B · Q8_0",
         min_ram_gb: 4,
+        licence: "Apache-2.0",
+    },
+    ModelSpec {
+        id: "starcoder2-3b-q4",
+        label: "StarCoder2 3B (CPU)",
+        tier: Tier::Balanced,
+        repo: "mradermacher/starcoder2-3b-GGUF",
+        file: "starcoder2-3b.Q4_K_M.gguf",
+        size_bytes: 1_887_905_664,
+        sha256: "da9c669139af6ec93c875af08f2e25d3c0096173275fdc7b7e592177d4a701d8",
+        params: "3B · Q4_K_M",
+        min_ram_gb: 4,
+        licence: "BigCode-OpenRAIL-M",
+    },
+    ModelSpec {
+        id: "mellum-4b-q4",
+        label: "Mellum 4B (CPU)",
+        tier: Tier::Balanced,
+        repo: "mradermacher/Mellum-4b-base-GGUF",
+        file: "Mellum-4b-base.Q4_K_M.gguf",
+        size_bytes: 2_605_171_488,
+        sha256: "08a38bfaa8062450e5136676bcb4bcc87e292e5db67865dd42d807ce602556ff",
+        params: "4B · Q4_K_M",
+        min_ram_gb: 5,
+        licence: "Apache-2.0",
+    },
+    ModelSpec {
+        id: "qwen2.5-coder-7b-q4",
+        label: "Qwen2.5-Coder 7B (CPU)",
+        tier: Tier::Large,
+        repo: "mradermacher/Qwen2.5-Coder-7B-GGUF",
+        file: "Qwen2.5-Coder-7B.Q4_K_M.gguf",
+        size_bytes: 4_683_074_400,
+        sha256: "92b96b6bfe55432605dee9c4757ed52ac9ca0a2a365eeaf782ce4c572bbfac39",
+        params: "7B · Q4_K_M",
+        min_ram_gb: 7,
         licence: "Apache-2.0",
     },
     ModelSpec {
@@ -136,6 +237,18 @@ pub const CATALOGUE: &[ModelSpec] = &[
 /// is the smallest one where the common case — finishing a call whose shape the surrounding code
 /// already implies — is right often enough to be worth the keystroke it saves.
 pub const DEFAULT_MODEL_ID: &str = "qwen2.5-coder-1.5b";
+
+/// Where the licence text lives, for a licence that is not an SPDX identifier — the settings row
+/// turns the licence name into this link. `None` for SPDX licences and for unknown ones, which
+/// [`tests::every_model_is_offerable`] refuses.
+pub fn licence_url(licence: &str) -> Option<&'static str> {
+    match licence {
+        "BigCode-OpenRAIL-M" => Some("https://huggingface.co/spaces/bigcode/bigcode-model-license-agreement"),
+        "Gemma" => Some("https://ai.google.dev/gemma/terms"),
+        "DeepSeek-License" => Some("https://github.com/deepseek-ai/DeepSeek-Coder/blob/main/LICENSE-MODEL"),
+        _ => None,
+    }
+}
 
 /// The entry with this id, or `None` for an id from a newer build's catalogue.
 ///
@@ -179,10 +292,12 @@ mod tests {
     /// would put a non-commercial model in front of a paying user.
     #[test]
     fn every_model_is_offerable() {
+        // SPDX, or a model licence the user accepted on 2026-11-15 that always carries its link.
         const ALLOWED: &[&str] = &["Apache-2.0", "MIT"];
         for spec in CATALOGUE {
             assert!(
-                ALLOWED.contains(&spec.licence),
+                ALLOWED.contains(&spec.licence)
+                    || licence_url(spec.licence).is_some_and(|url| url.starts_with("https://")),
                 "{} is licensed {}, which this app cannot offer from a menu. If the licence is \
                  genuinely fine, add it to ALLOWED here and say why.",
                 spec.id,

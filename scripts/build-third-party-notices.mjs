@@ -317,7 +317,6 @@ const FONTS = [
 /** The weights the app offers to download: read out of the catalogue, never restated here. */
 const MODELS = {
   source: "src-tauri/src/localai/catalogue.rs",
-  url: "https://huggingface.co/ggml-org",
 };
 
 /**
@@ -1522,8 +1521,8 @@ function render({ targets, npm, cargo, native, bundled, fonts, icons, archIcons,
     "model you pick into your own data directory. They are listed here because the app offers them.",
     "",
     `The catalogue in [\`${MODELS.source}\`](${MODELS.source}) offers only weights under a licence the app`,
-    "can point at, and a test there fails the build for any other. The conversions are published at",
-    `<${MODELS.url}>.`,
+    "can point at, and a test there fails the build for any other. Each row links the repository its",
+    "conversion is downloaded from.",
     "",
     "| Model | Licence (SPDX) | Published at |",
     "|---|---|---|",

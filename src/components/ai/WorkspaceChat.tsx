@@ -17,6 +17,7 @@ import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/Command
 import { exportChatConversation, exportMenuItems } from "../chat/exportChat";
 import { McpMenu } from "../chat/McpMenu";
 import { MentionMenu, useMentions } from "../chat/MentionMenu";
+import { GhostOverlay, useComposerGhost } from "../chat/useComposerGhost";
 import { ContextMenu } from "../common/ContextMenu";
 import { TurnReview } from "./TurnReview";
 import { EffortPicker } from "../chat/EffortPicker";
@@ -500,6 +501,15 @@ export function WorkspaceChat({
   );
 
   const workspaceName = useWorkspaceStore((s) => s.workspaces.find((w) => w.id === workspaceId)?.name ?? "");
+  /** Ghost text from the local completion model, when it is on — see `useComposerGhost`. */
+  const lastAnswer = useMemo(() => [...session.messages].reverse().find((m) => m.role === "assistant")?.content ?? null, [session.messages]);
+  const completion = useComposerGhost({
+    boxRef,
+    text: draft,
+    setText: setDraft,
+    context: { place: `the workspace "${workspaceName}" and its repositories ${projects.map((p) => p.name).join(", ")}`, lastAnswer },
+    suppressed: menuOpen || mentions.open,
+  });
   const lineage = useMemo(
     () => ({ surface: "ws" as const, scopeId: workspaceId, workspaceId, conversationId }),
     [workspaceId, conversationId],
@@ -761,42 +771,47 @@ export function WorkspaceChat({
             onRemove={(id) => useWorkspaceChatStore.getState().removeAttachment(conversationId, id)}
           />
           {skill && <SkillChip name={skill.name} onRemove={() => setSkill(null)} />}
-          <textarea
-            ref={boxRef}
-            data-ai-input="inline"
-            value={draft}
-            rows={1}
-            onChange={(e) => {
-              setDraft(e.target.value);
-              setCaret(e.target.selectionStart);
-            }}
-            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
-            onPaste={onPaste}
-            onContextMenu={textMenu.onField}
-            onKeyDown={(e) => {
-              if (mentions.onKeyDown(e)) return;
-              // Esc leaves an edit: the box goes back to a new question, empty.
-              if (e.key === "Escape" && editing && !menuOpen && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                useWorkspaceChatStore.getState().cancelEdit(conversationId);
-                setDraft("");
-                return;
+          <div className="relative flex flex-col">
+            <GhostOverlay boxRef={boxRef} text={draft} ghost={completion.ghost} />
+            <textarea
+              ref={boxRef}
+              data-ai-input="inline"
+              value={draft}
+              rows={1}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                setCaret(e.target.selectionStart);
+              }}
+              onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+              onPaste={onPaste}
+              onContextMenu={textMenu.onField}
+              onKeyDown={(e) => {
+                if (mentions.onKeyDown(e)) return;
+                // Then a shown suggestion: Tab takes it, Ctrl/Cmd+→ a word, Escape hides it.
+                if (completion.onKeyDown(e)) return;
+                // Esc leaves an edit: the box goes back to a new question, empty.
+                if (e.key === "Escape" && editing && !menuOpen && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  useWorkspaceChatStore.getState().cancelEdit(conversationId);
+                  setDraft("");
+                  return;
+                }
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder={
+                session.sending
+                  ? t("chat.queuePlaceholder")
+                  : session.plan
+                    ? t("assistant.planPlaceholder")
+                    : t("assistant.wsChatPlaceholder", { workspace: workspaceName })
               }
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
-                e.preventDefault();
-                submit();
-              }
-            }}
-            placeholder={
-              session.sending
-                ? t("chat.queuePlaceholder")
-                : session.plan
-                  ? t("assistant.planPlaceholder")
-                  : t("assistant.wsChatPlaceholder", { workspace: workspaceName })
-            }
-            aria-label={t("assistant.wsChatPlaceholder", { workspace: workspaceName })}
-            className="max-h-[180px] resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed outline-none placeholder:text-[var(--cf-text-muted)]"
-          />
+              aria-label={t("assistant.wsChatPlaceholder", { workspace: workspaceName })}
+              className="relative max-h-[180px] w-full resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed outline-none placeholder:text-[var(--cf-text-muted)]"
+            />
+          </div>
           {dictating ? (
             <div className="flex items-center gap-1.5 px-0.5">
               <DictationBar />

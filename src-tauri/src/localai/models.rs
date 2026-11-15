@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use super::catalogue::{ModelSpec, Tier, CATALOGUE};
+use super::catalogue::{licence_url, ModelSpec, Tier, CATALOGUE};
 
 /// Where weights live: `paths::models_dir()`, which is `state_dir()/models`.
 ///
@@ -75,6 +75,8 @@ pub struct ModelRow {
     pub tier: Tier,
     pub params: String,
     pub licence: String,
+    /// Link to the licence text when [`Self::licence`] is not an SPDX identifier.
+    pub licence_url: Option<String>,
     pub size_bytes: u64,
     pub min_ram_gb: u32,
     pub installed: bool,
@@ -92,6 +94,7 @@ pub fn rows() -> Vec<ModelRow> {
             tier: spec.tier,
             params: spec.params.to_string(),
             licence: spec.licence.to_string(),
+            licence_url: licence_url(spec.licence).map(str::to_string),
             size_bytes: spec.size_bytes,
             min_ram_gb: spec.min_ram_gb,
             installed: is_installed(spec),

@@ -180,13 +180,30 @@ struct Infill<'a> {
 /// what FIM training is for, and the measured 0.5B request stopped with `stop_type: "eos"` after
 /// eight tokens. These catch the case where it does not and starts emitting the *next* file
 /// instead, which is the characteristic failure of a base model that has run past its span.
+///
+/// One list for every family in [`super::catalogue`]: a marker from another family's vocabulary is
+/// never in real code, so sending all of them costs nothing and needs no per-model table.
 const STOP: &[&str] = &[
+    // Qwen2.5-Coder (and CodeGemma's FIM triplet).
     "<|endoftext|>",
     "<|fim_prefix|>",
     "<|fim_middle|>",
     "<|fim_suffix|>",
     "<|file_sep|>",
     "<|repo_name|>",
+    // CodeGemma.
+    "<|file_separator|>",
+    // StarCoder2 and Mellum.
+    "<fim_prefix>",
+    "<fim_middle>",
+    "<fim_suffix>",
+    "<file_sep>",
+    "<repo_name>",
+    // DeepSeek-Coder.
+    "<｜fim▁begin｜>",
+    "<｜fim▁hole｜>",
+    "<｜fim▁end｜>",
+    "<｜end▁of▁sentence｜>",
 ];
 
 /// What the server answers. Only the fields that are read.

@@ -5,6 +5,7 @@ import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/Command
 import { SkillChip } from "../chat/ChatComposer";
 import { AttachmentBar } from "../chat/AttachmentBar";
 import { MentionMenu, useMentions } from "../chat/MentionMenu";
+import { GhostOverlay, useComposerGhost } from "../chat/useComposerGhost";
 import { TurnReview } from "./TurnReview";
 import { ContextSources } from "./ContextSources";
 import { useTextMenu } from "../common/TextMenu";
@@ -491,6 +492,15 @@ export function PanelChat({
     [projectId, workspaceId, conversationId],
   );
   const lastUser = session.messages.map((m) => m.role).lastIndexOf("user");
+  /** Ghost text from the local completion model, when it is on — see `useComposerGhost`. */
+  const lastAnswer = useMemo(() => [...session.messages].reverse().find((m) => m.role === "assistant")?.content ?? null, [session.messages]);
+  const completion = useComposerGhost({
+    boxRef,
+    text: draft,
+    setText: setDraft,
+    context: { place: `the repository "${repoName}"`, lastAnswer },
+    suppressed: menuOpen || mentions.open,
+  });
 
   // ── Turn actions ──────────────────────────────────────────────────────────────────────────
   /** «Editar y reenviar»: the question whose text is in the box. Sending it replaces the thread from
@@ -921,67 +931,72 @@ export function PanelChat({
             onRemove={(id) => useChatStore.getState().removeAttachment(conversationId, id)}
           />
           {skill && <SkillChip name={skill.name} onRemove={() => setSkill(null)} />}
-          <textarea
-            ref={boxRef}
-            data-ai-input="inline"
-            {...mentions.inputProps}
-            value={draft}
-            rows={1}
-            onChange={(e) => {
-              setDraft(e.target.value);
-              setCaret(e.target.selectionStart);
-            }}
-            onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
-            onPaste={onPaste}
-            onContextMenu={textMenu.onField}
-            onKeyDown={(e) => {
-              // The `@` menu takes its keys first: arrows walk it, Enter/Tab pick, Escape hides it.
-              if (mentions.onKeyDown(e)) return;
-              // Esc leaves an edit: the box goes back to a new question, empty.
-              if (e.key === "Escape" && editing && !menuOpen && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                useChatStore.getState().cancelEdit(conversationId);
-                setDraft("");
-                return;
-              }
-              // Esc stops the running turn from the box. The `/` menu's own Escape is left to it, and
-              // a key an input method is using is not ours.
-              if (e.key === "Escape" && session.sending && !menuOpen && !e.nativeEvent.isComposing) {
-                e.preventDefault();
-                stop();
-                return;
-              }
-              // ↑ in an empty box brings back the last question sent, to edit and ask again. Only when
-              // nothing above took the key (the `@` menu did, before this line) and nothing is typed.
-              if (e.key === "ArrowUp" && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !draft && !menuOpen) {
-                const last = [...session.messages].reverse().find((m) => m.role === "user" && !m.content.startsWith("/"));
-                if (last) {
+          <div className="relative flex flex-col">
+            <GhostOverlay boxRef={boxRef} text={draft} ghost={completion.ghost} />
+            <textarea
+              ref={boxRef}
+              data-ai-input="inline"
+              {...mentions.inputProps}
+              value={draft}
+              rows={1}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                setCaret(e.target.selectionStart);
+              }}
+              onSelect={(e) => setCaret(e.currentTarget.selectionStart)}
+              onPaste={onPaste}
+              onContextMenu={textMenu.onField}
+              onKeyDown={(e) => {
+                // The `@` menu takes its keys first: arrows walk it, Enter/Tab pick, Escape hides it.
+                if (mentions.onKeyDown(e)) return;
+                // Then a shown suggestion: Tab takes it, Ctrl/Cmd+→ a word, Escape hides it.
+                if (completion.onKeyDown(e)) return;
+                // Esc leaves an edit: the box goes back to a new question, empty.
+                if (e.key === "Escape" && editing && !menuOpen && !e.nativeEvent.isComposing) {
                   e.preventDefault();
-                  setDraft(last.content);
-                  requestAnimationFrame(() => {
-                    const box = boxRef.current;
-                    if (box) box.setSelectionRange(box.value.length, box.value.length);
-                  });
+                  useChatStore.getState().cancelEdit(conversationId);
+                  setDraft("");
                   return;
                 }
+                // Esc stops the running turn from the box. The `/` menu's own Escape is left to it, and
+                // a key an input method is using is not ours.
+                if (e.key === "Escape" && session.sending && !menuOpen && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  stop();
+                  return;
+                }
+                // ↑ in an empty box brings back the last question sent, to edit and ask again. Only when
+                // nothing above took the key (the `@` menu did, before this line) and nothing is typed.
+                if (e.key === "ArrowUp" && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !draft && !menuOpen) {
+                  const last = [...session.messages].reverse().find((m) => m.role === "user" && !m.content.startsWith("/"));
+                  if (last) {
+                    e.preventDefault();
+                    setDraft(last.content);
+                    requestAnimationFrame(() => {
+                      const box = boxRef.current;
+                      if (box) box.setSelectionRange(box.value.length, box.value.length);
+                    });
+                    return;
+                  }
+                }
+                // Enter sends; Shift+Enter breaks the line. Never mid-composition: an input method
+                // uses Enter to accept a candidate, and sending then posts half a sentence.
+                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder={
+                session.sending
+                  ? t("chat.queuePlaceholder")
+                  : planMode
+                    ? t("assistant.planPlaceholder")
+                    : t("assistant.askPlaceholder", { repo: repoName })
               }
-              // Enter sends; Shift+Enter breaks the line. Never mid-composition: an input method
-              // uses Enter to accept a candidate, and sending then posts half a sentence.
-              if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {
-                e.preventDefault();
-                submit();
-              }
-            }}
-            placeholder={
-              session.sending
-                ? t("chat.queuePlaceholder")
-                : planMode
-                  ? t("assistant.planPlaceholder")
-                  : t("assistant.askPlaceholder", { repo: repoName })
-            }
-            aria-label={t("assistant.askPlaceholder", { repo: repoName })}
-            className="max-h-[180px] resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed outline-none placeholder:text-[var(--cf-text-muted)]"
-          />
+              aria-label={t("assistant.askPlaceholder", { repo: repoName })}
+              className="relative max-h-[180px] w-full resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed outline-none placeholder:text-[var(--cf-text-muted)]"
+            />
+          </div>
           {dictating ? (
             <div className="flex items-center gap-1.5 px-0.5">
               <DictationBar />
