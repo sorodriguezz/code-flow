@@ -296,6 +296,7 @@ jobs:
           - platform: windows-latest
             args: ""
             arch: x64
+            timeout: 90
           # One native leg per Mac architecture, and deliberately not `universal-apple-darwin`:
           # the bundled `llama-server` is a single-architecture download, and a universal Rust
           # binary paired with it would install fine on the other kind of Mac and then fail the
@@ -307,9 +308,11 @@ jobs:
           - platform: macos-latest
             args: ""
             arch: aarch64
+            timeout: 150
           - platform: macos-15-intel
             args: ""
             arch: x64
+            timeout: 150
     runs-on: ${{ matrix.platform }}
     # The default is six hours, which is what a bundler waiting on a prompt that will never come
     # costs. 90, not 60: v2.3.31's Windows leg changed a `windows-sys` feature, which recompiles
@@ -317,7 +320,14 @@ jobs:
     # in the post step that the 60-minute limit cancelled at 18:06, after every asset was already
     # uploaded. A cancelled leg skips `updater-json`, so the release stayed a draft, and the cache
     # that would have made the retry warm was never written.
-    timeout-minutes: 90
+    #
+    # Per platform since v2.8.35, whose Apple Silicon leg was cancelled at 90 minutes, 88 of them
+    # inside `tauri-action`. Nothing in that release explains it: every release from v2.8.x on was
+    # built against the same `Cargo.lock` (so the same `rust-cache` entry, an exact hit each time),
+    # and the macOS legs still swing from 10 to 67 minutes for the same code — v2.8.34, a version
+    # bump with no Rust change, took 67 on aarch64; the release 13 hours before it took 11. That is
+    # the runner, not the build, so the macOS legs get headroom; Windows (a steady 20–35) keeps 90.
+    timeout-minutes: ${{ matrix.timeout }}
     steps:
       # Defender scans every file the build reads and writes, and a release touches tens of
       # thousands under `target/`. v2.3.33's Windows leg spent 13 minutes in `rust-cache`'s post step
