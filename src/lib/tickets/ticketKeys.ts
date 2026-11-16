@@ -86,15 +86,29 @@ function fold(text: string): string {
   return text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
 }
 
+/**
+ * Whether `text` holds every word of `query`, in any order, ignoring case and accents: «anulacion
+ * citas» finds «Anulación de OT por eliminación de citas». An empty query matches everything.
+ */
+export function matchesQuery(text: string, query: string): boolean {
+  const words = fold(query).split(/\s+/).filter(Boolean);
+  if (words.length === 0) return true;
+  const haystack = fold(text);
+  return words.every((word) => haystack.includes(word));
+}
+
+/** What a ticket can be found by: its key and number, title, type, state, sprint, project and owner. */
+function searchText(ticket: Ticket): string {
+  return [displayKey(ticket), ticket.key, String(ticket.id), ticket.title, ticket.work_item_type, ticket.state, ticket.sprint, ticket.project, ticket.assigned_to ?? ""].join(" ");
+}
+
 export function filterTickets(tickets: readonly Ticket[], filters: TicketFilters, query: string): Ticket[] {
-  const needle = fold(query.trim());
   return tickets.filter((ticket) => {
     if (filters.boards.length > 0 && !filters.boards.includes(boardOf(ticket))) return false;
     if (filters.states.length > 0 && !filters.states.includes(ticket.state)) return false;
     if (filters.sprints.length > 0 && !filters.sprints.includes(ticket.sprint)) return false;
     if (filters.types.length > 0 && !filters.types.includes(ticket.work_item_type)) return false;
-    if (!needle) return true;
-    return fold(`${displayKey(ticket)} ${ticket.key} ${ticket.title} ${ticket.project}`).includes(needle);
+    return matchesQuery(searchText(ticket), query);
   });
 }
 

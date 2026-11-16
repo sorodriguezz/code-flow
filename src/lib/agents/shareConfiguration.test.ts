@@ -278,9 +278,14 @@ describe(SUITE, () => {
     const source = team();
     const missingAgent = () => configurationForExport(source, [], projects);
     expect(missingAgent).toThrow(CONFIGURATION_ERRORS.reference);
-    const roster = [agent()];
-    const missingRepository = () => configurationForExport(source, roster, []);
-    expect(missingRepository).toThrow(CONFIGURATION_ERRORS.exportRepository);
+  });
+
+  it("exports a member whose every repository left the workspace with none assigned", () => {
+    const source = team();
+    const file = configurationForExport(source, [agent()], []);
+    expect(file.repositories).toEqual([]);
+    expect(file.agents[ZERO].configuration.repos).toEqual([]);
+    for (const member of file.team!.members) expect(member.repos).toEqual([]);
   });
 
   it("drops repositories that left the workspace when others remain", () => {

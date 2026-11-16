@@ -497,6 +497,57 @@ fn new_planner_item(conn: &Connection, run: &Run, planner: &str, kind: &str, ins
     Ok(Some(item))
 }
 
+/// What the members have delivered so far, as one value: every finished task that left something —
+/// a commit for work, the answer for research. Work that finished without changing anything is not
+/// progress (a task the lead handed out again because it was already done ends exactly like that),
+/// nor are the advisor, reviews or merges, which come by themselves.
+fn progress_mark(items: &[Item]) -> String {
+    let mut parts: Vec<String> = items
+        .iter()
+        .filter(|i| i.status == "done" && !i.is_lead() && !matches!(i.kind.as_str(), "advise" | "review" | "integrate"))
+        .filter(|i| i.kind != "work" || !i.commit_sha.is_empty())
+        .map(|i| format!("{}:{}", i.key, i.commit_sha))
+        .collect();
+    parts.sort();
+    coordination::fingerprint(&parts.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
+/// The lead's latest round that handed out work still standing (not skipped by a rejected plan).
+fn last_working_round<'a>(run: &Run, items: &'a [Item]) -> Option<&'a Item> {
+    items
+        .iter()
+        .filter(|l| l.member_id == run.lead && matches!(l.kind.as_str(), "plan" | "final"))
+        .filter(|l| items.iter().any(|i| !i.is_lead() && i.kind != "advise" && i.round == l.round && i.status != "skipped"))
+        .max_by_key(|l| l.round)
+}
+
+/// A lead round the app starts by itself — after a failure, a block, the last look, a failing final
+/// check — but only if the last round that handed out work changed something. The round caps bound
+/// how many rounds there are; this stops the ones that only repeat: when nothing is still running
+/// and the members delivered nothing new since that round began, the run waits for the user instead
+/// of asking the lead again. «Seguir» acknowledges it and lets one more round through. Rounds the user
+/// asks for (a rejected plan, a question) go straight to [`new_lead_item`].
+fn new_lead_round(conn: &Connection, run: &Run, kind: &str, instruction: &str) -> Result<Option<Item>, String> {
+    let items = team::list_items(conn, &run.id).map_err(e2s)?;
+    let open = items.iter().filter(|i| !i.is_lead() && matches!(i.status.as_str(), "pending" | "running" | "waiting" | "gated" | "delegated")).count();
+    let mark = progress_mark(&items);
+    if open == 0 {
+        if let Some(previous) = last_working_round(run, &items).filter(|r| r.intelligence.progress == mark) {
+            let mut previous = previous.clone();
+            previous.intelligence.progress = format!("ack:{mark}");
+            team::update_item(conn, &previous).map_err(e2s)?;
+            let note = format!(
+                "La «{}» del líder no dejó cambios: ninguna tarea terminó con algo nuevo desde entonces. Se detiene para no repetir el trabajo. Lo que iba a pedirle al líder:\n{}",
+                previous.title,
+                first_line(instruction, 400)
+            );
+            team::set_run_status(conn, &run.id, "gated", &format!("stuck:{}", previous.id), &note).map_err(e2s)?;
+            return Ok(None);
+        }
+    }
+    new_lead_item(conn, run, kind, instruction, "")
+}
+
 fn new_lead_item(conn: &Connection, run: &Run, kind: &str, instruction: &str, feedback: &str) -> Result<Option<Item>, String> {
     let current = team::get_run(conn, &run.id).map_err(e2s)?.unwrap_or_else(|| run.clone());
     if current.lead_rounds_used >= current.policy.lead_rounds {
@@ -520,6 +571,7 @@ fn new_lead_item(conn: &Connection, run: &Run, kind: &str, instruction: &str, fe
     let mut item = team::new_item(run, &key, Some(lead), &first_repo, kind, &title, instruction);
     item.feedback = feedback.to_string();
     item.round = current.lead_rounds_used + 1;
+    item.intelligence.progress = progress_mark(&items);
     // The lead is always a background turn: it only plans, and its answer is read by the app.
     item.run_in = "headless".into();
     team::insert_item(conn, &item).map_err(e2s)?;
@@ -1461,7 +1513,7 @@ async fn on_failure(db: &Db, run: &Run, mut item: Item, reason: &str, kind: &str
                 "La tarea `{}` ({}, {}) falló {} veces ({kind}): {}\nDecide: reasígnala, divídela, cancela lo que dependía de ella o termina.",
                 item.key, item.member_name, item.title, item.attempts, trim_chars(reason, 3000)
             );
-            if new_lead_item(c, run, "plan", &instruction, "")?.is_some() {
+            if new_lead_round(c, run, "plan", &instruction)?.is_some() {
                 return Ok(());
             }
             return Ok(());
@@ -1563,6 +1615,9 @@ async fn on_ok(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), Str
                     return on_failure(db, run, item, &reason, "check").await;
                 }
             }
+            if gate_tests(db, run, &mut item).await? {
+                return Ok(());
+            }
             match gate_impact(db, run, &mut item).await {
                 Ok(true) => return Ok(()),
                 Ok(false) => {}
@@ -1624,6 +1679,37 @@ async fn on_ok(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), Str
             Ok(())
         }
     }
+}
+
+/// Whether the work's checks went green by weakening its tests (deleted, skipped or focused
+/// tests, silenced lint, a rewritten check script, a runner config changed): then the item waits
+/// for the user with what was found. It never goes back to the member as a failure — the task may
+/// have been to remove those tests, and a member sent to restore them would spend every attempt it
+/// has; a person tells the two apart in one look. Only for repositories with checks: without them
+/// there is nothing to game. A diff git cannot read is no reason to stop the work.
+async fn gate_tests(db: &Db, run: &Run, item: &mut Item) -> Result<bool, String> {
+    if !item.writes() || item.worktree_path.is_empty() || item.intelligence.base_sha.is_empty() {
+        return Ok(false);
+    }
+    let suites = suites_for(run, &item.project_id, &item.worktree_path);
+    if suites.is_empty() {
+        return Ok(false);
+    }
+    let lint = suites.iter().any(|c| c.kind == "lint");
+    let commands: Vec<String> = suites.into_iter().map(|c| c.command).collect();
+    let (path, base) = (item.worktree_path.clone(), item.intelligence.base_sha.clone());
+    let Ok(Ok(found)) = blocking(move || gitops::inspect_tests(&path, &base, &commands, lint)).await else { return Ok(false) };
+    let Some(found) = found.filter(|f| f.version != item.intelligence.approved_tests) else { return Ok(false) };
+    let listing = found.reasons.iter().map(|r| format!("- {r}")).collect::<Vec<_>>().join("\n");
+    item.intelligence.impact = Some(found);
+    item.status = "gated".into();
+    with(db, |c| {
+        team::update_item(c, item).map_err(e2s)?;
+        team::post(c, &run.id, &item.id, ("system", "CodeFlow"), ("user", "Tú"), "error", &format!("«{}» pasa sus verificaciones, pero debilita las pruebas:\n{listing}", item.title), &[])
+            .map(|_| ())
+            .map_err(e2s)
+    })?;
+    Ok(true)
 }
 
 async fn gate_impact(db: &Db, run: &Run, item: &mut Item) -> Result<bool, String> {
@@ -1708,7 +1794,13 @@ pub fn team_detect_checks(db: State<'_, Db>, project_id: String) -> Result<Vec<t
 }
 
 async fn verify_check(command: &str, cwd: &str, repo: Option<&RunRepo>, base: &str) -> intelligence::Evidence {
-    let (passed, output) = crate::commands::agents_cmd::run_shell_check(command, cwd).await;
+    // A fresh worktree has none of what `.gitignore` keeps out; a check that cannot find its runner
+    // says nothing about the work. An install that fails is told with the check's own failure.
+    let install = team::deps::ensure(cwd).await.err();
+    let (passed, mut output) = crate::commands::agents_cmd::run_shell_check(command, cwd).await;
+    if let Some(reason) = install.filter(|_| !passed) {
+        output = format!("No se pudieron instalar las dependencias antes de la verificación: {reason}\n\n{output}");
+    }
     let mut result = if passed { "passed" } else { "failed" };
     if let Some(repo) = repo.filter(|_| !passed && !base.is_empty()) {
         let root = repo.local_path.clone();
@@ -1716,7 +1808,15 @@ async fn verify_check(command: &str, cwd: &str, repo: Option<&RunRepo>, base: &s
         let start = base.to_string();
         let (r, p) = (root.clone(), path.clone());
         if blocking(move || gitops::add_detached(&r, &p, &start)).await.is_ok_and(|made| made.is_ok()) {
-            let (base_passed, base_output) = crate::commands::agents_cmd::run_shell_check(command, &path).await;
+            // Without its dependencies the base fails for that alone, and a regression reads as
+            // «both failed». A base whose install failed proves nothing: the result stays `failed`.
+            let installed = team::deps::ensure(&path).await.is_ok();
+            let env = team::deps::shared_build_env(std::path::Path::new(&path), std::path::Path::new(cwd));
+            let (base_passed, base_output) = if installed {
+                crate::commands::agents_cmd::run_shell_check_with(command, &path, crate::commands::agents_cmd::CHECK_TIMEOUT, &env).await
+            } else {
+                (false, String::new())
+            };
             let cleaned = |output: &str, path: &str| output.replace(path, "<repo>").trim().to_string();
             if base_passed {
                 result = "regression";
@@ -2178,6 +2278,18 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
             team::update_item(c, &item).map_err(e2s)?;
             return Ok(());
         }
+        // Out of attempts and still nothing: that is a failure, not a finished plan. Marking it done
+        // let a run with no work at all reach «Todo está hecho» (with `single_pass`, one bad answer
+        // was enough). It waits for the user instead; «Seguir» gives the lead one more try.
+        if added == 0 && !reply.finish && open == 0 && !sub_lead && matches!(item.kind.as_str(), "plan" | "final") {
+            item.status = "error".into();
+            item.last_error = "El líder no asignó ninguna tarea usable ni dio el trabajo por terminado.".into();
+            item.finished_at = queries::now();
+            team::update_item(c, &item).map_err(e2s)?;
+            let why = if reply.rejected.is_empty() { String::new() } else { format!("\n- {}", reply.rejected.join("\n- ")) };
+            return team::set_run_status(c, &run.id, "gated", &format!("stuck:{}", item.id), &format!("El líder no asignó ninguna tarea usable.{why}"))
+                .map_err(e2s);
+        }
         // A sub-lead's branch stays open until what it handed out closes (see `advance`).
         item.status = if item.kind == "delegate" && added > 0 && !reply.finish { "delegated".into() } else { "done".into() };
         item.feedback.clear();
@@ -2228,7 +2340,12 @@ async fn advance(db: &Db, run_id: &str) -> Result<(), String> {
         if let Some((item, impact)) = items.iter().filter(|item| item.status == "gated")
             .find_map(|item| item.intelligence.impact.as_ref().map(|impact| (item, impact)))
         {
-            return with(db, |c| team::set_run_status(c, run_id, "gated", &format!("impact:{}:{}", item.id, impact.version), "Revisa los cambios de impacto antes de integrarlos.").map_err(e2s));
+            let note = if impact.is_tests() {
+                format!("«{}» pasa sus verificaciones, pero debilita las pruebas. Apruébalo si la tarea lo pedía; recházalo si no.", item.title)
+            } else {
+                "Revisa los cambios de impacto antes de integrarlos.".to_string()
+            };
+            return with(db, |c| team::set_run_status(c, run_id, "gated", &format!("impact:{}:{}", item.id, impact.version), &note).map_err(e2s));
         }
     }
     // A sub-lead's branch whose work has all closed hands its summary up, and stops being open.
@@ -2266,7 +2383,7 @@ async fn advance(db: &Db, run_id: &str) -> Result<(), String> {
         return with(db, |c| {
             if !run.lead.is_empty() {
                 let instruction = format!("El trabajo está bloqueado: estas tareas esperan a otras que fallaron o se cancelaron: {blocked}. Reasigna, cancela o termina.");
-                if new_lead_item(c, &run, "plan", &instruction, "")?.is_some() {
+                if new_lead_round(c, &run, "plan", &instruction)?.is_some() {
                     return Ok(());
                 }
                 return Ok(());
@@ -2284,7 +2401,7 @@ async fn advance(db: &Db, run_id: &str) -> Result<(), String> {
     // The lead's last look.
     if !run.lead.is_empty() && !run.lead_done && run.policy.lead_final_check {
         let made = with(db, |c| {
-            let made = new_lead_item(c, &run, "final", "Todo lo asignado está hecho. Revisa las entregas: si falta algo, asígnalo; si está completo, responde `\"terminar\": true`.", "")?;
+            let made = new_lead_round(c, &run, "final", "Todo lo asignado está hecho. Revisa las entregas: si falta algo, asígnalo; si está completo, responde `\"terminar\": true`.")?;
             if let Some(mut final_item) = made.clone() {
                 if let Some(advice) = new_advice(c, &run, "final", "El equipo cree que terminó. ¿Hay algo que se le escapó antes de integrar?")? {
                     final_item.depends_on.push(advice.id.clone());
@@ -2316,7 +2433,7 @@ async fn advance(db: &Db, run_id: &str) -> Result<(), String> {
                     if !run.lead.is_empty() {
                         team::set_lead_done(c, run_id, false).map_err(e2s)?;
                         let instruction = format!("En {} la verificación `{}` {description} con todo integrado:\n{}\nDecide cómo tratar el fallo.", repo.name, check.command, evidence.detail);
-                        if new_lead_item(c, &run, "plan", &instruction, "")?.is_some() {
+                        if new_lead_round(c, &run, "plan", &instruction)?.is_some() {
                             return Ok(());
                         }
                         return Ok(());
@@ -2338,7 +2455,10 @@ async fn advance(db: &Db, run_id: &str) -> Result<(), String> {
     }
     if run.policy.approve_merge {
         let names = repos.iter().map(|r| format!("{} → {}", r.name, r.target_branch)).collect::<Vec<_>>().join(", ");
-        let question = if run.policy.integrate == "pr" { format!("Todo está hecho. ¿Abrir un PR en {names}?") } else { format!("Todo está hecho. ¿Integrar en {names}?") };
+        let produced = items.iter().any(|i| i.kind == "work" && i.status == "done" && !i.commit_sha.is_empty());
+        let question = if !produced {
+            format!("El equipo terminó sin cambios en el código de {names}. Revisa el canal antes de cerrar.")
+        } else if run.policy.integrate == "pr" { format!("Todo está hecho. ¿Abrir un PR en {names}?") } else { format!("Todo está hecho. ¿Integrar en {names}?") };
         return with(db, |c| team::set_run_status(c, run_id, "gated", "merge", &question).map_err(e2s));
     }
     deliver(db, &run).await
@@ -2722,18 +2842,24 @@ async fn decide_for_gate(db: &Db, run_id: &str, approve: bool, comment: &str, ex
             let impact = item.intelligence.impact.take().filter(|impact| impact.version == version)
                 .ok_or("La revisión de impacto cambió.")?;
             let tx = c.unchecked_transaction().map_err(e2s)?;
+            let tests = impact.is_tests();
             if approve {
                 item.status = "running".into();
-                item.intelligence.approved_impact = impact.version;
+                if tests {
+                    item.intelligence.approved_tests = impact.version.clone();
+                } else {
+                    item.intelligence.approved_impact = impact.version.clone();
+                }
             } else {
                 item.status = "error".into();
-                item.last_error = "El usuario rechazó el cambio de impacto.".into();
+                item.last_error = if tests { "El usuario rechazó el cambio: debilitaba las pruebas." } else { "El usuario rechazó el cambio de impacto." }.into();
                 item.finished_at = queries::now();
             }
             team::update_item(&tx, &item).map_err(e2s)?;
             let decision = if approve { "aprobó" } else { "rechazó" };
+            let what = if tests { "los cambios en las pruebas" } else { "los cambios de impacto" };
             team::post(&tx, &run_id, &item.id, ("user", "Tú"), ("all", "Equipo"), "decision",
-                &format!("{decision} los cambios de impacto de «{}» · {}", item.title, impact.files.join(", ")), &[]).map_err(e2s)?;
+                &format!("{decision} {what} de «{}» · {}", item.title, impact.files.join(", ")), &[]).map_err(e2s)?;
             team::set_run_status(&tx, &run_id, "running", "", "").map_err(e2s)?;
             tx.commit().map_err(e2s)?;
             Ok(item)
@@ -3881,6 +4007,72 @@ mod tests {
         decide(&db, &run_id, true, "").await.unwrap();
         let d = claim(&db, &run_id).await.unwrap();
         assert_eq!(d[0].item.key, "y");
+    }
+
+    fn led_team(db: &Db, ws: &str, lead: &str, dev: &str, policy: Policy) -> team::Team {
+        let member = |id: &str, agent: &str, name: &str, edits: bool| team::Member { id: id.into(), agent_id: agent.into(), name: name.into(), edits, max_parallel: 1, ..Default::default() };
+        with(db, |c| {
+            team::save_team(
+                c,
+                team::Team {
+                    workspace_id: ws.into(),
+                    name: "Equipo".into(),
+                    lead: "l".into(),
+                    policy,
+                    members: vec![member("l", lead, "Líder", false), member("d", dev, "Dev", true)],
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_lead_that_never_plans_anything_usable_leaves_the_run_stuck_not_done() {
+        let (_serial, _dir, db, ws, project, [lead, dev, _]) = fixture();
+        // `single_pass`: one attempt, no last look — the shape where one bad answer used to be
+        // enough to reach «Todo está hecho» with nothing done.
+        let tm = led_team(&db, &ws, &lead, &dev, Policy { approve_plan: false, ..Default::default() });
+        let state = start_run(&db, ws, tm.id, "Arregla el login".into(), None, vec![RepoPick { project_id: project, target_branch: String::new() }], None, None).await.unwrap();
+        let run_id = state.run.id.clone();
+        let d = claim(&db, &run_id).await.unwrap();
+        let state = settle_core(&db, &d[0].item.id, "ok", "Creo que habría que revisar el login.", "").await.unwrap();
+        assert_eq!(state.run.status, "gated", "{}", state.run.gate_note);
+        assert_eq!(state.run.gate, format!("stuck:{}", d[0].item.id));
+        assert_eq!(item_of(&state, "plan").status, "error");
+
+        // «Seguir» gives the lead one more try, with what the user said.
+        decide(&db, &run_id, true, "Asígnaselo al dev").await.unwrap();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].item.key, "plan");
+        assert!(d[0].message.contains("Asígnaselo al dev"), "{}", d[0].message);
+    }
+
+    #[tokio::test]
+    async fn a_lead_round_that_changed_nothing_stops_instead_of_asking_again() {
+        let (_serial, _dir, db, ws, project, [lead, dev, _]) = fixture();
+        let policy = Policy { single_pass: false, approve_plan: false, approve_merge: false, lead_rounds: 6, ..Default::default() };
+        let tm = led_team(&db, &ws, &lead, &dev, policy);
+        let state = start_run(&db, ws, tm.id, "Sube el timeout".into(), None, vec![RepoPick { project_id: project, target_branch: String::new() }], None, None).await.unwrap();
+        let run_id = state.run.id.clone();
+        let d = claim(&db, &run_id).await.unwrap();
+        let plan = "```equipo\n{\"items\":[{\"id\":\"t\",\"miembro\":\"Dev\",\"tarea\":\"sube el timeout\"}]}\n```";
+        settle_core(&db, &d[0].item.id, "ok", plan, "").await.unwrap();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d[0].item.key, "t");
+        // The member finishes without changing a file: the round left nothing.
+        let state = settle_core(&db, &d[0].item.id, "ok", "Ya estaba en 30 s.", "").await.unwrap();
+        assert_eq!(state.run.status, "gated", "{}", state.run.gate_note);
+        assert!(state.run.gate.starts_with("stuck:"), "{}", state.run.gate);
+        assert!(state.run.gate_note.contains("no dejó cambios"), "{}", state.run.gate_note);
+        assert!(state.items.iter().all(|i| i.kind != "final"), "no last look was started");
+
+        // Going on is the user's call: the last look then runs once.
+        decide(&db, &run_id, true, "").await.unwrap();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].item.kind, "final");
     }
 
     #[tokio::test]

@@ -282,7 +282,8 @@ export interface TeamItem {
     contract_specs?: { name: string; path: string }[];
     published_contracts?: { name: string; path: string; version: string; text: string }[];
     used_contracts?: Record<string, string>;
-    impact?: { files: string[]; diff: string; version: string } | null;
+    impact?: { files: string[]; diff: string; version: string; reasons?: string[] } | null;
+    approved_tests?: string;
   };
 }
 

@@ -41,7 +41,6 @@ export const CONFIGURATION_ERRORS = {
   version: "crew-share-version",
   reference: "crew-share-reference",
   repository: "crew-share-repository",
-  exportRepository: "crew-share-export-repository",
   size: "crew-share-size",
 } as const;
 
@@ -288,25 +287,21 @@ export function configurationForExport(source: WorkspaceAgent | Team, roster: Wo
   if (sourceAgents.length !== agentKeys.size) fail(CONFIGURATION_ERRORS.reference);
   // Removing a repository from the workspace, or moving it to another one, leaves its id behind in
   // every agent, member, step and check that named it. Those are dropped here rather than refusing
-  // the export: they point at nothing, so they never travel anyway. The one exception is a list the
-  // drop would empty — empty means "every repository", so exporting it would widen what the agent
-  // may touch — and that one is refused with a message that says which.
+  // the export: they point at nothing, so they never travel anyway. A member whose every repository
+  // left travels with none assigned (user, 2026-11-16: refusing the whole export over it was worse
+  // than having to assign them again after importing).
   const known = new Set(projects.map((project) => project.id));
-  const present = (owner: string, repos: string[]): string[] => {
-    const kept = repos.filter((repo) => known.has(repo));
-    if (repos.length > ZERO && kept.length === ZERO) fail(CONFIGURATION_ERRORS.exportRepository, owner);
-    return kept;
-  };
+  const present = (repos: string[]): string[] => repos.filter((repo) => known.has(repo));
   const scoped = (repo: string) => repo === EMPTY_TEXT || repo === ALL_REPOSITORIES || known.has(repo);
   const agents = sourceAgents.map((agent) => {
     const configuration = sharedAgent(agent);
-    return { key: agent.id, configuration: { ...configuration, repos: present(agent.name, configuration.repos) } };
+    return { key: agent.id, configuration: { ...configuration, repos: present(configuration.repos) } };
   });
   const agentRepositories = agents.flatMap((agent) => agent.configuration.repos);
   const repositories = new Set(agentRepositories);
   let team: SharedTeam | null = null;
   if (isTeam) {
-    const members = source.members.map((member) => ({ ...member, repos: present(member.name, member.repos) }));
+    const members = source.members.map((member) => ({ ...member, repos: present(member.repos) }));
     const plan = source.plan.map((step) => (scoped(step.repo) ? step : { ...step, repo: EMPTY_TEXT }));
     const basePolicy = { ...defaultPolicy(), ...source.policy };
     const policy = { ...basePolicy, checks: basePolicy.checks.filter((check) => scoped(check.repo)) };

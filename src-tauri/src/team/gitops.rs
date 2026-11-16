@@ -57,6 +57,61 @@ pub fn inspect_impact(path: &str, base: &str, custom: &[String]) -> Result<Optio
     inspect_changes(path, base, |file| super::coordination::impact_path(file, custom), true)
 }
 
+/// What in the work at `path` (against `base`) weakened its tests — see [`super::tamper`]. `commands`
+/// are the checks the repository runs (a rewritten `package.json` script is looked for among them);
+/// `lint` also looks for silenced lint and type errors. `None` when nothing was found. The version
+/// starts with `tests-`, which tells this gate apart from the impact one that shares its approval.
+pub fn inspect_tests(path: &str, base: &str, commands: &[String], lint: bool) -> Result<Option<super::coordination::Impact>, String> {
+    use super::tamper;
+    if base.is_empty() {
+        return Ok(None);
+    }
+    let diff = git_ok(path, &["diff", "--no-renames", "--no-ext-diff", "--no-textconv", "-U0", base, "--"])?;
+    let untracked_list = git_ok(path, &["ls-files", "--others", "--exclude-standard", "-z"]).unwrap_or_default();
+    let untracked_names: Vec<&str> = untracked_list.split('\0').filter(|f| !f.is_empty()).collect();
+    let untracked: Vec<(String, String)> = untracked_names
+        .iter()
+        .filter(|f| tamper::is_test_path(f))
+        .take(64)
+        .filter_map(|f| {
+            let full = Path::new(path).join(f);
+            let meta = std::fs::symlink_metadata(&full).ok()?;
+            (meta.is_file() && meta.len() <= 256 * 1024).then(|| std::fs::read_to_string(&full).ok().map(|text| (f.to_string(), text)))?
+        })
+        .collect();
+    let mut found = tamper::inspect(&diff, &untracked, lint);
+    let changed = git_ok(path, &["diff", "--no-renames", "--name-only", "-z", base, "--"]).unwrap_or_default();
+    let mut configs: Vec<&str> = changed.split('\0').chain(untracked_names.iter().copied()).filter(|f| !f.is_empty() && tamper::is_runner_config(f)).collect();
+    configs.sort_unstable();
+    configs.dedup();
+    for config in configs {
+        found.push(tamper::Finding { file: config.to_string(), text: format!("cambia {config}, que decide qué corren las pruebas o el lint") });
+    }
+    if changed.split('\0').any(|f| f == "package.json") {
+        let before = git_ok(path, &["show", &format!("{base}:package.json")]).unwrap_or_default();
+        let now = std::fs::read_to_string(Path::new(path).join("package.json")).unwrap_or_default();
+        found.extend(tamper::changed_scripts(&before, &now, commands));
+    }
+    if found.is_empty() {
+        return Ok(None);
+    }
+    let mut files: Vec<String> = found.iter().map(|f| f.file.clone()).filter(|f| !f.is_empty()).collect();
+    files.sort();
+    files.dedup();
+    let reasons: Vec<String> = found.into_iter().map(|f| f.text).collect();
+    let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", base, "--"];
+    args.extend(files.iter().map(String::as_str));
+    let shown: String = git_ok(path, &args).unwrap_or_default().chars().take(16_000).collect();
+    let mut identity: Vec<&str> = reasons.iter().map(String::as_str).collect();
+    identity.push(&diff);
+    Ok(Some(super::coordination::Impact {
+        version: format!("tests-{}", super::coordination::fingerprint(&identity)),
+        files,
+        diff: shown,
+        reasons,
+    }))
+}
+
 pub fn work_fingerprint(path: &str, base: &str) -> Result<String, String> {
     Ok(inspect_changes(path, base, |_| true, false)?.map(|changes| changes.version).unwrap_or_default())
 }
@@ -120,6 +175,7 @@ fn inspect_changes(
     Ok(Some(super::coordination::Impact {
         files, diff,
         version: super::coordination::fingerprint(&fingerprints),
+        reasons: Vec::new(),
     }))
 }
 
@@ -474,6 +530,35 @@ mod tests {
         sh(&path, &["add", "-A"]);
         sh(&path, &["commit", "-q", "-m", "init"]);
         (dir, path)
+    }
+
+    #[test]
+    fn weakened_tests_are_found_in_uncommitted_work_and_moved_tests_are_not() {
+        let (_dir, repo) = repo();
+        let root = Path::new(&repo);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.test.ts"), "it(\"one\", () => {})\nit(\"two\", () => {})\n").unwrap();
+        std::fs::write(root.join("package.json"), r#"{"scripts":{"test":"vitest run"}}"#).unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "tests"]);
+        let base = git_ok(&repo, &["rev-parse", "HEAD"]).unwrap();
+        let commands = vec!["pnpm test".to_string()];
+        assert!(inspect_tests(&repo, &base, &commands, false).unwrap().is_none(), "nothing changed yet");
+
+        // Moved to a file git does not track yet: the same tests, nothing lost.
+        std::fs::rename(root.join("src/a.test.ts"), root.join("src/b.test.ts")).unwrap();
+        assert!(inspect_tests(&repo, &base, &commands, false).unwrap().is_none());
+
+        // One skipped and the script told to pass with nothing to run.
+        std::fs::write(root.join("src/b.test.ts"), "it(\"one\", () => {})\nit.skip(\"two\", () => {})\n").unwrap();
+        std::fs::write(root.join("package.json"), r#"{"scripts":{"test":"vitest run --passWithNoTests"}}"#).unwrap();
+        let found = inspect_tests(&repo, &base, &commands, false).unwrap().expect("weakened");
+        assert!(found.is_tests());
+        assert!(found.reasons.iter().any(|r| r.contains("it.skip")), "{:?}", found.reasons);
+        assert!(found.reasons.iter().any(|r| r.contains("«test»")), "{:?}", found.reasons);
+        assert!(found.files.contains(&"package.json".to_string()), "{:?}", found.files);
+        // The same state is the same version: an approval holds until the work changes.
+        assert_eq!(inspect_tests(&repo, &base, &commands, false).unwrap().unwrap().version, found.version);
     }
 
     #[test]

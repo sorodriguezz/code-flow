@@ -79,8 +79,13 @@ fn stop_checks_for_chain(chain_id: &str) {
 /// One shell command in `cwd` with the checks' timeout: `(passed, output)`. A command that could not
 /// start is a failure with its reason as the output.
 pub(crate) async fn run_shell_check(command: &str, cwd: &str) -> (bool, String) {
+    run_shell_check_with(command, cwd, CHECK_TIMEOUT, &[]).await
+}
+
+/// [`run_shell_check`] with its own timeout and extra environment variables.
+pub(crate) async fn run_shell_check_with(command: &str, cwd: &str, timeout: Duration, env: &[(String, String)]) -> (bool, String) {
     let stop = Notify::new();
-    match run_check_process(command, cwd, CHECK_TIMEOUT, &stop).await {
+    match run_check_process_env(command, cwd, timeout, &stop, env).await {
         CheckEnd::Exited { success, output } => (success, output),
         CheckEnd::TimedOut { output } => (false, format!("{output}\n(tiempo agotado)")),
         CheckEnd::Stopped => (false, "detenido".to_string()),
@@ -135,6 +140,10 @@ fn kill_group(pid: Option<u32>) {
 /// the chain long since moved on. Now a timeout or a stop takes the whole group down
 /// ([`crate::ai_runs::kill_tree`]), and a check that exits on its own has its leftovers reaped too.
 pub(crate) async fn run_check_process(command: &str, cwd: &str, timeout: Duration, stop: &Notify) -> CheckEnd {
+    run_check_process_env(command, cwd, timeout, stop, &[]).await
+}
+
+pub(crate) async fn run_check_process_env(command: &str, cwd: &str, timeout: Duration, stop: &Notify, env: &[(String, String)]) -> CheckEnd {
     let mut cmd = if cfg!(windows) {
         let mut c = crate::proc::command("cmd");
         c.arg("/C").arg(command);
@@ -145,6 +154,9 @@ pub(crate) async fn run_check_process(command: &str, cwd: &str, timeout: Duratio
         c
     };
     cmd.current_dir(cwd);
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
     // Never inherited: a check that reads stdin would block forever behind a terminal that does
     // not exist.
     cmd.stdin(std::process::Stdio::null());

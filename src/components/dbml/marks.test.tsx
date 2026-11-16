@@ -269,8 +269,9 @@ describe("overlapping boxes", () => {
    * The fade must be on the card's *contents*, never on the group.
    *
    * A group opacity makes the backing translucent too, and then a receded box stops hiding whatever
-   * it overlaps. So the backing rect must sit outside any faded group — which shows up in the
-   * markup as a `fill="var(--cf-surface)"` rect with no `opacity` on it or on any ancestor.
+   * it overlaps. The fade is a veil of the surface colour drawn over the contents instead, so no
+   * group in the canvas carries an `opacity` at all — that is also what keeps a drag from
+   * recompositing every receded box it sweeps past.
    */
   it("keeps every card's backing fully opaque", () => {
     const html = renderToStaticMarkup(
@@ -284,10 +285,10 @@ describe("overlapping boxes", () => {
         query="posts"
       />,
     );
-    expect(html).toContain('opacity="0.45"');
-    for (const match of html.matchAll(/<g opacity="0\.45"[^>]*>(.*?)<\/g>/g)) {
-      expect(match[1]).not.toContain('fill="var(--cf-surface)"');
-    }
+    // The receded boxes are veiled…
+    expect(html).toContain('fill="var(--cf-surface)" fill-opacity="0.55"');
+    // …and nothing is faded as a group, so every backing stays opaque.
+    expect(html).not.toMatch(/<g[^>]* opacity="/);
   });
 });
 

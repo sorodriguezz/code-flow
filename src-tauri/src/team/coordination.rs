@@ -34,6 +34,17 @@ pub struct Impact {
     pub files: Vec<String>,
     pub diff: String,
     pub version: String,
+    /// Why it waits for the user, when that is not just which files it touches: the ways the change
+    /// weakened its tests (`gitops::inspect_tests`).
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}
+
+impl Impact {
+    /// Whether this is the weakened-tests gate rather than the high-impact-paths one.
+    pub fn is_tests(&self) -> bool {
+        self.version.starts_with("tests-")
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

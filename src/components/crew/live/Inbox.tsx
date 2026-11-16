@@ -12,6 +12,7 @@ import { Btn, field } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
 
 function gateTitle(run: TeamRun, l: (es: string, en: string) => string): string {
+  if (run.gate.split(":")[2]?.startsWith("tests-")) return l("Revisar pruebas debilitadas", "Review weakened tests");
   if (run.gate.startsWith("impact:")) return l("Revisar cambios de impacto", "Review high-impact changes");
   if (run.gate.startsWith("amend:") || run.gate.startsWith("amend_failed:")) return l("Revisar ajuste del plan", "Review plan amendment");
   if (run.gate === "plan") return l("Aprobar el plan", "Approve the plan");

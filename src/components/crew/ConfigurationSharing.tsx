@@ -41,7 +41,6 @@ const COPY = {
   version: ["Esta versión del archivo no es compatible con tu versión de CodeFlow.", "This file version is not supported by your version of CodeFlow."],
   reference: ["La configuración contiene referencias incompletas o una jerarquía inválida.", "The configuration contains incomplete references or an invalid hierarchy."],
   repository: ["Vincula todos los repositorios con el workspace de destino.", "Map every repository to the destination workspace."],
-  exportRepository: ["«{name}» solo puede trabajar en repositorios que ya no están en este workspace. Edita sus repositorios y vuelve a exportar.", "«{name}» may only work in repositories that are no longer in this workspace. Edit its repositories and export again."],
   size: ["El archivo supera el tamaño máximo de 5 MB.", "The file exceeds the maximum size of 5 MB."],
   changedWorkspace: ["El workspace cambió. Vuelve a abrir la importación en el destino.", "The workspace changed. Open the import again in the destination."],
 } as const;
@@ -50,7 +49,6 @@ const ERROR_COPY = {
   [CONFIGURATION_ERRORS.version]: COPY.version,
   [CONFIGURATION_ERRORS.reference]: COPY.reference,
   [CONFIGURATION_ERRORS.repository]: COPY.repository,
-  [CONFIGURATION_ERRORS.exportRepository]: COPY.exportRepository,
   [CONFIGURATION_ERRORS.size]: COPY.size,
 };
 const PERMISSION_SEPARATOR = ", ";

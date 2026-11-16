@@ -13,7 +13,7 @@ import type { DbmlSchema } from "../../lib/dbml/types";
  * ordering decision in `focusKind`/`focusId` that is not obvious from reading them.
  *
  * Opacity is the assertion because opacity is the feature. `0.95` is a lit line, `0.16` a dimmed
- * one — see the link render in `DbmlCanvas`.
+ * one — see the link render in `DbmlCanvas`, which puts it on each line's dashed stroke.
  */
 const column = (name: string, pk = false) => ({
   name,
@@ -67,8 +67,9 @@ function draw(focusRef: string | null) {
   );
 }
 
+/** How many relationship lines are drawn at `opacity`: the dashed stroke carries it, one per line. */
 const occurrences = (html: string, opacity: string) =>
-  (html.match(new RegExp(`opacity="${opacity}"`, "g")) ?? []).length;
+  (html.match(new RegExp(`stroke-dasharray="[^"]*" stroke-opacity="${opacity}"`, "g")) ?? []).length;
 
 describe("hovering a relation in the inspector", () => {
   it("lights the table's whole neighbourhood when nothing is hovered", () => {

@@ -7,7 +7,7 @@ import { useAgentsStore } from "../../../state/agentsStore";
 import { useTeamStore } from "../../../state/teamStore";
 import { useChainStore } from "../../../state/chainStore";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
-import { ticketUid } from "../../../lib/tickets/ticketKeys";
+import { NO_FILTERS, filterTickets, matchesQuery, ticketUid } from "../../../lib/tickets/ticketKeys";
 import { rankBetween, workState } from "../../../lib/backlog/status";
 import { emptyBacklogItem, type BacklogItem, type BacklogKind, type BacklogStatus } from "../../../types/crew";
 import type { Ticket } from "../../../lib/tauri/ticketCommands";
@@ -229,22 +229,29 @@ function TicketView({ ticket }: { ticket: Ticket }) {
   );
 }
 
-function Inbox() {
+/** How many tickets of one board the inbox draws before it asks you to search or open the rest. */
+const INBOX_SHOWN = 40;
+
+function Inbox({ query }: { query: string }) {
   const l = useL();
+  const [showAll, setShowAll] = useState(false);
   const tickets = useTicketStore((s) => s.tickets);
   const loading = useTicketStore((s) => s.loading);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const items = useBacklogStore((s) => s.items);
   const imported = useMemo(() => new Set(items.map((i) => i.ticket?.uid).filter(Boolean)), [items]);
   const pending = tickets.filter((t) => !imported.has(ticketUid(t)));
+  // The board's search reaches the inbox too: it is where most of the tickets are.
+  const searching = query.trim() !== "";
+  const found = searching ? filterTickets(pending, NO_FILTERS, query) : pending;
   const groups = new Map<string, Ticket[]>();
-  for (const t of pending) groups.set(t.provider, [...(groups.get(t.provider) ?? []), t]);
+  for (const t of found) groups.set(t.provider, [...(groups.get(t.provider) ?? []), t]);
   return (
     <section className="flex min-h-0 w-[262px] shrink-0 flex-col rounded-[12px] border border-dashed border-[var(--cf-border-strong)] bg-[color-mix(in_oklab,var(--cf-blue)_5%,var(--cf-sunken))]">
       <header className="flex items-center gap-2 px-3 pb-1 pt-2.5">
         <span className="h-2 w-2 rounded-[3px] bg-[var(--cf-blue)]" />
         <h3 className="m-0 text-[12.5px] font-semibold">{l("Entrada", "Inbox")}</h3>
-        <span title={l("Tickets sin traer a Pendientes", "Tickets not yet in the backlog")} className="text-[11px] text-[var(--cf-text-faint)]">{pending.length}</span>
+        <span title={searching ? l("Tickets que coinciden con la búsqueda, de los que no has traído a Pendientes", "Tickets matching the search, out of those not yet in the backlog") : l("Tickets sin traer a Pendientes", "Tickets not yet in the backlog")} className="text-[11px] text-[var(--cf-text-faint)]">{searching ? `${found.length} / ${pending.length}` : pending.length}</span>
         <span className="flex-1" />
         <button type="button" title={l("Trae los tickets nuevos de tus tableros", "Fetches new tickets from your boards")} onClick={() => void useTicketStore.getState().refresh(workspaceId)} className="grid h-6 w-6 place-items-center rounded-[6px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
@@ -258,12 +265,18 @@ function Inbox() {
               <Download className="h-3 w-3" />
               {provider}
             </span>
-            {list.slice(0, 40).map((t) => (
+            {(showAll ? list : list.slice(0, INBOX_SHOWN)).map((t) => (
               <TicketView key={ticketUid(t)} ticket={t} />
             ))}
+            {!showAll && list.length > INBOX_SHOWN && (
+              <button type="button" onClick={() => setShowAll(true)} title={l("Muestra todos los tickets de este tablero", "Shows every ticket of this board")} className="rounded-[8px] px-2 py-1.5 text-left text-[11.5px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
+                {l(`Ver ${list.length - INBOX_SHOWN} más, o busca arriba`, `Show ${list.length - INBOX_SHOWN} more, or search above`)}
+              </button>
+            )}
           </div>
         ))}
         {pending.length === 0 && <div className="rounded-[10px] border-[1.5px] border-dashed border-[var(--cf-border-strong)] px-2.5 py-4 text-center text-[12px] text-[var(--cf-text-faint)]">{l("Sin tickets nuevos", "No new tickets")}</div>}
+        {pending.length > 0 && found.length === 0 && <div className="rounded-[10px] border-[1.5px] border-dashed border-[var(--cf-border-strong)] px-2.5 py-4 text-center text-[12px] text-[var(--cf-text-faint)]">{l("Ningún ticket coincide con la búsqueda", "No ticket matches the search")}</div>}
       </div>
     </section>
   );
@@ -293,7 +306,7 @@ export function BoardSpace() {
   const visible = items
     .filter((i) => !i.parent_id)
     .filter((i) => filter === "all" || (filter === "none" ? !i.assignee_kind : `${i.assignee_kind}:${i.assignee_id}` === filter))
-    .filter((i) => !query.trim() || `${i.title} ${i.body} ${i.ticket?.key ?? ""}`.toLowerCase().includes(query.trim().toLowerCase()));
+    .filter((i) => matchesQuery(`${i.title} ${i.body} ${i.ticket?.key ?? ""}`, query));
 
   const create = async (kind: BacklogKind) => {
     if (!workspaceId) return;
@@ -314,13 +327,13 @@ export function BoardSpace() {
         })}
         <div className="relative ml-1 w-[200px]">
           <Search className="absolute left-2.5 top-[7px] h-4 w-4 text-[var(--cf-text-faint)]" />
-          <input value={query} onChange={(e) => setQuery(e.target.value)} title={l("Filtra por título, texto o clave de ticket", "Filter by title, text or ticket key")} placeholder={l("Buscar", "Search")} className={`${field} h-[30px] pl-8`} />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} title={l("Filtra las tarjetas y los tickets de Entrada por título, texto, número o clave de ticket", "Filters cards and inbox tickets by title, text, number or ticket key")} placeholder={l("Buscar", "Search")} className={`${field} h-[30px] pl-8`} />
         </div>
         <span className="flex-1" />
         <Btn small icon={Plus} onClick={() => void create("task")} title={l("Crea una tarjeta nueva; dentro eliges si es tarea, historia o bug", "Creates a new card; inside you pick task, story or bug")}>{l("Tarea", "Task")}</Btn>
       </div>
       <div className="flex min-h-0 flex-1 items-stretch gap-3 overflow-x-auto p-3.5">
-        <Inbox />
+        <Inbox query={query} />
         {COLUMNS.map((c) => (
           <Column key={c.id} id={c.id} title={l(c.es, c.en)} color={c.color} cards={visible.filter((i) => i.status === c.id).sort((a, b) => a.rank - b.rank)} />
         ))}

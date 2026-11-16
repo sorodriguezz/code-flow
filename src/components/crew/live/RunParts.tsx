@@ -26,6 +26,7 @@ export function GateCard({ state }: { state: TeamRunState }) {
   const gated = state.items.find((item) => item.id === gatedId);
   const amendment = kind === "amend" ? gated?.intelligence?.amendment : null;
   const impact = kind === "impact" ? gated?.intelligence?.impact : null;
+  const weakenedTests = impact?.version.startsWith("tests-") ?? false;
   const decide = async (approve: boolean) => {
     if (deciding) return;
     setDeciding(true);
@@ -39,6 +40,7 @@ export function GateCard({ state }: { state: TeamRunState }) {
   const [yes, no] =
     kind === "amend" ? [l("Aplicar ajuste", "Apply amendment"), l("Mantener el plan", "Keep current plan")]
       : kind === "amend_failed" ? [l("Reintentar ajuste", "Retry amendment"), l("Mantener el plan", "Keep current plan")]
+      : kind === "impact" && weakenedTests ? [l("Aprobar: la tarea lo pedía", "Approve: the task asked for it"), l("Rechazar la tarea", "Reject the task")]
       : kind === "impact" ? [l("Aprobar cambios", "Approve changes"), l("Rechazar cambios", "Reject changes")]
       : gate === "plan"
       ? [l("Aprobar el plan", "Approve the plan"), l("Pedir otro", "Ask for another")]
@@ -54,7 +56,8 @@ export function GateCard({ state }: { state: TeamRunState }) {
               ? [l("Seguir (+50% de presupuesto)", "Go on (+50% budget)"), l("Parar aquí", "Stop here")]
               : [l("Seguir", "Continue"), l("Darla por fallida", "Mark it failed")];
   const title =
-    kind === "impact" ? l("Cambios de impacto", "High-impact changes")
+    kind === "impact" && weakenedTests ? l("Las pruebas quedaron más débiles", "The tests got weaker")
+      : kind === "impact" ? l("Cambios de impacto", "High-impact changes")
       : kind === "amend" ? l("Ajuste propuesto por el líder", "Amendment proposed by the lead")
       : kind === "amend_failed" ? l("El ajuste necesita atención", "The amendment needs attention")
       : gate === "plan" ? l("El líder propone este plan", "The lead proposes this plan") : gate === "merge" ? (run.policy.integrate === "pr" ? l("Listo para abrir el PR", "Ready to open the PR") : l("Listo para integrar", "Ready to merge")) : gate === "budget" ? l("Llegó al presupuesto", "Budget reached") : gate.startsWith("stuck:") ? l("Se atascó", "It got stuck") : l("Te espera", "Waiting on you");
@@ -83,6 +86,11 @@ export function GateCard({ state }: { state: TeamRunState }) {
       {impact && (
         <div className="space-y-1 text-[12px]">
           <b>{gated?.title}</b>
+          {(impact.reasons ?? []).length > 0 && (
+            <ul className="m-0 list-disc space-y-0.5 pl-4">
+              {(impact.reasons ?? []).map((reason, index) => <li key={index} className="break-words">{reason}</li>)}
+            </ul>
+          )}
           <div className="break-words">{impact.files.join(" · ")}</div>
           {impact.diff && <pre className="max-h-52 overflow-auto rounded-lg bg-[var(--cf-sunken)] p-2 text-[11px]">{impact.diff}</pre>}
         </div>

@@ -23,10 +23,12 @@ pub mod artifacts;
 pub mod chat;
 pub mod gitops;
 pub mod coordination;
+pub mod deps;
 pub mod intelligence;
 pub mod hierarchy;
 pub mod metrics;
 pub mod protocol;
+pub mod tamper;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};

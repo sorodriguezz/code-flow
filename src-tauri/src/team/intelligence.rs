@@ -22,6 +22,13 @@ pub struct ItemIntelligence {
     pub failure_fingerprint: String,
     pub impact: Option<super::coordination::Impact>,
     pub approved_impact: String,
+    /// The weakened-tests finding the user approved (`Impact::version`), kept apart from
+    /// `approved_impact` so approving one gate does not reopen the other.
+    pub approved_tests: String,
+    /// On a lead's round: what the members had delivered when it was created
+    /// (`team_cmd::progress_mark`), so the next automatic round can tell whether this one produced
+    /// anything. `ack:<mark>` once the user chose to go on without progress.
+    pub progress: String,
     pub execution: Option<super::coordination::Execution>,
     pub quota_events: Vec<super::coordination::Execution>,
 }

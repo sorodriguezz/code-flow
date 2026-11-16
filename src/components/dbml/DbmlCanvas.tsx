@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { flushSync } from "react-dom";
 import { clip } from "../../lib/diagramSvg";
 import { routeEdges, type EdgeRouting, type RoutedEdge } from "../../lib/dbml/route";
 import {
@@ -592,7 +593,10 @@ export const DbmlCanvas = memo(forwardRef<
     if (liveFrame.current !== null) return;
     liveFrame.current = requestAnimationFrame(() => {
       liveFrame.current = null;
-      setLive(livePending.current);
+      // Rendered now, inside this frame's callback, so the moved box is in the frame about to be
+      // painted. A plain `setLive` here is scheduled by React for a later task, which lands the
+      // move a frame after the pointer — the trailing «delay» a drag felt like.
+      flushSync(() => setLive(livePending.current));
     });
   }, []);
   /** Drops the overlay — in the same handler as the release's write, so the two land in one render
@@ -609,6 +613,36 @@ export const DbmlCanvas = memo(forwardRef<
     },
     [],
   );
+
+  /**
+   * A release's write, held until the drop has been painted.
+   *
+   * Writing the place is the heavy part of a drag: the document's layout comment is rewritten, the
+   * editor applies the edit, the workbench re-renders and the schema is laid out again. Done in the
+   * release handler, all of that ran before the frame that shows the drop, so the box froze under
+   * the cursor for a moment as it was let go. Now the overlay keeps the box where it was dropped,
+   * that frame paints, and the write runs in the task after it — dropping the overlay in the same
+   * batch, so the box never flashes back. A press before it runs writes it first, so a second drag
+   * starts from the first one's result.
+   */
+  const pendingDrop = useRef<(() => void) | null>(null);
+  const flushDrop = useCallback(() => {
+    const write = pendingDrop.current;
+    pendingDrop.current = null;
+    write?.();
+  }, []);
+  const dropLater = useCallback(
+    (write: () => void) => {
+      flushDrop();
+      pendingDrop.current = () => {
+        clearLive();
+        write();
+      };
+      requestAnimationFrame(() => setTimeout(flushDrop, 0));
+    },
+    [flushDrop, clearLive],
+  );
+  useEffect(() => () => flushDrop(), [flushDrop]);
 
   /** The layout as the document has it. Not re-run by a drag — see `live`. */
   const settled = useMemo(
@@ -634,10 +668,21 @@ export const DbmlCanvas = memo(forwardRef<
     [schema.tables],
   );
   /** The sticky notes where they are drawn: placed, or parked to the right of the tables. */
-  const stickies = useMemo(
-    () => stickyBoxes(schema.notes ?? [], shownPositions, { width: layout.width === 0 ? 0 : layout.minX + layout.width }),
-    [schema.notes, shownPositions, layout.minX, layout.width],
-  );
+  // A note that did not move keeps its previous object: `shownPositions` is new on every frame of
+  // a table's drag, and a fresh box per note would re-render every memoised `StickyNoteBox` with it.
+  const stickiesBefore = useRef<Map<string, StickyBox>>(new Map());
+  const stickies = useMemo(() => {
+    const next = stickyBoxes(schema.notes ?? [], shownPositions, { width: layout.width === 0 ? 0 : layout.minX + layout.width });
+    const before = stickiesBefore.current;
+    const kept = next.map((box) => {
+      const old = before.get(box.id);
+      return old && old.x === box.x && old.y === box.y && old.w === box.w && old.h === box.h && old.name === box.name && old.content === box.content && old.color === box.color
+        ? old
+        : box;
+    });
+    stickiesBefore.current = new Map(kept.map((box) => [box.id, box]));
+    return kept;
+  }, [schema.notes, shownPositions, layout.minX, layout.width]);
   /**
    * The picture's extent with the notes in it — what fitting, the dotted ground and an export frame.
    * The tables' own `layout` stays what the router and `holdPlaces` read.
@@ -657,6 +702,10 @@ export const DbmlCanvas = memo(forwardRef<
     }
     return { ...layout, minX, minY, width: maxX - minX, height: maxY - minY };
   }, [layout, stickies]);
+  /** `framed` as it stands outside a drag — kept through one, for the dotted ground. */
+  const groundRef = useRef(framed);
+  if (!live) groundRef.current = framed;
+  const ground = groundRef.current;
   /** Every reference by its id, so a line can read its own cardinality without scanning the list. */
   const refById = useMemo(
     () => new Map(schema.refs.map((ref) => [ref.id, ref])),
@@ -1005,6 +1054,7 @@ export const DbmlCanvas = memo(forwardRef<
   }, [applyView, scheduleCommit, zoomBy]);
 
   const onPointerDown = (event: React.PointerEvent, node?: DiagramNode) => {
+    flushDrop();
     // Before the button check, so a right-click that opens a menu takes the card down with it.
     setNoteTip(null);
     if (event.button !== 0) return;
@@ -1129,12 +1179,17 @@ export const DbmlCanvas = memo(forwardRef<
       return;
     }
     if (drag?.kind === "canvas") commitView();
-    // The release is what writes the document — every frame before it only moved the picture.
-    if (drag?.kind === "node" || drag?.kind === "sticky") clearLive();
+    // The release is what writes the document — every frame before it only moved the picture — and
+    // it writes once the drop is on screen (see `dropLater`).
     if (drag?.kind === "node" && drag.moved && drag.lastX !== undefined && drag.lastY !== undefined) {
-      onMoveTable?.(drag.id, drag.lastX, drag.lastY, true);
+      const { id, lastX, lastY } = drag;
+      dropLater(() => onMoveTable?.(id, lastX, lastY, true));
+    } else if (drag?.kind === "sticky" && drag.moved && drag.last) {
+      const { id, last } = drag;
+      dropLater(() => notesEditing?.place(id, last, true));
+    } else if (drag?.kind === "node" || drag?.kind === "sticky") {
+      clearLive();
     }
-    if (drag?.kind === "sticky" && drag.moved && drag.last) notesEditing?.place(drag.id, drag.last, true);
     // A gesture that actually moved almost certainly left the line it started on — and it cannot
     // tell us so itself, because while the pointer is captured the browser stops delivering
     // enter/leave to the elements underneath. Without this the line stays lit for good. A press
@@ -1238,6 +1293,26 @@ export const DbmlCanvas = memo(forwardRef<
     [],
   );
   const pressBox = useLatest((event: React.PointerEvent, node: DiagramNode) => onPointerDown(event, node));
+  const pressNote = useLatest((event: React.PointerEvent, resize: boolean, box: StickyBox) => {
+    flushDrop();
+    setNoteTip(null);
+    if (event.button !== 0) return;
+    event.stopPropagation();
+    if (!notesEditing) return;
+    event.preventDefault();
+    frameRef.current?.focus({ preventScroll: true });
+    frameRef.current?.setPointerCapture?.(event.pointerId);
+    dragRef.current = { kind: "sticky", id: box.id, resize, x: event.clientX, y: event.clientY, box, moved: false };
+  });
+  const editNote = useLatest((box: StickyBox) => {
+    if (!notesEditing) return;
+    setNoteEditing({ id: box.id, name: box.name, content: box.content, box });
+  });
+  const noteMenu = useLatest((event: React.MouseEvent, box: StickyBox) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setMenu({ x: event.clientX, y: event.clientY, on: { kind: "note", id: box.id, name: box.name, content: box.content, color: box.color } });
+  });
   const openBox = useLatest((id: string) => onOpen?.(id));
   const renameBox = useLatest((node: DiagramNode) => beginRename(node.id, node.name));
   const startBoxWire = useLatest(
@@ -1430,11 +1505,14 @@ export const DbmlCanvas = memo(forwardRef<
           id={DBML_CANVAS_ID}
           transform={`translate(${view.x} ${view.y}) scale(${view.k})`}
         >
+          {/* Sized from the frame as it was before the drag: a box pulled past the edge would
+              otherwise resize this rect, the largest thing in the drawing, on every frame — and
+              repaint all of it. The margin is wide enough that a drag does not reach past it. */}
           <rect
-            x={framed.minX - 2400}
-            y={framed.minY - 2400}
-            width={framed.width + 4800}
-            height={framed.height + 4800}
+            x={ground.minX - 2400}
+            y={ground.minY - 2400}
+            width={ground.width + 4800}
+            height={ground.height + 4800}
             fill="url(#cf-dbml-dots)"
             pointerEvents="none"
           />
@@ -1516,6 +1594,7 @@ export const DbmlCanvas = memo(forwardRef<
                 color={isEnum ? undefined : tableColors.get(node.id)}
                 pinned={pinnedId === node.id}
                 selected={selected === node.id}
+                moving={live !== null && live[node.id] !== undefined}
                 // Only this box's hovered row, as a column name: the whole canvas's hovered row
                 // would be a new prop for every box each time the pointer crossed a line.
                 connectHint={connectable ? connectHint : undefined}
@@ -1565,29 +1644,9 @@ export const DbmlCanvas = memo(forwardRef<
               editingNow={noteEditing?.id === box.id}
               hint={t("dbml.noteEditHint")}
               placeholder={t("dbml.notePlaceholder")}
-              onPointerDown={(event, resize) => {
-                setNoteTip(null);
-                if (event.button !== 0) return;
-                event.stopPropagation();
-                if (!notesEditing) return;
-                event.preventDefault();
-                frameRef.current?.focus({ preventScroll: true });
-                frameRef.current?.setPointerCapture?.(event.pointerId);
-                dragRef.current = { kind: "sticky", id: box.id, resize, x: event.clientX, y: event.clientY, box, moved: false };
-              }}
-              onEdit={() => {
-                if (!notesEditing) return;
-                setNoteEditing({ id: box.id, name: box.name, content: box.content, box });
-              }}
-              onContextMenu={
-                notesEditing
-                  ? (event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      setMenu({ x: event.clientX, y: event.clientY, on: { kind: "note", id: box.id, name: box.name, content: box.content, color: box.color } });
-                    }
-                  : undefined
-              }
+              onPointerDown={pressNote}
+              onEdit={editNote}
+              onContextMenu={notesEditing ? noteMenu : undefined}
             />
           ))}
 
@@ -2081,7 +2140,11 @@ const EdgeLine = memo(function EdgeLine({
       >
         <title>{`${link.from}.${link.fromColumn} → ${link.to}.${link.toColumn}`}</title>
       </path>
-      <g opacity={opacity} pointerEvents="none">
+      {/* The fade is on each mark rather than on this group: a group's opacity is drawn offscreen,
+          over the group's whole extent — for a line, a box spanning both of its tables — and
+          composited again on every repaint that crosses it. The badge stays opaque: it is there to
+          cut the line, and a see-through one let the dash run through its label. */}
+      <g pointerEvents="none">
         {/* Dashed, and every line is.
 
             A reference is a rule about the data rather than a thing the data contains, and a dashed
@@ -2099,12 +2162,13 @@ const EdgeLine = memo(function EdgeLine({
           // rather than as a corner.
           strokeLinejoin="round"
           strokeDasharray={mark === "remove" ? "1.5 4" : "6 4"}
+          strokeOpacity={opacity}
         />
         {/* The dot pins the line to the row it belongs to; the foot beside it says how many rows
             that end stands for. Neither is an arrowhead: direction is not what a reader is asking a
             relationship line, and a head large enough to see at 40% zoom is a blob at 200%. */}
-        <circle cx={route.x1} cy={route.y1} r={lit ? 3.2 : 2.4} fill={stroke} />
-        <circle cx={route.x2} cy={route.y2} r={lit ? 3.2 : 2.4} fill={stroke} />
+        <circle cx={route.x1} cy={route.y1} r={lit ? 3.2 : 2.4} fill={stroke} fillOpacity={opacity} />
+        <circle cx={route.x2} cy={route.y2} r={lit ? 3.2 : 2.4} fill={stroke} fillOpacity={opacity} />
         <Foot
           x={route.x1}
           y={route.y1}
@@ -2112,9 +2176,10 @@ const EdgeLine = memo(function EdgeLine({
           many={fromMany}
           colour={stroke}
           lit={lit}
+          opacity={opacity}
         />
-        <Foot x={route.x2} y={route.y2} outward={toOutward} many={toMany} colour={stroke} lit={lit} />
-        <CardinalityBadge x={route.mid.x} y={route.mid.y} label={label} colour={stroke} />
+        <Foot x={route.x2} y={route.y2} outward={toOutward} many={toMany} colour={stroke} lit={lit} opacity={opacity} />
+        <CardinalityBadge x={route.mid.x} y={route.mid.y} label={label} colour={stroke} opacity={opacity} />
       </g>
     </g>
   );
@@ -2140,6 +2205,7 @@ function Foot({
   many,
   colour,
   lit,
+  opacity,
 }: {
   x: number;
   y: number;
@@ -2147,6 +2213,7 @@ function Foot({
   many: boolean;
   colour: string;
   lit: boolean;
+  opacity: number;
 }) {
   const weight = lit ? 1.8 : 1.3;
   if (!many) {
@@ -2160,6 +2227,7 @@ function Foot({
         x2={at}
         y2={y + 4.4}
         stroke={colour}
+        strokeOpacity={opacity}
         strokeWidth={weight}
         strokeLinecap="round"
       />
@@ -2171,6 +2239,7 @@ function Foot({
       d={`M${apex} ${y} L${x} ${y - 4.8} M${apex} ${y} L${x} ${y} M${apex} ${y} L${x} ${y + 4.8}`}
       fill="none"
       stroke={colour}
+      strokeOpacity={opacity}
       strokeWidth={weight}
       strokeLinecap="round"
     />
@@ -2193,11 +2262,13 @@ function CardinalityBadge({
   y,
   label,
   colour,
+  opacity,
 }: {
   x: number;
   y: number;
   label: string;
   colour: string;
+  opacity: number;
 }) {
   return (
     <>
@@ -2209,10 +2280,10 @@ function CardinalityBadge({
         rx={7.5}
         fill="var(--cf-surface)"
         stroke={colour}
-        strokeOpacity={0.5}
+        strokeOpacity={0.5 * opacity}
         strokeWidth={1}
       />
-      <text x={x} y={y + 3.2} fontSize={8.5} fontWeight={700} textAnchor="middle" fill={colour}>
+      <text x={x} y={y + 3.2} fontSize={8.5} fontWeight={700} textAnchor="middle" fill={colour} fillOpacity={opacity}>
         {label}
       </text>
     </>
@@ -2301,9 +2372,11 @@ const StickyNoteBox = memo(function StickyNoteBox({
   editingNow: boolean;
   hint: string;
   placeholder: string;
-  onPointerDown: (event: React.PointerEvent, resize: boolean) => void;
-  onEdit: () => void;
-  onContextMenu?: (event: React.MouseEvent) => void;
+  /** These take the box they are about: they are the canvas's own, stable for its lifetime, so the
+   *  memo holds through a drag that is not about this note. */
+  onPointerDown: (event: React.PointerEvent, resize: boolean, box: StickyBox) => void;
+  onEdit: (box: StickyBox) => void;
+  onContextMenu?: (event: React.MouseEvent, box: StickyBox) => void;
 }) {
   const colour = box.color ?? DEFAULT_NOTE_COLOR;
   const lines = useMemo(
@@ -2314,12 +2387,12 @@ const StickyNoteBox = memo(function StickyNoteBox({
   return (
     <g
       transform={`translate(${box.x} ${box.y})`}
-      onPointerDown={(event) => onPointerDown(event, false)}
+      onPointerDown={(event) => onPointerDown(event, false, box)}
       onDoubleClick={(event) => {
         event.stopPropagation();
-        onEdit();
+        onEdit(box);
       }}
-      onContextMenu={onContextMenu}
+      onContextMenu={onContextMenu ? (event) => onContextMenu(event, box) : undefined}
       style={{ cursor: editable ? "move" : "default" }}
     >
       {editable && <title>{hint}</title>}
@@ -2359,7 +2432,7 @@ const StickyNoteBox = memo(function StickyNoteBox({
           style={{ cursor: "nwse-resize" }}
           onPointerDown={(event) => {
             event.stopPropagation();
-            onPointerDown(event, true);
+            onPointerDown(event, true, box);
           }}
         />
       )}
@@ -2382,6 +2455,7 @@ const SchemaBox = memo(function SchemaBox({
   markNames,
   pinned,
   selected,
+  moving,
   related,
   dimmed,
   joinedColumns,
@@ -2422,6 +2496,8 @@ const SchemaBox = memo(function SchemaBox({
   /** The inspector is held on this table. */
   pinned: boolean;
   selected: boolean;
+  /** Being dragged: the selection halo is drawn as a ring instead of a blur while it moves. */
+  moving: boolean;
   related: boolean;
   dimmed: boolean;
   /** The names of this box's columns that the lit relationship is made of. */
@@ -2467,6 +2543,7 @@ const SchemaBox = memo(function SchemaBox({
   onOpen: (id: string) => void;
 }) {
   const accent = isEnum ? ENUM_COLOUR : color ?? "var(--cf-accent)";
+  const veil = dimmed ? 0.55 : mark === "remove" ? 0.18 : 0;
   // The row handlers, bound to this node once per node rather than once per row per render, so the
   // memoised `Row`s hold while the box re-renders for something that is not theirs.
   const connectable = connectHint !== undefined && !isEnum;
@@ -2586,13 +2663,29 @@ const SchemaBox = memo(function SchemaBox({
           the strength that halo was drawn at — a quarter of the selection's, so the eye lands on the
           selection first while the neighbours still read as a lit set — the two are
           indistinguishable, and the ring costs nothing to repaint. */}
-      {selected && (
+      {/* While it moves, the blur would be re-rasterised at every new position, a region almost
+          twice the box's size per frame; the ring the neighbours use costs nothing to move. */}
+      {selected && !moving && (
         <rect
           width={node.width}
           height={node.height}
           rx={TABLE_CORNER_RADIUS}
           fill="var(--cf-surface)"
           filter={SELECTED_TABLE_GLOW}
+          pointerEvents="none"
+        />
+      )}
+      {selected && moving && (
+        <rect
+          x={-3}
+          y={-3}
+          width={node.width + 6}
+          height={node.height + 6}
+          rx={TABLE_CORNER_RADIUS + 3}
+          fill="none"
+          stroke="var(--cf-accent)"
+          strokeOpacity={0.35}
+          strokeWidth={6}
           pointerEvents="none"
         />
       )}
@@ -2619,16 +2712,7 @@ const SchemaBox = memo(function SchemaBox({
           The backing stays at full alpha and only what is *printed on it* recedes. */}
       <rect width={node.width} height={node.height} rx={12} fill="var(--cf-surface)" />
 
-      <g
-        // Receding, not vanishing. The selection is *marked* — an accent border, a halo, lit lines,
-        // the joined columns washed — and the dim is only there to push the rest behind that. Taken
-        // further it stops reading as focus and starts reading as a diagram that failed to load.
-        //
-        // A removal candidate recedes a little even when nothing is selected: it is still part of
-        // the model, and it is on its way out of it. Not as far as `dimmed`, which means "not what
-        // you asked about" and has to stay distinguishable from "marked".
-        opacity={dimmed ? 0.45 : mark === "remove" ? 0.82 : 1}
-      >
+      <g>
       <rect
         width={node.width}
         height={node.height}
@@ -2906,6 +2990,32 @@ const SchemaBox = memo(function SchemaBox({
         </text>
       )}
       </g>
+      {/* Receding, not vanishing. The selection is *marked* — an accent border, a halo, lit lines,
+          the joined columns washed — and the dim is only there to push the rest behind that. Taken
+          further it stops reading as focus and starts reading as a diagram that failed to load.
+
+          A removal candidate recedes a little even when nothing is selected: it is still part of
+          the model, and it is on its way out of it. Not as far as `dimmed`, which means "not what
+          you asked about" and has to stay distinguishable from "marked".
+
+          A veil of the card's own colour over what is printed on it, not `opacity` on the group:
+          the card is opaque, so `veil` of surface over the content is exactly the content at
+          `1 - veil` over the surface — the same picture. But a group's opacity is drawn offscreen
+          and composited again on every repaint that touches it, and with a table selected most of
+          the diagram is receded: a drag that swept its lines across them recomposited dozens of
+          groups per frame. A translucent rect is one blend. */}
+      {veil > 0 && (
+        <rect
+          x={-1}
+          y={-1}
+          width={node.width + 2}
+          height={node.height + 2}
+          rx={13}
+          fill="var(--cf-surface)"
+          fillOpacity={veil}
+          pointerEvents="none"
+        />
+      )}
     </g>
   );
 });

@@ -100,6 +100,10 @@ describe("filters and groups", () => {
     expect(filterTickets(list, { ...NO_FILTERS, sprints: ["Sprint 2"] }, "").map((t) => t.key)).toEqual(["ABC-2"]);
     expect(filterTickets(list, NO_FILTERS, "sesion").map((t) => t.key)).toEqual(["ABC-1"]);
     expect(filterTickets(list, NO_FILTERS, "#9")).toHaveLength(1);
+    // Every word, in any order, and the bare number finds an Azure ticket.
+    expect(filterTickets(list, NO_FILTERS, "sesion ABC").map((t) => t.key)).toEqual(["ABC-1"]);
+    expect(filterTickets(list, NO_FILTERS, "sesion zzz")).toHaveLength(0);
+    expect(filterTickets(list, NO_FILTERS, "9")).not.toHaveLength(0);
     expect(filterTickets(list, { ...NO_FILTERS, types: ["Bug"] }, "")).toHaveLength(1);
     expect(filterTickets(list, { ...NO_FILTERS, boards: ["azure:acme:Api"] }, "")).toHaveLength(1);
     expect(valuesOf(list, "sprint")).toEqual(["Sprint 1", "Sprint 2"]);
