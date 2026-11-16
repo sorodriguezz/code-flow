@@ -905,6 +905,22 @@ How to work:\n",
     system
 }
 
+/// The sentence of [`agent_system`] a run across a workspace's repositories says otherwise.
+const ONE_FOLDER: &str = "You work inside one project folder; every path you use is relative to it.";
+
+/// What a run across a workspace's repositories is told on top of [`agent_system`]: that it is not
+/// inside one project, and how to name a path in each repository. Empty for a run in one folder.
+fn workspace_rules(repos: &[(String, String)]) -> String {
+    if repos.is_empty() {
+        return String::new();
+    }
+    let list = repos.iter().map(|(name, path)| format!("- {name}/ → {path}")).collect::<Vec<_>>().join("\n");
+    format!(
+        "\n\nThis run is not inside one project: it works across the workspace's repositories, each reached by its name.\n{list}\n- Write every path as <repo>/<path> (for example {first}/README.md), or as the repository's absolute path; list_files with an empty path lists them.\n- find_files, search, find_symbol and find_usages look in every repository when nothing names one, and answer with the same prefixes.\n- When the user asks what the project or the workspace is about, read each repository's README or package manifest before answering.",
+        first = repos[0].0
+    )
+}
+
 async fn agent(
     session: &Session,
     inv: &AiInvocation<'_>,
@@ -939,6 +955,7 @@ async fn agent(
         memories_for(root, &matched, memory_budget(rough_input), &asked, push.memories())
     };
     let toolbox = tools::Toolbox::new(root, grants)?
+        .with_repos(inv.extra_dirs)
         .with_model(&session.live.model)
         .with_given_memories(memory_count)
         .with_full_access(inv.full_access && !inv.read_only);
@@ -967,7 +984,13 @@ async fn agent(
         log(ctx, json!({ "event": "note", "text": "approved memories attached" }));
     }
     let more: Vec<&str> = [skills, memories.trim(), map.as_str()].into_iter().filter(|part| !part.trim().is_empty()).collect();
-    let system = join_system(&agent_system(toolbox.grants(), &offered, listed, grounding, !skills.is_empty()), inv.system_prompt, &more.join("\n\n"));
+    let mut own = agent_system(toolbox.grants(), &offered, listed, grounding, !skills.is_empty());
+    let repos = toolbox.repo_names();
+    if !repos.is_empty() {
+        own = own.replacen(ONE_FOLDER, "You work across several repositories, listed at the end of these instructions.", 1);
+    }
+    own.push_str(&workspace_rules(&repos));
+    let system = join_system(&own, inv.system_prompt, &more.join("\n\n"));
     // Retrieval before the first step: the passages of the project's knowledge closest to the
     // request ride the first message (`crate::knowledge`), cut to a sixth of the budget. A small
     // model answers from what it is shown far more reliably than it decides to go and look — which is
@@ -1497,6 +1520,16 @@ mod tests {
         assert_eq!(no_tools_note("[... abre `a.rs` con tus herramientas si necesitas el resto ...]"), Some(NO_TOOLS_NOTE_ES));
         assert_eq!(no_tools_note("Open the file with your tools before you conclude."), Some(NO_TOOLS_NOTE_EN));
         assert_eq!(no_tools_note("Write a commit message for this diff."), None);
+    }
+
+    #[test]
+    fn a_workspace_run_is_told_it_spans_repositories() {
+        let grants = Grants { write: false, run: false, reach: Reach::Observe };
+        let own = agent_system(grants, &["read_file"], false, false, false);
+        assert!(own.contains(ONE_FOLDER), "the sentence a workspace run replaces must be there");
+        assert_eq!(workspace_rules(&[]), "");
+        let rules = workspace_rules(&[("AGENDA".to_string(), "/w/AGENDA".to_string()), ("api".to_string(), "/w/api".to_string())]);
+        assert!(rules.contains("- AGENDA/ → /w/AGENDA") && rules.contains("AGENDA/README.md"), "{rules}");
     }
 
     #[test]

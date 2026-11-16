@@ -826,8 +826,8 @@ where
                 options["num_ctx"] = json!(num_ctx);
             }
             let mut body = json!({ "model": request.model, "messages": messages, "stream": true, "options": options });
-            if let Some(think) = request.think {
-                body["think"] = json!(think);
+            if let Some(think) = ollama_think(request.model, request.think) {
+                body["think"] = think;
             }
             if let Some(keep_alive) = request.keep_alive {
                 body["keep_alive"] = json!(keep_alive);
@@ -904,6 +904,26 @@ where
 }
 
 // ------------------------------------------------------------------ a conversation with tools
+
+/// Ollama's `think` for `model`: the switch as it is, except for gpt-oss, which cannot stop
+/// thinking and takes a level instead — Ollama ignores `true`/`false` for it
+/// (docs.ollama.com/capabilities/thinking). Sent `false` (Razonamiento «Nunca»), gpt-oss 20B wrote
+/// its reasoning into the answer — "It appears the workspace directories are not present…" — where
+/// the chat showed it as the reply (user report, 2026-11-16). «Off» is its lowest level, and an
+/// answer at that level comes back with the reasoning in its own field.
+pub fn ollama_think(model: &str, think: Option<bool>) -> Option<Value> {
+    let think = think?;
+    if is_gpt_oss(model) {
+        return Some(json!(if think { "medium" } else { "low" }));
+    }
+    Some(json!(think))
+}
+
+/// Whether `model` is OpenAI's gpt-oss, by the names Ollama and the hubs give it.
+pub fn is_gpt_oss(model: &str) -> bool {
+    let name = model.to_ascii_lowercase();
+    name.contains("gpt-oss") || name.contains("gpt_oss") || name.contains("gptoss")
+}
 
 /// The bundled engine's per-request reasoning switch: llama.cpp hands `chat_template_kwargs` to the
 /// model's own template, where Qwen3 and Nemotron read `enable_thinking`. Sent only to the bundled
@@ -1080,8 +1100,8 @@ where
             if let Some(keep_alive) = request.keep_alive {
                 body["keep_alive"] = json!(keep_alive);
             }
-            if let Some(think) = request.think {
-                body["think"] = json!(think);
+            if let Some(think) = ollama_think(request.model, request.think) {
+                body["think"] = think;
             }
             client.post(format!("{}/api/chat", endpoint.base_url)).json(&body)
         }
@@ -1368,6 +1388,16 @@ mod tests {
         assert_eq!(normalize_url("http://localhost:1234/v1/"), "http://localhost:1234");
         assert_eq!(normalize_url(" http://127.0.0.1:11434 "), "http://127.0.0.1:11434");
         assert_eq!(normalize_url("https://proxy.example.com/litellm/v1"), "https://proxy.example.com/litellm");
+    }
+
+    #[test]
+    fn gpt_oss_is_sent_a_level_because_it_cannot_stop_thinking() {
+        assert_eq!(ollama_think("gpt-oss:20b", Some(false)), Some(json!("low")));
+        assert_eq!(ollama_think("GPT-OSS:120b", Some(true)), Some(json!("medium")));
+        assert_eq!(ollama_think("gpt-oss:20b", None), None, "a model that cannot think is asked nothing");
+        assert_eq!(ollama_think("qwen3:8b", Some(false)), Some(json!(false)));
+        assert_eq!(ollama_think("qwen3:8b", Some(true)), Some(json!(true)));
+        assert!(is_gpt_oss("hf.co/unsloth/gpt-oss-20b-GGUF") && !is_gpt_oss("qwen2.5-coder:7b"));
     }
 
     #[test]

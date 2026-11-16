@@ -25,6 +25,23 @@ describe("chatQuestions", () => {
     expect(splitQuestions(plain).questions).toEqual([]);
   });
 
+  it("reads a question written as bare JSON at the end, and nothing else bare", () => {
+    const text = 'No veo los repos.{"pregunta":"¿A qué proyecto te refieres?","opciones":[],"multiple":false}';
+    expect(splitQuestions(text)).toEqual({
+      text: "No veo los repos.",
+      questions: [{ question: "¿A qué proyecto te refieres?", options: [], multiple: false }],
+    });
+    const several = 'Dos dudas:\n[{"pregunta": "¿Uno?", "opciones": ["a", "b"]}, {"pregunta": "¿Dos?"}]';
+    expect(splitQuestions(several).questions.map((q) => q.question)).toEqual(["¿Uno?", "¿Dos?"]);
+    const fenced = 'Elige:\n```json\n{"pregunta": "¿Cuál?", "opciones": ["X", "Y"]}\n```';
+    expect(splitQuestions(fenced)).toEqual({ text: "Elige:", questions: [{ question: "¿Cuál?", options: ["X", "Y"], multiple: false }] });
+    // JSON in the middle of prose, or that is not a question, stays where it is.
+    const middle = 'El formato es {"pregunta": "¿?"} y sigue el texto.';
+    expect(splitQuestions(middle)).toEqual({ text: middle, questions: [] });
+    const config = 'La configuración:\n```json\n{"port": 8080}\n```';
+    expect(splitQuestions(config)).toEqual({ text: config, questions: [] });
+  });
+
   it("answers one question with the choice alone, several with each question", () => {
     const one = [{ question: "¿Color?", options: ["Rojo"], multiple: false }];
     expect(answerMessage(one, [["Rojo"]])).toBe("Rojo");

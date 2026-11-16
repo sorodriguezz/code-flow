@@ -59,6 +59,8 @@ const SEARCH_HITS: usize = 60;
 const FIND_RESULTS: usize = 200;
 /// Entries `list_files` returns.
 const LIST_ENTRIES: usize = 300;
+/// The least of a workspace chat's map one repository gets, however many there are.
+const MAP_SECTION_MIN_CHARS: usize = 1_500;
 /// The tail of a command's output that goes back to the model.
 const COMMAND_OUTPUT_CHARS: usize = 8_000;
 /// How long a command may run.
@@ -272,6 +274,20 @@ pub struct Toolbox {
     /// The chat's «Completo» permissions for this run, held as long as the toolbox — see
     /// [`Toolbox::with_full_access`].
     _full: Option<crate::agentcli::FullAccess>,
+    /// A workspace chat's repositories ([`Toolbox::with_repos`]): the run works in the chat's own
+    /// folder, and reaches each of these by its name or its absolute path.
+    repos: Vec<Repo>,
+}
+
+/// One repository a workspace chat's run can reach from the chat's own folder: a toolbox of its
+/// own, with every fence a run inside it would have.
+struct Repo {
+    /// What the model calls it: the folder's name, made unique among the workspace's.
+    name: String,
+    /// Its root, canonical, and as the workspace stores it — a model copies either.
+    path: PathBuf,
+    given: PathBuf,
+    tools: Toolbox,
 }
 
 /// One tool call's result: the text the model reads, and a short line for the run log.
@@ -332,7 +348,38 @@ impl Toolbox {
             workspace_id,
             inventory,
             given_memories: 0,
+            repos: Vec::new(),
         })
+    }
+
+    /// The repositories of a workspace chat (`AiInvocation::extra_dirs`), each reachable from this
+    /// run as `<name>/<path>` or by its absolute path — what the CLIs get as `--add-dir`.
+    ///
+    /// Without it the chat's run saw only its own folder, which is empty: asked what the project
+    /// does, gpt-oss 20B found nothing, said "the workspace directories are not present", and asked
+    /// which change to make (user report, 2026-11-16). Each repository keeps its own toolbox, so a
+    /// path still cannot leave the repository it names, and a read there is what allows an edit
+    /// there. A folder that does not exist, or is this run's own, is left out.
+    pub fn with_repos(mut self, dirs: &[String]) -> Self {
+        for dir in dirs {
+            let given = PathBuf::from(dir);
+            let Ok(path) = given.canonicalize() else { continue };
+            if path == self.root || self.repos.iter().any(|repo| repo.path == path) {
+                continue;
+            }
+            let Ok(tools) = Toolbox::new(&path.to_string_lossy(), self.grants) else { continue };
+            let base = path.file_name().map(|name| name.to_string_lossy().to_string()).filter(|name| !name.is_empty()).unwrap_or_else(|| "repo".to_string());
+            let taken = |name: &str| self.repos.iter().any(|repo: &Repo| repo.name.eq_ignore_ascii_case(name));
+            let name = if taken(&base) { (2..).map(|n| format!("{base}-{n}")).find(|name| !taken(name)).unwrap_or(base) } else { base };
+            let tools = Toolbox { map: self.map, model: self.model.clone(), ..tools };
+            self.repos.push(Repo { name, path, given, tools });
+        }
+        self
+    }
+
+    /// The workspace's repositories as the model is told about them: name and absolute path.
+    pub fn repo_names(&self) -> Vec<(String, String)> {
+        self.repos.iter().map(|repo| (repo.name.clone(), repo.given.to_string_lossy().to_string())).collect()
     }
 
     /// How many approved memories the run's message already carries — `recall` is offered only for
@@ -364,6 +411,9 @@ impl Toolbox {
     /// The model driving the run, for the audit log.
     pub fn with_model(mut self, model: &str) -> Self {
         self.model = model.to_string();
+        for repo in &mut self.repos {
+            repo.tools.model = self.model.clone();
+        }
         self
     }
 
@@ -395,6 +445,9 @@ impl Toolbox {
     /// no `find_symbol` / `find_usages` / `outline`.
     pub fn without_map(mut self) -> Self {
         self.map = false;
+        for repo in &mut self.repos {
+            repo.tools.map = false;
+        }
         self
     }
 
@@ -403,6 +456,9 @@ impl Toolbox {
     /// (`codemap::summary`). Built from the repository map, which this also brings up to date.
     /// Falls back to the plain file list when the map cannot be built.
     pub async fn project_map(&self, budget: usize) -> (String, Option<crate::codemap::BuildInfo>) {
+        if !self.repos.is_empty() {
+            return self.workspace_map(budget).await;
+        }
         let files = self.files().unwrap_or_default();
         if !self.map {
             return (format!("Project files:\n{}", self.file_map(MAP_FALLBACK_FILES)), None);
@@ -428,6 +484,25 @@ impl Toolbox {
             }
             _ => (format!("Project files:\n{}", self.file_map(MAP_FALLBACK_FILES)), None),
         }
+    }
+
+    /// A workspace chat's map: each repository's, under its name, in an even share of `budget` —
+    /// the chat's own folder holds nothing to map.
+    async fn workspace_map(&self, budget: usize) -> (String, Option<crate::codemap::BuildInfo>) {
+        let share = (budget / self.repos.len()).max(MAP_SECTION_MIN_CHARS);
+        let mut sections = Vec::new();
+        let mut info: Option<crate::codemap::BuildInfo> = None;
+        for repo in &self.repos {
+            let (map, built) = Box::pin(repo.tools.project_map(share)).await;
+            sections.push(format!("## {}/ — {} (its paths are relative to it: write them as {}/<path>)\n{}", repo.name, repo.given.display(), repo.name, map.trim()));
+            if let Some(built) = built {
+                info = Some(match info {
+                    Some(sum) => crate::codemap::BuildInfo { files: sum.files + built.files, symbols: sum.symbols + built.symbols, parsed: sum.parsed + built.parsed, millis: sum.millis + built.millis },
+                    None => built,
+                });
+            }
+        }
+        (format!("The workspace's repositories:\n\n{}", sections.join("\n\n")), info)
     }
 
     pub fn grants(&self) -> Grants {
@@ -698,6 +773,11 @@ impl Toolbox {
     /// Runs one call. Never panics and never returns `Err`: a failure is an answer the model reads
     /// and can correct, exactly like a CLI agent's tool error.
     pub async fn call(&self, name: &str, args: &Value, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Outcome {
+        if !self.repos.is_empty() {
+            if let Some(outcome) = Box::pin(self.across_repos(name, args, cancel)).await {
+                return outcome;
+            }
+        }
         let started = std::time::Instant::now();
         let mut outcome = self.dispatch(name, args, cancel).await;
         // Content from the project — or from what the app runs and reaches — that talks to an AI is
@@ -1229,16 +1309,174 @@ impl Toolbox {
         found
     }
 
-    /// Declarations this run renamed or removed that are still written somewhere, with where.
+    /// Declarations this run renamed or removed that are still written somewhere, with where — in
+    /// a workspace chat, in each repository it changed, its places named `<repo>/<path>`.
     pub fn dangling(&self) -> Vec<(String, Vec<String>)> {
         let names: Vec<String> = self.renamed.lock().map(|set| set.iter().cloned().collect()).unwrap_or_default();
-        names
+        let mut found: Vec<(String, Vec<String>)> = names
             .into_iter()
             .filter_map(|name| {
                 let places = self.occurrences(&name);
                 (!places.is_empty()).then_some((name, places))
             })
-            .collect()
+            .collect();
+        for repo in &self.repos {
+            found.extend(repo.tools.dangling().into_iter().map(|(name, places)| {
+                (name, places.into_iter().map(|place| format!("{}/{place}", repo.name)).collect())
+            }));
+        }
+        found
+    }
+
+    /// A call a workspace chat's run makes into one of its repositories, or across all of them;
+    /// `None` for a call this folder answers itself.
+    ///
+    /// * A path tool goes to the repository the path names — `<repo>/<path>` or an absolute path
+    ///   inside it — with the path made relative to it. A bare path that is not in the chat's own
+    ///   folder goes to the one repository that has it, so a model that copied a path from a search
+    ///   without its prefix still reads the file it meant.
+    /// * `list_files` of the folder itself lists the repositories.
+    /// * `find_files`, `search`, `find_symbol` and `find_usages` with nothing naming a repository
+    ///   ask every one, and each answer comes back with its repository's prefix.
+    async fn across_repos(&self, name: &str, args: &Value, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Option<Outcome> {
+        let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+        let with = |key: &str, value: &str| {
+            let mut args = args.clone();
+            args[key] = json!(value);
+            args
+        };
+        match name {
+            "list_files" if clean_rel(&text("path")).is_empty() && !Path::new(text("path").trim()).is_absolute() => Some(self.list_repos()),
+            "read_file" | "edit_file" | "write_file" | "list_files" | "outline" => {
+                // `outline` with a `repo` names a reference repository, which the folder's own map answers.
+                if name == "outline" && !text("repo").is_empty() && self.repo_named(&text("repo")).is_none() {
+                    return None;
+                }
+                let (repo, rest) = match self.repo_named(&text("repo")).filter(|_| name == "outline") {
+                    Some(repo) => (repo, clean_rel(&text("path"))),
+                    None => self.repo_for(&text("path"), name != "write_file")?,
+                };
+                let mut args = with("path", &rest);
+                if let Some(map) = args.as_object_mut() {
+                    map.remove("repo");
+                }
+                Some(in_repo(repo, repo.tools.call(name, &args, cancel).await))
+            }
+            "find_files" => {
+                let pattern = text("pattern");
+                match self.repo_prefix(&pattern) {
+                    Some((repo, rest)) => Some(prefix_lines(repo, repo.tools.call(name, &with("pattern", &rest), cancel).await)),
+                    None => Some(self.fan_out(name, args, true, cancel).await),
+                }
+            }
+            "search" => {
+                let include = text("include");
+                match self.repo_prefix(&include) {
+                    Some((repo, rest)) => Some(prefix_lines(repo, repo.tools.call(name, &with("include", &rest), cancel).await)),
+                    None => Some(self.fan_out(name, args, true, cancel).await),
+                }
+            }
+            "find_symbol" | "find_usages" => {
+                let wanted = text("repo");
+                if wanted.is_empty() {
+                    return Some(self.fan_out(name, args, false, cancel).await);
+                }
+                // A `repo` that is not one of the workspace's is a reference repository.
+                let repo = self.repo_named(&wanted)?;
+                let mut args = args.clone();
+                if let Some(map) = args.as_object_mut() {
+                    map.remove("repo");
+                }
+                Some(in_repo(repo, repo.tools.call(name, &args, cancel).await))
+            }
+            _ => None,
+        }
+    }
+
+    fn repo_named(&self, name: &str) -> Option<&Repo> {
+        let name = name.trim().trim_end_matches('/');
+        (!name.is_empty()).then(|| self.repos.iter().find(|repo| repo.name.eq_ignore_ascii_case(name))).flatten()
+    }
+
+    /// `AGENDA/src/a.ts` → the repository AGENDA and `src/a.ts`.
+    fn repo_prefix(&self, path: &str) -> Option<(&Repo, String)> {
+        let cleaned = clean_rel(path);
+        let (first, rest) = cleaned.split_once('/').unwrap_or((cleaned.as_str(), ""));
+        self.repo_named(first).map(|repo| (repo, rest.to_string()))
+    }
+
+    /// The repository `path` is in, and the path relative to it. `existing`: a bare path with no
+    /// prefix may be looked for in each repository (not for a file about to be created, whose
+    /// place must be said).
+    fn repo_for(&self, path: &str, existing: bool) -> Option<(&Repo, String)> {
+        let trimmed = path.trim();
+        let absolute = Path::new(trimmed);
+        if absolute.is_absolute() {
+            return self.repos.iter().find_map(|repo| {
+                let rest = absolute.strip_prefix(&repo.given).or_else(|_| absolute.strip_prefix(&repo.path)).ok()?;
+                Some((repo, clean_rel(&rest.to_string_lossy())))
+            });
+        }
+        if let Some(found) = self.repo_prefix(trimmed) {
+            return Some(found);
+        }
+        let rel = clean_rel(trimmed);
+        if !existing || rel.is_empty() || rel.split('/').any(|part| part == "..") || self.root.join(&rel).exists() {
+            return None;
+        }
+        let mut holders = self.repos.iter().filter(|repo| repo.path.join(&rel).exists());
+        match (holders.next(), holders.next()) {
+            (Some(repo), None) => Some((repo, rel)),
+            _ => None,
+        }
+    }
+
+    fn list_repos(&self) -> Outcome {
+        let mut lines: Vec<String> = self.repos.iter().map(|repo| format!("{}/   ({})", repo.name, repo.given.display())).collect();
+        // The chat's own folder may hold files of its own (a note the run wrote): listed after.
+        if let Ok(entries) = fsops::list_dir(&self.root_str, None) {
+            lines.extend(entries.iter().take(LIST_ENTRIES).map(|entry| if entry.is_dir { format!("{}/", entry.path) } else { entry.path.clone() }));
+        }
+        let count = self.repos.len();
+        Outcome::ok(
+            format!("This workspace's repositories — write a path inside one as <repo>/<path>:\n{}", lines.join("\n")),
+            format!(". · {count} repositories"),
+        )
+    }
+
+    /// `name` asked of every repository: the ones with an answer, each under its prefix. `lines`:
+    /// each line of an answer starts with a path, which gets the prefix itself.
+    async fn fan_out(&self, name: &str, args: &Value, lines: bool, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Outcome {
+        let mut sections = Vec::new();
+        let mut errors = Vec::new();
+        let mut hits = 0usize;
+        for repo in &self.repos {
+            let outcome = repo.tools.call(name, args, cancel).await;
+            if !outcome.ok {
+                errors.push(format!("{}: {}", repo.name, outcome.summary));
+                continue;
+            }
+            // Every search tool's summary ends in its count: «query · 0» is nothing found.
+            if outcome.summary.ends_with(" · 0") {
+                continue;
+            }
+            hits += 1;
+            if lines {
+                sections.push(prefix_lines(repo, outcome).content);
+            } else {
+                sections.push(format!("In {}/ (paths relative to it — write them as {}/<path>):\n{}", repo.name, repo.name, outcome.content.trim()));
+            }
+        }
+        // The same error from every repository is the call's own mistake (an empty pattern…).
+        if hits == 0 && errors.len() == self.repos.len() && !errors.is_empty() {
+            return Outcome::err(errors.join("; "));
+        }
+        let content = if sections.is_empty() {
+            format!("Nothing found in any of the workspace's repositories ({}).", self.repos.iter().map(|repo| repo.name.as_str()).collect::<Vec<_>>().join(", "))
+        } else {
+            clip_middle(&sections.join("\n\n"), READ_CHARS)
+        };
+        Outcome::ok(content, format!("{} · {hits} repositories", args.get("pattern").or_else(|| args.get("query")).or_else(|| args.get("name")).and_then(Value::as_str).unwrap_or(name)))
     }
 
     fn was_read(&self, rel: &str) -> bool {
@@ -1630,6 +1868,30 @@ fn line_arg(args: &Value, key: &str) -> Option<usize> {
         _ => None,
     }
     .filter(|&n| n > 0)
+}
+
+/// A repository's answer as the workspace's run reads it: its summary under the repository's name.
+fn in_repo(repo: &Repo, mut outcome: Outcome) -> Outcome {
+    outcome.summary = format!("{}/{}", repo.name, outcome.summary);
+    outcome
+}
+
+/// [`in_repo`], with every line that names a path (`src/a.ts`, `src/a.ts:12: …`) prefixed by the
+/// repository's name, so the model can hand it back as it is. Status lines are left alone.
+fn prefix_lines(repo: &Repo, outcome: Outcome) -> Outcome {
+    if !outcome.ok {
+        return in_repo(repo, outcome);
+    }
+    let content = outcome
+        .content
+        .lines()
+        .map(|line| {
+            let status = line.starts_with('…') || line.starts_with("No ") || line.starts_with('[') || line.trim().is_empty();
+            if status { line.to_string() } else { format!("{}/{line}", repo.name) }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    in_repo(repo, Outcome { content, ..outcome })
 }
 
 /// A path as models write it — `./src/a.ts`, `/src/a.ts`, `src\a.ts` — as the repository-relative,
@@ -2077,6 +2339,73 @@ mod tests {
         let tools = Toolbox::new(plain.path().to_str().unwrap(), READ).unwrap();
         let hits = tools.call("search", &json!({ "query": "BETA" }), &mut None).await;
         assert!(hits.content.contains("notes.txt:2:"), "{}", hits.content);
+    }
+
+    /// A workspace chat's folder and two repositories beside it, `AGENDA` and `api`.
+    fn workspace() -> (TempDir, TempDir, Vec<String>) {
+        let chat = TempDir::new();
+        let repos = TempDir::new();
+        for (name, readme, code) in [("AGENDA", "# Agenda\nBooks medical appointments.\n", "export const slots = 3;\n"), ("api", "# API\n", "export const port = 8080;\n")] {
+            let root = repos.path().join(name);
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            git2::Repository::init(&root).expect("git init");
+            std::fs::write(root.join("README.md"), readme).unwrap();
+            std::fs::write(root.join("src/index.ts"), code).unwrap();
+        }
+        let dirs = ["AGENDA", "api"].iter().map(|name| repos.path().join(name).to_string_lossy().to_string()).collect();
+        (chat, repos, dirs)
+    }
+
+    #[tokio::test]
+    async fn a_workspace_chat_reaches_its_repositories_by_name_and_by_path() {
+        let (chat, repos, dirs) = workspace();
+        let tools = toolbox(&chat, WRITE).with_repos(&dirs);
+        assert_eq!(tools.repo_names().iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["AGENDA", "api"]);
+        let listed = tools.call("list_files", &json!({ "path": "" }), &mut None).await;
+        assert!(listed.content.contains("AGENDA/") && listed.content.contains("api/"), "{}", listed.content);
+        let read = tools.call("read_file", &json!({ "path": "AGENDA/README.md" }), &mut None).await;
+        assert!(read.ok && read.content.contains("Books medical appointments"), "{}", read.content);
+        assert!(read.summary.starts_with("AGENDA/README.md"), "{}", read.summary);
+        let absolute = repos.path().join("api/README.md").to_string_lossy().to_string();
+        let read = tools.call("read_file", &json!({ "path": absolute }), &mut None).await;
+        assert!(read.ok && read.content.contains("# API"), "{}", read.content);
+        // A path only one repository has needs no prefix; one both have does.
+        std::fs::write(repos.path().join("api/only-here.md"), "solo\n").unwrap();
+        let bare = tools.call("read_file", &json!({ "path": "only-here.md" }), &mut None).await;
+        assert!(bare.ok && bare.content.contains("solo"), "{}", bare.content);
+        assert!(!tools.call("read_file", &json!({ "path": "README.md" }), &mut None).await.ok);
+        let listed = tools.call("list_files", &json!({ "path": "api/src" }), &mut None).await;
+        assert!(listed.content.contains("index.ts"), "{}", listed.content);
+    }
+
+    #[tokio::test]
+    async fn a_workspace_search_asks_every_repository_and_prefixes_what_it_finds() {
+        let (chat, _repos, dirs) = workspace();
+        let tools = toolbox(&chat, READ).with_repos(&dirs);
+        let hits = tools.call("search", &json!({ "query": "export const" }), &mut None).await;
+        assert!(hits.content.contains("AGENDA/src/index.ts:1:") && hits.content.contains("api/src/index.ts:1:"), "{}", hits.content);
+        let one = tools.call("search", &json!({ "query": "export const", "include": "api/**/*.ts" }), &mut None).await;
+        assert!(one.content.contains("api/src/index.ts") && !one.content.contains("AGENDA/"), "{}", one.content);
+        let found = tools.call("find_files", &json!({ "pattern": "README.md" }), &mut None).await;
+        assert!(found.content.contains("AGENDA/README.md") && found.content.contains("api/README.md"), "{}", found.content);
+        let none = tools.call("search", &json!({ "query": "nowhere-at-all" }), &mut None).await;
+        assert!(none.ok && none.content.contains("Nothing found"), "{}", none.content);
+    }
+
+    #[tokio::test]
+    async fn a_workspace_edit_stays_inside_the_repository_it_names() {
+        let (chat, repos, dirs) = workspace();
+        let tools = toolbox(&chat, WRITE).with_repos(&dirs);
+        // Read first, as in one repository: the read in AGENDA is what allows the edit there.
+        let refused = tools.call("edit_file", &json!({ "path": "AGENDA/src/index.ts", "old_text": "3", "new_text": "4" }), &mut None).await;
+        assert!(!refused.ok || std::fs::read_to_string(repos.path().join("AGENDA/src/index.ts")).unwrap().contains("= 3"));
+        tools.call("read_file", &json!({ "path": "AGENDA/src/index.ts" }), &mut None).await;
+        let edited = tools.call("edit_file", &json!({ "path": "AGENDA/src/index.ts", "old_text": "slots = 3", "new_text": "slots = 4" }), &mut None).await;
+        assert!(edited.ok, "{}", edited.content);
+        assert!(std::fs::read_to_string(repos.path().join("AGENDA/src/index.ts")).unwrap().contains("slots = 4"));
+        let escape = tools.call("write_file", &json!({ "path": "AGENDA/../api/evil.txt", "content": "x" }), &mut None).await;
+        assert!(!escape.ok);
+        assert!(!repos.path().join("api/evil.txt").exists());
     }
 
     #[tokio::test]
