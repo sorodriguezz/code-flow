@@ -39,6 +39,7 @@ export const CONFIGURATION_ERRORS = {
   version: "crew-share-version",
   reference: "crew-share-reference",
   repository: "crew-share-repository",
+  exportRepository: "crew-share-export-repository",
   size: "crew-share-size",
 } as const;
 
@@ -84,8 +85,15 @@ const FILE_SHAPE = {
   agents: [{ key: EMPTY_TEXT, configuration: AGENT_SHAPE }],
 };
 
-function fail(error: string = CONFIGURATION_ERRORS.invalid): never {
-  throw new Error(error);
+/** The error's message is the key `ConfigurationSharing` translates; `subject` is what it names. */
+export class ConfigurationError extends Error {
+  constructor(key: string, readonly subject: string | null = null) {
+    super(key);
+  }
+}
+
+function fail(error: string = CONFIGURATION_ERRORS.invalid, subject: string | null = null): never {
+  throw new ConfigurationError(error, subject);
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -261,23 +269,38 @@ export function configurationForExport(source: WorkspaceAgent | Team, roster: Wo
   const agentKeys = new Set(sourceAgentIds);
   const sourceAgents = isTeam ? roster.filter((agent) => agentKeys.has(agent.id)) : [source];
   if (sourceAgents.length !== agentKeys.size) fail(CONFIGURATION_ERRORS.reference);
-  const agents = sourceAgents.map((agent) => ({ key: agent.id, configuration: sharedAgent(agent) }));
+  // Removing a repository from the workspace, or moving it to another one, leaves its id behind in
+  // every agent, member, step and check that named it. Those are dropped here rather than refusing
+  // the export: they point at nothing, so they never travel anyway. The one exception is a list the
+  // drop would empty — empty means "every repository", so exporting it would widen what the agent
+  // may touch — and that one is refused with a message that says which.
+  const known = new Set(projects.map((project) => project.id));
+  const present = (owner: string, repos: string[]): string[] => {
+    const kept = repos.filter((repo) => known.has(repo));
+    if (repos.length > ZERO && kept.length === ZERO) fail(CONFIGURATION_ERRORS.exportRepository, owner);
+    return kept;
+  };
+  const scoped = (repo: string) => repo === EMPTY_TEXT || repo === ALL_REPOSITORIES || known.has(repo);
+  const agents = sourceAgents.map((agent) => {
+    const configuration = sharedAgent(agent);
+    return { key: agent.id, configuration: { ...configuration, repos: present(agent.name, configuration.repos) } };
+  });
   const agentRepositories = agents.flatMap((agent) => agent.configuration.repos);
   const repositories = new Set(agentRepositories);
   let team: SharedTeam | null = null;
   if (isTeam) {
-    const policy = { ...defaultPolicy(), ...source.policy };
-    team = { name: source.name, description: source.description, lead: source.lead, members: source.members, plan: source.plan, policy };
-    for (const member of source.members) for (const repo of member.repos) repositories.add(repo);
-    const scopedSteps = source.plan.map((step) => step.repo);
-    const scopedChecks = source.policy.checks.map((check) => check.repo);
-    const scopes = [...scopedSteps, ...scopedChecks];
+    const members = source.members.map((member) => ({ ...member, repos: present(member.name, member.repos) }));
+    const plan = source.plan.map((step) => (scoped(step.repo) ? step : { ...step, repo: EMPTY_TEXT }));
+    const basePolicy = { ...defaultPolicy(), ...source.policy };
+    const policy = { ...basePolicy, checks: basePolicy.checks.filter((check) => scoped(check.repo)) };
+    team = { name: source.name, description: source.description, lead: source.lead, members, plan, policy };
+    for (const member of members) for (const repo of member.repos) repositories.add(repo);
+    const scopes = [...plan.map((step) => step.repo), ...policy.checks.map((check) => check.repo)];
     for (const scope of scopes) {
       if (scope !== EMPTY_TEXT && scope !== ALL_REPOSITORIES) repositories.add(scope);
     }
   }
-  const repositoryList = Array.from(repositories);
-  const portableRepositories = repositoryList.map((key) => {
+  const portableRepositories = Array.from(repositories).map((key) => {
     const project = projects.find((candidate) => candidate.id === key);
     if (!project) fail(CONFIGURATION_ERRORS.repository);
     return { key, name: project.name };

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Download, FileWarning, GitBranch, GitCompare, History, Undo2, Workflow, X } from "lucide-react";
 import { AiSparkles } from "../common/AiGlyph";
 import { EmptyState } from "../common/EmptyState";
@@ -191,6 +191,19 @@ export function DiagramsView() {
     };
   }, []);
 
+  /**
+   * The schema workbench's three callbacks, stable.
+   *
+   * `DbmlWorkbench` is memoised, and this view re-renders on every save cycle — `dirty`, `saving`
+   * and `savedAt` all flip per edit — so three arrows built inline were enough to re-render the
+   * whole workbench, canvas and all, twice for every keystroke that got saved. The template action
+   * goes through a ref because it reads the title of the render that runs it.
+   */
+  const saveAsTemplateRef = useRef<() => void>(() => {});
+  const schemaSaveAsTemplate = useCallback(() => saveAsTemplateRef.current(), []);
+  const schemaAskAi = useCallback(() => setAiOpen(true), [setAiOpen]);
+  const schemaOlderVersions = useCallback(() => setHistoryOpen(true), []);
+
   if (workspaceId === null) {
     return (
       <EmptyState
@@ -219,6 +232,7 @@ export function DiagramsView() {
       useToastStore.getState().pushToast(t("diagrams.templateSaved"), "success");
     });
   };
+  saveAsTemplateRef.current = saveAsTemplate;
 
   /** `at` is in window coordinates — see `injectToolbarButtons`, which translates them out of the
    *  iframe so the menu lands under the pointer. */
@@ -530,9 +544,9 @@ export function DiagramsView() {
                   <DbmlWorkbench
                     key={activeId}
                     diagramId={activeId}
-                    onSaveAsTemplate={saveAsTemplate}
-                    onAskAi={() => setAiOpen(true)}
-                    onOlderVersions={() => setHistoryOpen(true)}
+                    onSaveAsTemplate={schemaSaveAsTemplate}
+                    onAskAi={schemaAskAi}
+                    onOlderVersions={schemaOlderVersions}
                   />
                 </Suspense>
               ) : isMermaid ? (

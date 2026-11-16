@@ -1,4 +1,5 @@
 import {
+  diagramBounds,
   layoutDiagram,
   type DiagramColumnMode,
   type DiagramDensity,
@@ -333,6 +334,40 @@ export function layoutDbml(
     // origin alone leaves one hanging off the right. Either way it is missing from every export.
     ...extend(laid, groups),
   };
+}
+
+/**
+ * A laid-out diagram with some boxes moved — what `layoutDbml` would return with those boxes pinned
+ * there, without laying the schema out again.
+ *
+ * Exact, not an approximation, because of how pinning works: `layoutDiagram` places every box and
+ * *then* overrides the pinned ones, so where an unpinned box lands never depends on where a pinned
+ * one was put. Moving a box of a finished layout is therefore the same answer the engine would give;
+ * only the extent and the group boundaries, which are measured from where the boxes are, have to be
+ * measured again. That is what makes a drag cheap: one box changes per frame, and the layered
+ * placement of the other two hundred is not redone sixty times a second to arrive where it already
+ * was.
+ *
+ * Every node that did not move is the **same object** as in `base`, so a memoised box keyed on its
+ * node does not re-render for a drag that is not its own.
+ */
+export function moveDbmlNodes(
+  base: DbmlLayout,
+  schema: DbmlSchema,
+  density: DiagramDensity,
+  moves: Record<string, { x: number; y: number }>,
+): DbmlLayout {
+  let changed = false;
+  const nodes = base.nodes.map((node) => {
+    const seat = moves[node.id];
+    if (!seat || (seat.x === node.x && seat.y === node.y)) return node;
+    changed = true;
+    return { ...node, x: seat.x, y: seat.y };
+  });
+  if (!changed) return base;
+  const laid: DiagramLayout = { nodes, links: base.links, ...diagramBounds(nodes, density) };
+  const groups = schema.groups.length === 0 ? base.groups : groupBoxes(schema, laid, density);
+  return { ...laid, enumIds: base.enumIds, groups, ...extend(laid, groups) };
 }
 
 /** The canvas, grown in whichever directions the group boundaries reach past the tables. */

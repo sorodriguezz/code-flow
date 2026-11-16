@@ -268,7 +268,22 @@ describe(SUITE, () => {
     expect(missingAgent).toThrow(CONFIGURATION_ERRORS.reference);
     const roster = [agent()];
     const missingRepository = () => configurationForExport(source, roster, []);
-    expect(missingRepository).toThrow(CONFIGURATION_ERRORS.repository);
+    expect(missingRepository).toThrow(CONFIGURATION_ERRORS.exportRepository);
+  });
+
+  it("drops repositories that left the workspace when others remain", () => {
+    const source = team();
+    const stale = "stale-repository";
+    source.members = source.members.map((member) => ({ ...member, repos: [...member.repos, stale] }));
+    source.plan = source.plan.map((step) => ({ ...step, repo: stale }));
+    source.policy = { ...source.policy, checks: [{ repo: stale, command: "npm test", when: "item" }] };
+    const roster = [{ ...agent(), repos: [REPOSITORY, stale] }];
+    const file = configurationForExport(source, roster, projects);
+    expect(file.repositories.map((repository) => repository.key)).toEqual([REPOSITORY]);
+    expect(file.agents[ZERO].configuration.repos).toEqual([REPOSITORY]);
+    for (const member of file.team!.members) expect(member.repos).toEqual([REPOSITORY]);
+    for (const step of file.team!.plan) expect(step.repo).toBe(EMPTY_TEXT);
+    expect(file.team!.policy.checks).toEqual([]);
   });
 
   it(TESTS.enums, () => {

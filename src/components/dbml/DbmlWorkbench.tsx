@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
@@ -71,6 +72,7 @@ import { hintFor } from "../../lib/dbml/errors";
 import { mergeDbml } from "../../lib/dbml/merge";
 import { pushRevision, type Revision, type RevisionCause } from "../../lib/dbml/history";
 import {
+  blankMarkers,
   DEFAULT_NOTE_SIZE,
   fieldMarkKey,
   holdPlaces,
@@ -181,6 +183,14 @@ const MINIMAP_KEY = "cf.dbml.minimap";
 const PARSE_DEBOUNCE_MS = 260;
 /** And how long after the last change the gallery's picture is redrawn. Longer: it rasterises. */
 const THUMBNAIL_DEBOUNCE_MS = 1400;
+/**
+ * The largest the gallery's picture is drawn, in CSS pixels — twice what a card shows, so it is
+ * sharp on a retina screen and no larger. It used to be drawn at 1:1, which for a real schema is a
+ * canvas of tens of megapixels encoded on the main thread every time the document settled — and
+ * then, being over `THUMBNAIL_MAX_CHARS`, thrown away.
+ */
+const THUMBNAIL_MAX_W = 480;
+const THUMBNAIL_MAX_H = 360;
 /** How long a document has to sit still before the change to it is recorded as one. Between the
  *  parse and the thumbnail: long enough that a sentence is one revision, short enough that a
  *  revision is still there when you reach for it. */
@@ -222,12 +232,33 @@ const TOOLS: { id: Tool; Icon: typeof FileCode2 }[] = [
   { id: "diff", Icon: GitCompare },
 ];
 
+/**
+ * The text pane's Monaco options, built once. Inline they were a new object per render, and the
+ * wrapper hands a new `options` object to `editor.updateOptions` — once for every hover of the
+ * canvas chrome, every search hit and every save.
+ */
+const EDITOR_OPTIONS: MonacoEditorNS.IStandaloneEditorConstructionOptions = {
+  ...OVERFLOW_SAFE_OPTIONS,
+  fontSize: 12.5,
+  minimap: { enabled: false },
+  lineNumbers: "on",
+  lineNumbersMinChars: 3,
+  scrollBeyondLastLine: false,
+  automaticLayout: true,
+  renderLineHighlight: "line",
+  tabSize: 2,
+  wordWrap: "off",
+};
+
 interface Parser {
   parseDbml: (doc: string) => DbmlSchema;
   sqlToDbmlWithCore: (sql: string, dialect: SqlImportDialect) => string;
 }
 
-export function DbmlWorkbench({
+/**
+ * Memoised: `DiagramsView` re-renders on every save cycle, and nothing it passes changes then.
+ */
+export const DbmlWorkbench = memo(function DbmlWorkbench({
   diagramId,
   onSaveAsTemplate,
   onAskAi,
@@ -271,19 +302,39 @@ export function DbmlWorkbench({
    * are on the diagram, and "your data is stale" is exactly the thing you want to learn without
    * having to go and look.
    */
-  const sandbox = useSandboxStore(sandboxOf(diagramId));
+  // Two narrow reads rather than the diagram's whole slice: the slice is replaced on every write to
+  // the sandbox (a grid edit, a console run), and this component only cares about these two.
+  const sandboxStatus = useSandboxStore((state) => sandboxOf(diagramId)(state).status);
+  const sandboxCounts = sandboxStatus?.counts;
   const sandboxRows = useMemo(
-    () =>
-      Object.values(sandbox.status?.counts ?? {}).reduce((total, count) => total + count, 0),
-    [sandbox.status],
+    () => Object.values(sandboxCounts ?? {}).reduce((total, count) => total + count, 0),
+    [sandboxCounts],
   );
-  const sandboxDrifted = sandbox.drift !== null && !sandbox.driftIgnored;
+  const sandboxDrifted = useSandboxStore((state) => {
+    const entry = sandboxOf(diagramId)(state);
+    return entry.drift !== null && !entry.driftIgnored;
+  });
 
   const [selected, setSelected] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  /** Only so the canvas's chip can print it. Updated when the rounded percentage actually moves,
-   *  or a pinch would re-render the workbench once per frame for a number that did not change. */
-  const [zoom, setZoom] = useState(1);
+  /**
+   * The zoom, for the readout between − and +. Not state: every percent of a pinch re-rendered this
+   * whole component — the editor's props, the inspector, the canvas — to change three characters.
+   * The canvas reports into this sink and `ZoomReadout` is the only thing that renders for it.
+   */
+  const zoomSink = useRef<((scale: number) => void) | null>(null);
+  const lastZoom = useRef(1);
+  const subscribeZoom = useCallback((show: (scale: number) => void) => {
+    zoomSink.current = show;
+    show(lastZoom.current);
+    return () => {
+      if (zoomSink.current === show) zoomSink.current = null;
+    };
+  }, []);
+  const onZoom = useCallback((scale: number) => {
+    lastZoom.current = scale;
+    zoomSink.current?.(scale);
+  }, []);
   /** How many tables the query hit. `null` when there is no query. */
   const [hits, setHits] = useState<number | null>(null);
   /** The relationship the pointer is on in the inspector, lit on the canvas. See `focusRef`. */
@@ -373,6 +424,10 @@ export function DbmlWorkbench({
   const [mapLayout, setMapLayout] = useState<DbmlLayout | null>(null);
   const viewSink = useRef<((view: DbmlView) => void) | null>(null);
   const lastView = useRef<DbmlView | null>(null);
+  const onView = useCallback((view: DbmlView) => {
+    lastView.current = view;
+    viewSink.current?.(view);
+  }, []);
   const subscribeView = useCallback((draw: (view: DbmlView) => void) => {
     viewSink.current = draw;
     if (lastView.current) draw(lastView.current);
@@ -410,7 +465,18 @@ export function DbmlWorkbench({
   const pendingReveal = useRef<string | null>(null);
 
   /** The document, split. Recomputed on every keystroke, which is a string scan and nothing more. */
-  const { source, positions, marks: stored } = useMemo(() => readLayout(doc ?? ""), [doc]);
+  const split = useMemo(() => readLayout(doc ?? ""), [doc]);
+  const source = split.source;
+  /**
+   * The two sidecar halves, kept as the *same objects* while what they say does not change.
+   *
+   * `readLayout` builds fresh ones for every document, so a keystroke anywhere — or a drag of one
+   * box — handed the canvas a new `positions` and a new `marks`, and both are what the layout memo
+   * and every box's memo are keyed on. Comparing their contents costs a `JSON.stringify` of a few
+   * hundred numbers; not comparing them cost a full relayout per keystroke.
+   */
+  const positions = useStructural(split.positions);
+  const stored = useStructural(split.marks);
 
   /**
    * The marks, from both of the places one is written.
@@ -425,9 +491,8 @@ export function DbmlWorkbench({
    * deleting the line by hand. Reading them back makes what the file says and what the canvas shows
    * the same fact, which is the only way "clear this mark" can be relied on to clear both.
    */
-  const marks = useMemo(
-    () => ({ ...edits.marksFromComments(source), ...stored }),
-    [source, stored],
+  const marks = useStructural(
+    useMemo(() => ({ ...edits.marksFromComments(source), ...stored }), [source, stored]),
   );
 
   // ---- the parser, and what it produced -----------------------------------
@@ -474,23 +539,35 @@ export function DbmlWorkbench({
    * so `schema` is only replaced when there is something to replace it with, and the error rides
    * along on the schema that produced it.
    */
+  /**
+   * What the parser is given: the whole text, as the editor shows it, with the marker lines blanked
+   * — so a diagnostic names the line the editor has (see `blankMarkers`).
+   *
+   * Keyed on this rather than on `doc`, and that is most of what keeps a drag cheap: dropping a box
+   * rewrites only the layout comment, which this blanks, so the string is unchanged and the 15 MB
+   * parser is not run again on the main thread for a document whose DBML did not move.
+   */
+  const parseInput = useMemo(() => blankMarkers(doc ?? ""), [doc]);
   useEffect(() => {
     if (!parser) return;
     const timer = window.setTimeout(() => {
-      // The whole text, as the editor shows it: `parseDbml` blanks the comment markers, so a
-      // diagnostic names the line the editor has.
-      const parsed = parser.parseDbml(doc ?? "");
-      setSchema((current) =>
+      const parsed = parser.parseDbml(parseInput);
+      setSchema((current) => {
         // A failed parse that recovered nothing keeps the previous tables and takes the new error.
         // `errorAt` travels with `error` — they are one fact, and a stale caret pointing at a line
         // that no longer holds the problem is worse than no caret.
-        parsed.tables.length === 0 && parsed.enums.length === 0 && parsed.error
-          ? { ...current, error: parsed.error, errorAt: parsed.errorAt }
-          : parsed,
-      );
+        const next =
+          parsed.tables.length === 0 && parsed.enums.length === 0 && parsed.error
+            ? { ...current, error: parsed.error, errorAt: parsed.errorAt }
+            : parsed;
+        // The same schema as before — a comment typed, a mark written, whitespace — keeps the
+        // object it had, so nothing downstream lays itself out again for a parse that said nothing
+        // new.
+        return JSON.stringify(next) === JSON.stringify(current) ? current : next;
+      });
     }, PARSE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [parser, doc]);
+  }, [parser, parseInput]);
 
   // The selection cannot outlive the table it names — renaming or deleting one would otherwise
   // leave the inspector open on nothing and the canvas dimmed around a table that is gone.
@@ -862,7 +939,7 @@ export function DbmlWorkbench({
       if (!parser || !drawn) return;
       const after = parser.parseDbml(next);
       if (after.error) return;
-      const laid = layoutDbml(after, { mode, density, pinned: {}, counts: sandbox.status?.counts });
+      const laid = layoutDbml(after, { mode, density, pinned: {}, counts: sandboxCounts });
       const known = new Set(drawn.nodes.map((node) => node.id));
       // A rename is one id gone and one arrived; an addition is one arrived.
       const added = laid.nodes.filter((node) => !known.has(node.id));
@@ -876,7 +953,7 @@ export function DbmlWorkbench({
       }
       sidecar.current = { positions, marks: sidecar.current.marks };
     },
-    [parser, mode, density, sandbox.status],
+    [parser, mode, density, sandboxCounts],
   );
 
   const editing = useMemo(
@@ -962,23 +1039,16 @@ export function DbmlWorkbench({
   );
 
   /**
-   * Boxes mid-drag, before they are written.
+   * A box — a table, or a sticky note with its size — put somewhere. `final` is the release.
    *
-   * A drag reports every frame. Writing each one would put sixty edits a second into the editor and
-   * onto its undo stack, so the frames move this overlay instead and only the release writes the
-   * layout comment — one edit, one undo step, the way a keystroke is one.
+   * Only the release is written: one edit, one undo step, the way a keystroke is one. The frames
+   * before it are the canvas's own business — it moves the box in an overlay of its own (see `live`
+   * in `DbmlCanvas`), which is what keeps a drag from re-laying-out the schema and re-rendering
+   * this whole component sixty times a second.
    */
-  const [livePlaces, setLivePlaces] = useState<Record<string, LayoutSpot> | null>(null);
-  const shownPositions = useMemo(() => (livePlaces ? { ...positions, ...livePlaces } : positions), [positions, livePlaces]);
-
-  /** A box — a table, or a sticky note with its size — put somewhere. `final` is the release. */
   const placeBox = useCallback(
     (id: string, spot: LayoutSpot, final: boolean) => {
-      if (!final) {
-        setLivePlaces((current) => ({ ...(current ?? {}), [id]: spot }));
-        return;
-      }
-      setLivePlaces(null);
+      if (!final) return;
       cause.current = "moved";
       sidecar.current = { ...sidecar.current, positions: { ...sidecar.current.positions, [id]: spot } };
       commitDoc(writeLayout(source, sidecar.current.positions, sidecar.current.marks));
@@ -1131,17 +1201,22 @@ export function DbmlWorkbench({
    * the user types, and a marker left on a line that has since been fixed is a lie that survives
    * until the next failure.
    */
+  // Keyed on the error and its coordinate, as primitives — not on `source`, which re-ran this per
+  // keystroke to set the same empty list. A marker Monaco holds moves with the text as it is edited,
+  // and the next parse replaces or clears it, so there is nothing a keystroke alone needs redone.
+  const errorLine = schema.errorAt?.line ?? null;
+  const errorColumn = schema.errorAt?.column ?? null;
   useEffect(() => {
     const monaco = monacoRef.current;
     const model = editorRef.current?.getModel();
     if (!monaco || !model) return;
     const OWNER = "cf-dbml-parse";
-    if (!schema.error || !schema.errorAt) {
+    if (!schema.error || errorLine === null || errorColumn === null) {
       monaco.editor.setModelMarkers(model, OWNER, []);
       return;
     }
-    const line = Math.min(Math.max(1, schema.errorAt.line), model.getLineCount());
-    const column = Math.max(1, schema.errorAt.column);
+    const line = Math.min(Math.max(1, errorLine), model.getLineCount());
+    const column = Math.max(1, errorColumn);
     monaco.editor.setModelMarkers(model, OWNER, [
       {
         severity: monaco.MarkerSeverity.Error,
@@ -1152,7 +1227,7 @@ export function DbmlWorkbench({
         endColumn: Math.max(column + 1, model.getLineMaxColumn(line)),
       },
     ]);
-  }, [schema.error, schema.errorAt, source, editorOpen]);
+  }, [schema.error, errorLine, errorColumn, editorOpen]);
 
   /**
    * Puts the caret on the error.
@@ -1316,26 +1391,81 @@ export function DbmlWorkbench({
    * *diagram* surface — the other three do not have a canvas mounted, and a thumbnail taken while
    * the convert panel is open would be a picture of the previous schema.
    */
+  /**
+   * The document the stored picture was drawn from, per diagram.
+   *
+   * **Opening a diagram is not a change to it.** A diagram that arrives with a picture already has
+   * the one this document produces, so the first document seen is recorded as already drawn and no
+   * picture is taken until it changes. Without this every open re-rasterised the schema, and — the
+   * bytes of a PNG being whatever the encoder felt like that day — usually stored a "different"
+   * picture, which marked an untouched diagram dirty and saved it.
+   *
+   * Then, the same rule for every later run: a document that has not changed since the last picture
+   * (a selection, a search, a pane folded) is not drawn again.
+   */
+  const drawnFrom = useRef<{ id: string; doc: string | null } | null>(null);
+  const docRef = useRef(doc);
+  docRef.current = doc;
+  useEffect(() => {
+    if (doc === null || draftId !== diagramId) return;
+    if (drawnFrom.current?.id !== diagramId) {
+      const stored = useDiagramsStore.getState().draft?.thumbnail;
+      drawnFrom.current = { id: diagramId, doc: stored ? doc : null };
+    }
+  }, [doc, draftId, diagramId]);
   useEffect(() => {
     if (surface !== "diagram" || draftId !== diagramId) return;
-    const timer = window.setTimeout(() => {
+    if (docRef.current === null || drawnFrom.current?.doc === docRef.current) return;
+    let idle: number | null = null;
+    let cancelled = false;
+    const draw = () => {
+      idle = null;
       const element = canvas.current?.element();
       const layout = canvas.current?.layout();
-      if (!element || !layout || layout.width === 0) return;
-      void rasterize(standaloneSvg(element, layout, DBML_CANVAS_ID), layout, 1)
-        .then((base64) => {
-          const uri = `data:image/png;base64,${base64}`;
-          useDiagramsStore
-            .getState()
-            .setThumbnail(diagramId, uri.length > THUMBNAIL_MAX_CHARS ? "" : uri);
+      const drawing = docRef.current;
+      if (cancelled || !element || !layout || layout.width === 0 || drawing === null) return;
+      if (drawnFrom.current?.doc === drawing) return;
+      // Small, on purpose — see `THUMBNAIL_MAX_W`. Never enlarged: a three-table schema stays 1:1.
+      const scale = Math.min(1, THUMBNAIL_MAX_W / layout.width, THUMBNAIL_MAX_H / layout.height);
+      const svg = standaloneSvg(element, layout, DBML_CANVAS_ID);
+      const take = async () => {
+        let uri = `data:image/png;base64,${await rasterize(svg, layout, scale)}`;
+        // A dense picture can still come out over the gallery's ceiling; half again is always
+        // worth a try before giving up and storing none.
+        if (uri.length > THUMBNAIL_MAX_CHARS) {
+          uri = `data:image/png;base64,${await rasterize(svg, layout, scale / 2)}`;
+        }
+        return uri.length > THUMBNAIL_MAX_CHARS ? "" : uri;
+      };
+      void take()
+        .then((uri) => {
+          if (cancelled) return;
+          drawnFrom.current = { id: diagramId, doc: drawing };
+          useDiagramsStore.getState().setThumbnail(diagramId, uri);
         })
         .catch(() => {
           // A picture that could not be drawn is not worth a message: the card falls back to its
           // glyph, which is what a diagram with no thumbnail has always looked like.
         });
+    };
+    // After the debounce, and then in the browser's next idle moment rather than in the middle of
+    // whatever the user is doing: serialising the SVG and encoding the PNG are both main-thread
+    // work, and a picture for the gallery can always wait for a gap.
+    const timer = window.setTimeout(() => {
+      if (typeof window.requestIdleCallback === "function") {
+        idle = window.requestIdleCallback(draw, { timeout: 4000 });
+      } else {
+        draw();
+      }
     }, THUMBNAIL_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
-  }, [schema, positions, surface, diagramId, draftId]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      if (idle !== null && typeof window.cancelIdleCallback === "function") {
+        window.cancelIdleCallback(idle);
+      }
+    };
+  }, [schema, positions, marks, surface, diagramId, draftId]);
 
   // ---- getting it out ------------------------------------------------------
 
@@ -1509,6 +1639,73 @@ export function DbmlWorkbench({
     pendingReveal.current = null;
     if (pending) revealIn(editor, pending);
   };
+
+  /** `rearrange` and the routing toggle, stable — they go into the canvas's memoised `editing`. */
+  const autoArrange = useLatest(() => rearrange());
+  const toggleRouting = useCallback(
+    () => setRouting((current) => (current === "curved" ? "orthogonal" : "curved")),
+    [],
+  );
+
+  /**
+   * What the canvas may do to the document — built once per change to what it closes over rather
+   * than inline in the JSX, where it was a new object on every render and the canvas (memoised)
+   * re-rendered with it for every hover of the toolbar.
+   */
+  const canvasEditing = useMemo<NonNullable<React.ComponentProps<typeof DbmlCanvas>["editing"]>>(
+    () => ({
+      blocked: editing.blocked,
+      // A drawn relationship is a foreign key until told otherwise, which is what `>` means and
+      // what nine of ten drawn relationships are. The inspector's form is where the other three
+      // arrows live.
+      connect: (from, to) => editing.addRef(from, to, ">"),
+      rename: editing.renameTable,
+      // Every one of these invents a name, so every one of them has to check that the name is
+      // free — see `freeName`. A second `new_table` does not make a messy schema, it makes one
+      // that does not parse.
+      addField: (table) => {
+        const target = schema.tables.find((entry) => entry.name === table);
+        editing.addField(table, {
+          name: edits.freeName(
+            (target?.fields ?? []).map((field) => field.name),
+            "column",
+          ),
+          type: "varchar",
+        });
+      },
+      dropTable: editing.dropTable,
+      setTableColor: editing.setTableColor,
+      addTable: () => editing.addTable(edits.freeName(declared, t("dbml.newTable"))),
+      addEnum: () => editing.addEnum(edits.freeName(declared, t("dbml.newEnum"))),
+      setMark,
+      setFieldMark,
+      // The table's **id**, which is what the canvas menu passes and what the sidecar key a
+      // column's mark lives under is built from. `editing` resolves it back to a block either way
+      // — see `tableIdOf`.
+      dropField: editing.dropField,
+      togglePin: togglePinFromCanvas,
+      autoArrange,
+      orthogonal: routing === "orthogonal",
+      toggleRouting,
+      dropRef: editing.dropRef,
+      // The arrow the canvas offers is the one it does not already have. `>` and `<` are the same
+      // relationship read from the two ends, so "flip" is the one gesture that needs no dialog to
+      // choose between them.
+      flipRef: (from, to) => editing.setRefCardinality(from, to, "<"),
+    }),
+    [
+      editing,
+      schema.tables,
+      declared,
+      t,
+      setMark,
+      setFieldMark,
+      togglePinFromCanvas,
+      autoArrange,
+      routing,
+      toggleRouting,
+    ],
+  );
 
   // The document has not arrived from the database yet, or belongs to another diagram.
   if (doc === null || draftId !== diagramId) return <ViewSkeleton />;
@@ -1804,18 +2001,7 @@ export function DbmlWorkbench({
               theme={monacoTheme}
               onMount={onEditorMount}
               onChange={(value) => editDoc(value ?? "")}
-              options={{
-                ...OVERFLOW_SAFE_OPTIONS,
-                fontSize: 12.5,
-                minimap: { enabled: false },
-                lineNumbers: "on",
-                lineNumbersMinChars: 3,
-                scrollBeyondLastLine: false,
-                automaticLayout: true,
-                renderLineHighlight: "line",
-                tabSize: 2,
-                wordWrap: "off",
-              }}
+              options={EDITOR_OPTIONS}
             />
           </div>
           {schema.error && (
@@ -1932,24 +2118,17 @@ export function DbmlWorkbench({
                     <DbmlCanvas
                       ref={canvas}
                       schema={schema}
-                      positions={shownPositions}
+                      positions={positions}
                       notesEditing={notes}
-                      rowCounts={sandbox.status?.counts}
+                      rowCounts={sandboxCounts}
                       onMoveTable={moveTable}
                       selected={selected}
                       onSelect={selectFromCanvas}
                       onOpen={revealTable}
                       onMatchCount={setHits}
                       onNodeCount={setNodeCount}
-                      onZoom={(scale) =>
-                        setZoom((current) =>
-                          Math.round(scale * 100) === Math.round(current * 100) ? current : scale,
-                        )
-                      }
-                      onView={(view) => {
-                        lastView.current = view;
-                        viewSink.current?.(view);
-                      }}
+                      onZoom={onZoom}
+                      onView={onView}
                       onLayout={setMapLayout}
                       mode={mode}
                       density={density}
@@ -1959,49 +2138,7 @@ export function DbmlWorkbench({
                       pinnedId={pinned ? selected : null}
                       focusRef={hoveredRef}
                       laser={laser ? laserInk(laserColour) : null}
-                      editing={{
-                        blocked: editing.blocked,
-                        // A drawn relationship is a foreign key until told otherwise, which is what
-                        // `>` means and what nine of ten drawn relationships are. The inspector's
-                        // form is where the other three arrows live.
-                        connect: (from, to) => editing.addRef(from, to, ">"),
-                        rename: editing.renameTable,
-                        // Every one of these invents a name, so every one of them has to check that
-                        // the name is free — see `freeName`. A second `new_table` does not make a
-                        // messy schema, it makes one that does not parse.
-                        addField: (table) => {
-                          const target = schema.tables.find((entry) => entry.name === table);
-                          editing.addField(table, {
-                            name: edits.freeName(
-                              (target?.fields ?? []).map((field) => field.name),
-                              "column",
-                            ),
-                            type: "varchar",
-                          });
-                        },
-                        dropTable: editing.dropTable,
-                        setTableColor: editing.setTableColor,
-                        addTable: () => editing.addTable(edits.freeName(declared, t("dbml.newTable"))),
-                        addEnum: () => editing.addEnum(edits.freeName(declared, t("dbml.newEnum"))),
-                        setMark,
-                        setFieldMark,
-                        // The table's **id**, which is what the canvas menu passes and what the
-                        // sidecar key a column's mark lives under is built from. `editing` resolves
-                        // it back to a block either way — see `tableIdOf`.
-                        dropField: editing.dropField,
-                        togglePin: togglePinFromCanvas,
-                        autoArrange: rearrange,
-                        orthogonal: routing === "orthogonal",
-                        toggleRouting: () =>
-                          setRouting((current) =>
-                            current === "curved" ? "orthogonal" : "curved",
-                          ),
-                        dropRef: editing.dropRef,
-                        // The arrow the canvas offers is the one it does not already have. `>` and
-                        // `<` are the same relationship read from the two ends, so "flip" is the
-                        // one gesture that needs no dialog to choose between them.
-                        flipRef: (from, to) => editing.setRefCardinality(from, to, "<"),
-                      }}
+                      editing={canvasEditing}
                       className="h-full"
                     />
 
@@ -2173,7 +2310,7 @@ export function DbmlWorkbench({
                             className: "min-w-[48px] font-mono tabular-nums",
                           })}
                         >
-                          {`${Math.round(zoom * 100)}%`}
+                          <ZoomReadout subscribe={subscribeZoom} />
                         </button>
                       </Tooltip>
                       <ZoomStep onClick={() => canvas.current?.zoomBy(1.2)} title={t("dbml.zoomIn")}>
@@ -2225,10 +2362,7 @@ export function DbmlWorkbench({
                           // differ, and gating on the smaller one leaves a switch that is enabled
                           // and silently does nothing.
                           disabled: nodeCount > ROUTING_NODE_LIMIT,
-                          onClick: () =>
-                            setRouting((current) =>
-                              current === "curved" ? "orthogonal" : "curved",
-                            ),
+                              onClick: toggleRouting,
                         },
                         {
                           label: t(minimap ? "dbml.minimapHide" : "dbml.minimapShow"),
@@ -2518,7 +2652,7 @@ export function DbmlWorkbench({
    * re-fitted on the transition on purpose.
    */
   return zen ? createPortal(workbench, document.body) : workbench;
-}
+});
 
 /**
  * One of the toolbar's icon buttons: `iconButtonClass` at 26px, labelled by the app's tooltip.
@@ -2654,6 +2788,36 @@ function ZoomStep({
       </button>
     </Tooltip>
   );
+}
+
+/**
+ * The zoom percentage, rendered on its own.
+ *
+ * Fed through `subscribe` straight from the canvas, so a pinch re-renders these three characters
+ * and nothing else — and only when the rounded percentage actually moves.
+ */
+function ZoomReadout({ subscribe }: { subscribe: (show: (scale: number) => void) => () => void }) {
+  const [percent, setPercent] = useState(100);
+  useEffect(() => subscribe((scale) => setPercent(Math.round(scale * 100))), [subscribe]);
+  return <>{`${percent}%`}</>;
+}
+
+/**
+ * The same object back for as long as its contents serialise the same — for the small sidecar
+ * values (`positions`, `marks`) that are rebuilt from text on every edit but rarely say anything new.
+ */
+function useStructural<T>(value: T): T {
+  const held = useRef<{ value: T; key: string } | null>(null);
+  const key = JSON.stringify(value);
+  if (held.current === null || held.current.key !== key) held.current = { value, key };
+  return held.current.value;
+}
+
+/** A stable callback that always runs the latest render's `fn` — for event handlers only. */
+function useLatest<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+  const ref = useRef(fn);
+  ref.current = fn;
+  return useCallback((...args: A) => ref.current(...args), []);
 }
 
 /** Bytes from what `rasterize` hands back, which is base64 with no `data:` prefix. */

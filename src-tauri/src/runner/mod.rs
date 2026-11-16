@@ -232,6 +232,22 @@ async fn run_headless(app: AppHandle, team_run_id: String, dispatch: Dispatch) {
         }
     }
     with_conn(&app, |c| queries::update_agent_task_run(c, &task.id, "running", &task.model, task.turns, ""));
+    // The run's per-turn ceiling (`Policy::turn_minutes`): past it the turn is stopped like a
+    // cancel, but settled as a failed attempt — a cancel hands the attempt back, and a turn that
+    // never finishes would then be retried forever.
+    let limit = with_conn(&app, |c| crate::team::get_run(c, &team_run_id).ok().flatten().map(|run| run.policy.turn_minutes))
+        .flatten()
+        .unwrap_or(0);
+    let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog = (limit > 0).then(|| {
+        let flag = timed_out.clone();
+        let turn = turn_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(limit as u64 * 60)).await;
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            crate::ai_runs::cancel(&turn);
+        })
+    });
     let reply = crate::commands::claude_cmd::send_chat_message(
         app.clone(),
         app.state::<Db>(),
@@ -253,7 +269,15 @@ async fn run_headless(app: AppHandle, team_run_id: String, dispatch: Dispatch) {
         None,
     )
     .await;
+    if let Some(watchdog) = watchdog {
+        watchdog.abort();
+    }
     state().turns.remove(&item_id);
+    let reply = if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
+        Err(format!("El turno superó {limit} minutos y se detuvo (límite por turno del equipo)."))
+    } else {
+        reply
+    };
     match reply {
         Ok(reply) => {
             let model = reply.model.clone().unwrap_or_else(|| task.model.clone());

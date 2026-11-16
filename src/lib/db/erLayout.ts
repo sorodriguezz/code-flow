@@ -449,22 +449,39 @@ export function layoutDiagram(
     }
   }
 
+  return { nodes, links, ...diagramBounds(nodes, density) };
+}
+
+/**
+ * The extent of a set of placed boxes, with the layout's own padding around them.
+ *
+ * Its own export so a caller that moves boxes *after* the layout — the DBML canvas during a drag,
+ * which shifts one node of a cached layout instead of laying the whole schema out again per frame —
+ * measures the result exactly as `layoutDiagram` would have.
+ */
+export function diagramBounds(
+  nodes: readonly { x: number; y: number; width: number; height: number }[],
+  density: DiagramDensity = "roomy",
+): { minX: number; minY: number; width: number; height: number } {
   // Guarded, because `Math.max()` of nothing is `-Infinity` and an empty schema would hand the
   // panel a canvas it then tries to scale itself to.
-  if (nodes.length === 0) return { nodes, links, minX: 0, minY: 0, width: 0, height: 0 };
-
+  if (nodes.length === 0) return { minX: 0, minY: 0, width: 0, height: 0 };
+  const { padding } = SPACING[density];
   // Capped at zero on the way down, so a diagram nobody dragged keeps the exact origin and size it
-  // has always had — the padding on the left is the layout's own, not a margin added here.
-  const minX = Math.min(0, ...nodes.map((n) => n.x - gap.padding));
-  const minY = Math.min(0, ...nodes.map((n) => n.y - gap.padding));
-  return {
-    nodes,
-    links,
-    minX,
-    minY,
-    width: Math.max(...nodes.map((n) => n.x + n.width)) + gap.padding - minX,
-    height: Math.max(...nodes.map((n) => n.y + n.height)) + gap.padding - minY,
-  };
+  // has always had — the padding on the left is the layout's own, not a margin added here. A loop
+  // rather than `Math.min(...spread)`: two hundred boxes is fine either way, the spread is not
+  // when it runs once per drag frame.
+  let minX = 0;
+  let minY = 0;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const n of nodes) {
+    if (n.x - padding < minX) minX = n.x - padding;
+    if (n.y - padding < minY) minY = n.y - padding;
+    if (n.x + n.width > maxX) maxX = n.x + n.width;
+    if (n.y + n.height > maxY) maxY = n.y + n.height;
+  }
+  return { minX, minY, width: maxX + padding - minX, height: maxY + padding - minY };
 }
 
 /**

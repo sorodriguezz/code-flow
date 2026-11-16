@@ -623,10 +623,17 @@ const sqlProvider: MonacoLanguages.CompletionItemProvider = {
     const qualifier = QUALIFIER_RE.exec(line)?.[1];
     if (qualifier) {
       const name = unquote(qualifier).toLowerCase();
-      const hit = relations.find(
-        (relation) =>
-          relation.alias?.toLowerCase() === name || relation.table.toLowerCase() === name,
-      );
+      // In a table slot (`from public.`) the word before the dot is the relation being typed, and
+      // `RELATION_RE` has already read it as a table named `public` — matching it here would ask for
+      // that "table"'s columns, get nothing, and close the list on the very keystroke that should
+      // open the schema's tables. There, the qualifier is always a schema or a database.
+      const hit =
+        slot === "relation"
+          ? undefined
+          : relations.find(
+              (relation) =>
+                relation.alias?.toLowerCase() === name || relation.table.toLowerCase() === name,
+            );
       if (hit) {
         const columns = read(columnRef(tab, hit));
         return pendingList(columnItems(columns, range, hit.table, "0"), pending, word.word, range);
@@ -635,17 +642,46 @@ const sqlProvider: MonacoLanguages.CompletionItemProvider = {
       // is actually one of this database's: `where price > 1.` and `from (select …) s where s.` both
       // land here too, and treating them as schemas means a round-trip to an error, once per typed
       // decimal point, and a `barren` entry for a schema named `1`.
-      const known = read({ kind: "database", database: tab.database, schema: null, name: null });
+      const known = tab.database
+        ? read({ kind: "database", database: tab.database, schema: null, name: null })
+        : [];
       const isSchema = known.some(
         (node) => node.kind === "schema" && node.name.toLowerCase() === name,
       );
-      if (!isSchema) return { suggestions: [] };
-      const tables = read({
-        kind: "table_folder",
-        database: tab.database || null,
-        schema: unquote(qualifier),
-        name: null,
-      });
+      // Engines without a schema level (MySQL, MariaDB) qualify by database instead: `from otherdb.`
+      // wants that database's relations, and the database's children there are folders, never
+      // schemas, so the check above can't see it.
+      const database = isSchema
+        ? null
+        : read({ kind: "root", database: null, schema: null, name: null }).find(
+            (node) => node.kind === "database" && node.name.toLowerCase() === name,
+          );
+      if (!isSchema && !database) {
+        // `select users.` / `where users.` with no alias: a table of the console's scope that the
+        // statement hasn't named (yet) still has columns to offer.
+        if (slot !== "relation" && (tab.database || tab.schema)) {
+          const table = read({
+            kind: "table_folder",
+            database: tab.database || null,
+            schema: tab.schema || null,
+            name: null,
+          }).find((node) => node.name.toLowerCase() === name);
+          if (table) {
+            const relation = { schema: null, table: table.name, alias: null };
+            const columns = read(columnRef(tab, relation));
+            return pendingList(columnItems(columns, range, table.name, "0"), pending, word.word, range);
+          }
+        }
+        if (pending) return pendingList([], pending, word.word, range);
+        return { suggestions: [] };
+      }
+      const scope = isSchema
+        ? { database: tab.database || null, schema: unquote(qualifier) }
+        : { database: database!.name, schema: null };
+      const tables = [
+        ...read({ kind: "table_folder", ...scope, name: null }),
+        ...read({ kind: "view_folder", ...scope, name: null }),
+      ];
       return pendingList(
         tables.map((node) => ({
           label: node.name,

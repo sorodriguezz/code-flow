@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ghostPrompt, ghostRemainder, ghostWanted, ghostWord } from "./useComposerGhost";
+import { ghostPrompt, ghostRemainder, ghostTidy, ghostWanted, ghostWord } from "./useComposerGhost";
 
 describe("ghostWanted", () => {
   it("asks only with the caret at the end of the draft", () => {
@@ -55,5 +55,33 @@ describe("ghostPrompt", () => {
     const long = "a".repeat(5000) + "FIN";
     expect(ghostPrompt("x", { place: "p", lastAnswer: long })).toContain("aFIN\n\nUser: x");
     expect(ghostPrompt("x", { place: "p", lastAnswer: null })).not.toContain("Assistant:");
+  });
+});
+
+describe("ghostTidy", () => {
+  it("cuts a suggestion where it starts looping", () => {
+    const loop = " de la aplicación de agendamiento de pacientes de la aplicación de agendamiento de pacientes de la aplicación";
+    expect(ghostTidy(loop, "se necesita un sistema")).toBe(" de la aplicación de agendamiento de pacientes");
+  });
+
+  it("offers nothing when the suggestion only repeats the end of the draft", () => {
+    const draft = "un sistema de agendamiento de pacientes de la aplicación";
+    expect(ghostTidy(" de agendamiento de pacientes de la aplicación", draft)).toBe("");
+  });
+
+  it("stops at the end of the first sentence", () => {
+    expect(ghostTidy(" la rama main. Después revisa los tests", "compara con")).toBe(" la rama main.");
+  });
+
+  it("caps a long suggestion at a word boundary", () => {
+    const long = " " + Array.from({ length: 60 }, (_, i) => `palabra${i}`).join(" ");
+    const out = ghostTidy(long, "hola");
+    expect(out.length).toBeLessThanOrEqual(160);
+    expect(long.startsWith(out)).toBe(true);
+    expect(out.endsWith(" ")).toBe(false);
+  });
+
+  it("leaves an ordinary suggestion alone", () => {
+    expect(ghostTidy(" y dime qué archivos cambian", "explica el cambio")).toBe(" y dime qué archivos cambian");
   });
 });

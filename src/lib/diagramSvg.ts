@@ -134,10 +134,19 @@ export function standaloneSvg(
 ): string {
   const clone = source.cloneNode(true) as SVGSVGElement;
   const styles = getComputedStyle(document.documentElement);
+  // Each token looked up once. A schema uses a dozen of them across tens of thousands of attributes,
+  // and `getPropertyValue` on a live computed style is not free.
+  const tokens = new Map<string, string>();
+  const token = (name: string) => {
+    let value = tokens.get(name);
+    if (value === undefined) {
+      value = (styles.getPropertyValue(name) || "#888").trim();
+      tokens.set(name, value);
+    }
+    return value;
+  };
   const resolve = (value: string) =>
-    value.replace(/var\((--[a-z0-9-]+)\)/gi, (_match, name: string) =>
-      (styles.getPropertyValue(name) || "#888").trim(),
-    );
+    value.replace(/var\((--[a-z0-9-]+)\)/gi, (_match, name: string) => token(name));
 
   for (const element of clone.querySelectorAll("*")) {
     for (const attribute of Array.from(element.attributes)) {

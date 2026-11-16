@@ -116,15 +116,22 @@ fn members_of(run: &Run) -> Vec<team::Member> {
     run.members.iter().map(|m| m.member.clone()).collect()
 }
 
-/// Whether a plan is what «chico» means: one member — the one who does it, or the sub-lead of its
-/// area — at most one task per repository, nothing to investigate first.
+/// Whether a plan is what «chico» means: at most one task per repository, nothing to investigate
+/// first. Not "one member": in a full-stack team a one-line change in the web and the matching one
+/// in the API are two members' work and still small — requiring a single member is what turned
+/// nearly every «chico» of such a team back into the full ceremony (user report, 2026-11-16).
 fn is_small(plan: &[Item]) -> bool {
-    let Some(first) = plan.first() else { return false };
+    if plan.is_empty() || plan.len() > SMALL_PLAN_ITEMS {
+        return false;
+    }
     let mut repos: Vec<&str> = plan.iter().map(|i| i.project_id.as_str()).collect();
     repos.sort_unstable();
     repos.dedup();
-    plan.iter().all(|i| i.member_id == first.member_id && matches!(i.kind.as_str(), "work" | "delegate")) && repos.len() == plan.len()
+    plan.iter().all(|i| matches!(i.kind.as_str(), "work" | "delegate")) && repos.len() == plan.len()
 }
+
+/// The most tasks a «chico» plan may have — one per repository of a three-repository workspace.
+const SMALL_PLAN_ITEMS: usize = 3;
 
 /// Who a planner may hand work to: the lead plans for everyone, a sub-lead only for its branch.
 /// A leader is in its own roster only when it is `hands_on`; an advisor is never assignable. A
@@ -408,7 +415,7 @@ pub async fn start_run(
         agent_project_id: agent_project_id.unwrap_or_default(),
         created_at: stamp.clone(),
         updated_at: stamp,
-        policy: policy.unwrap_or_else(|| tm.policy.clone()).sane(),
+        policy: policy.unwrap_or_else(|| tm.policy.clone()).sane().for_run(),
         members,
         ..Default::default()
     };
@@ -1184,7 +1191,7 @@ fn compose(run: &Run, repos: &[RunRepo], items: &[Item], messages: &[team::Messa
             "plan" => item.kind == "plan",
             _ => false,
         };
-        out.push_str(&protocol::lead_protocol(may_ask));
+        out.push_str(&protocol::lead_protocol(may_ask, run.policy.single_pass));
     } else {
         out.push_str(&protocol::member_protocol(run.policy.members_may_ask()));
     }
@@ -2081,9 +2088,16 @@ fn on_lead(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), String>
         // it is delivered. Checks and integration still run.
         let small = first_plan_now && reply.small && is_small(&fresh);
         if first_plan_now && reply.small && !small {
-            team::post(c, &run.id, "", ("system", "CodeFlow"), ("all", "Equipo"), "status", "el líder lo marcó como chico, pero su plan reparte trabajo entre varios: sigue como tarea normal", &[]).map_err(e2s)?;
+            team::post(c, &run.id, "", ("system", "CodeFlow"), ("all", "Equipo"), "status", "el líder lo marcó como chico, pero su plan tiene más de una tarea por repositorio o tareas de investigar: sigue como tarea normal", &[]).map_err(e2s)?;
         }
-        let advice = if first_plan_now && !small {
+        if small && run.policy.review.enabled {
+            // Small skips the review laps too: a reviewer that answers FIX three times over a color
+            // change is the loop «chico» exists to avoid.
+            let mut policy = run.policy.clone();
+            policy.review.enabled = false;
+            set_run_policy(c, &run.id, &policy)?;
+        }
+        let advice = if first_plan_now && !small && !run.policy.single_pass {
             let plan_text: Vec<String> = reply.items.iter().map(|p| format!("- `{}` {} → {}", p.key, p.title, member(run, &p.member_id).map(|m| m.member.name.clone()).unwrap_or_default())).collect();
             new_advice(c, run, "plan", &format!("El líder propone este plan:\n{}\n¿Falta algo, sobra algo, o hay un riesgo que no vio?", plan_text.join("\n")))?
         } else {
@@ -2651,10 +2665,12 @@ async fn decide_for_gate(db: &Db, run_id: &str, approve: bool, comment: &str, ex
             if policy.budget_minutes > 0 && minutes >= policy.budget_minutes as f64 {
                 policy.budget_minutes = policy.budget_minutes * 3 / 2;
             }
-            set_run_policy(c, &run_id, &policy)?;
+            // Before saving: doubled after `set_run_policy`, the new allowance was never stored and
+            // the run hit the same unmetered gate again on its next claim.
             if policy.unmetered_minutes > 0 && unmetered_over(&run, &team::list_items(c, &run_id).map_err(e2s)?).is_some() {
                 policy.unmetered_minutes *= 2;
             }
+            set_run_policy(c, &run_id, &policy)?;
             // Past the plan cap: start counting again from here, another cap's worth.
             c.execute("DELETE FROM app_settings WHERE key = ?1", rusqlite::params![session_base_key(&run_id)]).map_err(e2s)?;
             return team::set_run_status(c, &run_id, "running", "", "").map_err(e2s);
@@ -3223,7 +3239,7 @@ mod tests {
             max_parallel: 1,
             ..Default::default()
         };
-        let mut policy = Policy::default();
+        let mut policy = Policy { single_pass: false, ..Default::default() };
         policy.approve_plan = false;
         policy.approve_merge = false;
         let tm = with(&db, |c| {
@@ -3269,7 +3285,8 @@ mod tests {
         };
         assert!(is_small(&plan_of(&["d"], &["p1"])));
         assert!(is_small(&plan_of(&["d", "d"], &["p1", "p2"])), "one task in each repository that changes");
-        assert!(!is_small(&plan_of(&["d", "q"], &["p1", "p2"])), "two members");
+        assert!(is_small(&plan_of(&["d", "q"], &["p1", "p2"])), "two members, one task per repository");
+        assert!(!is_small(&plan_of(&["a", "b", "c", "d"], &["p1", "p2", "p3", "p4"])), "too many tasks");
         assert!(!is_small(&plan_of(&["d", "d"], &["p1", "p1"])), "two tasks in one repository");
         assert!(!is_small(&[]));
     }
@@ -3285,7 +3302,7 @@ mod tests {
             max_parallel: 2,
             ..Default::default()
         };
-        let mut policy = Policy::default();
+        let mut policy = Policy { single_pass: false, ..Default::default() };
         policy.review = team::ReviewPolicy { enabled: true, reviewer: "q".into(), ..Default::default() };
         let tm = with(&db, |c| {
             team::save_team(
@@ -3405,7 +3422,7 @@ mod tests {
             leads,
             ..Default::default()
         };
-        let mut policy = Policy::default();
+        let mut policy = Policy { single_pass: false, ..Default::default() };
         policy.approve_plan = false;
         policy.comms = "tree".into();
         let tm = with(&db, |c| {
@@ -3496,7 +3513,7 @@ mod tests {
             leads,
             ..Default::default()
         };
-        let mut policy = Policy::default();
+        let mut policy = Policy { single_pass: false, ..Default::default() };
         policy.approve_plan = false;
         policy.approve_merge = false;
         let tm = with(&db, |c| {
@@ -3543,7 +3560,7 @@ mod tests {
     #[tokio::test]
     async fn a_run_over_its_budget_waits_and_approval_grows_it() {
         let (_serial, _dir, db, ws, project, [lead, dev, _qa]) = fixture();
-        let mut policy = Policy::default();
+        let mut policy = Policy { single_pass: false, ..Default::default() };
         policy.approve_plan = false;
         policy.budget_usd = 0.5;
         let tm = with(&db, |c| {
@@ -3604,6 +3621,7 @@ mod tests {
                         team::Member { id: "d".into(), agent_id: dev.clone(), name: "Dev".into(), ..Default::default() },
                         team::Member { id: "a".into(), agent_id: qa.clone(), name: "Asesor".into(), edits: false, advisor: true, ..Default::default() },
                     ],
+                    policy: Policy { single_pass: false, ..Default::default() },
                     ..Default::default()
                 },
             )
@@ -3641,7 +3659,7 @@ mod tests {
                     workspace_id: ws.clone(),
                     name: "Fijo".into(),
                     lead: String::new(),
-                    policy: Policy { approve_merge: false, commit: "squash".into(), max_attempts: 1, ..Default::default() },
+                    policy: Policy { approve_merge: false, commit: "squash".into(), max_attempts: 1, single_pass: false, ..Default::default() },
                     plan: vec![team::PlanStep { key: "uno".into(), member: "d".into(), instruction: "haz uno".into(), ..Default::default() }],
                     members: vec![
                         team::Member { id: "d".into(), agent_id: dev.clone(), name: "Dev".into(), escalate_to: "s".into(), ..Default::default() },

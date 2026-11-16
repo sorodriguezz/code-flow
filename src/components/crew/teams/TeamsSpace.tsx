@@ -396,7 +396,7 @@ function TeamList({ teams, actions, onDuplicate, onRemove }: { teams: Team[]; ac
                 {t.members.slice(0, 7).map((m, i) => {
                   const agent = roster.find((a) => a.id === m.agent_id);
                   return (
-                    <span key={m.id} title={m.name} className="rounded-[10px] ring-2 ring-[var(--cf-surface-raised)]" style={{ marginLeft: i ? -6 : 0 }}>
+                    <span key={m.id} title={m.name} className="rounded-[10px] ring-2 ring-[var(--cf-surface-raised-solid,var(--cf-surface-raised))]" style={{ marginLeft: i ? -6 : 0 }}>
                       <AgentAvatar agent={{ id: m.agent_id, icon: agent?.icon, color: agent?.color }} size={26} />
                     </span>
                   );

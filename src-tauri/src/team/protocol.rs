@@ -481,7 +481,12 @@ pub const APPS: &str = "## Las demás apps de CodeFlow\n\
     Úsalas cuando sirvan para verificar tu trabajo; lo que pida aprobación, el usuario lo aprueba en la app.";
 
 /// How a lead is told to answer. Appended to every lead turn.
-pub fn lead_protocol(can_ask_user: bool) -> String {
+pub fn lead_protocol(can_ask_user: bool, single_pass: bool) -> String {
+    let pass = if single_pass {
+        "**Una sola pasada.** Este equipo trabaja en una pasada: tienes una única ronda de planificación y cada miembro trabaja una vez, sin revisiones ni segunda vuelta. Reparte todo ahora, con tareas completas en sí mismas, y marca `\"terminar\": true` en este mismo bloque. "
+    } else {
+        ""
+    };
     let ask = if can_ask_user {
         "Si te falta información que solo el usuario tiene, pregunta en vez de suponer: `\"preguntas\": [{\"pregunta\": \"...\", \"opciones\": [\"a\", \"b\"]}]` y no planifiques todavía. "
     } else {
@@ -502,7 +507,7 @@ pub fn lead_protocol(can_ask_user: bool) -> String {
          **Planifica lo mínimo.** Cada tarea arranca un agente completo y gasta la cuota del usuario: una tarea sencilla es una tarea por repositorio que de verdad cambia, nada más. \
          No crees tareas de investigar, revisar, coordinar o verificar si la tarea no lo exige, no metas a un miembro solo porque existe, y no partas en pasos lo que una persona haría de una vez. \
          Si dudas entre dos planes, el más corto. Si una entrega trae lo pedido, termina: no abras rondas para pulir. \
-         **Clasifica el pedido.** Si es chico —un cambio puntual como un color, un texto, un ajuste de estilo o un bug acotado— dáselo a un solo miembro, una tarea de `trabajo` por repositorio, y marca `\"chico\": true`: \
+         **Clasifica el pedido.** Si es chico —un cambio puntual como un color, un texto, un ajuste de estilo o un bug acotado— una sola tarea de `trabajo` por cada repositorio que cambia (como máximo tres), y marca `\"chico\": true`: \
          la entrega se integra directo, sin otra ronda tuya ni del asesor. Si no es chico, `\"chico\": false`. \
          **Áreas con sub-líder.** Si el equipo tiene sub-líderes (por ejemplo de backend, front o base de datos), lo que es de un área dáselo entero a su sub-líder: él decide quién lo hace. \
          Si un pedido toca varias áreas, una tarea por área a cada sub-líder, con `depende_de` cuando una necesite la entrega de otra. \
@@ -510,7 +515,7 @@ pub fn lead_protocol(can_ask_user: bool) -> String {
          `trabajo` escribe código (en su propia rama); `investigar` solo lee. Un miembro de solo lectura no recibe `trabajo`. \
          Quien depende de otra tarea recibe su entrega. No repitas tareas que ya existen. \
          Cuando todo lo necesario esté hecho y revisado, responde `\"terminar\": true`.\n\
-         {ask}"
+         {pass}{ask}"
     )
 }
 

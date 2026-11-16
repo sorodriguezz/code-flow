@@ -79,6 +79,50 @@ export function ghostPrompt(draft: string, context: { place: string; lastAnswer?
   return lines.join("\n");
 }
 
+/** The longest suggestion offered in a chat box: about a sentence. */
+const MAX_GHOST_CHARS = 160;
+
+/** Words in a row that, seen twice, mean the model is looping. */
+const LOOP_WORDS = 4;
+
+/**
+ * A suggestion cut to what is worth offering in prose. Pure, for tests.
+ *
+ * The local models are code models, sampled without repetition penalties (the right call in code),
+ * and on prose a small one falls into a loop: «de la aplicación de agendamiento de pacientes de la
+ * aplicación de…» (user report, 2026-11-16). Accepting it with Tab fed the loop back as the next
+ * prompt, so it grew with every acceptance. Here the suggestion stops where a run of
+ * [`LOOP_WORDS`] words repeats — in itself or from the end of the draft — at the end of its first
+ * sentence, and at [`MAX_GHOST_CHARS`].
+ */
+export function ghostTidy(answer: string, draft: string): string {
+  const words = [...answer.matchAll(/\S+/g)];
+  const norm = (w: string) => w.toLocaleLowerCase().replace(/[.,;:!?¡¿"'()]/g, "");
+  const tail = draft.split(/\s+/).filter(Boolean).slice(-40).map(norm);
+  const seen = new Set<string>();
+  for (let i = 0; i + LOOP_WORDS <= tail.length; i++) seen.add(tail.slice(i, i + LOOP_WORDS).join(" "));
+  const all = [...tail, ...words.map((w) => norm(w[0]))];
+  let cut = answer.length;
+  for (let i = 0; i < words.length; i++) {
+    const at = tail.length + i;
+    if (at + LOOP_WORDS > all.length) break;
+    const gram = all.slice(at, at + LOOP_WORDS).join(" ");
+    if (seen.has(gram)) {
+      cut = words[i].index ?? 0;
+      break;
+    }
+    seen.add(gram);
+  }
+  let text = answer.slice(0, cut);
+  const sentence = /[.!?](?=\s|$)/.exec(text);
+  if (sentence) text = text.slice(0, sentence.index + 1);
+  if (text.length > MAX_GHOST_CHARS) {
+    const space = text.lastIndexOf(" ", MAX_GHOST_CHARS);
+    text = text.slice(0, space > 0 ? space : MAX_GHOST_CHARS);
+  }
+  return text.trim() ? text.replace(/\s+$/, "") : "";
+}
+
 function newRequestId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
 }
@@ -148,8 +192,10 @@ export function useComposerGhost({
       })
         .then((answer) => {
           if (!live || inFlight.current !== requestId || !answer) return;
-          memo.current = { prefix: text, text: answer };
-          setGhost(answer);
+          const offered = ghostTidy(answer, text);
+          if (!offered) return;
+          memo.current = { prefix: text, text: offered };
+          setGhost(offered);
         })
         // A keystroke must never raise anything; the settings pane explains a broken engine.
         .catch(() => {})

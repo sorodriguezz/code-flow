@@ -1211,7 +1211,7 @@ const CommitTable = memo(function CommitTable() {
                 cx={laneX(r.lane)}
                 cy={rowY(r.row)}
                 r={HEAD_RADIUS}
-                fill="var(--cf-surface)"
+                fill="var(--cf-surface-solid, var(--cf-surface))"
                 stroke={laneColor(r.lane)}
                 strokeWidth={1.5}
                 strokeDasharray="2 2"
@@ -1225,7 +1225,7 @@ const CommitTable = memo(function CommitTable() {
                 width={DOT_RADIUS * 2}
                 height={DOT_RADIUS * 2}
                 rx={1.5}
-                fill="var(--cf-surface)"
+                fill="var(--cf-surface-solid, var(--cf-surface))"
                 stroke="var(--cf-text-faint)"
                 strokeWidth={1.5}
               />
@@ -1237,7 +1237,7 @@ const CommitTable = memo(function CommitTable() {
                 cx={laneX(r.lane)}
                 cy={rowY(r.row)}
                 r={HEAD_RADIUS}
-                fill="var(--cf-surface)"
+                fill="var(--cf-surface-solid, var(--cf-surface))"
                 stroke={laneColor(r.lane)}
                 strokeWidth={2.5}
               />

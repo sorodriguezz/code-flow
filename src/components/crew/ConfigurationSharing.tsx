@@ -5,7 +5,7 @@ import { useAgentsStore } from "../../state/agentsStore";
 import { useTeamStore } from "../../state/teamStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import { configurationName, exportConfiguration, importConfiguration, openConfiguration } from "../../lib/agents/configurationFiles";
-import { CONFIGURATION_ERRORS, EMPTY_TEXT, ZERO, prepareConfigurationImport, type ConfigurationFile, type SharingProject } from "../../lib/agents/shareConfiguration";
+import { CONFIGURATION_ERRORS, ConfigurationError, EMPTY_TEXT, ZERO, prepareConfigurationImport, type ConfigurationFile, type SharingProject } from "../../lib/agents/shareConfiguration";
 import type { WorkspaceAgent } from "../../types/domain";
 import type { Team } from "../../types/team";
 import { Btn, IconBtn, Modal, field } from "./kit/ui";
@@ -41,6 +41,7 @@ const COPY = {
   version: ["Esta versión del archivo no es compatible con tu versión de CodeFlow.", "This file version is not supported by your version of CodeFlow."],
   reference: ["La configuración contiene referencias incompletas o una jerarquía inválida.", "The configuration contains incomplete references or an invalid hierarchy."],
   repository: ["Vincula todos los repositorios con el workspace de destino.", "Map every repository to the destination workspace."],
+  exportRepository: ["«{name}» solo puede trabajar en repositorios que ya no están en este workspace. Edita sus repositorios y vuelve a exportar.", "«{name}» may only work in repositories that are no longer in this workspace. Edit its repositories and export again."],
   size: ["El archivo supera el tamaño máximo de 5 MB.", "The file exceeds the maximum size of 5 MB."],
   changedWorkspace: ["El workspace cambió. Vuelve a abrir la importación en el destino.", "The workspace changed. Open the import again in the destination."],
 } as const;
@@ -49,6 +50,7 @@ const ERROR_COPY = {
   [CONFIGURATION_ERRORS.version]: COPY.version,
   [CONFIGURATION_ERRORS.reference]: COPY.reference,
   [CONFIGURATION_ERRORS.repository]: COPY.repository,
+  [CONFIGURATION_ERRORS.exportRepository]: COPY.exportRepository,
   [CONFIGURATION_ERRORS.size]: COPY.size,
 };
 const PERMISSION_SEPARATOR = ", ";
@@ -71,7 +73,8 @@ function errorMessage(error: unknown, l: ReturnType<typeof useL>): string {
   const copy = ERROR_COPY[message as keyof typeof ERROR_COPY];
   if (!copy) return message;
   const [spanish, english] = copy;
-  return l(spanish, english);
+  const subject = error instanceof ConfigurationError ? (error.subject ?? EMPTY_TEXT) : EMPTY_TEXT;
+  return l(spanish, english).replace("{name}", subject);
 }
 
 function initialRepositoryMapping(file: ConfigurationFile, projects: SharingProject[]): Record<string, string> {
@@ -97,8 +100,12 @@ export function ConfigurationExportButton({ source, compact = false }: { source:
     if (busy) return;
     setBusy(true);
     try {
-      const workspace = useWorkspaceStore.getState();
-      const projects = workspace.projectsByWorkspace[source.workspace_id] ?? [];
+      // A workspace whose repositories haven't been read yet would look empty, and every agent
+      // limited to one would fail as if its repositories were gone.
+      if (!useWorkspaceStore.getState().projectsByWorkspace[source.workspace_id]) {
+        await useWorkspaceStore.getState().loadProjects(source.workspace_id);
+      }
+      const projects = useWorkspaceStore.getState().projectsByWorkspace[source.workspace_id] ?? [];
       const roster = useAgentsStore.getState().roster;
       const saved = await exportConfiguration(source, roster, projects);
       if (saved) {

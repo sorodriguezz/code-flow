@@ -1,3 +1,4 @@
+import { createPortal } from "react-dom";
 import { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Check, Copy, Eye, EyeOff, FileText, GitCommitHorizontal, Link2, Loader2, LogOut, Radio, Share2, UserPlus, Users, X } from "lucide-react";
 import { ChatMessageBubble } from "../chat/ChatMessageBubble";
@@ -85,7 +86,11 @@ function Modal({ title, icon, onClose, children, footer }: { title: string; icon
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
-  return (
+  // Portalled to `body`: rendered in place, the scrim lived inside the chat's sheet, which clips what
+  // it holds (`overflow: hidden`) and is its own stacking context — the dim covered the panel and
+  // the dialog itself never showed, leaving the chat greyed out with nothing to click
+  // (user report, 2026-11-16).
+  return createPortal(
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4" onMouseDown={onClose}>
       <div
         role="dialog"
@@ -103,7 +108,8 @@ function Modal({ title, icon, onClose, children, footer }: { title: string; icon
         <div className="flex min-h-0 flex-col gap-3 overflow-auto px-4 py-3.5 text-[12.5px]">{children}</div>
         <footer className="flex justify-end gap-2 border-t border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-4 py-3">{footer}</footer>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 

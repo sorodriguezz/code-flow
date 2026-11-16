@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import type { DbmlLayout } from "../../lib/dbml/layout";
 
 /**
@@ -30,7 +30,8 @@ export interface DbmlView {
 /** Width over height. */
 const MAP_ASPECT = "8 / 5";
 
-export function DbmlMinimap({
+// Memoised: its parent re-renders for many things, and the blocks only change with the layout.
+export const DbmlMinimap = memo(function DbmlMinimap({
   layout,
   selected,
   subscribe,
@@ -123,4 +124,4 @@ export function DbmlMinimap({
       </svg>
     </div>
   );
-}
+});

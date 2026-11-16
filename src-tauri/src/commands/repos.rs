@@ -461,9 +461,14 @@ pub fn get_project(db: State<Db>, id: String) -> Result<Option<Project>, String>
 pub fn delete_project(db: State<Db>, id: String) -> Result<(), String> {
     let path = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let path = queries::get_project(&conn, &id).ok().flatten().map(|p| p.local_path);
+        let project = queries::get_project(&conn, &id).ok().flatten();
+        if let Some(project) = &project {
+            // Best effort: a reference left behind is what this cleans up, never a reason to keep
+            // the repository.
+            let _ = crate::team::forget_repository(&conn, &project.workspace_id, &id);
+        }
         queries::delete_project(&conn, &id).map_err(|e| e.to_string())?;
-        path
+        project.map(|p| p.local_path)
     };
     // The checkout PR reviews read from (`review::checkout`) is the project's, and goes with it —
     // off the lock, since removing a worktree is a git process and a folder's worth of deletes.
@@ -479,6 +484,11 @@ pub fn delete_project(db: State<Db>, id: String) -> Result<(), String> {
 pub fn move_project_to_workspace(db: State<Db>, id: String, workspace_id: String) -> Result<(), String> {
     let moved = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
+        if let Some(from) = queries::get_project(&conn, &id).ok().flatten().map(|p| p.workspace_id) {
+            if from != workspace_id {
+                let _ = crate::team::forget_repository(&conn, &from, &id);
+            }
+        }
         queries::move_project_to_workspace(&conn, &id, &workspace_id).map_err(|e| e.to_string())?;
         let identity =
             queries::get_workspace_identity(&conn, &workspace_id).map_err(|e| e.to_string())?;

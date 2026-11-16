@@ -62,6 +62,10 @@ export interface TeamPolicy {
   unmetered_minutes: number;
   /** Let the decision layer settle finite choices before paying a planner turn. */
   decider: boolean;
+  /** «Una pasada por agente»: one planning round, one attempt, no review laps or last look. */
+  single_pass: boolean;
+  /** Wall-clock minutes one turn may run before it is stopped; `0` is no limit. */
+  turn_minutes: number;
 }
 
 export interface TeamMember {
@@ -386,6 +390,8 @@ export function defaultPolicy(): TeamPolicy {
     max_session_pct: 30,
     unmetered_minutes: 60,
     decider: true,
+    single_pass: true,
+    turn_minutes: 30,
   };
 }
 

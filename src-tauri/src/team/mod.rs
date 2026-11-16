@@ -151,6 +151,16 @@ pub struct Policy {
     /// Let the decision layer (`crate::decide`) settle finite choices — retry or stop, the model to
     /// start on — before paying a planner turn for them.
     pub decider: bool,
+    /// «Una pasada por agente»: each member works once. One planning round for the lead and for a
+    /// sub-lead, one attempt per item, no review laps, no advisor on the plan and no last look —
+    /// for the tasks whose whole answer is a handful of edits (user report, 2026-11-16: a small
+    /// task that iterated for over three hours). Applied when a run starts (`for_run`), so turning
+    /// it off gives the team back the numbers it had.
+    pub single_pass: bool,
+    /// Wall-clock minutes one turn may run before it is stopped and counted as a failed attempt.
+    /// A turn is a whole agent session with unlimited tool steps, so without this ten turns can
+    /// take an afternoon. `0` is no limit.
+    pub turn_minutes: i64,
 }
 
 impl Default for Policy {
@@ -188,6 +198,10 @@ impl Default for Policy {
             max_session_pct: 30,
             unmetered_minutes: 60,
             decider: true,
+            // On by default, old rows included: a team nobody tuned should do what was asked and
+            // stop, not spend the user's quota iterating (user report, 2026-11-16).
+            single_pass: true,
+            turn_minutes: 30,
         }
     }
 }
@@ -218,12 +232,25 @@ impl Policy {
         self.max_session_pct = self.max_session_pct.clamp(0, 100);
         self.unmetered_minutes = self.unmetered_minutes.clamp(0, 24 * 60);
         self.ping_pong_laps = self.ping_pong_laps.clamp(2, 12);
+        self.turn_minutes = self.turn_minutes.clamp(0, 8 * 60);
         self.checks.retain(|c| !c.command.trim().is_empty());
         for c in &mut self.checks {
             c.when = pick(&c.when, &["item", "final"], "final");
             if c.repo.trim().is_empty() {
                 c.repo = "*".into();
             }
+        }
+        self
+    }
+
+    /// The policy a run starts with: `single_pass` folded into the numbers it stands for.
+    pub fn for_run(mut self) -> Self {
+        if self.single_pass {
+            self.lead_rounds = 1;
+            self.sub_lead_rounds = 1;
+            self.max_attempts = 1;
+            self.review.enabled = false;
+            self.lead_final_check = false;
         }
         self
     }
@@ -691,6 +718,55 @@ pub fn save_team(conn: &Connection, mut team: Team) -> Result<Team, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(team)
+}
+
+/// Takes a repository that is leaving a workspace (removed, or moved to another one) out of every
+/// agent and team there that named it. Left behind, the id points at nothing: the agent's card
+/// still says it is limited to N repositories and exporting it fails.
+///
+/// A list the removal would empty is left as it is — empty means "every repository", so emptying it
+/// would widen what the agent may touch instead of narrowing it; the user decides that one.
+pub fn forget_repository(conn: &Connection, workspace_id: &str, project_id: &str) -> rusqlite::Result<()> {
+    let drop = |repos: &mut Vec<String>| -> bool {
+        if !repos.iter().any(|r| r == project_id) || repos.iter().all(|r| r == project_id) {
+            return false;
+        }
+        repos.retain(|r| r != project_id);
+        true
+    };
+    let agents: Vec<(String, String)> = {
+        let mut stmt = conn.prepare("SELECT id, repos FROM workspace_agents WHERE workspace_id = ?1")?;
+        let rows = stmt.query_map(params![workspace_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (id, text) in agents {
+        let mut repos: Vec<String> = parse(&text);
+        if drop(&mut repos) {
+            conn.execute("UPDATE workspace_agents SET repos = ?1 WHERE id = ?2", params![json(&repos), id])?;
+        }
+    }
+    for mut team in list_teams(conn, workspace_id)? {
+        let mut changed = false;
+        for member in &mut team.members {
+            changed |= drop(&mut member.repos);
+        }
+        for step in &mut team.plan {
+            if step.repo == project_id {
+                step.repo.clear();
+                changed = true;
+            }
+        }
+        let before = team.policy.checks.len();
+        team.policy.checks.retain(|c| c.repo != project_id);
+        changed |= team.policy.checks.len() != before;
+        if changed {
+            conn.execute(
+                "UPDATE agent_teams SET policy = ?1, plan = ?2, members = ?3, updated_at = ?4 WHERE id = ?5",
+                params![json(&team.policy), json(&team.plan), json(&team.members), now(), team.id],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 pub fn delete_team(conn: &Connection, id: &str) -> rusqlite::Result<()> {
@@ -1306,6 +1382,21 @@ mod tests {
         assert!(!needs_code_approval(&r, &approved[1], &approved));
         r.policy.approve_code = "each".into();
         assert!(needs_code_approval(&r, &approved[1], &approved));
+    }
+
+    #[test]
+    fn single_pass_folds_into_one_round_one_attempt_and_no_review() {
+        let mut team = Policy { lead_rounds: 5, max_attempts: 4, lead_final_check: true, ..Default::default() };
+        team.review.enabled = true;
+        assert!(team.single_pass, "on by default, old rows included");
+        let run = team.clone().for_run();
+        assert_eq!((run.lead_rounds, run.sub_lead_rounds, run.max_attempts), (1, 1, 1));
+        assert!(!run.review.enabled && !run.lead_final_check);
+        let iterative = Policy { single_pass: false, ..team }.for_run();
+        assert_eq!((iterative.lead_rounds, iterative.max_attempts), (5, 4));
+        assert!(iterative.review.enabled && iterative.lead_final_check);
+        let legacy: Policy = serde_json::from_str("{}").unwrap();
+        assert!(legacy.single_pass && legacy.turn_minutes == 30);
     }
 
     #[test]

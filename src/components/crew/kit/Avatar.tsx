@@ -4,7 +4,9 @@ import { agentColorVar } from "../../../lib/agents/agentColors";
 
 export type AgentState = "idle" | "thinking" | "waiting" | "error" | "done";
 
-/** An agent as the view draws it everywhere: its icon on its colour. A turn in flight is a border
+/** An agent as the view draws it everywhere: its icon on its colour. Mixed over the *solid* surface:
+ * see-through, `--cf-surface` is transparent, and overlapped avatars showed each other's edges
+ * through the tint (user report, 2026-11-16). A turn in flight is a border
  * whose gradient travels (never a rotating box), waiting on you is a soft halo. */
 export function AgentAvatar({
   agent,
@@ -31,8 +33,8 @@ export function AgentAvatar({
         height: size,
         borderRadius: Math.round(size * 0.3),
         color,
-        background: `color-mix(in oklab, ${color} 15%, var(--cf-surface))`,
-        boxShadow: state === "error" ? `inset 0 0 0 1.5px var(--cf-danger)` : `inset 0 0 0 1px color-mix(in oklab, ${color} 30%, var(--cf-surface))`,
+        background: `color-mix(in oklab, ${color} 15%, var(--cf-surface-solid, var(--cf-surface)))`,
+        boxShadow: state === "error" ? `inset 0 0 0 1.5px var(--cf-danger)` : `inset 0 0 0 1px color-mix(in oklab, ${color} 30%, var(--cf-surface-solid, var(--cf-surface)))`,
         ["--cf-crew-c" as string]: color,
       }}
     >
@@ -51,8 +53,8 @@ export function TeamAvatar({ size = 28, className = "", state = "idle" }: { size
       <svg viewBox="0 0 30 30" className="absolute inset-0 h-full w-full" aria-hidden>
         <path
           d="M15 1.8 26.4 8.4v13.2L15 28.2 3.6 21.6V8.4Z"
-          fill="color-mix(in oklab, var(--cf-accent) 14%, var(--cf-surface))"
-          stroke="color-mix(in oklab, var(--cf-accent) 45%, var(--cf-surface))"
+          fill="color-mix(in oklab, var(--cf-accent) 14%, var(--cf-surface-solid, var(--cf-surface)))"
+          stroke="color-mix(in oklab, var(--cf-accent) 45%, var(--cf-surface-solid, var(--cf-surface)))"
           strokeWidth="1.4"
           strokeLinejoin="round"
         />
@@ -68,7 +70,7 @@ export function AvatarStack({ agents, size = 20, max = 4 }: { agents: { id: stri
   return (
     <span className="inline-flex items-center">
       {shown.map((agent, index) => (
-        <span key={agent.id} style={{ marginLeft: index ? -Math.round(size * 0.3) : 0 }} className="rounded-[8px] ring-2 ring-[var(--cf-surface)]">
+        <span key={agent.id} style={{ marginLeft: index ? -Math.round(size * 0.3) : 0 }} className="rounded-[8px] ring-2 ring-[var(--cf-surface-solid,var(--cf-surface))]">
           <AgentAvatar agent={agent} size={size} />
         </span>
       ))}

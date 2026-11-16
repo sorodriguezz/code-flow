@@ -202,7 +202,10 @@ export function TeamInspector({ team, update }: { team: Team; update: Update }) 
             </Row>
           </>
         )}
-        <Switch checked={p.lead_final_check} onChange={(lead_final_check) => set({ lead_final_check })} label={l("El líder revisa al final", "The lead checks at the end")} />
+        <Switch checked={p.single_pass ?? true} onChange={(single_pass) => set({ single_pass })}
+          label={l("Una pasada por agente", "One pass per agent")}
+          hint={l("Cada agente trabaja una vez y se entrega lo pedido: sin revisiones, reintentos ni rondas extra del líder. Desactívalo para tareas grandes que necesiten iterar.", "Each agent works once and what was asked is delivered: no reviews, retries or extra lead rounds. Turn it off for large tasks that need to iterate.")} />
+        <Switch checked={p.lead_final_check} disabled={p.single_pass ?? true} onChange={(lead_final_check) => set({ lead_final_check })} label={l("El líder revisa al final", "The lead checks at the end")} />
         <Switch checked={p.auto_checks ?? false} onChange={(auto_checks) => set({ auto_checks })} label={l("Detectar y ejecutar las pruebas del repositorio", "Detect and run repository tests")} hint={l("Si el repositorio ya tiene verificaciones configuradas para el equipo, se usan esas.", "The team uses its configured checks when the repository already has them.")} />
         <Switch checked={p.impact_approval ?? false} onChange={(impact_approval) => set({ impact_approval })}
           label={l("Revisar cambios de impacto", "Review high-impact changes")}
@@ -222,6 +225,9 @@ export function TeamInspector({ team, update }: { team: Team; update: Update }) 
         </Row>
         <Row label={l("Rondas del líder", "Lead rounds")} title={l("Cuántos turnos puede usar el líder para planificar y coordinar", "How many turns the lead may use to plan and coordinate")}>
           <Stepper value={p.lead_rounds} min={1} max={20} onChange={(lead_rounds) => set({ lead_rounds })} label="rounds" />
+        </Row>
+        <Row label={l("Minutos por turno", "Minutes per turn")} hint={l("0: sin límite", "0: no limit")} title={l("Lo más que puede durar un turno de un agente antes de detenerse y contarse como intento fallido", "The longest one agent turn may run before it is stopped and counted as a failed attempt")}>
+          <MoneyInput value={p.turn_minutes ?? 30} step={5} onChange={(turn_minutes) => set({ turn_minutes: Math.min(480, turn_minutes) }, false)} suffix="min" />
         </Row>
         <Row label={l("Rondas de un sub-líder", "Sub-lead rounds")} title={l("Turnos máximos de cada sub-líder en su rama", "Max turns for each sub-lead in its branch")}>
           <Stepper value={p.sub_lead_rounds} min={1} max={12} onChange={(sub_lead_rounds) => set({ sub_lead_rounds })} label="sub rounds" />

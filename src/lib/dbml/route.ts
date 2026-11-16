@@ -56,8 +56,8 @@ export type EdgeRouting = "curved" | "orthogonal";
 /**
  * Above this many boxes the toggle is refused and every edge is drawn curved.
  *
- * Routing is recomputed whenever the layout is, and the layout is recomputed on every frame of a
- * box drag — `moveTable` rewrites the document per pointermove. Measured at `roomy`, routing 200
+ * Routing is recomputed on every frame of a box drag (the canvas shifts the dragged box in its
+ * cached layout — see `moveDbmlNodes` — and re-routes against the result). Measured at `roomy`, routing 200
  * nodes costs about 0.6 ms on top of the layout's 1.4 ms, so the cap is a backstop rather than a
  * boundary anyone is expected to meet. A schema past it is also one where the picture is a map you
  * navigate rather than something you read a single line off.

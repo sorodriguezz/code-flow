@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 import { clip } from "../../lib/diagramSvg";
-import { routeEdges, type EdgeRouting } from "../../lib/dbml/route";
+import { routeEdges, type EdgeRouting, type RoutedEdge } from "../../lib/dbml/route";
 import {
   BADGE_GAP,
   badgeStripWidth,
@@ -19,6 +19,7 @@ import {
   isCommented,
   layoutDbml,
   MIN_NOTE_SIDE,
+  moveDbmlNodes,
   NOTE_SLOT,
   stickyBoxes,
   type DbmlBadge,
@@ -54,7 +55,12 @@ import { LEGEND, MARK_COLOUR, markMenuItems, markNamesOf } from "./markChrome";
 import { LaserLayer, type LaserPan } from "../diagrams/Laser";
 import { useT } from "../../state/languageStore";
 import type { DbDiagramColumn } from "../../types/database";
-import type { DiagramColumnMode, DiagramDensity, DiagramNode } from "../../lib/db/erLayout";
+import type {
+  DiagramColumnMode,
+  DiagramDensity,
+  DiagramLink,
+  DiagramNode,
+} from "../../lib/db/erLayout";
 import type { DbmlView } from "./DbmlMinimap";
 
 /**
@@ -92,7 +98,6 @@ import type { DbmlView } from "./DbmlMinimap";
 const ZOOM_MIN = 0.15;
 const ZOOM_MAX = 2.5;
 const SELECTED_TABLE_GLOW = "url(#cf-dbml-glow)";
-const RELATED_TABLE_GLOW = "url(#cf-dbml-glow-soft)";
 const TABLE_CORNER_RADIUS = 12;
 /** The scale a table found by searching is at least brought to. */
 const READABLE_ZOOM = 0.85;
@@ -225,7 +230,12 @@ export interface DbmlCanvasHandle {
   centre: () => { x: number; y: number } | null;
 }
 
-export const DbmlCanvas = forwardRef<
+/**
+ * Memoised: the workbench around it re-renders for things the drawing does not show — the pointer
+ * entering the canvas fades the chrome in, a search hit count, the minimap's layout — and every one
+ * of those re-rendered the whole canvas with it.
+ */
+export const DbmlCanvas = memo(forwardRef<
   DbmlCanvasHandle,
   {
     schema: DbmlSchema;
@@ -243,8 +253,9 @@ export const DbmlCanvas = forwardRef<
     rowCounts?: Record<string, number>;
     /**
      * Omit for a read-only canvas — the boxes then sit wherever the layout engine puts them.
-     * Called on every frame of a drag with `final` false, and once more on the release with it
-     * true: the caller writes the document on the release and only moves the picture before it.
+     * Called once, on the release, with `final` true: the frames before it move the canvas's own
+     * overlay and nothing else (see `live`). `final` stays in the signature for callers that
+     * still branch on it.
      */
     onMoveTable?: (id: string, x: number, y: number, final?: boolean) => void;
     /**
@@ -257,7 +268,7 @@ export const DbmlCanvas = forwardRef<
       setText: (name: string, text: string) => void;
       setColor: (name: string, color: string | null) => void;
       drop: (name: string) => void;
-      /** Moved or resized; `final` as for `onMoveTable`. */
+      /** Moved or resized, on the release — `final` as for `onMoveTable`. */
       place: (id: string, spot: LayoutSpot, final: boolean) => void;
     };
     /** The table whose neighbourhood is lit up, or `null`. Controlled: the inspector reads it too. */
@@ -430,6 +441,7 @@ export const DbmlCanvas = forwardRef<
    * is the only text on this canvas that is read rather than drawn.
    */
   const markNames = useMemo(() => markNamesOf(t), [t]);
+  const connectHint = t("dbml.connectHint");
   const frameRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const canvasRef = useRef<SVGGElement>(null);
@@ -560,9 +572,57 @@ export const DbmlCanvas = forwardRef<
   const matchRef = useRef<string[]>([]);
   const matchAt = useRef(0);
 
-  const layout = useMemo(
+  /**
+   * The boxes mid-drag, by id — tables and sticky notes alike — before anything is written.
+   *
+   * Held *here* rather than by the caller, and that is the performance fix for dragging. The caller
+   * used to merge every frame into `positions`, which is a new object per pointer move, which re-ran
+   * the whole layout engine, the router, every box and the minimap sixty times a second for one box
+   * that moved. Now the frames only touch this overlay, the overlay only shifts the one box in the
+   * cached layout (`moveDbmlNodes`), and the caller hears about the drag once, on the release.
+   *
+   * Updated at most once per animation frame: a pointer reports faster than the screen draws on
+   * some hardware, and a render for a frame nobody will see is pure cost.
+   */
+  const [live, setLive] = useState<Record<string, LayoutSpot> | null>(null);
+  const livePending = useRef<Record<string, LayoutSpot> | null>(null);
+  const liveFrame = useRef<number | null>(null);
+  const pushLive = useCallback((id: string, spot: LayoutSpot) => {
+    livePending.current = { ...(livePending.current ?? {}), [id]: spot };
+    if (liveFrame.current !== null) return;
+    liveFrame.current = requestAnimationFrame(() => {
+      liveFrame.current = null;
+      setLive(livePending.current);
+    });
+  }, []);
+  /** Drops the overlay — in the same handler as the release's write, so the two land in one render
+   *  and the box never flashes back to where it started. */
+  const clearLive = useCallback(() => {
+    if (liveFrame.current !== null) cancelAnimationFrame(liveFrame.current);
+    liveFrame.current = null;
+    livePending.current = null;
+    setLive(null);
+  }, []);
+  useEffect(
+    () => () => {
+      if (liveFrame.current !== null) cancelAnimationFrame(liveFrame.current);
+    },
+    [],
+  );
+
+  /** The layout as the document has it. Not re-run by a drag — see `live`. */
+  const settled = useMemo(
     () => layoutDbml(schema, { mode, density, pinned: positions, counts: rowCounts }),
     [schema, mode, density, positions, rowCounts],
+  );
+  const layout = useMemo(
+    () => (live ? moveDbmlNodes(settled, schema, density, live) : settled),
+    [settled, live, schema, density],
+  );
+  /** `positions` with the overlay on top — what the sticky notes are placed from. */
+  const shownPositions = useMemo(
+    () => (live ? { ...positions, ...live } : positions),
+    [positions, live],
   );
   const nodeById = useMemo(
     () => new Map(layout.nodes.map((node) => [node.id, node])),
@@ -575,8 +635,8 @@ export const DbmlCanvas = forwardRef<
   );
   /** The sticky notes where they are drawn: placed, or parked to the right of the tables. */
   const stickies = useMemo(
-    () => stickyBoxes(schema.notes ?? [], positions, { width: layout.width === 0 ? 0 : layout.minX + layout.width }),
-    [schema.notes, positions, layout.minX, layout.width],
+    () => stickyBoxes(schema.notes ?? [], shownPositions, { width: layout.width === 0 ? 0 : layout.minX + layout.width }),
+    [schema.notes, shownPositions, layout.minX, layout.width],
   );
   /**
    * The picture's extent with the notes in it — what fitting, the dotted ground and an export frame.
@@ -605,13 +665,30 @@ export const DbmlCanvas = forwardRef<
   /**
    * Every line's geometry, computed once for the set rather than per edge.
    *
-   * Beside the layout memo and with the same deps through it, so a drag — which produces a new
-   * `positions` object per frame — re-routes exactly as often as it re-lays-out and no more.
+   * Re-run per drag frame (it is cheap next to the layout — see `ROUTING_NODE_LIMIT`), but a line
+   * whose path came out the same keeps its previous object, so the memoised `EdgeLine` of every
+   * relationship that does not touch the dragged box is not re-rendered.
    */
-  const routes = useMemo(
-    () => routeEdges(layout, routing, density),
-    [layout, routing, density],
-  );
+  const routesBefore = useRef<Map<string, RoutedEdge>>(new Map());
+  const routes = useMemo(() => {
+    const next = routeEdges(layout, routing, density);
+    const before = routesBefore.current;
+    for (const [id, route] of next) {
+      const old = before.get(id);
+      if (
+        old &&
+        old.d === route.d &&
+        old.mid.x === route.mid.x &&
+        old.mid.y === route.mid.y &&
+        old.fromRight === route.fromRight &&
+        old.toRight === route.toRight
+      ) {
+        next.set(id, old);
+      }
+    }
+    routesBefore.current = next;
+    return next;
+  }, [layout, routing, density]);
 
   useEffect(() => {
     onNodeCount?.(layout.nodes.length);
@@ -865,10 +942,13 @@ export const DbmlCanvas = forwardRef<
   // The minimap's blocks: the layout each time it changes, and the view against it.
   const layoutSink = useRef(onLayout);
   layoutSink.current = onLayout;
+  // Not while a box is being dragged: the minimap lives in the caller's render, and handing it a
+  // layout per frame re-rendered the whole workbench per frame. It catches up on the release.
   useEffect(() => {
+    if (live) return;
     layoutSink.current?.(framed);
     emitView();
-  }, [framed, emitView]);
+  }, [framed, emitView, live]);
 
   /**
    * Fits once, when the canvas first has something to fit — and on a density change, because
@@ -1005,7 +1085,8 @@ export const DbmlCanvas = forwardRef<
       drag.last = drag.resize
         ? { x: box.x, y: box.y, w: Math.max(MIN_NOTE_SIDE, Math.round(box.w + dx / k)), h: Math.max(MIN_NOTE_SIDE, Math.round(box.h + dy / k)) }
         : { x: Math.round(box.x + dx / k), y: Math.round(box.y + dy / k), w: box.w, h: box.h };
-      notesEditing.place(drag.id, drag.last, false);
+      // The overlay, not the caller — see `live`.
+      pushLive(drag.id, drag.last);
       return;
     }
     if (!onMoveTable) return;
@@ -1013,7 +1094,7 @@ export const DbmlCanvas = forwardRef<
     drag.moved = true;
     drag.lastX = Math.round(drag.nodeX + dx / viewRef.current.k);
     drag.lastY = Math.round(drag.nodeY + dy / viewRef.current.k);
-    onMoveTable(drag.id, drag.lastX, drag.lastY, false);
+    pushLive(drag.id, { x: drag.lastX, y: drag.lastY });
   };
 
   /**
@@ -1049,6 +1130,7 @@ export const DbmlCanvas = forwardRef<
     }
     if (drag?.kind === "canvas") commitView();
     // The release is what writes the document — every frame before it only moved the picture.
+    if (drag?.kind === "node" || drag?.kind === "sticky") clearLive();
     if (drag?.kind === "node" && drag.moved && drag.lastX !== undefined && drag.lastY !== undefined) {
       onMoveTable?.(drag.id, drag.lastX, drag.lastY, true);
     }
@@ -1126,6 +1208,123 @@ export const DbmlCanvas = forwardRef<
     };
     return [...layout.nodes].sort((a, b) => rank(a.id) - rank(b.id));
   }, [layout.nodes, selected, highlight, matches]);
+
+  // ---- stable handlers for the memoised boxes and lines -------------------------------------
+  //
+  // Every one of these takes the id (or the node) it is about rather than closing over it, and is
+  // stable for the life of the canvas: `SchemaBox`, `Row` and `EdgeLine` are memoised, and a fresh
+  // closure per box per render was what used to re-render all two hundred of them for a hover that
+  // changed one. `useLatest` keeps them reading this render's state without being rebuilt by it.
+
+  const enterLink = useCallback((id: string) => setHoveredLink(id), []);
+  const leaveLink = useCallback(
+    (id: string) => setHoveredLink((current) => (current === id ? null : current)),
+    [],
+  );
+  const linkMenu = useLatest((event: React.MouseEvent, constraint: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const ends = endsOf(constraint);
+    if (!ends) return;
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      on: { kind: "ref", id: constraint, mark: marks[constraint], ...ends },
+    });
+  });
+  const enterBox = useCallback((id: string) => setHovered(id), []);
+  const leaveBox = useCallback(
+    (id: string) => setHovered((current) => (current === id ? null : current)),
+    [],
+  );
+  const pressBox = useLatest((event: React.PointerEvent, node: DiagramNode) => onPointerDown(event, node));
+  const openBox = useLatest((id: string) => onOpen?.(id));
+  const renameBox = useLatest((node: DiagramNode) => beginRename(node.id, node.name));
+  const startBoxWire = useLatest(
+    (event: React.PointerEvent, node: DiagramNode, column: string, cy: number) =>
+      startWire(event, node, column, cy),
+  );
+  const boxMenu = useLatest((event: React.MouseEvent, node: DiagramNode) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onSelect(node.id);
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      on: {
+        kind: "table",
+        id: node.id,
+        name: node.name,
+        isEnum: layout.enumIds.has(node.id),
+        mark: marks[node.id],
+        color: tableColors.get(node.id),
+        // Read from the prop and not from `selected`: right-clicking a table while another one is
+        // held does not move the selection (`onSelect` is refused while pinned), so the two are not
+        // the same question.
+        pinned: pinnedId === node.id,
+      },
+    });
+  });
+  const fieldMenu = useLatest((event: React.MouseEvent, node: DiagramNode, column: string) => {
+    event.preventDefault();
+    // The box's own handler would otherwise run too and replace this menu with the table's — the
+    // row is inside the card, so both are on the path.
+    event.stopPropagation();
+    onSelect(node.id);
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      on: {
+        kind: "field",
+        table: node.id,
+        name: node.name,
+        column,
+        mark: marks[fieldMarkKey(node.id, column)],
+      },
+    });
+  });
+
+  /**
+   * The joined columns, one set per box, so a box is handed only its own — and a box with none gets
+   * the one shared empty set, which is what lets its memo hold when the highlight moves elsewhere.
+   */
+  const joinedByNode = useMemo(() => {
+    const out = new Map<string, Set<string>>();
+    if (!highlight) return out;
+    for (const key of highlight.columns) {
+      const bar = key.indexOf("|");
+      if (bar === -1) continue;
+      const id = key.slice(0, bar);
+      let set = out.get(id);
+      if (!set) out.set(id, (set = new Set()));
+      set.add(key.slice(bar + 1));
+    }
+    return out;
+  }, [highlight]);
+
+  /**
+   * Each box's column marks, as a slice of `marks` — kept as the *same object* while its contents
+   * do not change, so marking one column re-renders one box and not the diagram.
+   */
+  const fieldMarksBefore = useRef<Map<string, Record<string, DbmlMarkKind>>>(new Map());
+  const fieldMarksByNode = useMemo(() => {
+    const fresh = new Map<string, Record<string, DbmlMarkKind>>();
+    for (const [key, value] of Object.entries(marks)) {
+      const field = key.indexOf("|");
+      if (field === -1) continue;
+      const id = key.slice(0, field);
+      let slice = fresh.get(id);
+      if (!slice) fresh.set(id, (slice = {}));
+      slice[key.slice(field + 1)] = value;
+    }
+    const before = fieldMarksBefore.current;
+    for (const [id, slice] of fresh) {
+      const old = before.get(id);
+      if (old && sameMarks(old, slice)) fresh.set(id, old);
+    }
+    fieldMarksBefore.current = fresh;
+    return fresh;
+  }, [marks]);
 
   /**
    * Centres on the first hit as the query changes — and only when the *set of hits* changes.
@@ -1225,26 +1424,6 @@ export const DbmlCanvas = forwardRef<
               style={{ floodColor: "var(--cf-accent)", floodOpacity: 0.5 }}
             />
           </filter>
-          {/* The neighbourhood's halo, and it is deliberately *far* below the one above rather than
-              a step down from it.
-
-              Both haloes are the same hue, so the only thing separating "the table I clicked" from
-              "the five it joins" is how much light each throws. At a quarter of the selection's
-              strength — instead of the two thirds this used to be — the neighbours still read as a
-              lit set, but the eye lands on the selection first and without effort. The rest of what
-              marks a neighbour is untouched: it keeps the accent border, the lit header band and
-              the wash on its joined columns, which is what stops the smaller halo from reading as
-              "not selected either". */}
-          <filter id="cf-dbml-glow-soft" x="-45%" y="-45%" width="190%" height="190%">
-            <feDropShadow
-              dx="0"
-              dy="0"
-              stdDeviation="4"
-              floodColor="var(--cf-accent)"
-              floodOpacity="0.12"
-              style={{ floodColor: "var(--cf-accent)", floodOpacity: 0.12 }}
-            />
-          </filter>
         </defs>
         <g
           ref={canvasRef}
@@ -1298,233 +1477,84 @@ export const DbmlCanvas = forwardRef<
           ))}
 
           {layout.links.map((link) => {
-            const from = nodeById.get(link.from);
-            const to = nodeById.get(link.to);
-            if (!from || !to) return null;
+            if (!nodeById.has(link.from) || !nodeById.has(link.to)) return null;
+            const route = routes.get(link.id);
+            if (!route) return null;
             // `link.constraint` carries the ref's own id — see `toSchemaDiagram` — which is what
             // makes "is this line part of the selection" an exact question rather than a guess
             // from its endpoints.
             const lit = highlight ? highlight.refs.has(link.constraint) : false;
-            const dim = highlight !== null && !lit;
-            const route = routes.get(link.id);
-            if (!route) return null;
-            const opacity = dim ? 0.16 : lit ? 0.95 : 0.42;
-            const d = route.d;
-            // A marked relationship is drawn in its mark's colour rather than the accent, and a
-            // removal candidate is dashed as well — at the zoom where a whole model fits, colour
-            // alone is a few pixels of hue on a hairline and the dash is what carries.
-            const mark = marks[link.constraint];
-            const stroke = mark ? MARK_COLOUR[mark] : "var(--cf-accent)";
-            // Which end stands for many rows. A ref the canvas is drawing always has an entry here;
-            // the fallback is what a mid-keystroke re-parse looks like for one frame, and `1:1` is
-            // the reading that claims the least about a relationship nobody has finished typing.
             const relation = refById.get(link.constraint);
-            const fromMany = relation?.from.relation === "*";
-            const toMany = relation?.to.relation === "*";
-            // A self-reference leaves and arrives on the same face, and the router's `toRight` —
-            // which is `!fromRight` by construction — says the opposite for the second end. Left
-            // alone, the foot on a `manager_id → employees` loop is drawn inside its own table.
-            const loop = link.from === link.to;
-            const toOutward = loop || route.toRight ? 1 : -1;
-            // Left to right as drawn, not as written: `route.fromRight` means the `from` box is the
-            // one on the left, so that is the half of the label that goes first.
-            const ends = [fromMany ? "N" : "1", toMany ? "N" : "1"] as const;
-            const label = route.fromRight
-              ? `${ends[0]}:${ends[1]}`
-              : `${ends[1]}:${ends[0]}`;
             return (
-              <g key={link.id}>
-                {/* The part you can actually hit. A 1.4px curve is not a pointer target at any
-                    zoom, so the hover rides an invisible stroke ten times its width — drawn before
-                    the nodes, which means a table always wins where the two overlap. */}
-                <path
-                  d={d}
-                  fill="none"
-                  stroke="transparent"
-                  strokeWidth={14}
-                  pointerEvents="stroke"
-                  style={{ cursor: "pointer" }}
-                  onContextMenu={
-                    editing
-                      ? (event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          const ends = endsOf(link.constraint);
-                          if (ends) {
-                            setMenu({
-                              x: event.clientX,
-                              y: event.clientY,
-                              on: {
-                                kind: "ref",
-                                id: link.constraint,
-                                mark: marks[link.constraint],
-                                ...ends,
-                              },
-                            });
-                          }
-                        }
-                      : undefined
-                  }
-                  onPointerEnter={() => setHoveredLink(link.constraint)}
-                  onPointerLeave={() =>
-                    setHoveredLink((current) =>
-                      current === link.constraint ? null : current,
-                    )
-                  }
-                >
-                  <title>{`${link.from}.${link.fromColumn} → ${link.to}.${link.toColumn}`}</title>
-                </path>
-                <g opacity={opacity} pointerEvents="none">
-                  {/* Dashed, and every line is.
-
-                      A reference is a rule about the data rather than a thing the data contains,
-                      and a dashed line is how a schema drawing has always said so — it also lets a
-                      line cross a neighbour without the two reading as one continuous stroke. The
-                      removal mark keeps a pattern of its own on the far side of that: a *dot* is
-                      still unmistakably not the dash everything else is drawn with, where a
-                      slightly shorter dash would have quietly stopped meaning anything. */}
-                  <path
-                    d={d}
-                    fill="none"
-                    stroke={stroke}
-                    strokeWidth={lit ? 2 : 1.4}
-                    strokeLinecap="round"
-                    // A right angle at 1.4px shows its mitre without this, which reads as a nick in
-                    // the line rather than as a corner.
-                    strokeLinejoin="round"
-                    strokeDasharray={mark === "remove" ? "1.5 4" : "6 4"}
-                  />
-                  {/* The dot pins the line to the row it belongs to; the foot beside it says how
-                      many rows that end stands for. Neither is an arrowhead: direction is not what
-                      a reader is asking a relationship line, and a head large enough to see at 40%
-                      zoom is a blob at 200%. */}
-                  <circle cx={route.x1} cy={route.y1} r={lit ? 3.2 : 2.4} fill={stroke} />
-                  <circle cx={route.x2} cy={route.y2} r={lit ? 3.2 : 2.4} fill={stroke} />
-                  <Foot
-                    x={route.x1}
-                    y={route.y1}
-                    outward={route.fromRight ? 1 : -1}
-                    many={fromMany}
-                    colour={stroke}
-                    lit={lit}
-                  />
-                  <Foot
-                    x={route.x2}
-                    y={route.y2}
-                    outward={toOutward}
-                    many={toMany}
-                    colour={stroke}
-                    lit={lit}
-                  />
-                  <CardinalityBadge
-                    x={route.mid.x}
-                    y={route.mid.y}
-                    label={label}
-                    colour={stroke}
-                  />
-                </g>
-              </g>
+              <EdgeLine
+                key={link.id}
+                link={link}
+                route={route}
+                lit={lit}
+                dim={highlight !== null && !lit}
+                mark={marks[link.constraint]}
+                fromMany={relation?.from.relation === "*"}
+                toMany={relation?.to.relation === "*"}
+                onContextMenu={editing ? linkMenu : undefined}
+                onEnter={enterLink}
+                onLeave={leaveLink}
+              />
             );
           })}
 
-
-
-          {painted.map((node) => (
-            <SchemaBox
-              key={node.id}
-              node={node}
-              isEnum={layout.enumIds.has(node.id)}
-              mark={marks[node.id]}
-              marks={marks}
-              markNames={markNames}
-              color={layout.enumIds.has(node.id) ? undefined : tableColors.get(node.id)}
-              pinned={pinnedId === node.id}
-              selected={selected === node.id}
-              connect={
-                editing && !editing.blocked
-                  ? {
-                      hoveredRow,
-                      hint: t("dbml.connectHint"),
-                      onHoverRow: setHoveredRow,
-                      onStart: (column, cy, event) => startWire(event, node, column, cy),
-                    }
-                  : undefined
-              }
-              onContextMenu={
-                editing
-                  ? (event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      onSelect(node.id);
-                      setMenu({
-                        x: event.clientX,
-                        y: event.clientY,
-                        on: {
-                          kind: "table",
-                          id: node.id,
-                          name: node.name,
-                          isEnum: layout.enumIds.has(node.id),
-                          mark: marks[node.id],
-                          color: tableColors.get(node.id),
-                          // Read from the prop and not from `selected`: right-clicking a table
-                          // while another one is held does not move the selection (`onSelect` is
-                          // refused while pinned), so the two are not the same question.
-                          pinned: pinnedId === node.id,
-                        },
-                      });
-                    }
-                  : undefined
-              }
-              onFieldContextMenu={
-                // Not `editing && !editing.blocked`: the four rows this opens are the marks and a
-                // delete, and only the delete is refused while the document does not parse — the
-                // menu itself disables that one. Gating the whole menu would take reviewing away at
-                // exactly the moment a half-typed schema is what you are reviewing.
-                //
-                // Enums are excluded because their rows are values, not columns: there is no field
-                // line for `setFieldMarkComment` to write against and nothing for a delete to
-                // remove.
-                editing && !layout.enumIds.has(node.id)
-                  ? (column, event) => {
-                      event.preventDefault();
-                      // The box's own handler would otherwise run too and replace this menu with
-                      // the table's — the row is inside the card, so both are on the path.
-                      event.stopPropagation();
-                      onSelect(node.id);
-                      setMenu({
-                        x: event.clientX,
-                        y: event.clientY,
-                        on: {
-                          kind: "field",
-                          table: node.id,
-                          name: node.name,
-                          column,
-                          mark: marks[fieldMarkKey(node.id, column)],
-                        },
-                      });
-                    }
-                  : undefined
-              }
-              onRename={
-                editing && !editing.blocked
-                  ? () => beginRename(node.id, node.name)
-                  : undefined
-              }
-              related={highlight !== null && highlight.tables.has(node.id) && selected !== node.id}
-              dimmed={
-                (highlight !== null && !highlight.tables.has(node.id)) ||
-                (matches !== null && !matches.has(node.id))
-              }
-              joinedColumns={highlight?.columns ?? null}
-              draggable={onMoveTable !== undefined}
-              onPointerDown={(event) => onPointerDown(event, node)}
-              onPointerEnter={() => setHovered(node.id)}
-              onPointerLeave={() => setHovered((current) => (current === node.id ? null : current))}
-              onNoteEnter={showNote}
-              onNoteLeave={hideNote}
-              onOpen={() => onOpen?.(node.id)}
-            />
-          ))}
+          {painted.map((node) => {
+            const isEnum = layout.enumIds.has(node.id);
+            const connectable = editing !== undefined && !editing.blocked;
+            return (
+              <SchemaBox
+                key={node.id}
+                node={node}
+                isEnum={isEnum}
+                mark={marks[node.id]}
+                fieldMarks={fieldMarksByNode.get(node.id) ?? EMPTY_MARKS}
+                markNames={markNames}
+                color={isEnum ? undefined : tableColors.get(node.id)}
+                pinned={pinnedId === node.id}
+                selected={selected === node.id}
+                // Only this box's hovered row, as a column name: the whole canvas's hovered row
+                // would be a new prop for every box each time the pointer crossed a line.
+                connectHint={connectable ? connectHint : undefined}
+                hoveredRow={
+                  connectable && hoveredRow?.startsWith(`${node.id}|`)
+                    ? hoveredRow.slice(node.id.length + 1)
+                    : null
+                }
+                onHoverRow={setHoveredRow}
+                onStartWire={startBoxWire}
+                onContextMenu={editing ? boxMenu : undefined}
+                onFieldContextMenu={
+                  // Not `editing && !editing.blocked`: the four rows this opens are the marks and a
+                  // delete, and only the delete is refused while the document does not parse — the
+                  // menu itself disables that one. Gating the whole menu would take reviewing away
+                  // at exactly the moment a half-typed schema is what you are reviewing.
+                  //
+                  // Enums are excluded because their rows are values, not columns: there is no
+                  // field line for `setFieldMarkComment` to write against and nothing for a delete
+                  // to remove.
+                  editing && !isEnum ? fieldMenu : undefined
+                }
+                onRename={connectable ? renameBox : undefined}
+                related={highlight !== null && highlight.tables.has(node.id) && selected !== node.id}
+                dimmed={
+                  (highlight !== null && !highlight.tables.has(node.id)) ||
+                  (matches !== null && !matches.has(node.id))
+                }
+                joinedColumns={joinedByNode.get(node.id) ?? EMPTY_SET}
+                draggable={onMoveTable !== undefined}
+                onPointerDown={pressBox}
+                onPointerEnter={enterBox}
+                onPointerLeave={leaveBox}
+                onNoteEnter={showNote}
+                onNoteLeave={hideNote}
+                onOpen={openBox}
+              />
+            );
+          })}
 
           {/* Sticky notes, over the tables: a post-it is put on top of what it is about. */}
           {stickies.map((box) => (
@@ -1744,7 +1774,7 @@ export const DbmlCanvas = forwardRef<
       )}
     </div>
   );
-});
+}));
 
 /**
  * What the right button offers, by what it landed on.
@@ -1960,6 +1990,135 @@ function menuItems(
     },
   ];
 }
+
+/** The one empty set every box without joined columns is handed — see `joinedByNode`. */
+const EMPTY_SET: ReadonlySet<string> = new Set();
+/** The same, for a box with no marked columns. */
+const EMPTY_MARKS: Record<string, DbmlMarkKind> = {};
+
+/** Whether two slices of column marks say the same thing. */
+function sameMarks(a: Record<string, DbmlMarkKind>, b: Record<string, DbmlMarkKind>): boolean {
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((key) => a[key] === b[key]);
+}
+
+/**
+ * A callback that is the same function for the component's lifetime and always runs the latest
+ * render's version of `fn` — React's long-proposed `useEvent`, in the shape this file already uses
+ * for `zoomSink` and friends. For handlers given to memoised children and only ever called from
+ * events, never during render.
+ */
+function useLatest<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+  const ref = useRef(fn);
+  ref.current = fn;
+  return useCallback((...args: A) => ref.current(...args), []);
+}
+
+/**
+ * One relationship line: its hit target, the stroke, the end dots, the feet and the badge.
+ *
+ * Memoised on primitives and on its route, which `routes` keeps as the same object while the path
+ * does not change — so dragging a box re-renders the lines that touch it and no others, and a hover
+ * re-renders the lines whose lit state actually flipped.
+ */
+const EdgeLine = memo(function EdgeLine({
+  link,
+  route,
+  lit,
+  dim,
+  mark,
+  fromMany,
+  toMany,
+  onContextMenu,
+  onEnter,
+  onLeave,
+}: {
+  link: DiagramLink;
+  route: RoutedEdge;
+  lit: boolean;
+  dim: boolean;
+  mark?: DbmlMarkKind;
+  /** Which end stands for many rows. A ref the canvas is drawing always has an answer; the
+   *  fallback (`false`) is what a mid-keystroke re-parse looks like for one frame, and `1:1` is the
+   *  reading that claims the least about a relationship nobody has finished typing. */
+  fromMany: boolean;
+  toMany: boolean;
+  onContextMenu?: (event: React.MouseEvent, constraint: string) => void;
+  onEnter: (constraint: string) => void;
+  onLeave: (constraint: string) => void;
+}) {
+  const opacity = dim ? 0.16 : lit ? 0.95 : 0.42;
+  const d = route.d;
+  // A marked relationship is drawn in its mark's colour rather than the accent, and a removal
+  // candidate is dashed as well — at the zoom where a whole model fits, colour alone is a few pixels
+  // of hue on a hairline and the dash is what carries.
+  const stroke = mark ? MARK_COLOUR[mark] : "var(--cf-accent)";
+  // A self-reference leaves and arrives on the same face, and the router's `toRight` — which is
+  // `!fromRight` by construction — says the opposite for the second end. Left alone, the foot on a
+  // `manager_id → employees` loop is drawn inside its own table.
+  const loop = link.from === link.to;
+  const toOutward = loop || route.toRight ? 1 : -1;
+  // Left to right as drawn, not as written: `route.fromRight` means the `from` box is the one on the
+  // left, so that is the half of the label that goes first.
+  const ends = [fromMany ? "N" : "1", toMany ? "N" : "1"] as const;
+  const label = route.fromRight ? `${ends[0]}:${ends[1]}` : `${ends[1]}:${ends[0]}`;
+  return (
+    <g>
+      {/* The part you can actually hit. A 1.4px curve is not a pointer target at any zoom, so the
+          hover rides an invisible stroke ten times its width — drawn before the nodes, which means
+          a table always wins where the two overlap. */}
+      <path
+        d={d}
+        fill="none"
+        stroke="transparent"
+        strokeWidth={14}
+        pointerEvents="stroke"
+        style={{ cursor: "pointer" }}
+        onContextMenu={onContextMenu ? (event) => onContextMenu(event, link.constraint) : undefined}
+        onPointerEnter={() => onEnter(link.constraint)}
+        onPointerLeave={() => onLeave(link.constraint)}
+      >
+        <title>{`${link.from}.${link.fromColumn} → ${link.to}.${link.toColumn}`}</title>
+      </path>
+      <g opacity={opacity} pointerEvents="none">
+        {/* Dashed, and every line is.
+
+            A reference is a rule about the data rather than a thing the data contains, and a dashed
+            line is how a schema drawing has always said so — it also lets a line cross a neighbour
+            without the two reading as one continuous stroke. The removal mark keeps a pattern of its
+            own on the far side of that: a *dot* is still unmistakably not the dash everything else
+            is drawn with, where a slightly shorter dash would have quietly stopped meaning anything. */}
+        <path
+          d={d}
+          fill="none"
+          stroke={stroke}
+          strokeWidth={lit ? 2 : 1.4}
+          strokeLinecap="round"
+          // A right angle at 1.4px shows its mitre without this, which reads as a nick in the line
+          // rather than as a corner.
+          strokeLinejoin="round"
+          strokeDasharray={mark === "remove" ? "1.5 4" : "6 4"}
+        />
+        {/* The dot pins the line to the row it belongs to; the foot beside it says how many rows
+            that end stands for. Neither is an arrowhead: direction is not what a reader is asking a
+            relationship line, and a head large enough to see at 40% zoom is a blob at 200%. */}
+        <circle cx={route.x1} cy={route.y1} r={lit ? 3.2 : 2.4} fill={stroke} />
+        <circle cx={route.x2} cy={route.y2} r={lit ? 3.2 : 2.4} fill={stroke} />
+        <Foot
+          x={route.x1}
+          y={route.y1}
+          outward={route.fromRight ? 1 : -1}
+          many={fromMany}
+          colour={stroke}
+          lit={lit}
+        />
+        <Foot x={route.x2} y={route.y2} outward={toOutward} many={toMany} colour={stroke} lit={lit} />
+        <CardinalityBadge x={route.mid.x} y={route.mid.y} label={label} colour={stroke} />
+      </g>
+    </g>
+  );
+});
 
 /**
  * How many rows this end of a line stands for, drawn as the line's own shape.
@@ -2219,7 +2378,7 @@ const SchemaBox = memo(function SchemaBox({
   isEnum,
   mark,
   color,
-  marks,
+  fieldMarks,
   markNames,
   pinned,
   selected,
@@ -2227,7 +2386,10 @@ const SchemaBox = memo(function SchemaBox({
   dimmed,
   joinedColumns,
   draggable,
-  connect,
+  connectHint,
+  hoveredRow,
+  onHoverRow,
+  onStartWire,
   onContextMenu,
   onFieldContextMenu,
   onRename,
@@ -2249,13 +2411,12 @@ const SchemaBox = memo(function SchemaBox({
    */
   color?: string;
   /**
-   * Every mark in the document, so each row can find its own under `fieldMarkKey`.
+   * This box's column marks, by column name.
    *
-   * The whole map rather than this box's slice, because a slice would be a fresh object on every
-   * render and the memo above exists to stop two hundred boxes re-rendering for a pan that moved
-   * none of them. The map's identity only changes when the document does.
+   * A slice rather than the whole map, and the canvas keeps each slice the same object while its
+   * contents do not change (`fieldMarksByNode`) — so marking one column re-renders one box.
    */
-  marks: DbmlMarks;
+  fieldMarks: Record<string, DbmlMarkKind>;
   /** What each mark is *called*, for the tooltips. Translated by the caller: this is SVG. */
   markNames: Record<DbmlMarkKind, string>;
   /** The inspector is held on this table. */
@@ -2263,24 +2424,32 @@ const SchemaBox = memo(function SchemaBox({
   selected: boolean;
   related: boolean;
   dimmed: boolean;
-  joinedColumns: Set<string> | null;
+  /** The names of this box's columns that the lit relationship is made of. */
+  joinedColumns: ReadonlySet<string>;
   draggable: boolean;
-  /** Present when relationships can be drawn out of this box's rows. */
-  connect?: {
-    hoveredRow: string | null;
-    hint: string;
-    onHoverRow: (key: string | null) => void;
-    onStart: (column: string, cy: number, event: React.PointerEvent) => void;
-  };
-  onContextMenu?: (event: React.MouseEvent) => void;
+  /**
+   * The connect handle's tooltip — present exactly when relationships can be drawn out of this
+   * box's rows. The rest of that gesture is the three props after it.
+   */
+  connectHint?: string;
+  /** The column of *this* box under the pointer, or `null`: one string, not the canvas's state. */
+  hoveredRow: string | null;
+  onHoverRow: (key: string | null) => void;
+  onStartWire: (event: React.PointerEvent, node: DiagramNode, column: string, cy: number) => void;
+  /**
+   * The handlers below all take the node, or its id, they are about rather than closing over it:
+   * they are the canvas's own, stable for its lifetime, so this memo holds across a hover or a drag
+   * that is not about this box.
+   */
+  onContextMenu?: (event: React.MouseEvent, node: DiagramNode) => void;
   /** Right-click on one of the rows. Absent on a read-only canvas and on an enum, whose rows are
    *  values rather than columns and have nothing a mark could be written against. */
-  onFieldContextMenu?: (column: string, event: React.MouseEvent) => void;
+  onFieldContextMenu?: (event: React.MouseEvent, node: DiagramNode, column: string) => void;
   /** Double-click on the header band. Distinct from `onOpen`, which is the body's. */
-  onRename?: () => void;
-  onPointerDown: (event: React.PointerEvent) => void;
-  onPointerEnter: () => void;
-  onPointerLeave: () => void;
+  onRename?: (node: DiagramNode) => void;
+  onPointerDown: (event: React.PointerEvent, node: DiagramNode) => void;
+  onPointerEnter: (id: string) => void;
+  onPointerLeave: (id: string) => void;
   /**
    * Pointer on a comment bubble — this table's, or one of its columns'. The card itself is drawn by
    * the canvas, in HTML over the frame: a `foreignObject` here would inherit the panned group's
@@ -2295,9 +2464,25 @@ const SchemaBox = memo(function SchemaBox({
     event: React.PointerEvent,
   ) => void;
   onNoteLeave?: () => void;
-  onOpen: () => void;
+  onOpen: (id: string) => void;
 }) {
   const accent = isEnum ? ENUM_COLOUR : color ?? "var(--cf-accent)";
+  // The row handlers, bound to this node once per node rather than once per row per render, so the
+  // memoised `Row`s hold while the box re-renders for something that is not theirs.
+  const connectable = connectHint !== undefined && !isEnum;
+  const enterRow = useCallback(
+    (column: string) => onHoverRow(`${node.id}|${column}`),
+    [node.id, onHoverRow],
+  );
+  const leaveRow = useCallback(() => onHoverRow(null), [onHoverRow]);
+  const startRow = useCallback(
+    (event: React.PointerEvent, column: string, cy: number) => onStartWire(event, node, column, cy),
+    [node, onStartWire],
+  );
+  const rowMenu = useCallback(
+    (event: React.MouseEvent, column: string) => onFieldContextMenu?.(event, node, column),
+    [node, onFieldContextMenu],
+  );
   const lit = selected || related;
   /**
    * The table carries a `Note: '…'` of its own.
@@ -2379,30 +2564,49 @@ const SchemaBox = memo(function SchemaBox({
   // which is the part still visible when the boxes are packed tight enough to overlap their glows.
   //
   // The three values are close together on purpose, and they are what carries the neighbourhood now
-  // that its halo is a quarter of the selection's (see `cf-dbml-glow-soft`). A neighbour has to stay
+  // that its halo is a quarter of the selection's (see the ring below). A neighbour has to stay
   // legible as *lit* at a glance; what it must not do is compete for the first look. So the marks
   // that say "in the set" stay strong and the mark that says "look here" — the halo — is the one
   // that separates them.
   const bandOpacity = selected ? 0.22 : related ? 0.115 : 0.09;
-  const tableGlow = selected ? SELECTED_TABLE_GLOW : related ? RELATED_TABLE_GLOW : undefined;
 
   return (
     <g
       transform={`translate(${node.x} ${node.y})`}
-      onPointerDown={onPointerDown}
-      onPointerEnter={onPointerEnter}
-      onPointerLeave={onPointerLeave}
-      onContextMenu={onContextMenu}
-      onDoubleClick={onOpen}
+      onPointerDown={(event) => onPointerDown(event, node)}
+      onPointerEnter={() => onPointerEnter(node.id)}
+      onPointerLeave={() => onPointerLeave(node.id)}
+      onContextMenu={onContextMenu ? (event) => onContextMenu(event, node) : undefined}
+      onDoubleClick={() => onOpen(node.id)}
       style={{ cursor: draggable ? "move" : "pointer" }}
     >
-      {tableGlow && (
+      {/* The selection's halo is a real blur — it is one box, and the blur is what keeps it from
+          reading as another border. The neighbourhood's is a soft ring instead: there can be dozens
+          of neighbours, and a blur filter per box is re-rasterised on every frame of every pan. At
+          the strength that halo was drawn at — a quarter of the selection's, so the eye lands on the
+          selection first while the neighbours still read as a lit set — the two are
+          indistinguishable, and the ring costs nothing to repaint. */}
+      {selected && (
         <rect
           width={node.width}
           height={node.height}
           rx={TABLE_CORNER_RADIUS}
           fill="var(--cf-surface)"
-          filter={tableGlow}
+          filter={SELECTED_TABLE_GLOW}
+          pointerEvents="none"
+        />
+      )}
+      {related && !selected && (
+        <rect
+          x={-2.5}
+          y={-2.5}
+          width={node.width + 5}
+          height={node.height + 5}
+          rx={TABLE_CORNER_RADIUS + 2.5}
+          fill="none"
+          stroke="var(--cf-accent)"
+          strokeOpacity={0.14}
+          strokeWidth={5}
           pointerEvents="none"
         />
       )}
@@ -2458,7 +2662,7 @@ const SchemaBox = memo(function SchemaBox({
           onRename
             ? (event) => {
                 event.stopPropagation();
-                onRename();
+                onRename(node);
               }
             : undefined
         }
@@ -2674,38 +2878,19 @@ const SchemaBox = memo(function SchemaBox({
           typeRight={typeRight}
           first={index === 0}
           isEnum={isEnum}
-          connect={
-            connect && !isEnum
-              ? {
-                  lit: connect.hoveredRow === `${node.id}|${column.name}`,
-                  hint: connect.hint,
-                  onEnter: () => connect.onHoverRow(`${node.id}|${column.name}`),
-                  onLeave: () => connect.onHoverRow(null),
-                  onStart: (event) =>
-                    connect.onStart(column.name, HEADER_H + index * ROW_H + ROW_H / 2, event),
-                }
-              : undefined
-          }
+          connectHint={connectable ? connectHint : undefined}
+          lit={connectable && hoveredRow === column.name}
+          onEnter={enterRow}
+          onLeave={leaveRow}
+          onStart={startRow}
           // The column the selected relationship is actually made of, on both sides of it. Without
           // this a highlighted pair of tables still leaves you counting rows to find the join.
-          joined={joinedColumns?.has(`${node.id}|${column.name}`) ?? false}
-          mark={isEnum ? undefined : marks[fieldMarkKey(node.id, column.name)]}
+          joined={joinedColumns.has(column.name)}
+          mark={isEnum ? undefined : fieldMarks[column.name]}
           markNames={markNames}
-          note={
-            onNoteEnter && onNoteLeave
-              ? {
-                  onEnter: (event) =>
-                    onNoteEnter(
-                      { name: column.name, type: column.data_type, note: column.note ?? "" },
-                      event,
-                    ),
-                  onLeave: onNoteLeave,
-                }
-              : undefined
-          }
-          onContextMenu={
-            onFieldContextMenu ? (event) => onFieldContextMenu(column.name, event) : undefined
-          }
+          onNoteEnter={onNoteEnter && onNoteLeave ? onNoteEnter : undefined}
+          onNoteLeave={onNoteEnter && onNoteLeave ? onNoteLeave : undefined}
+          onContextMenu={onFieldContextMenu ? rowMenu : undefined}
         />
       ))}
 
@@ -2733,7 +2918,7 @@ const SchemaBox = memo(function SchemaBox({
  * thing that stops a column of types being scannable. The glyph column at the other end is fixed
  * for the same reason, from the other side: see `GUTTER`.
  */
-function Row({
+const Row = memo(function Row({
   column,
   y,
   width,
@@ -2743,8 +2928,13 @@ function Row({
   joined,
   mark,
   markNames,
-  note,
-  connect,
+  onNoteEnter,
+  onNoteLeave,
+  connectHint,
+  lit,
+  onEnter,
+  onLeave,
+  onStart,
   onContextMenu,
 }: {
   column: DbDiagramColumn;
@@ -2775,17 +2965,23 @@ function Row({
    * silently dropped it would be a diagram claiming a documented column is undocumented. Only the
    * card needs a live pointer, so only the card is conditional.
    */
-  note?: { onEnter: (event: React.PointerEvent) => void; onLeave: () => void };
-  /** Present when a relationship can be dragged out of this row. */
-  connect?: {
-    lit: boolean;
-    hint: string;
-    onEnter: () => void;
-    onLeave: () => void;
-    onStart: (event: React.PointerEvent) => void;
-  };
-  onContextMenu?: (event: React.MouseEvent) => void;
+  onNoteEnter?: (
+    subject: { name: string; type: string; note: string },
+    event: React.PointerEvent,
+  ) => void;
+  onNoteLeave?: () => void;
+  /** The handle's tooltip — present exactly when a relationship can be dragged out of this row. */
+  connectHint?: string;
+  /** Lit as a drop target / under the pointer. */
+  lit: boolean;
+  /** The box's own handlers, bound to the box and handed the column — see `SchemaBox`. */
+  onEnter: (column: string) => void;
+  onLeave: () => void;
+  onStart: (event: React.PointerEvent, column: string, cy: number) => void;
+  onContextMenu?: (event: React.MouseEvent, column: string) => void;
 }) {
+  const connect = connectHint !== undefined;
+  const note = onNoteEnter && onNoteLeave;
   const badgeY = y + (ROW_H - BADGE_H) / 2;
   // Which badges this row carries, and how wide, comes from `columnBadges` — the same function the
   // box was measured with. What is decided here is only where they land and what colour they are.
@@ -2823,9 +3019,9 @@ function Row({
 
   return (
     <g
-      onPointerEnter={connect?.onEnter}
-      onPointerLeave={connect?.onLeave}
-      onContextMenu={onContextMenu}
+      onPointerEnter={connect ? () => onEnter(column.name) : undefined}
+      onPointerLeave={connect ? onLeave : undefined}
+      onContextMenu={onContextMenu ? (event) => onContextMenu(event, column.name) : undefined}
     >
       {/* The row itself, as a target: what makes all of it answer rather than only its ink.
 
@@ -2859,7 +3055,7 @@ function Row({
       )}
       {/* The row lit as a drop target while a relationship is being dragged over it. Same wash as
           a joined column, because it is about to become one. */}
-      {connect?.lit && (
+      {connect && lit && (
         <rect y={y} width={width} height={ROW_H} fill="var(--cf-accent)" fillOpacity={0.16} />
       )}
       {!first && (
@@ -2885,7 +3081,7 @@ function Row({
           target — 4.5px is not something anybody hits at 60% zoom. */}
       {connect && (
         <g
-          onPointerDown={connect.onStart}
+          onPointerDown={(event) => onStart(event, column.name, y + ROW_H / 2)}
           style={{ cursor: "crosshair" }}
         >
           <circle
@@ -2895,7 +3091,7 @@ function Row({
             fill="transparent"
             pointerEvents="all"
           >
-            <title>{connect.hint}</title>
+            <title>{connectHint}</title>
           </circle>
           <circle
             cx={width}
@@ -2904,7 +3100,7 @@ function Row({
             fill="var(--cf-surface)"
             stroke="var(--cf-accent)"
             strokeWidth={1.6}
-            opacity={connect.lit ? 1 : 0}
+            opacity={lit ? 1 : 0}
             pointerEvents="none"
           />
         </g>
@@ -3014,8 +3210,16 @@ function Row({
             height={ROW_H - 4}
             fill="transparent"
             pointerEvents="all"
-            onPointerEnter={note?.onEnter}
-            onPointerLeave={note?.onLeave}
+            onPointerEnter={
+              note
+                ? (event) =>
+                    onNoteEnter(
+                      { name: column.name, type: column.data_type, note: column.note ?? "" },
+                      event,
+                    )
+                : undefined
+            }
+            onPointerLeave={note ? onNoteLeave : undefined}
             style={note ? { cursor: "help" } : undefined}
           />
         </g>
@@ -3076,4 +3280,4 @@ function Row({
       ))}
     </g>
   );
-}
+});

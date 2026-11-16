@@ -1047,14 +1047,22 @@ export function EditorPane({
     };
   }, [previewKind]);
 
+  /**
+   * The text the `.dbml` preview is drawn from: the buffer, a quarter-second behind the typing.
+   *
+   * `@dbml/core` runs on the main thread, and parsing it inside the memo below on every keystroke
+   * is what made typing in a large `.dbml` file stutter. Not delayed across a change of file — the
+   * preview of the file just opened is drawn at once, never the previous file's for a beat.
+   */
+  const dbmlContent = useDebouncedText(previewKind === "dbml" ? content : "", 250, activePath);
   const dbmlSchema = useMemo<DbmlSchema | null>(() => {
     if (previewKind !== "dbml") return null;
     // A parser that arrived wins over an earlier failure: opening a second `.dbml` file retries
     // the chunk, and a retry that succeeded must not keep showing the error from the one before.
-    if (parseDbml) return parseDbml(content);
+    if (parseDbml) return parseDbml(dbmlContent);
     if (dbmlLoadError) return { ...EMPTY_SCHEMA, error: dbmlLoadError };
     return null;
-  }, [previewKind, content, parseDbml, dbmlLoadError]);
+  }, [previewKind, dbmlContent, parseDbml, dbmlLoadError]);
   /** `null` schema on a `.dbml` file means the parser hasn't landed yet — the one case the diagram
    * must show as a wait rather than as an empty schema. */
   const dbmlLoading = previewKind === "dbml" && dbmlSchema === null;
@@ -3461,4 +3469,27 @@ export function EditorPane({
       )}
     </div>
   );
+}
+
+/**
+ * `value`, settled: it follows `value` once `delay` ms have passed without a change — and at once
+ * whenever `resetKey` changes, so switching to another file is never shown the old one's text.
+ */
+function useDebouncedText(value: string, delay: number, resetKey: unknown): string {
+  const [settled, setSettled] = useState(value);
+  const [keyed, setKeyed] = useState(resetKey);
+  if (keyed !== resetKey) {
+    // Adjusting state during render, React's documented pattern for "reset when a prop changes".
+    setKeyed(resetKey);
+    setSettled(value);
+  }
+  // Nothing settled yet — the file's text is only now arriving — is not a burst of typing to wait
+  // out: an empty preview for a quarter second would read as a file that declares nothing.
+  const immediate = keyed !== resetKey || settled === "";
+  useEffect(() => {
+    if (value === settled) return;
+    const timer = window.setTimeout(() => setSettled(value), immediate ? 0 : delay);
+    return () => clearTimeout(timer);
+  }, [value, settled, delay, immediate]);
+  return immediate ? value : settled;
 }
