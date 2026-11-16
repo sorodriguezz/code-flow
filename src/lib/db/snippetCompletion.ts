@@ -28,6 +28,10 @@ export function installSnippetCompletions(): void {
       provideCompletionItems(model, position) {
         if (model.uri.scheme !== "cf-db") return { suggestions: [] };
         const word = model.getWordUntilPosition(position);
+        // Right after a dot the next word is a name (`schema.`, `alias.`, `db.collection.`), never
+        // the start of a statement: a snippet there only crowds out — or stands in for — the names.
+        const before = model.getValueInRange({ startLineNumber: position.lineNumber, startColumn: Math.max(1, word.startColumn - 1), endLineNumber: position.lineNumber, endColumn: word.startColumn });
+        if (before === ".") return { suggestions: [] };
         const range = {
           startLineNumber: position.lineNumber,
           endLineNumber: position.lineNumber,

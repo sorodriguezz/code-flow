@@ -45,7 +45,9 @@ export function GateCard({ state }: { state: TeamRunState }) {
       : gate.startsWith("item:")
         ? [l("Aprobar", "Approve"), l("Saltar", "Skip")]
         : gate === "merge"
-          ? [l("Integrar", "Merge"), l("Dejar en su rama", "Leave on its branch")]
+          ? run.policy.integrate === "pr"
+            ? [state.repos.some((r) => r.status === "failed") ? l("Reintentar el PR", "Retry the PR") : l("Abrir PR", "Open PR"), l("Dejar en su rama", "Leave on its branch")]
+            : [l("Integrar", "Merge"), l("Dejar en su rama", "Leave on its branch")]
           : gate.startsWith("review:")
             ? [l("Integrar igual", "Merge anyway"), l("Descartar", "Discard")]
             : gate === "budget"
@@ -55,7 +57,7 @@ export function GateCard({ state }: { state: TeamRunState }) {
     kind === "impact" ? l("Cambios de impacto", "High-impact changes")
       : kind === "amend" ? l("Ajuste propuesto por el líder", "Amendment proposed by the lead")
       : kind === "amend_failed" ? l("El ajuste necesita atención", "The amendment needs attention")
-      : gate === "plan" ? l("El líder propone este plan", "The lead proposes this plan") : gate === "merge" ? l("Listo para integrar", "Ready to merge") : gate === "budget" ? l("Llegó al presupuesto", "Budget reached") : gate.startsWith("stuck:") ? l("Se atascó", "It got stuck") : l("Te espera", "Waiting on you");
+      : gate === "plan" ? l("El líder propone este plan", "The lead proposes this plan") : gate === "merge" ? (run.policy.integrate === "pr" ? l("Listo para abrir el PR", "Ready to open the PR") : l("Listo para integrar", "Ready to merge")) : gate === "budget" ? l("Llegó al presupuesto", "Budget reached") : gate.startsWith("stuck:") ? l("Se atascó", "It got stuck") : l("Te espera", "Waiting on you");
 
   return (
     <motion.div initial={{ opacity: 0, y: -8 }} animate={{ opacity: 1, y: 0 }} transition={SOFT} className="cf-crew-waiting mx-3 mt-3 flex shrink-0 flex-col gap-2 rounded-[14px] border border-[var(--cf-warning)] bg-[color-mix(in_oklab,var(--cf-warning)_8%,var(--cf-surface))] p-3" style={{ ["--cf-crew-c" as string]: "var(--cf-warning)" }}>

@@ -4,11 +4,20 @@
 
 import type { AgentTask } from "./domain";
 
+export type TeamCheckKind = "unit" | "integration" | "e2e" | "lint" | "other";
+
 export interface TeamCheck {
   /** A project id, or `"*"` for every repository of the run. */
   repo: string;
   command: string;
-  when: "item" | "final";
+  /** `agent`: only told to the members, who run it themselves; the app does not. */
+  when: "item" | "final" | "agent";
+  /** What the members are told it is. Missing on checks saved before kinds existed: `other`. */
+  kind?: TeamCheckKind;
+  /** The user's own name for it; empty reads as the kind's. */
+  label?: string;
+  /** Members add or update tests of this kind for what they change. */
+  write?: boolean;
 }
 
 export interface TeamReviewPolicy {
@@ -27,7 +36,10 @@ export interface TeamPolicy {
   questions: "allow" | "plan" | "never";
   commit: "item" | "squash" | "none";
   commit_style: "conventional" | "free";
-  integrate: "merge" | "branch";
+  /** `pr`: the run publishes its branch and opens a pull request into the target. */
+  integrate: "merge" | "branch" | "pr";
+  /** With `integrate: "pr"`, the pull request opens as a draft. */
+  pr_draft: boolean;
   push: boolean;
   /** A member id, `author` or `user`. */
   conflicts: string;
@@ -64,6 +76,9 @@ export interface TeamPolicy {
   decider: boolean;
   /** «Una pasada por agente»: one planning round, one attempt, no review laps or last look. */
   single_pass: boolean;
+  /** A test that already failed the same way before the change: `ignore` lets the task through
+   *  with it noted, `fix` makes the member fix it too. */
+  baseline_failures?: "ignore" | "fix";
   /** Wall-clock minutes one turn may run before it is stopped; `0` is no limit. */
   turn_minutes: number;
 }
@@ -208,7 +223,9 @@ export interface TeamRunRepo {
   target_branch: string;
   integration_branch: string;
   integration_path: string;
-  status: "ready" | "merged" | "left" | "failed";
+  status: "ready" | "merged" | "left" | "pr" | "failed";
+  /** The pull request the run opened for this repository. */
+  pr_url: string;
   last_error: string;
   position: number;
 }
@@ -365,10 +382,12 @@ export function defaultPolicy(): TeamPolicy {
     commit: "item",
     commit_style: "conventional",
     integrate: "merge",
+    pr_draft: true,
     push: false,
     conflicts: "author",
     checks: [],
-    auto_checks: false,
+    // On for new teams: a team nobody set up still tells its members the repository's tests.
+    auto_checks: true,
     impact_approval: false,
     impact_paths: [],
     review: { enabled: false, reviewer: "", of: [], exigence: "correct", laps: 3 },
@@ -390,6 +409,7 @@ export function defaultPolicy(): TeamPolicy {
     max_session_pct: 30,
     unmetered_minutes: 60,
     decider: true,
+    baseline_failures: "ignore",
     single_pass: true,
     turn_minutes: 30,
   };

@@ -399,6 +399,7 @@ pub async fn start_run(
             status: "ready".into(),
             last_error: String::new(),
             position: position as i64,
+            pr_url: String::new(),
         });
     }
 
@@ -1092,8 +1093,14 @@ fn compose(run: &Run, repos: &[RunRepo], items: &[Item], messages: &[team::Messa
             ));
         }
         out.push_str("\n## Repositorios\n");
+        let mut tested = false;
         for r in repos {
-            out.push_str(&format!("- **{}** — rama destino `{}`, trabajo integrado en `{}` ({})\n", r.name, r.target_branch, r.integration_branch, r.integration_path));
+            let suites = suites_for(run, &r.project_id, &r.integration_path);
+            tested |= !suites.is_empty();
+            out.push_str(&format!("- **{}** — rama destino `{}`, trabajo integrado en `{}` ({}){}\n", r.name, r.target_branch, r.integration_branch, r.integration_path, protocol::tests_line(&suites)));
+        }
+        if tested {
+            out.push_str("Cada miembro recibe las pruebas de su repositorio. Cuando una tarea cambie comportamiento, di en ella qué debe quedar probado; no pidas pruebas de un tipo que el repositorio no tiene.\n");
         }
         let others: Vec<&Item> = if item.member_id != run.lead && !run.lead.is_empty() {
             items.iter().filter(|i| i.parent == item.id || (i.parent.is_empty() && scope.contains(&i.member_id) && !i.is_lead())).filter(|i| i.id != item.id).collect()
@@ -1162,6 +1169,9 @@ fn compose(run: &Run, repos: &[RunRepo], items: &[Item], messages: &[team::Messa
                 }
                 out.push('\n');
             }
+        }
+        if let Some(r) = repo.filter(|_| item.writes()) {
+            out.push_str(&protocol::tests_brief(&suites_for(run, &r.project_id, &cwd), run.policy.baseline_failures == "fix"));
         }
     }
     if !item.intelligence.criteria.is_empty() {
@@ -1536,25 +1546,18 @@ async fn on_ok(db: &Db, run: &Run, mut item: Item, text: &str) -> Result<(), Str
             }
         }
         "work" => {
-            // Checks the policy runs after each piece of work, in its own folder.
-            let mut checks: Vec<String> = run
-                .policy
-                .checks
-                .iter()
-                .filter(|c| c.when == "item" && (c.repo == "*" || c.repo == item.project_id))
-                .map(|c| c.command.clone())
+            // Checks the policy runs after each piece of work, in its own folder: the ones set up for
+            // the repository, or the ones detected in it.
+            let checks: Vec<String> = suites_for(run, &item.project_id, &item.worktree_path)
+                .into_iter()
+                .filter(|c| c.when == "item")
+                .map(|c| c.command)
                 .collect();
-            if checks.is_empty() && run.policy.auto_checks
-                && !run.policy.checks.iter().any(|c| c.repo == "*" || c.repo == item.project_id)
-            {
-                if let Some(command) = intelligence::repository_check(std::path::Path::new(&item.worktree_path)) {
-                    checks.push(command.to_string());
-                }
-            }
             for command in checks {
                 let evidence = verify_check(&command, &item.worktree_path, repo.as_ref(), &item.intelligence.base_sha).await;
-                let failed = evidence.result != "passed";
-                let reason = failed.then(|| format!("`{command}` · {}\n{}", check_description(&evidence.result), evidence.detail));
+                let failed = !check_passes(&run.policy, &evidence.result);
+                let fix = if evidence.result == "preexisting" { "\nYa fallaba antes de tu cambio; el equipo pide arreglarlo también." } else { "" };
+                let reason = failed.then(|| format!("`{command}` · {}{fix}\n{}", check_description(&evidence.result), evidence.detail));
                 item.intelligence.evidence.push(evidence);
                 if let Some(reason) = reason {
                     return on_failure(db, run, item, &reason, "check").await;
@@ -1660,6 +1663,48 @@ fn check_description(result: &str) -> &'static str {
         "preexisting" => "repitió el mismo fallo de la base",
         _ => "falló; sin comparación concluyente con la base",
     }
+}
+
+/// Whether a check's result lets the work through: it passed, or it failed exactly as it did before
+/// the change and the team leaves such failures alone (`baseline_failures: ignore`).
+fn check_passes(policy: &Policy, result: &str) -> bool {
+    result == "passed" || (result == "preexisting" && policy.baseline_failures != "fix")
+}
+
+/// Whether `project_id`'s suites are the detected ones: `auto_checks` on and none set up for it.
+fn detected_only(run: &Run, project_id: &str) -> bool {
+    run.policy.auto_checks && !run.policy.checks.iter().any(|c| c.repo == "*" || c.repo == project_id)
+}
+
+/// The test suites for a member working in `project_id`: what it is told, and what the app runs
+/// after each task (`item`) or once at the end (`final`). The ones the team set up for that
+/// repository (or for every one), or — with `auto_checks` and none set up — every suite the app
+/// detects in `root`. Detected suites run unattended, so only the fast ones run after each task
+/// (unit, lint); integration and e2e, which usually need a database, a browser or a service, are
+/// only told to the member.
+fn suites_for(run: &Run, project_id: &str, root: &str) -> Vec<team::Check> {
+    if !detected_only(run, project_id) {
+        return run.policy.checks.iter().filter(|c| c.repo == "*" || c.repo == project_id).cloned().collect();
+    }
+    let mut suites = intelligence::detect_suites(std::path::Path::new(root));
+    for suite in &mut suites {
+        suite.repo = project_id.into();
+        if suite.when == "final" {
+            suite.when = "agent".into();
+        }
+    }
+    suites
+}
+
+/// The suites a repository has, for the team's «Verificaciones» to start from.
+#[tauri::command]
+pub fn team_detect_checks(db: State<'_, Db>, project_id: String) -> Result<Vec<team::Check>, String> {
+    let project = with(&db, |c| queries::get_project(c, &project_id).map_err(e2s)?.ok_or_else(|| "El repositorio ya no está en la app.".to_string()))?;
+    let mut suites = intelligence::detect_suites(std::path::Path::new(&project.local_path));
+    for suite in &mut suites {
+        suite.repo = project_id.clone();
+    }
+    Ok(suites)
 }
 
 async fn verify_check(command: &str, cwd: &str, repo: Option<&RunRepo>, base: &str) -> intelligence::Evidence {
@@ -2259,7 +2304,7 @@ async fn advance(db: &Db, run_id: &str) -> Result<(), String> {
             let base = items.iter().find(|item| item.project_id == repo.project_id && !item.intelligence.base_sha.is_empty())
                 .map(|item| item.intelligence.base_sha.as_str()).unwrap_or_default();
             let evidence = verify_check(&check.command, &repo.integration_path, Some(repo), base).await;
-            let passed = evidence.result == "passed";
+            let passed = check_passes(&run.policy, &evidence.result);
             let description = check_description(&evidence.result);
             with(db, |c| {
                 team::post(c, run_id, "", ("system", "CodeFlow"), ("all", "Equipo"), if passed { "status" } else { "error" }, &format!("{} · `{}` {description}", repo.name, check.command), &[])
@@ -2293,9 +2338,144 @@ async fn advance(db: &Db, run_id: &str) -> Result<(), String> {
     }
     if run.policy.approve_merge {
         let names = repos.iter().map(|r| format!("{} → {}", r.name, r.target_branch)).collect::<Vec<_>>().join(", ");
-        return with(db, |c| team::set_run_status(c, run_id, "gated", "merge", &format!("Todo está hecho. ¿Integrar en {names}?")).map_err(e2s));
+        let question = if run.policy.integrate == "pr" { format!("Todo está hecho. ¿Abrir un PR en {names}?") } else { format!("Todo está hecho. ¿Integrar en {names}?") };
+        return with(db, |c| team::set_run_status(c, run_id, "gated", "merge", &question).map_err(e2s));
     }
-    land_all(db, &run).await
+    deliver(db, &run).await
+}
+
+/// The run's last step, by the policy: a pull request per repository, or the work landed on the
+/// target branch.
+async fn deliver(db: &Db, run: &Run) -> Result<(), String> {
+    if run.policy.integrate == "pr" {
+        open_prs(db, run).await
+    } else {
+        land_all(db, run).await
+    }
+}
+
+/// Opens a pull request per repository with work (`integrate: pr`). The target's latest tip is
+/// merged into the integration branch, the branch is published on `origin`, and the pull request
+/// goes from it into the target on whichever host the repository is linked to, with the tokens the
+/// user already set up. The app opens it, not an agent: no tokens spent, no `gh` needed.
+///
+/// A repository that cannot get one (not linked, no token, the push refused) stops the run at the
+/// integration question with the reason; its branch is kept. Approving retries it, rejecting
+/// leaves the branch. Repositories whose pull request already opened are not touched again.
+async fn open_prs(db: &Db, run: &Run) -> Result<(), String> {
+    let state = state_of(db, &run.id)?;
+    for repo in state.repos.iter().filter(|r| r.status == "ready" || r.status == "failed") {
+        let (root, target, path, branch) = (repo.local_path.clone(), repo.target_branch.clone(), repo.integration_path.clone(), repo.integration_branch.clone());
+        let prepared = blocking(move || {
+            let _git = crate::git::write_lock(&root);
+            let ready = gitops::prepare_pr(&root, &target, &path, &branch)?;
+            if matches!(ready, gitops::PrReady::Ready { .. }) {
+                gitops::publish_branch(&root, &branch)?;
+            }
+            Ok::<_, String>(ready)
+        })
+        .await?;
+        let base = match prepared {
+            Ok(gitops::PrReady::Ready { base }) => base,
+            Ok(gitops::PrReady::Empty) => {
+                with(db, |c| {
+                    team::set_repo_status(c, &run.id, &repo.project_id, "left", "").map_err(e2s)?;
+                    team::post(c, &run.id, "", ("system", "CodeFlow"), ("user", "Tú"), "merge", &format!("{}: no hay cambios respecto de {}; no se abrió un PR.", repo.name, repo.target_branch), &[])
+                        .map(|_| ())
+                        .map_err(e2s)
+                })?;
+                continue;
+            }
+            Ok(gitops::PrReady::Conflict(files)) => return target_conflict(db, run, repo, &files),
+            Err(e) => return pr_failed(db, run, repo, &e),
+        };
+        let (root, source) = (repo.local_path.clone(), repo.integration_branch.clone());
+        let commits = blocking(move || gitops::commits_between(&root, &base, &source)).await?.unwrap_or_default();
+        let draft = pr_draft(&state, repo, &commits, true);
+        let title = gitops::commit_message(&run.policy.commit_style, "", &draft.title);
+        let body = pr_body(&state, repo, &draft.body);
+        let project = match with(db, |c| queries::get_project(c, &repo.project_id).map_err(e2s)) {
+            Ok(Some(project)) => project,
+            Ok(None) => return pr_failed(db, run, repo, "el repositorio ya no está en la app"),
+            Err(e) => return pr_failed(db, run, repo, &e),
+        };
+        match crate::commands::ado_cmd::create_pull_request_for(&project, &title, &body, &repo.integration_branch, &repo.target_branch, run.policy.pr_draft, Vec::new()).await {
+            Ok(pr) => with(db, |c| {
+                team::set_repo_pr(c, &run.id, &repo.project_id, &pr.url).map_err(e2s)?;
+                let kind = if run.policy.pr_draft { "PR en borrador" } else { "PR" };
+                team::post(c, &run.id, "", ("system", "CodeFlow"), ("user", "Tú"), "merge", &format!("{}: {kind} abierto, `{}` → `{}` — {}", repo.name, repo.integration_branch, repo.target_branch, pr.url), &[])
+                    .map(|_| ())
+                    .map_err(e2s)
+            })?,
+            Err(e) => return pr_failed(db, run, repo, &e),
+        }
+    }
+    if run.policy.cleanup {
+        tidy_run(db, &run.id).await?;
+    }
+    with(db, |c| team::set_run_status(c, &run.id, "done", "", "").map_err(e2s))
+}
+
+/// The draft's body plus what only a run-opened pull request needs: the other repositories of the
+/// same run, so a reviewer knows the change has parts elsewhere.
+fn pr_body(state: &RunState, repo: &RunRepo, body: &str) -> String {
+    let mut out = body.trim_end().to_string();
+    let others: Vec<&RunRepo> = state.repos.iter().filter(|r| r.project_id != repo.project_id).collect();
+    if !others.is_empty() {
+        out.push_str("\n\n## Otros repositorios de esta corrida\n");
+        for other in others {
+            out.push_str(&format!("- {} · `{}`\n", other.name, other.integration_branch));
+        }
+    }
+    out.push_str(&format!("\n---\nAbierto por el equipo «{}» de CodeFlow.\n", state.run.team_name));
+    out
+}
+
+/// A pull request that could not open: the repository is marked with the reason and the run waits
+/// at the integration question, the team's branch untouched.
+fn pr_failed(db: &Db, run: &Run, repo: &RunRepo, error: &str) -> Result<(), String> {
+    with(db, |c| {
+        team::set_repo_status(c, &run.id, &repo.project_id, "failed", error).map_err(e2s)?;
+        team::set_run_status(
+            c,
+            &run.id,
+            "gated",
+            "merge",
+            &format!("{}: no se pudo abrir el PR — {error}. La rama `{}` queda intacta: corrígelo y aprueba para reintentar, o rechaza para dejar la rama.", repo.name, repo.integration_branch),
+        )
+        .map_err(e2s)
+    })
+}
+
+/// The target moved and conflicts with the team's work: a member resolves it in the integration
+/// tree (or the user, by the policy), then the delivery runs again.
+fn target_conflict(db: &Db, run: &Run, repo: &RunRepo, files: &[String]) -> Result<(), String> {
+    let resolver = match run.policy.conflicts.as_str() {
+        "user" | "author" | "" => None,
+        id => member(run, id).cloned(),
+    }
+    .or_else(|| run.members.iter().find(|m| m.member.edits && m.member.id != run.lead).cloned());
+    with(db, |c| match resolver.filter(|_| run.policy.conflicts != "user") {
+        Some(resolver) => {
+            let items = team::list_items(c, &run.id).map_err(e2s)?;
+            let mut fix = team::new_item(
+                run,
+                &team::free_key(&items, "merge-destino"),
+                Some(&resolver),
+                &repo.project_id,
+                "integrate",
+                &format!("Resolver conflictos con {}", repo.target_branch),
+                &format!("{} cambió mientras el equipo trabajaba y choca con el trabajo integrado. El merge está a medias en esta carpeta: resuelve los conflictos conservando ambos lados y quita las marcas (no hagas commit).", repo.target_branch),
+            );
+            fix.worktree_path = repo.integration_path.clone();
+            fix.approved = true;
+            fix.feedback = files.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
+            team::insert_item(c, &fix).map_err(e2s)?;
+            Ok(())
+        }
+        None => team::set_run_status(c, &run.id, "gated", "stuck:", &format!("{} choca con {} en: {}. Resuélvelo en {} y aprueba.", repo.target_branch, repo.integration_branch, files.join(", "), repo.integration_path))
+            .map_err(e2s),
+    })
 }
 
 /// Lands every ready repository on its target branch, by the policy.
@@ -2321,36 +2501,7 @@ async fn land_all(db: &Db, run: &Run) -> Result<(), String> {
                 team::set_repo_status(c, &run.id, &repo.project_id, "merged", "").map_err(e2s)?;
                 team::post(c, &run.id, "", ("system", "CodeFlow"), ("user", "Tú"), "merge", &format!("{}: {summary}", repo.name), &[]).map(|_| ()).map_err(e2s)
             })?,
-            Ok(gitops::Landed::Conflict(files)) => {
-                // The target moved and conflicts with the team's work: a member resolves it in the
-                // integration tree, then the landing runs again.
-                let resolver = match run.policy.conflicts.as_str() {
-                    "user" | "author" | "" => None,
-                    id => member(run, id).cloned(),
-                }
-                .or_else(|| run.members.iter().find(|m| m.member.edits && m.member.id != run.lead).cloned());
-                return with(db, |c| match resolver.filter(|_| run.policy.conflicts != "user") {
-                    Some(resolver) => {
-                        let items = team::list_items(c, &run.id).map_err(e2s)?;
-                        let mut fix = team::new_item(
-                            run,
-                            &team::free_key(&items, "merge-destino"),
-                            Some(&resolver),
-                            &repo.project_id,
-                            "integrate",
-                            &format!("Resolver conflictos con {}", repo.target_branch),
-                            &format!("{} cambió mientras el equipo trabajaba y choca con el trabajo integrado. El merge está a medias en esta carpeta: resuelve los conflictos conservando ambos lados y quita las marcas (no hagas commit).", repo.target_branch),
-                        );
-                        fix.worktree_path = repo.integration_path.clone();
-                        fix.approved = true;
-                        fix.feedback = files.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n");
-                        team::insert_item(c, &fix).map_err(e2s)?;
-                        Ok(())
-                    }
-                    None => team::set_run_status(c, &run.id, "gated", "stuck:", &format!("{} choca con {} en: {}. Resuélvelo en {} y aprueba.", repo.target_branch, repo.integration_branch, files.join(", "), repo.integration_path))
-                        .map_err(e2s),
-                });
-            }
+            Ok(gitops::Landed::Conflict(files)) => return target_conflict(db, run, repo, &files),
             Err(e) => {
                 return with(db, |c| {
                     team::set_repo_status(c, &run.id, &repo.project_id, "failed", &e).map_err(e2s)?;
@@ -2705,7 +2856,7 @@ async fn decide_for_gate(db: &Db, run_id: &str, approve: bool, comment: &str, ex
     })?;
     if land {
         let run = with(db, |c| team::get_run(c, &run_id).map_err(e2s)?.ok_or_else(|| "La corrida ya no existe.".to_string()))?;
-        land_all(db, &run).await?;
+        deliver(db, &run).await?;
     } else {
         advance(db, &run_id).await?;
     }
@@ -2791,7 +2942,8 @@ async fn tidy_run(db: &Db, run_id: &str) -> Result<(), String> {
         let run = team::get_run(c, run_id).map_err(e2s)?;
         Ok((run, team::list_repos(c, run_id).map_err(e2s)?, team::list_items(c, run_id).map_err(e2s)?))
     })?;
-    let keep_integration = run.as_ref().is_some_and(|r| r.policy.integrate == "branch");
+    // A pull request's source branch stays too: it is what the pull request shows.
+    let keep_integration = run.as_ref().is_some_and(|r| matches!(r.policy.integrate.as_str(), "branch" | "pr"));
     for repo in repos {
         let mine: Vec<&Item> = items.iter().filter(|i| i.project_id == repo.project_id).collect();
         let mut paths: Vec<String> = mine.iter().map(|i| i.worktree_path.clone()).filter(|p| !p.is_empty()).collect();
@@ -2901,7 +3053,7 @@ pub struct PrDraft {
 pub async fn team_pr_draft(db: State<'_, Db>, run_id: String, project_id: String, spanish: bool) -> Result<PrDraft, String> {
     let state = state_of(&db, &run_id)?;
     let repo = state.repos.iter().find(|repo| repo.project_id == project_id).ok_or("El repositorio no está en la corrida.")?;
-    if !(state.run.status == "gated" && state.run.gate == "merge" && repo.status == "ready"
+    if !(state.run.status == "gated" && state.run.gate == "merge" && matches!(repo.status.as_str(), "ready" | "failed")
         || state.run.status == "done" && repo.status == "left")
     {
         return Err("El borrador requiere una entrega lista en la rama del equipo.".into());
@@ -3276,6 +3428,88 @@ mod tests {
         assert_eq!(state.run.status, "done", "{}", state.run.last_reason);
         assert!(state.items.iter().all(|i| i.kind != "advise" && i.kind != "final"), "{:?}", state.items.iter().map(|i| &i.kind).collect::<Vec<_>>());
         assert!(claim(&db, &run_id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_run_that_opens_a_pr_publishes_its_branch_and_waits_when_the_host_refuses() {
+        let (_serial, dir, db, ws, project, [lead, dev, _]) = fixture();
+        let repo = with(&db, |c| Ok(queries::get_project(c, &project).unwrap().unwrap().local_path)).unwrap();
+        let origin = dir.0.join("origin.git").to_string_lossy().into_owned();
+        sh(&dir.0.to_string_lossy(), &["init", "-q", "--bare", &origin]);
+        sh(&repo, &["remote", "add", "origin", &origin]);
+        sh(&repo, &["push", "-q", "origin", "main"]);
+        let member = |id: &str, agent: &str, edits: bool| team::Member { id: id.into(), agent_id: agent.into(), name: id.into(), edits, max_parallel: 1, ..Default::default() };
+        let unit = team::Check { repo: project.clone(), command: "true".into(), when: "agent".into(), kind: "unit".into(), write: true, ..Default::default() };
+        let policy = Policy { single_pass: false, approve_plan: false, approve_merge: false, integrate: "pr".into(), checks: vec![unit], ..Default::default() };
+        let tm = with(&db, |c| {
+            team::save_team(c, team::Team { workspace_id: ws.clone(), name: "Equipo".into(), lead: "l".into(), policy, members: vec![member("l", &lead, false), member("d", &dev, true)], ..Default::default() })
+        })
+        .unwrap();
+        let state = start_run(&db, ws.clone(), tm.id.clone(), "Cambia el color del botón".into(), None, vec![RepoPick { project_id: project.clone(), target_branch: "main".into() }], None, None)
+            .await
+            .unwrap();
+        let run_id = state.run.id.clone();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert!(d[0].message.contains("· pruebas: Pruebas unitarias (`true`, se escriben)"), "the lead sees the repository's suites");
+        let plan = "```equipo\n{\"items\":[{\"id\":\"color\",\"miembro\":\"d\",\"tarea\":\"cambia el color\"}],\"chico\":true}\n```";
+        settle_core(&db, &d[0].item.id, "ok", plan, "").await.unwrap();
+        let d = claim(&db, &run_id).await.unwrap();
+        assert!(d[0].message.contains("## Pruebas de este repositorio\n- Pruebas unitarias: `true` — la corres tú"), "the member is told what to run and write");
+        std::fs::write(Path::new(&d[0].cwd).join("boton.css"), "button { color: red }\n").unwrap();
+        let state = settle_core(&db, &d[0].item.id, "ok", "Listo.", "").await.unwrap();
+
+        // The repository is linked to no host, so the pull request cannot open: the run waits at
+        // the integration question with the reason, and the branch is already on origin.
+        assert_eq!((state.run.status.as_str(), state.run.gate.as_str()), ("gated", "merge"), "{}", state.run.last_reason);
+        assert!(state.run.gate_note.contains("no se pudo abrir el PR"), "{}", state.run.gate_note);
+        let r = &state.repos[0];
+        assert_eq!(r.status, "failed");
+        assert!(!r.last_error.is_empty());
+        let remote = crate::git::cli::run_in(&origin, &["rev-parse", "--verify", &format!("refs/heads/{}", r.integration_branch)], &[]).unwrap();
+        assert!(remote.success, "the team's branch was published: {}", remote.detail());
+        let main = crate::git::cli::run_in(&repo, &["log", "--format=%s", "main"], &[]).unwrap().stdout;
+        assert!(!main.contains("color"), "nothing landed on main: {main}");
+
+        let body = pr_body(&state, r, "## Objetivo\nx");
+        assert!(body.contains("Abierto por el equipo «Equipo» de CodeFlow."), "{body}");
+        assert!(!body.contains("Otros repositorios"), "one repository, nothing to point at: {body}");
+    }
+
+    #[test]
+    fn a_failure_the_repository_already_had_blocks_only_when_the_team_asks_to_fix_it() {
+        let ignore = Policy::default();
+        assert_eq!(ignore.baseline_failures, "ignore");
+        let fix = Policy { baseline_failures: "fix".into(), ..Default::default() };
+        assert!(check_passes(&ignore, "passed") && check_passes(&fix, "passed"));
+        assert!(check_passes(&ignore, "preexisting"));
+        assert!(!check_passes(&fix, "preexisting"));
+        for result in ["regression", "failed"] {
+            assert!(!check_passes(&ignore, result) && !check_passes(&fix, result), "what the change broke blocks: {result}");
+        }
+        assert_eq!(Policy { baseline_failures: "otro".into(), ..Default::default() }.sane().baseline_failures, "ignore");
+    }
+
+    #[test]
+    fn a_team_nobody_set_up_gets_the_detected_suites_and_runs_only_the_fast_ones() {
+        let root = std::env::temp_dir().join(format!("cf-auto-suites-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("package.json"), r#"{"scripts":{"test":"vitest run","test:integration":"vitest -c int","test:e2e":"playwright test"}}"#).unwrap();
+        let path = root.to_string_lossy().into_owned();
+        let run = Run { policy: Policy::default(), ..Default::default() };
+        assert!(run.policy.auto_checks, "on for new teams");
+        let suites = suites_for(&run, "p1", &path);
+        let found: Vec<(&str, &str)> = suites.iter().map(|c| (c.kind.as_str(), c.when.as_str())).collect();
+        assert_eq!(found, vec![("unit", "item"), ("integration", "agent"), ("e2e", "agent")], "unattended, integration is only told");
+        assert!(suites.iter().all(|c| c.repo == "p1"));
+
+        // What the user set up for the repository replaces the detection.
+        let mine = team::Check { repo: "p1".into(), command: "make check".into(), when: "final".into(), ..Default::default() };
+        let run = Run { policy: Policy { checks: vec![mine.clone()], ..Default::default() }, ..Default::default() };
+        assert_eq!(suites_for(&run, "p1", &path), vec![mine]);
+        assert_eq!(suites_for(&run, "p2", &path).len(), 3, "another repository still gets its own");
+        let off = Run { policy: Policy { auto_checks: false, ..Default::default() }, ..Default::default() };
+        assert!(suites_for(&off, "p1", &path).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

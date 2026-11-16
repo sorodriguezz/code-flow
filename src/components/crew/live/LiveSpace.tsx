@@ -5,11 +5,13 @@
  * the runs move in the backend, so this page is the same in the main window and in an island.
  */
 import { useEffect, useMemo, useState } from "react";
-import { Activity, ArrowLeft, BarChart3, GitBranch, Hand, Kanban, MessagesSquare, Network, Pause, Pin, PinOff, Play, Search, Square, Trash2, Users, WandSparkles } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { Activity, ArrowLeft, BarChart3, GitBranch, GitPullRequest, Hand, Kanban, MessagesSquare, Network, Pause, Pin, PinOff, Play, Search, Square, Trash2, Users, WandSparkles } from "lucide-react";
 import { useTeamStore } from "../../../state/teamStore";
 import { useBacklogStore } from "../../../state/backlogStore";
 import { useT } from "../../../state/languageStore";
 import { confirmAction } from "../../../state/confirmStore";
+import { pushErrorToast } from "../../../state/toastStore";
 import { recoveryNeedsUser, runIsLive, type TeamRun, type TeamRunState } from "../../../types/team";
 import { TeamAvatar } from "../kit/Avatar";
 import { Btn, Chip, Empty, Seg, field } from "../kit/ui";
@@ -155,6 +157,12 @@ function RunHeader({ state }: { state: TeamRunState }) {
               {r.status === "merged" && <span className="text-[var(--cf-success)]">· {l("integrado", "merged")}</span>}
               {r.status === "failed" && <span className="text-[var(--cf-danger)]" title={r.last_error}>· {l("falló", "failed")}</span>}
               {r.status === "left" && <span>· {l("en su rama", "on its branch")}</span>}
+              {r.status === "pr" && r.pr_url && (
+                <button type="button" title={r.pr_url} onClick={() => void openUrl(r.pr_url).catch((e) => pushErrorToast(String(e)))}
+                  className="inline-flex items-center gap-0.5 text-[var(--cf-accent)] hover:underline">
+                  · <GitPullRequest className="h-3 w-3" /> {l("PR abierto", "PR opened")}
+                </button>
+              )}
             </span>
           ))}
         </div>

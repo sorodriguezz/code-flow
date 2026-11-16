@@ -124,7 +124,12 @@ fn inspect_changes(
 }
 
 pub fn pr_commits(path: &str, target: &str, source: &str) -> Result<String, String> {
-    let range = format!("refs/heads/{target}..refs/heads/{source}");
+    commits_between(path, &format!("refs/heads/{target}"), source)
+}
+
+/// The commits on `source` that `base` (a full ref) lacks, one `<sha> <subject>` per line.
+pub fn commits_between(path: &str, base: &str, source: &str) -> Result<String, String> {
+    let range = format!("{base}..refs/heads/{source}");
     git_ok(path, &["log", "--no-merges", "--max-count=60", "--format=%h %s", &range, "--"])
 }
 
@@ -366,6 +371,54 @@ pub fn land(repo: &str, target: &str, integration_path: &str, integration_branch
     Ok(Landed::Done(summary))
 }
 
+pub enum PrReady {
+    /// The integration branch is ahead of `base` (the full ref the pull request will merge into).
+    Ready { base: String },
+    /// Nothing the target does not already have: no pull request to open.
+    Empty,
+    /// Bringing the target into the integration branch conflicted: resolve these there first.
+    Conflict(Vec<String>),
+}
+
+/// Readies the integration branch to be a pull request's source. The target's latest tip — from
+/// `origin` when it has one, since that is what the pull request merges into — is merged into the
+/// integration branch first, so the pull request opens without conflicts and any conflict is
+/// resolved here, by a member, the way `land` does it.
+pub fn prepare_pr(repo: &str, target: &str, integration_path: &str, integration_branch: &str) -> Result<PrReady, String> {
+    if !git(repo, &["remote", "get-url", "origin"]).is_ok_and(|o| o.success) {
+        return Err("el repositorio no tiene un remoto `origin` al que publicar la rama".into());
+    }
+    // A target that exists only here is fine: the local branch is the base then. A fetch that
+    // fails (offline, no access) is reported by the push below, in git's words.
+    let _ = git(repo, &["fetch", "origin", target]);
+    let remote = format!("refs/remotes/origin/{target}");
+    let base = if git(repo, &["show-ref", "--verify", "--quiet", &remote]).is_ok_and(|o| o.success) {
+        remote
+    } else if branch_exists(repo, target) {
+        format!("refs/heads/{target}")
+    } else {
+        return Err(format!("la rama destino `{target}` no existe ni aquí ni en origin"));
+    };
+    let out = git(integration_path, &["merge", "--no-edit", &base])?;
+    if !out.success {
+        let conflicts = unmerged_paths(integration_path);
+        if conflicts.is_empty() {
+            let _ = git(integration_path, &["merge", "--abort"]);
+            return Err(format!("git merge {target}: {}", out.detail()));
+        }
+        return Ok(PrReady::Conflict(conflicts));
+    }
+    if !has_commits_beyond(integration_path, &base, integration_branch) {
+        return Ok(PrReady::Empty);
+    }
+    Ok(PrReady::Ready { base })
+}
+
+/// Publishes `branch` on `origin` and makes it track it.
+pub fn publish_branch(repo: &str, branch: &str) -> Result<(), String> {
+    git_ok(repo, &["push", "-u", "origin", branch]).map(|_| ())
+}
+
 /// A commit message in the policy's style.
 pub fn commit_message(style: &str, key: &str, title: &str) -> String {
     let title = title.trim();
@@ -488,5 +541,38 @@ mod tests {
         assert_eq!(commit_message("conventional", "Login", "Añadir MFA"), "feat(login): Añadir MFA");
         assert_eq!(commit_message("conventional", "", "Corregir bug"), "fix: Corregir bug");
         assert_eq!(commit_message("free", "k", "Hola"), "Hola");
+    }
+
+    #[test]
+    fn a_pr_branch_takes_origin_s_target_and_is_published() {
+        let (dir, repo) = repo();
+        let integ = dir.path().join("wt/integ").to_string_lossy().into_owned();
+        add_worktree(&repo, &integ, "codeflow/team-x", "main").unwrap();
+        assert!(matches!(prepare_pr(&repo, "main", &integ, "codeflow/team-x"), Err(e) if e.contains("origin")), "no remote, no pull request");
+
+        let origin = dir.path().join("origin.git").to_string_lossy().into_owned();
+        sh(&dir.path().to_string_lossy(), &["init", "-q", "--bare", &origin]);
+        sh(&repo, &["remote", "add", "origin", &origin]);
+        sh(&repo, &["push", "-q", "origin", "main"]);
+        assert!(matches!(prepare_pr(&repo, "main", &integ, "codeflow/team-x").unwrap(), PrReady::Empty), "nothing new");
+
+        // Someone else moved main on origin; the local main is behind it.
+        std::fs::write(Path::new(&repo).join("b.txt"), "otro\n").unwrap();
+        sh(&repo, &["add", "-A"]);
+        sh(&repo, &["commit", "-q", "-m", "upstream"]);
+        sh(&repo, &["push", "-q", "origin", "main"]);
+        sh(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+        std::fs::write(Path::new(&integ).join("c.txt"), "equipo\n").unwrap();
+        sh(&integ, &["add", "-A"]);
+        sh(&integ, &["commit", "-q", "-m", "trabajo del equipo"]);
+
+        let PrReady::Ready { base } = prepare_pr(&repo, "main", &integ, "codeflow/team-x").unwrap() else { panic!("there is work") };
+        assert_eq!(base, "refs/remotes/origin/main");
+        assert!(Path::new(&integ).join("b.txt").exists(), "origin's main was merged in");
+        let commits = commits_between(&repo, &base, "codeflow/team-x").unwrap();
+        assert!(commits.contains("trabajo del equipo") && !commits.contains("upstream"), "{commits}");
+
+        publish_branch(&repo, "codeflow/team-x").unwrap();
+        assert!(git(&origin, &["rev-parse", "--verify", "refs/heads/codeflow/team-x"]).unwrap().success);
     }
 }

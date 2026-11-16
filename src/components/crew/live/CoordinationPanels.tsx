@@ -37,7 +37,8 @@ export function CoordinationPanels({ state, onOpenItem }: { state: TeamRunState;
     const names = Object.entries(item.intelligence?.used_contracts ?? {}).filter(([name, version]) => contracts.get(name)?.version !== version).map(([name]) => name);
     return names.length ? [{ item, names }] : [];
   });
-  const eligible = repos.filter((repo) => (run.status === "gated" && run.gate === "merge" && repo.status === "ready")
+  // A pull request the run could not open itself (`failed`) can still be opened by hand from here.
+  const eligible = repos.filter((repo) => (run.status === "gated" && run.gate === "merge" && (repo.status === "ready" || repo.status === "failed"))
     || (run.status === "done" && repo.status === "left"));
 
   useEffect(() => {

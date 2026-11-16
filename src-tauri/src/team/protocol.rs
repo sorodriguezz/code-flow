@@ -468,6 +468,45 @@ pub fn member_protocol(can_ask_user: bool) -> String {
     )
 }
 
+/// What a member that writes code is told about its repository's tests: each suite the user set
+/// up for it (or the one the app detected), whether the member writes tests of that kind, and who
+/// runs it. Empty for a repository with none — not every repository has tests, and a member told
+/// to run suites that do not exist invents them.
+pub fn tests_brief(checks: &[super::Check], fix_baseline: bool) -> String {
+    if checks.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## Pruebas de este repositorio\n");
+    for check in checks {
+        let who = match check.when.as_str() {
+            "item" => "la app la corre al terminar tu tarea y, si falla, la tarea vuelve con el error",
+            "final" => "la app la corre al final, con el trabajo de todos integrado",
+            _ => "la corres tú; la app no la corre",
+        };
+        let write = if check.write { " Agrega o actualiza pruebas de este tipo para lo que cambies." } else { "" };
+        out.push_str(&format!("- {}: `{}` — {who}.{write}\n", check.name(), check.command));
+    }
+    out.push_str(
+        "Antes de terminar, corre las que cubren lo que cambiaste y corrige lo que falle. \
+         Si alguna no se puede correr aquí (falta un servicio, una base o un navegador), dilo en tu entrega en vez de darla por pasada.\n",
+    );
+    out.push_str(if fix_baseline {
+        "Si alguna ya fallaba antes de tu cambio, arréglala también: esta configuración del equipo pide dejarlas pasando.\n\n"
+    } else {
+        "Si alguna ya fallaba antes de tu cambio, no es tuya: no la arregles; menciónala en tu entrega.\n\n"
+    });
+    out
+}
+
+/// The suites of one repository in a line, for the lead's list of repositories.
+pub fn tests_line(checks: &[super::Check]) -> String {
+    if checks.is_empty() {
+        return String::new();
+    }
+    let names = checks.iter().map(|c| format!("{} (`{}`{})", c.name(), c.command, if c.write { ", se escriben" } else { "" })).collect::<Vec<_>>().join(", ");
+    format!(" · pruebas: {names}")
+}
+
 /// The rest of CodeFlow, as tools of its `codeflow` MCP server — told to every member that works,
 /// so a test against an API, a failing pipeline or a database check is done with the user's own
 /// connections instead of guessed. Which ones a turn has depends on its access (read-only runs get
@@ -601,6 +640,20 @@ mod tests {
         assert_eq!(notes[1].to, Recipient::User);
         assert_eq!(errors.len(), 1);
         assert_eq!(prose(text), "Hecho.\nFin.");
+    }
+
+    #[test]
+    fn a_member_hears_only_the_suites_its_repository_has() {
+        assert_eq!(tests_brief(&[], true), "", "no tests, nothing to run or invent");
+        let unit = super::super::Check { command: "pnpm test".into(), when: "item".into(), kind: "unit".into(), write: true, ..Default::default() };
+        let e2e = super::super::Check { command: "pnpm e2e".into(), when: "agent".into(), kind: "e2e".into(), label: "Playwright".into(), ..Default::default() };
+        let brief = tests_brief(&[unit.clone(), e2e.clone()], false);
+        assert!(brief.contains("no es tuya: no la arregles"), "{brief}");
+        assert!(tests_brief(&[unit.clone()], true).contains("arréglala también"));
+        assert!(brief.contains("- Pruebas unitarias: `pnpm test` — la app la corre al terminar tu tarea"), "{brief}");
+        assert!(brief.contains("Agrega o actualiza pruebas de este tipo"), "{brief}");
+        assert!(brief.contains("- Playwright: `pnpm e2e` — la corres tú; la app no la corre.\n"), "the e2e suite is only told, and not written: {brief}");
+        assert_eq!(tests_line(&[unit]), " · pruebas: Pruebas unitarias (`pnpm test`, se escriben)");
     }
 
     #[test]

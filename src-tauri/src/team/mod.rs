@@ -54,13 +54,40 @@ pub struct Check {
     /// A project id, or `"*"` for every repository of the run.
     pub repo: String,
     pub command: String,
-    /// `item` after each piece of work, `final` once everything is integrated.
+    /// `item` after each piece of work, `final` once everything is integrated, `agent` only told
+    /// to the members, who run it themselves (an e2e suite that needs a browser or a service the
+    /// app cannot assume).
     pub when: String,
+    /// `unit | integration | e2e | lint | other` — what the members are told it is. Repositories
+    /// differ: one has only unit tests, another integration and e2e, so the user says which.
+    pub kind: String,
+    /// The user's own name for it («pruebas de contrato»); empty reads as the kind's.
+    pub label: String,
+    /// Members add or update tests of this kind for what they change, not only run them.
+    pub write: bool,
 }
 
 impl Default for Check {
     fn default() -> Self {
-        Self { repo: "*".into(), command: String::new(), when: "final".into() }
+        Self { repo: "*".into(), command: String::new(), when: "final".into(), kind: "other".into(), label: String::new(), write: false }
+    }
+}
+
+impl Check {
+    /// What the members and the channel call it.
+    pub fn name(&self) -> String {
+        let label = self.label.trim();
+        if !label.is_empty() {
+            return label.to_string();
+        }
+        match self.kind.as_str() {
+            "unit" => "Pruebas unitarias",
+            "integration" => "Pruebas de integración",
+            "e2e" => "Pruebas end-to-end",
+            "lint" => "Lint y tipos",
+            _ => "Verificación",
+        }
+        .to_string()
     }
 }
 
@@ -101,8 +128,12 @@ pub struct Policy {
     pub commit: String,
     /// `conventional` or `free`.
     pub commit_style: String,
-    /// `merge` (into the target branch) or `branch` (leave the integration branch for the user).
+    /// `merge` (into the target branch), `branch` (leave the integration branch for the user) or
+    /// `pr` (publish the integration branch and open a pull request into the target).
     pub integrate: String,
+    /// With `integrate: pr`, the pull request opens as a draft: agent work is read before anyone
+    /// is asked to review it.
+    pub pr_draft: bool,
     pub push: bool,
     /// Member id that resolves merge conflicts, `author` (the item's own member) or `user`.
     pub conflicts: String,
@@ -161,6 +192,10 @@ pub struct Policy {
     /// A turn is a whole agent session with unlimited tool steps, so without this ten turns can
     /// take an afternoon. `0` is no limit.
     pub turn_minutes: i64,
+    /// A test that already failed the same way before the change (lint errors the repository
+    /// had): `ignore` lets the task through with the failure noted, `fix` makes it the member's to
+    /// fix as well. A failure the change caused blocks either way.
+    pub baseline_failures: String,
 }
 
 impl Default for Policy {
@@ -173,10 +208,13 @@ impl Default for Policy {
             commit: "item".into(),
             commit_style: "conventional".into(),
             integrate: "merge".into(),
+            pr_draft: true,
             push: false,
             conflicts: "author".into(),
             checks: Vec::new(),
-            auto_checks: false,
+            // On for new teams (user, 2026-11-16: agents were not testing their work). Teams saved
+            // before keep the `false` they were saved with.
+            auto_checks: true,
             impact_approval: false,
             impact_paths: Vec::new(),
             review: ReviewPolicy::default(),
@@ -202,6 +240,7 @@ impl Default for Policy {
             // stop, not spend the user's quota iterating (user report, 2026-11-16).
             single_pass: true,
             turn_minutes: 30,
+            baseline_failures: "ignore".into(),
         }
     }
 }
@@ -221,8 +260,9 @@ impl Policy {
         self.questions = pick(&self.questions, &["allow", "plan", "never"], "allow");
         self.commit = pick(&self.commit, &["item", "squash", "none"], "item");
         self.commit_style = pick(&self.commit_style, &["conventional", "free"], "conventional");
-        self.integrate = pick(&self.integrate, &["merge", "branch"], "merge");
+        self.integrate = pick(&self.integrate, &["merge", "branch", "pr"], "merge");
         self.comms = pick(&self.comms, &["open", "tree", "tree_siblings"], "open");
+        self.baseline_failures = pick(&self.baseline_failures, &["ignore", "fix"], "ignore");
         self.max_notes_per_item = self.max_notes_per_item.clamp(0, 32);
         self.sub_lead_rounds = self.sub_lead_rounds.clamp(1, 12);
         self.budget_usd = if self.budget_usd.is_finite() { self.budget_usd.clamp(0.0, 10_000.0) } else { 0.0 };
@@ -235,7 +275,9 @@ impl Policy {
         self.turn_minutes = self.turn_minutes.clamp(0, 8 * 60);
         self.checks.retain(|c| !c.command.trim().is_empty());
         for c in &mut self.checks {
-            c.when = pick(&c.when, &["item", "final"], "final");
+            c.when = pick(&c.when, &["item", "final", "agent"], "final");
+            c.kind = pick(&c.kind, &["unit", "integration", "e2e", "lint", "other"], "other");
+            c.label = c.label.trim().chars().take(60).collect();
             if c.repo.trim().is_empty() {
                 c.repo = "*".into();
             }
@@ -401,10 +443,12 @@ pub struct RunRepo {
     pub target_branch: String,
     pub integration_branch: String,
     pub integration_path: String,
-    /// `ready | merged | left | failed`.
+    /// `ready | merged | left | pr | failed`.
     pub status: String,
     pub last_error: String,
     pub position: i64,
+    /// The pull request the run opened for this repository (`integrate: pr`).
+    pub pr_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -539,6 +583,7 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             status TEXT NOT NULL DEFAULT 'ready',
             last_error TEXT NOT NULL DEFAULT '',
             position INTEGER NOT NULL DEFAULT 0,
+            pr_url TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (run_id, project_id)
          );
          CREATE TABLE IF NOT EXISTS agent_team_items (
@@ -605,6 +650,11 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         if !present {
             conn.execute_batch(&format!("ALTER TABLE agent_team_items ADD COLUMN {column} {definition};"))?;
         }
+    }
+    // Pull requests (2026-11): the link a run opened for a repository.
+    let present: bool = conn.prepare("SELECT 1 FROM pragma_table_info('agent_team_repos') WHERE name = 'pr_url'")?.exists([])?;
+    if !present {
+        conn.execute_batch("ALTER TABLE agent_team_repos ADD COLUMN pr_url TEXT NOT NULL DEFAULT '';")?;
     }
     chat::migrate(conn)
 }
@@ -882,7 +932,7 @@ pub fn delete_run(conn: &Connection, id: &str) -> rusqlite::Result<()> {
 // ---------------------------------------------------------------- repos
 
 const REPO_COLUMNS: &str =
-    "run_id, project_id, name, local_path, target_branch, integration_branch, integration_path, status, last_error, position";
+    "run_id, project_id, name, local_path, target_branch, integration_branch, integration_path, status, last_error, position, pr_url";
 
 fn map_repo(row: &rusqlite::Row) -> rusqlite::Result<RunRepo> {
     Ok(RunRepo {
@@ -896,6 +946,7 @@ fn map_repo(row: &rusqlite::Row) -> rusqlite::Result<RunRepo> {
         status: row.get(7)?,
         last_error: row.get(8)?,
         position: row.get(9)?,
+        pr_url: row.get(10)?,
     })
 }
 
@@ -907,11 +958,20 @@ pub fn list_repos(conn: &Connection, run_id: &str) -> rusqlite::Result<Vec<RunRe
 
 pub fn insert_repo(conn: &Connection, repo: &RunRepo) -> rusqlite::Result<()> {
     conn.execute(
-        &format!("INSERT INTO agent_team_repos ({REPO_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"),
+        &format!("INSERT INTO agent_team_repos ({REPO_COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"),
         params![
             repo.run_id, repo.project_id, repo.name, repo.local_path, repo.target_branch, repo.integration_branch,
-            repo.integration_path, repo.status, repo.last_error, repo.position
+            repo.integration_path, repo.status, repo.last_error, repo.position, repo.pr_url
         ],
+    )?;
+    Ok(())
+}
+
+/// A repository whose pull request opened: its link, for the run's view.
+pub fn set_repo_pr(conn: &Connection, run_id: &str, project_id: &str, url: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE agent_team_repos SET status = 'pr', last_error = '', pr_url = ?3 WHERE run_id = ?1 AND project_id = ?2",
+        params![run_id, project_id, url],
     )?;
     Ok(())
 }

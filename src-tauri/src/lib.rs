@@ -1971,6 +1971,7 @@ sharded_invoke_handler! {
         commands::team_cmd::team_amend,
         commands::team_cmd::team_recommendations,
         commands::team_cmd::team_pr_draft,
+        commands::team_cmd::team_detect_checks,
         commands::team_cmd::team_run_artifacts,
         decide::decider_config,
         decide::decider_set,

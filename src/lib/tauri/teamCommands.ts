@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { TeamChatState } from "../../types/team";
 import type { ChatAttachment } from "./chatCommands";
 import type {
-  TeamRunMetrics, Team, TeamDispatch, TeamPolicy, TeamPrDraft, TeamRecommendation, TeamRun, TeamRunState } from "../../types/team";
+  TeamRunMetrics, Team, TeamCheck, TeamDispatch, TeamPolicy, TeamPrDraft, TeamRecommendation, TeamRun, TeamRunState } from "../../types/team";
 
 export const teamList = (workspaceId: string) => invoke<Team[]>("team_list", { workspaceId });
 export const teamChatOpen = (teamId: string, projectId: string, fresh = false) => invoke<TeamChatState>("team_chat_open", { teamId, projectId, fresh });
@@ -57,6 +57,8 @@ export const teamAnswer = (messageId: string, answer: string) => invoke<TeamRunS
 export const teamNote = (runId: string, toId: string, body: string) => invoke<TeamRunState>("team_note", { runId, toId, body });
 export const teamAmend = (runId: string, body: string) => invoke<TeamRunState>("team_amend", { runId, body });
 export const teamRecommendations = (runId: string) => invoke<TeamRecommendation[]>("team_recommendations", { runId });
+/** The test suites a repository has, read off its manifests, for «Verificaciones» to start from. */
+export const teamDetectChecks = (projectId: string) => invoke<TeamCheck[]>("team_detect_checks", { projectId });
 export const teamPrDraft = (runId: string, projectId: string, spanish: boolean) =>
   invoke<TeamPrDraft>("team_pr_draft", { runId, projectId, spanish });
 export const teamRemember = (runId: string, messageId: string, projectId: string, keep: boolean) =>

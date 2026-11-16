@@ -7,7 +7,9 @@ import { motion } from "framer-motion";
 import { FlaskConical, Hammer, Plus, Search, Trash2, Workflow } from "lucide-react";
 import { useAgentsStore } from "../../../state/agentsStore";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
-import type { Team, TeamCheck, TeamPlanStep } from "../../../types/team";
+import { teamDetectChecks } from "../../../lib/tauri/teamCommands";
+import { useToastStore } from "../../../state/toastStore";
+import type { Team, TeamCheck, TeamCheckKind, TeamPlanStep } from "../../../types/team";
 import { AgentAvatar } from "../kit/Avatar";
 import { SelectBox, Btn, Chip, Empty, Label, Seg, SPRING, ToggleChip, field } from "../kit/ui";
 import { useL } from "../state";
@@ -210,57 +212,121 @@ export function FlowTab({ team, update }: { team: Team; update: Update }) {
   );
 }
 
+const CHECK_KINDS: { value: TeamCheckKind; es: string; en: string }[] = [
+  { value: "unit", es: "Unitarias", en: "Unit" },
+  { value: "integration", es: "Integración", en: "Integration" },
+  { value: "e2e", es: "End-to-end", en: "End-to-end" },
+  { value: "lint", es: "Lint y tipos", en: "Lint and types" },
+  { value: "other", es: "Otra", en: "Other" },
+];
+
+/** The suites a team's members are told about and the app runs, per repository. Repositories
+ *  differ — one has only unit tests, another integration and e2e — so each check says what it is,
+ *  who runs it and whether the members write tests of its kind. */
 export function ChecksTab({ team, update }: { team: Team; update: Update }) {
   const l = useL();
   const projects = useWorkspaceStore((s) => (s.activeWorkspaceId ? s.projectsByWorkspace[s.activeWorkspaceId] ?? NO_PROJECTS : NO_PROJECTS));
   const checks = team.policy.checks;
   const set = (next: TeamCheck[], now = true) => update((t) => ({ ...t, policy: { ...t.policy, checks: next } }), now);
-  const [draft, setDraft] = useState<TeamCheck>({ repo: "*", command: "", when: "item" });
+  const patch = (index: number, change: Partial<TeamCheck>) => set(checks.map((c, j) => (j === index ? { ...c, ...change } : c)));
+  const [draft, setDraft] = useState<TeamCheck>({ repo: "*", command: "", when: "item", kind: "unit", label: "", write: true });
+  const [detecting, setDetecting] = useState(false);
+  const kindName = (c: TeamCheck) => c.label?.trim() || l(...(() => { const k = CHECK_KINDS.find((x) => x.value === (c.kind ?? "other")) ?? CHECK_KINDS[4]; return [k.es, k.en] as const; })());
+  const whenOptions = [
+    { value: "item" as const, label: l("Por tarea", "Per task"), title: l("La app la corre en el worktree del miembro antes de dar la tarea por hecha; si falla, vuelve con el error", "The app runs it in the member's worktree before the task counts as done; a failure sends it back with the error") },
+    { value: "final" as const, label: l("Al final", "At the end"), title: l("La app la corre una vez sobre la rama integrada al cerrar la corrida", "The app runs it once on the integrated branch when the run closes") },
+    { value: "agent" as const, label: l("La corre el agente", "Agent runs it"), title: l("Solo se le indica al agente, que la corre por su cuenta; la app no la corre (útil para e2e que necesitan un navegador o servicios)", "Only told to the agent, who runs it; the app does not (useful for e2e that need a browser or services)") },
+  ];
+
+  /** Reads the suites off each chosen repository and adds the ones not listed yet. */
+  const detect = async () => {
+    const targets = draft.repo === "*" ? projects : projects.filter((p) => p.id === draft.repo);
+    setDetecting(true);
+    try {
+      const found = (await Promise.all(targets.map((p) => teamDetectChecks(p.id).catch(() => [] as TeamCheck[])))).flat();
+      const fresh = found.filter((f) => !checks.some((c) => (c.repo === f.repo || c.repo === "*") && c.command === f.command));
+      if (fresh.length) set([...checks, ...fresh]);
+      else useToastStore.getState().pushToast(found.length ? l("Las pruebas detectadas ya están en la lista.", "The detected tests are already listed.") : l("No encontré pruebas en ese repositorio. Puedes añadirlas a mano.", "No tests found in that repository. You can add them by hand."), "info");
+    } finally {
+      setDetecting(false);
+    }
+  };
 
   return (
     <div className="min-h-0 flex-1 overflow-auto p-5">
-      <div className="mx-auto flex max-w-[720px] flex-col gap-4">
+      <div className="mx-auto flex max-w-[760px] flex-col gap-4">
         <div>
-          <h3 className="m-0 flex items-center gap-2 text-[14px] font-semibold"><FlaskConical className="h-4 w-4 text-[var(--cf-accent)]" />{l("Verificaciones", "Checks")}</h3>
+          <h3 className="m-0 flex items-center gap-2 text-[14px] font-semibold"><FlaskConical className="h-4 w-4 text-[var(--cf-accent)]" />{l("Pruebas", "Tests")}</h3>
           <p className="m-0 mt-1 text-[12.5px] text-[var(--cf-text-muted)]">
-            {l("Comandos que deben pasar. Por tarea: corren en el worktree del miembro antes de darla por hecha, y si fallan vuelve con el error. Al final: corren sobre la rama integrada.", "Commands that must pass. Per task: they run in the member's worktree before the task counts as done, and a failure sends it back with the error. At the end: they run on the integrated branch.")}
+            {l("Las pruebas que tiene cada repositorio. Cada agente recibe las de su repositorio: cuáles debe escribir o actualizar y cuáles correr antes de terminar. Un repositorio sin pruebas aquí no recibe ninguna.", "The tests each repository has. Each agent is told its repository's: which to write or update and which to run before finishing. A repository with none here gets none.")}
           </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2 rounded-[10px] border border-[var(--cf-border)] px-2.5 py-2">
+          <span className="min-w-[200px] flex-1 text-[12.5px]">
+            <b className="font-medium">{l("Si una prueba ya fallaba antes del cambio", "If a test already failed before the change")}</b>
+            <span className="block text-[11.5px] text-[var(--cf-text-muted)]">{l("Lo que el cambio rompe bloquea siempre la tarea.", "What the change breaks always blocks the task.")}</span>
+          </span>
+          <Seg size="sm" value={team.policy.baseline_failures ?? "ignore"} onChange={(baseline_failures) => update((t) => ({ ...t, policy: { ...t.policy, baseline_failures } }))} options={[
+            { value: "ignore" as const, label: l("No bloquea", "Don't block"), title: l("La tarea sigue y el fallo queda anotado; el agente no lo toca", "The task goes on and the failure is noted; the agent leaves it alone") },
+            { value: "fix" as const, label: l("El agente la arregla", "The agent fixes it"), title: l("El agente debe dejarla pasando aunque no la haya roto él; hace más grande cada tarea", "The agent must make it pass even though it did not break it; makes each task bigger") },
+          ]} />
         </div>
         <div className="flex flex-col gap-1.5">
           {checks.map((c, i) => (
-            <motion.div key={i} layout className="flex items-center gap-2 rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2.5 py-2">
-              <Chip tone={c.when === "final" ? "violet" : "info"} title={c.when === "final" ? l("Corre sobre la rama integrada al terminar la corrida", "Runs on the integrated branch when the run ends") : l("Corre en el worktree del miembro antes de dar la tarea por hecha", "Runs in the member's worktree before the task counts as done")}>{c.when === "final" ? l("Al final", "At the end") : l("Por tarea", "Per task")}</Chip>
-              <code title={c.command} className="min-w-0 flex-1 truncate font-mono text-[12px]">{c.command}</code>
-              <span title={l("Repositorio donde corre el comando", "Repository the command runs in")} className="text-[11.5px] text-[var(--cf-text-muted)]">{c.repo === "*" ? l("todos", "all") : projects.find((p) => p.id === c.repo)?.name ?? c.repo}</span>
-              <button type="button" aria-label={l("Quitar", "Remove")} title={l("Quita este check; ya no se exigirá", "Removes this check; it will no longer be required")} onClick={() => set(checks.filter((_, j) => j !== i))} className="grid h-6 w-6 place-items-center rounded-[6px] text-[var(--cf-text-faint)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]">
+            <motion.div key={i} layout className="flex flex-wrap items-center gap-2 rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-2.5 py-2">
+              <Chip tone={c.kind === "e2e" ? "violet" : c.kind === "integration" ? "warn" : "info"}>{kindName(c)}</Chip>
+              <code title={c.command} className="min-w-[120px] flex-1 truncate font-mono text-[12px]">{c.command}</code>
+              <span title={l("Repositorio donde corre", "Repository it runs in")} className="text-[11.5px] text-[var(--cf-text-muted)]">{c.repo === "*" ? l("todos", "all") : projects.find((p) => p.id === c.repo)?.name ?? c.repo}</span>
+              <Seg size="sm" value={c.when} onChange={(when) => patch(i, { when })} options={whenOptions} />
+              <ToggleChip on={!!c.write} onClick={() => patch(i, { write: !c.write })} title={l("El agente agrega o actualiza pruebas de este tipo para lo que cambia", "The agent adds or updates tests of this kind for what it changes")}>
+                {l("Las escribe", "Writes them")}
+              </ToggleChip>
+              <button type="button" aria-label={l("Quitar", "Remove")} title={l("Quita esta prueba; ya no se indica ni se exige", "Removes this test; it is no longer told or required")} onClick={() => set(checks.filter((_, j) => j !== i))} className="grid h-6 w-6 place-items-center rounded-[6px] text-[var(--cf-text-faint)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]">
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
             </motion.div>
           ))}
-          {checks.length === 0 && <span className="text-[12.5px] text-[var(--cf-text-muted)]">{l("Sin checks: el equipo confía en sus propias pruebas.", "No checks: the team trusts its own tests.")}</span>}
+          {checks.length === 0 && <span className="text-[12.5px] text-[var(--cf-text-muted)]">{l("Sin pruebas configuradas. Usa «Detectar» para leerlas del repositorio o añádelas a mano.", "No tests set up. Use «Detect» to read them off the repository, or add them by hand.")}</span>}
         </div>
-        <div className="flex flex-wrap items-center gap-2 rounded-[11px] border border-dashed border-[var(--cf-border-strong)] p-2.5">
-          <input value={draft.command} onChange={(e) => setDraft({ ...draft, command: e.target.value })} title={l("Comando que debe terminar sin error (código de salida 0)", "Command that must finish without error (exit code 0)")} placeholder="pnpm test" className={`${field} min-w-[200px] flex-1 font-mono`} />
-          <SelectBox value={draft.repo} onChange={(v) => setDraft({ ...draft, repo: v })} className="w-[150px] shrink-0" title={l("En qué repositorio corre el check", "Which repository the check runs in")}>
-            <option value="*">{l("Todos los repos", "Every repo")}</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </SelectBox>
-          <Seg size="sm" value={draft.when} onChange={(when) => setDraft({ ...draft, when })} options={[{ value: "item", label: l("Por tarea", "Per task"), title: l("Tras cada tarea, antes de darla por hecha", "After each task, before it counts as done") }, { value: "final", label: l("Al final", "At the end"), title: l("Una vez, sobre la rama integrada al cerrar la corrida", "Once, on the integrated branch when the run closes") }]} />
-          <Btn
-            kind="primary"
-            small
-            icon={Plus}
-            title={l("Añade el check a la lista", "Adds the check to the list")}
-            disabled={!draft.command.trim()}
-            onClick={() => {
-              set([...checks, { ...draft, command: draft.command.trim() }]);
-              setDraft({ ...draft, command: "" });
-            }}
-          >
-            {l("Añadir", "Add")}
-          </Btn>
+        <div className="flex flex-col gap-2 rounded-[11px] border border-dashed border-[var(--cf-border-strong)] p-2.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <SelectBox value={draft.repo} onChange={(v) => setDraft({ ...draft, repo: v })} className="w-[150px] shrink-0" title={l("En qué repositorio", "Which repository")}>
+              <option value="*">{l("Todos los repos", "Every repo")}</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </SelectBox>
+            <Btn small icon={Search} disabled={detecting || projects.length === 0} onClick={() => void detect()} title={l("Lee las pruebas de package.json, Cargo, Maven, Gradle, pytest, Go, .NET, Playwright o Cypress", "Reads the tests off package.json, Cargo, Maven, Gradle, pytest, Go, .NET, Playwright or Cypress")}>
+              {detecting ? l("Detectando…", "Detecting…") : l("Detectar pruebas", "Detect tests")}
+            </Btn>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <SelectBox value={draft.kind ?? "other"} onChange={(v) => { const kind = v as TeamCheckKind; setDraft({ ...draft, kind, write: kind === "unit", when: kind === "e2e" ? "agent" : kind === "integration" ? "final" : "item" }); }} className="w-[130px] shrink-0" title={l("Qué tipo de prueba es", "What kind of test it is")}>
+              {CHECK_KINDS.map((k) => <option key={k.value} value={k.value}>{l(k.es, k.en)}</option>)}
+            </SelectBox>
+            <input value={draft.command} onChange={(e) => setDraft({ ...draft, command: e.target.value })} title={l("Comando que debe terminar sin error (código de salida 0)", "Command that must finish without error (exit code 0)")} placeholder="pnpm test" className={`${field} min-w-[180px] flex-1 font-mono`} />
+            <input value={draft.label ?? ""} onChange={(e) => setDraft({ ...draft, label: e.target.value })} title={l("Nombre opcional, por ejemplo «Pruebas de contrato»", "Optional name, e.g. «Contract tests»")} placeholder={l("Nombre (opcional)", "Name (optional)")} className={`${field} w-[150px]`} />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Seg size="sm" value={draft.when} onChange={(when) => setDraft({ ...draft, when })} options={whenOptions} />
+            <ToggleChip on={!!draft.write} onClick={() => setDraft({ ...draft, write: !draft.write })} title={l("El agente agrega o actualiza pruebas de este tipo para lo que cambia", "The agent adds or updates tests of this kind for what it changes")}>
+              {l("Las escribe", "Writes them")}
+            </ToggleChip>
+            <span className="flex-1" />
+            <Btn
+              kind="primary"
+              small
+              icon={Plus}
+              title={l("Añade la prueba a la lista", "Adds the test to the list")}
+              disabled={!draft.command.trim()}
+              onClick={() => {
+                set([...checks, { ...draft, command: draft.command.trim(), label: draft.label?.trim() ?? "" }]);
+                setDraft({ ...draft, command: "", label: "" });
+              }}
+            >
+              {l("Añadir", "Add")}
+            </Btn>
+          </div>
         </div>
       </div>
     </div>

@@ -20,15 +20,17 @@ const TERMINAL_MODE = "terminal";
 const CONFLICT_AUTHOR = "author";
 const CONFLICT_USER = "user";
 const COPY_NUMBER_START = 2;
-const CHECK_WHEN = ["item", "final"];
+const CHECK_WHEN = ["item", "final", "agent"];
+const CHECK_KINDS = ["unit", "integration", "e2e", "lint", "other"];
 const STEP_KINDS = ["work", "investigate"];
 const POLICY_CHOICES: Record<string, string[]> = {
   approve_code: ["never", "first", "each"],
   questions: ["allow", "plan", "never"],
   commit: ["item", "squash", "none"],
   commit_style: ["conventional", "free"],
-  integrate: ["merge", "branch"],
+  integrate: ["merge", "branch", "pr"],
   comms: ["open", "tree", "tree_siblings"],
+  baseline_failures: ["ignore", "fix"],
 };
 const REVIEW_EXIGENCE = ["correct", "polished"];
 const DECIMAL_POLICY_FIELDS = new Set(["budget_usd", "budget_minutes", "unmetered_minutes"]);
@@ -70,7 +72,7 @@ const MEMBER_SHAPE = { ...memberDefaults, repos: [EMPTY_TEXT], talks_to: [EMPTY_
 const policyDefaults = defaultPolicy();
 const POLICY_SHAPE = {
   ...policyDefaults,
-  checks: [{ repo: EMPTY_TEXT, command: EMPTY_TEXT, when: CHECK_WHEN[ZERO] }],
+  checks: [{ repo: EMPTY_TEXT, command: EMPTY_TEXT, when: CHECK_WHEN[ZERO], kind: "other", label: EMPTY_TEXT, write: false }],
   impact_paths: [EMPTY_TEXT],
   review: { ...policyDefaults.review, of: [EMPTY_TEXT] },
 };
@@ -124,6 +126,20 @@ function readShape(value: unknown, shape: unknown): unknown {
     if (!finite || numeric < ZERO) fail();
   }
   return value;
+}
+
+/** A team policy with the settings added after the file was exported filled in with their
+ *  defaults (`single_pass`, `pr_draft`, a check's `kind`), so an older file still imports and gets
+ *  them as a new team would. A setting the file has, of the wrong type, still fails. */
+function withPolicyDefaults(team: unknown): unknown {
+  const source = record(team);
+  const policy = source.policy;
+  if (typeof policy !== OBJECT_TYPE || policy === null || Array.isArray(policy)) return team;
+  const filled: Record<string, unknown> = { ...policyDefaults, ...(policy as Record<string, unknown>) };
+  if (Array.isArray(filled.checks)) {
+    filled.checks = filled.checks.map((check) => (typeof check === OBJECT_TYPE && check !== null ? { kind: "other", label: EMPTY_TEXT, write: false, ...(check as Record<string, unknown>) } : check));
+  }
+  return { ...source, policy: filled };
 }
 
 function requireText(text: string): void {
@@ -219,6 +235,7 @@ function validateTeam(team: SharedTeam, agentKeys: Set<string>, repositoryKeys: 
   for (const check of team.policy.checks) {
     requireReference(check.repo, repositoryKeys, [ALL_REPOSITORIES]);
     requireChoice(check.when, CHECK_WHEN);
+    requireChoice(check.kind ?? "other", CHECK_KINDS);
     requireText(check.command);
   }
 }
@@ -234,7 +251,7 @@ export function parseConfiguration(text: string): ConfigurationFile {
   if (source.version !== CONFIGURATION_VERSION) fail(CONFIGURATION_ERRORS.version);
   const base = readShape(source, FILE_SHAPE) as Omit<ConfigurationFile, "team">;
   requireChoice(base.kind, [AGENT_CONFIGURATION, TEAM_CONFIGURATION]);
-  const team = source.team === null ? null : readShape(source.team, TEAM_SHAPE) as SharedTeam;
+  const team = source.team === null ? null : readShape(withPolicyDefaults(source.team), TEAM_SHAPE) as SharedTeam;
   const file: ConfigurationFile = { ...base, team };
   const agentIds = file.agents.map((agent) => agent.key);
   const agentKeys = uniqueKeys(agentIds);

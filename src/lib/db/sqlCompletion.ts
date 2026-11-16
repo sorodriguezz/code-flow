@@ -530,6 +530,17 @@ function columnItems(
  * in front of the cursor and accepting it by reflex — Tab completes the top item here — types the
  * same thing the user already had.
  */
+/** How close a table name is to a qualifier that named nothing: 0 the same once a plural is
+ *  dropped (`capas` → `capa`), 1 starts with it, 2 contains it or shares its first three letters,
+ *  3 unrelated. */
+function closeness(typed: string, candidate: string): number {
+  const stem = typed.replace(/(es|s)$/, "");
+  if (candidate === typed || candidate === stem || `${candidate}s` === typed) return 0;
+  if (candidate.startsWith(typed) || (stem.length >= 3 && candidate.startsWith(stem))) return 1;
+  if (candidate.includes(stem) || (stem.length >= 3 && candidate.slice(0, 3) === stem.slice(0, 3))) return 2;
+  return 3;
+}
+
 function pendingList(
   suggestions: MonacoLanguages.CompletionItem[],
   pending: boolean,
@@ -620,8 +631,9 @@ const sqlProvider: MonacoLanguages.CompletionItemProvider = {
       endLineNumber: position.lineNumber,
       endColumn: position.column,
     });
-    const qualifier = QUALIFIER_RE.exec(line)?.[1];
-    if (qualifier) {
+    const qualified = QUALIFIER_RE.exec(line);
+    const qualifier = qualified?.[1];
+    if (qualified && qualifier) {
       const name = unquote(qualifier).toLowerCase();
       // In a table slot (`from public.`) the word before the dot is the relation being typed, and
       // `RELATION_RE` has already read it as a table named `public` — matching it here would ask for
@@ -648,6 +660,17 @@ const sqlProvider: MonacoLanguages.CompletionItemProvider = {
       const isSchema = known.some(
         (node) => node.kind === "schema" && node.name.toLowerCase() === name,
       );
+      // `from appdb.` where the database has schemas (PostgreSQL, SQL Server): the three-part
+      // `database.schema.table`, so the next name is one of its schemas.
+      const schemas = known.filter((node) => node.kind === "schema");
+      if (!isSchema && slot === "relation" && schemas.length > 0 && tab.database.toLowerCase() === name) {
+        return pendingList(
+          schemas.map((node) => ({ label: node.name, kind: monaco.languages.CompletionItemKind.Module, insertText: node.name, range })),
+          pending,
+          word.word,
+          range,
+        );
+      }
       // Engines without a schema level (MySQL, MariaDB) qualify by database instead: `from otherdb.`
       // wants that database's relations, and the database's children there are folders, never
       // schemas, so the check above can't see it.
@@ -670,6 +693,43 @@ const sqlProvider: MonacoLanguages.CompletionItemProvider = {
             const relation = { schema: null, table: table.name, alias: null };
             const columns = read(columnRef(tab, relation));
             return pendingList(columnItems(columns, range, table.name, "0"), pending, word.word, range);
+          }
+        }
+        // `from capas.` where no schema or database is called that: most likely a table typed
+        // wrong, or a table taken for a schema. The console's tables closest to it are offered,
+        // and picking one replaces the whole `capas.` with it — an empty list here left only the
+        // snippets showing, which read as the completion not knowing the schema at all.
+        if (slot === "relation" && (tab.database || tab.schema)) {
+          const scopeRef = { database: tab.database || null, schema: tab.schema || null, name: null };
+          const nodes = [...read({ kind: "table_folder", ...scopeRef }), ...read({ kind: "view_folder", ...scopeRef })];
+          const fix = {
+            startLineNumber: position.lineNumber,
+            endLineNumber: position.lineNumber,
+            startColumn: qualified.index + 1,
+            endColumn: word.endColumn,
+          };
+          const typedAfter = word.word.toLowerCase();
+          const close = nodes
+            .map((node) => ({ node, score: closeness(name, node.name.toLowerCase()) }))
+            .filter(({ node, score }) => score < 3 && (!typedAfter || node.name.toLowerCase().includes(typedAfter)))
+            .sort((a, b) => a.score - b.score || a.node.name.localeCompare(b.node.name))
+            .slice(0, 50);
+          if (close.length > 0 || pending) {
+            return pendingList(
+              close.map(({ node, score }) => ({
+                label: { label: node.name, description: `en vez de «${qualifier}.»` },
+                kind: monaco.languages.CompletionItemKind.Struct,
+                detail: node.detail || undefined,
+                insertText: node.name,
+                // Monaco filters by the text in the range, which now starts at the qualifier.
+                filterText: line.slice(qualified.index),
+                sortText: `${score}${node.name}`,
+                range: fix,
+              })),
+              pending,
+              word.word,
+              range,
+            );
           }
         }
         if (pending) return pendingList([], pending, word.word, range);

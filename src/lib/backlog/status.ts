@@ -38,7 +38,7 @@ export function workState(item: BacklogItem, index: WorkIndex): WorkState {
       if (run.status === "gated" || run.status === "paused") needsYou = true;
       if (run.status === "failed" || run.status === "aborted") failed = true;
       if (run.status !== "done") allDone = false;
-      else if (run.policy.integrate === "branch") review = true;
+      else if (run.policy.integrate === "branch" || run.policy.integrate === "pr") review = true;
     } else if (link.kind === "chain") {
       const chain = index.chains.get(link.ref_id);
       if (!chain) continue;

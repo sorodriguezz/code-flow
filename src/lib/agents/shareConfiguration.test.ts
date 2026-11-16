@@ -191,6 +191,18 @@ describe(SUITE, () => {
     expect(attempt).toThrow(CONFIGURATION_ERRORS.invalid);
   });
 
+  it("imports a team exported before newer settings existed, with their defaults", () => {
+    const file = exportedTeam();
+    const policy = file.team!.policy as unknown as Record<string, unknown>;
+    delete policy.single_pass;
+    delete policy.pr_draft;
+    file.team!.policy.checks = [{ repo: "*", command: "npm test", when: "item" }];
+    const parsed = parseConfiguration(JSON.stringify(file));
+    expect(parsed.team!.policy.single_pass).toBe(true);
+    expect(parsed.team!.policy.pr_draft).toBe(true);
+    expect(parsed.team!.policy.checks[ZERO]).toEqual({ repo: "*", command: "npm test", when: "item", kind: "other", label: EMPTY_TEXT, write: false });
+  });
+
   it(TESTS.unknown, () => {
     const file = exportedTeam();
     const configuration = file.agents[ZERO].configuration;

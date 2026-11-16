@@ -50,7 +50,7 @@ function complete(text: string): string[] {
   };
   const trigger = text.endsWith(".") ? { triggerKind: 1, triggerCharacter: "." } : { triggerKind: 0 };
   const list = registered.provider.provideCompletionItems(model, { lineNumber: 1, column }, trigger);
-  return list.suggestions.map((s: { label: string }) => s.label);
+  return list.suggestions.map((s: { label: string | { label: string } }) => (typeof s.label === "string" ? s.label : s.label.label));
 }
 
 const pgDatabase: DbNodeRef = { kind: "database", database: "app", schema: null, name: null };
@@ -87,6 +87,22 @@ describe("sql completion after a dot", () => {
 
   it("offers a table's columns when it is used as a qualifier without an alias", () => {
     expect(complete("select users.")).toEqual(["id", "email"]);
+  });
+
+  it("offers the closest tables when the qualifier names no schema or database", () => {
+    expect(complete("select * from user.")).toEqual(["users", "active_users"]);
+    const item = registered.provider.provideCompletionItems(
+      { uri: { toString: () => "cf-db:/console/t1.sql" }, getValue: () => "select * from user.", getOffsetAt: () => 19,
+        getWordUntilPosition: () => ({ word: "", startColumn: 20, endColumn: 20 }), getValueInRange: () => "select * from user." },
+      { lineNumber: 1, column: 20 }, { triggerKind: 1, triggerCharacter: "." },
+    ).suggestions[0];
+    expect(item.range.startColumn).toBe(15);
+    expect(item.filterText).toBe("user.");
+    expect(complete("select * from zzz.")).toEqual([]);
+  });
+
+  it("offers the schemas after the console's own database name", () => {
+    expect(complete("select * from app.")).toEqual(["public", "audit"]);
   });
 
   it("offers another database's tables where there is no schema level", () => {

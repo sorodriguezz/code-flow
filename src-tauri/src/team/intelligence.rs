@@ -47,45 +47,109 @@ pub fn reported_evidence(criteria: &[String], reply: &str) -> Vec<Evidence> {
     }).collect()
 }
 
-pub fn repository_check(root: &std::path::Path) -> Option<&'static str> {
-    let manifest = |name| std::fs::read_to_string(root.join(name)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-    if let Some(package) = manifest("package.json") {
-        let test = package["scripts"]["test"].as_str().unwrap_or_default();
-        if !test.trim().is_empty() && !test.contains("no test specified") {
-            let manager = package["packageManager"].as_str().and_then(|value| value.split('@').next());
-            return Some(match manager {
-                Some("pnpm") => "pnpm test",
-                Some("yarn") => "yarn test",
-                Some("bun") => "bun run test",
-                Some("npm") => "npm test",
-                _ if root.join("pnpm-lock.yaml").is_file() => "pnpm test",
-                _ if root.join("yarn.lock").is_file() => "yarn test",
-                _ if root.join("bun.lock").is_file() || root.join("bun.lockb").is_file() => "bun run test",
-                _ => "npm test",
-            });
+/// The test suites a repository has, read off its manifests and config files: what the user
+/// starts from in the team's «Pruebas» tab before saying which run when and which the members
+/// write. Each comes with a default the user can change — unit tests and lint after every task
+/// (fast, and what the members write), integration once at the end, e2e told to the members only,
+/// since it usually needs a browser or a running service. `repo` is left for the caller.
+pub fn detect_suites(root: &std::path::Path) -> Vec<super::Check> {
+    fn add(out: &mut Vec<super::Check>, kind: &str, label: &str, command: String) {
+        if out.iter().any(|c| c.command == command) {
+            return;
+        }
+        let (when, write) = match kind {
+            "unit" => ("item", true),
+            "lint" => ("item", false),
+            "integration" => ("final", false),
+            _ => ("agent", false),
+        };
+        out.push(super::Check { repo: String::new(), command, when: when.into(), kind: kind.into(), label: label.into(), write });
+    }
+    let mut out: Vec<super::Check> = Vec::new();
+    let read_json = |name: &str| std::fs::read_to_string(root.join(name)).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    let exists = |name: &str| root.join(name).exists();
+    let any_of = |names: &[&str]| names.iter().any(|n| root.join(n).is_file());
+
+    if let Some(package) = read_json("package.json") {
+        let manager = package["packageManager"].as_str().and_then(|value| value.split('@').next()).map(str::to_string).unwrap_or_else(|| {
+            if exists("pnpm-lock.yaml") { "pnpm" } else if exists("yarn.lock") { "yarn" } else if exists("bun.lock") || exists("bun.lockb") { "bun" } else { "npm" }.to_string()
+        });
+        let run = |script: &str| match (manager.as_str(), script) {
+            ("npm", "test") => "npm test".to_string(),
+            ("npm", s) => format!("npm run {s}"),
+            ("yarn", s) => format!("yarn {s}"),
+            ("bun", s) => format!("bun run {s}"),
+            (_, "test") => "pnpm test".to_string(),
+            (_, s) => format!("pnpm run {s}"),
+        };
+        let scripts = package["scripts"].as_object().cloned().unwrap_or_default();
+        let has = |name: &str| scripts.get(name).and_then(|v| v.as_str()).is_some_and(|v| !v.trim().is_empty() && !v.contains("no test specified"));
+        let unit = ["test:unit", "unit"].into_iter().find(|s| has(s));
+        if let Some(script) = unit {
+            add(&mut out, "unit", "", run(script));
+        }
+        if has("test") {
+            add(&mut out, if unit.is_some() { "other" } else { "unit" }, if unit.is_some() { "Todas las pruebas" } else { "" }, run("test"));
+        }
+        if let Some(script) = ["test:integration", "test:int", "integration"].into_iter().find(|s| has(s)) {
+            add(&mut out, "integration", "", run(script));
+        }
+        let e2e = ["test:e2e", "e2e", "test:playwright", "playwright", "cy:run", "cypress:run"].into_iter().find(|s| has(s));
+        if let Some(script) = e2e {
+            add(&mut out, "e2e", "", run(script));
+        } else if any_of(&["playwright.config.ts", "playwright.config.js", "playwright.config.mjs"]) {
+            add(&mut out, "e2e", "Playwright", "npx playwright test".into());
+        } else if any_of(&["cypress.config.ts", "cypress.config.js", "cypress.config.mjs", "cypress.json"]) {
+            add(&mut out, "e2e", "Cypress", "npx cypress run".into());
+        }
+        if has("lint") {
+            add(&mut out, "lint", "Lint", run("lint"));
+        }
+        if let Some(script) = ["typecheck", "type-check", "check-types", "tsc"].into_iter().find(|s| has(s)) {
+            add(&mut out, "lint", "Tipos", run(script));
         }
     }
-    if root.join("Cargo.toml").is_file() {
-        return Some(if root.join("Cargo.lock").is_file() { "cargo test --locked" } else { "cargo test" });
+    if exists("Cargo.toml") {
+        add(&mut out, "unit", "", if exists("Cargo.lock") { "cargo test --locked" } else { "cargo test" }.into());
     }
-    if root.join("pom.xml").is_file() {
-        return Some(if cfg!(windows) && root.join("mvnw.cmd").is_file() {
-            "mvnw.cmd test"
-        } else if !cfg!(windows) && root.join("mvnw").is_file() {
-            "./mvnw test"
-        } else {
-            "mvn test"
-        });
+    if exists("go.mod") {
+        add(&mut out, "unit", "", "go test ./...".into());
     }
-    if root.join("pytest.ini").is_file()
-        || std::fs::read_to_string(root.join("pyproject.toml")).is_ok_and(|text| text.contains("[tool.pytest"))
-    {
-        return Some(if cfg!(windows) { "python -m pytest" } else { "python3 -m pytest" });
+    let pom = std::fs::read_to_string(root.join("pom.xml")).ok();
+    if let Some(pom) = &pom {
+        let mvn = if cfg!(windows) && exists("mvnw.cmd") { "mvnw.cmd" } else if !cfg!(windows) && exists("mvnw") { "./mvnw" } else { "mvn" };
+        add(&mut out, "unit", "", format!("{mvn} test"));
+        if pom.contains("maven-failsafe-plugin") {
+            add(&mut out, "integration", "", format!("{mvn} verify"));
+        }
     }
-    if manifest("composer.json").is_some_and(|value| !value["scripts"]["test"].is_null()) {
-        return Some("composer test");
+    if pom.is_none() && any_of(&["build.gradle", "build.gradle.kts"]) {
+        let gradle = if cfg!(windows) && exists("gradlew.bat") { "gradlew.bat" } else if !cfg!(windows) && exists("gradlew") { "./gradlew" } else { "gradle" };
+        add(&mut out, "unit", "", format!("{gradle} test"));
     }
-    None
+    let python = if cfg!(windows) { "python -m pytest" } else { "python3 -m pytest" };
+    if exists("pytest.ini") || exists("conftest.py") || std::fs::read_to_string(root.join("pyproject.toml")).is_ok_and(|text| text.contains("[tool.pytest")) {
+        add(&mut out, "unit", "", python.to_string());
+        for (dir, kind) in [("tests/integration", "integration"), ("tests/e2e", "e2e")] {
+            if root.join(dir).is_dir() {
+                add(&mut out, kind, "", format!("{python} {dir}"));
+            }
+        }
+    }
+    if read_json("composer.json").is_some_and(|value| !value["scripts"]["test"].is_null()) {
+        add(&mut out, "unit", "", "composer test".into());
+    }
+    let dotnet = std::fs::read_dir(root).into_iter().flatten().flatten().any(|e| {
+        let name = e.file_name().to_string_lossy().to_lowercase();
+        name.ends_with(".sln") || name.ends_with(".csproj")
+    });
+    if dotnet {
+        add(&mut out, "unit", "", "dotnet test".into());
+    }
+    if out.is_empty() && std::fs::read_to_string(root.join("Makefile")).is_ok_and(|m| m.lines().any(|l| l.starts_with("test:"))) {
+        add(&mut out, "unit", "", "make test".into());
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +381,31 @@ pub fn set_memory(conn: &Connection, run: &Run, entry: Memory, keep: bool) -> ru
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suites_are_read_off_what_each_repository_has() {
+        let root = std::env::temp_dir().join(format!("cf-suites-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("pnpm-lock.yaml"), "").unwrap();
+        std::fs::write(root.join("playwright.config.ts"), "").unwrap();
+        std::fs::write(root.join("package.json"), r#"{"scripts":{"test":"vitest run","test:integration":"vitest -c int","lint":"eslint .","typecheck":"tsc --noEmit"}}"#).unwrap();
+        let suites = detect_suites(&root);
+        let found: Vec<(&str, &str, &str, bool)> = suites.iter().map(|c| (c.kind.as_str(), c.command.as_str(), c.when.as_str(), c.write)).collect();
+        assert_eq!(found, vec![
+            ("unit", "pnpm test", "item", true),
+            ("integration", "pnpm run test:integration", "final", false),
+            ("e2e", "npx playwright test", "agent", false),
+            ("lint", "pnpm run lint", "item", false),
+            ("lint", "pnpm run typecheck", "item", false),
+        ]);
+
+        // A repository with no tests has no suites — nothing for the members to run or invent.
+        let bare = root.join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        std::fs::write(bare.join("package.json"), r#"{"scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}"#).unwrap();
+        assert!(detect_suites(&bare).is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn repository_scopes_are_portable_and_never_escape_the_project() {

@@ -1498,7 +1498,22 @@ pub async fn create_pull_request(
     work_item_ids: Option<Vec<i64>>,
 ) -> Result<ado::PullRequestSummary, String> {
     let project = load_project(&db, &project_id)?;
-    match linked_repo(&project)? {
+    create_pull_request_for(&project, &title, &description, &source_branch, &target_branch, draft, work_item_ids.unwrap_or_default()).await
+}
+
+/// [`create_pull_request`] for a project already in hand — what a team run calls when it finishes
+/// with `integrate: pr`, where there is no Tauri `State` to read the project through.
+pub(crate) async fn create_pull_request_for(
+    project: &crate::db::models::Project,
+    title: &str,
+    description: &str,
+    source_branch: &str,
+    target_branch: &str,
+    draft: bool,
+    work_item_ids: Vec<i64>,
+) -> Result<ado::PullRequestSummary, String> {
+    let (title, description, source_branch, target_branch) = (title.to_string(), description.to_string(), source_branch.to_string(), target_branch.to_string());
+    match linked_repo(project)? {
         LinkedRepo::Azure { org, project: ado_project, repo_id } => {
             let pat = pat_for_org(&org)?;
             ado::create_pull_request(
@@ -1510,7 +1525,7 @@ pub async fn create_pull_request(
                 &source_branch,
                 &target_branch,
                 draft,
-                &work_item_ids.unwrap_or_default(),
+                &work_item_ids,
                 &pat,
             )
             .await
