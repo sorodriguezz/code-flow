@@ -1696,7 +1696,7 @@ fn suites_for(run: &Run, project_id: &str, root: &str) -> Vec<team::Check> {
     suites
 }
 
-/// The suites a repository has, for the team's «Verificaciones» to start from.
+/// The suites a repository has, for the team's «Pruebas» tab to start from.
 #[tauri::command]
 pub fn team_detect_checks(db: State<'_, Db>, project_id: String) -> Result<Vec<team::Check>, String> {
     let project = with(&db, |c| queries::get_project(c, &project_id).map_err(e2s)?.ok_or_else(|| "El repositorio ya no está en la app.".to_string()))?;

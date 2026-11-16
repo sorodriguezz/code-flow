@@ -3067,6 +3067,7 @@
 {"name":"expectedGate","type":"Option<String>","optional":true}],"returns":"Result<RunState, String>","doc":"Answers whatever a gated run waits for."},
 {"name":"team_delete","area":"team","risk":"destructive","args":[{"name":"id","type":"String","optional":false}],"returns":"Result<(), String>","doc":""},
 {"name":"team_delete_run","area":"team","risk":"destructive","args":[{"name":"runId","type":"String","optional":false}],"returns":"Result<(), String>","doc":"Deletes a run with its tasks, its clean worktrees and the branches with nothing of their own."},
+{"name":"team_detect_checks","area":"team","risk":"read","args":[{"name":"projectId","type":"String","optional":false}],"returns":"Result<Vec<team::Check>, String>","doc":"The suites a repository has, for the team's «Pruebas» tab to start from."},
 {"name":"team_item_terminal","area":"team","risk":"write","args":[{"name":"itemId","type":"String","optional":false},
 {"name":"sessionId","type":"String","optional":false}],"returns":"Result<(), String>","doc":"Records the terminal session an item runs in (so the view can open it)."},
 {"name":"team_list","area":"team","risk":"read","args":[{"name":"workspaceId","type":"String","optional":false}],"returns":"Result<Vec<team::Team>, String>","doc":""},
