@@ -189,10 +189,12 @@ pub fn fit(need: u64, also_resident: u64, machine: &Machine) -> Fit {
         GpuKind::Discrete => machine.ram_bytes + machine.gpu_bytes.unwrap_or(0),
         _ => machine.ram_bytes,
     };
-    if machine.ram_bytes == 0 {
+    if machine.is_unknown() {
         return Fit::Unknown;
     }
-    if total > ceiling {
+    // A remote card whose machine's RAM was not given: past the card it spills, and whether the RAM
+    // behind it holds the rest is not known — so never "does not fit" on a guess.
+    if total > ceiling && machine.ram_bytes > 0 {
         return Fit::DoesNotFit;
     }
     match machine.gpu_bytes {
@@ -364,7 +366,9 @@ pub fn suggest_ctx(
 ) -> u32 {
     let options: Vec<u32> = ctx_options(max_ctx).into_iter().filter(|&ctx| ctx <= 65_536).collect();
     let smallest = options.first().copied().unwrap_or(8_192);
-    let (Some(model_bytes), Some(kv)) = (model_bytes, kv_bytes_per_token) else {
+    // An unknown machine (a remote server nobody described) is judged like an unknown model: no fit
+    // can be comfortable there, and the smallest window would be a guess dressed as an answer.
+    let (Some(model_bytes), Some(kv), false) = (model_bytes, kv_bytes_per_token, machine.is_unknown()) else {
         return options.iter().copied().filter(|&ctx| ctx <= 16_384).max().unwrap_or(smallest);
     };
     options
@@ -635,5 +639,36 @@ mod tests {
         // A model that fits keeps everything on the card.
         let small = Shape { bytes: 8 * GIB, kv_bytes_per_token: 6_144, active_share: 0.1 };
         assert_eq!(cpu_moe_layers(&small, 23, 16_384, 0, &card), 0);
+    }
+    #[test]
+    fn a_remote_server_is_judged_by_its_own_card_not_this_machine() {
+        // A 16 GB laptop talking to a box with a 24 GB card: the 14B spills on the laptop at 16k,
+        // and sits comfortably on the card at 32k.
+        let laptop = mac(16);
+        let server = Machine::remote(Some(24 * GIB), Some(64 * GIB));
+        assert_eq!(suggest_ctx(Some(Q14), Some(196_608), Some(131_072), 0, &laptop), 8_192);
+        assert!(suggest_ctx(Some(Q14), Some(196_608), Some(131_072), 0, &server) >= 32_768);
+        assert_eq!(fit(memory_need(Q14, 196_608, 32_768), 0, &server), Fit::Comfortable);
+    }
+
+    #[test]
+    fn a_remote_server_nobody_described_is_unknown_not_this_machine() {
+        let server = Machine::remote(None, None);
+        assert!(server.is_unknown());
+        assert_eq!(fit(memory_need(Q7, 57_344, 16_384), 0, &server), Fit::Unknown);
+        assert_eq!(suggest_ctx(Some(Q7), Some(57_344), Some(131_072), 0, &server), 16_384);
+        assert_eq!(write_speed(&DENSE_7B, 16_384, 0, &server), None);
+    }
+
+    #[test]
+    fn a_remote_card_without_its_ram_spills_rather_than_failing() {
+        // Past the card the rest goes to RAM nobody stated: slower, never "does not fit" on a guess.
+        let server = Machine::remote(Some(12 * GIB), None);
+        assert_eq!(fit(memory_need(Q32, 262_144, 8_192), 0, &server), Fit::SpillsToCpu);
+        assert_eq!(fit(memory_need(Q7, 57_344, 16_384), 0, &server), Fit::Comfortable);
+        // Only RAM: judged as a CPU machine.
+        let cpu_box = Machine::remote(None, Some(32 * GIB));
+        assert_eq!(cpu_box.gpu, GpuKind::Unknown);
+        assert_eq!(fit(memory_need(Q7, 57_344, 16_384), 0, &cpu_box), Fit::Comfortable);
     }
 }

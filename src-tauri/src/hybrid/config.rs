@@ -25,6 +25,14 @@ pub const KEY_DELEGATE: &str = "local_exec_delegate";
 pub const KEY_ON_FAIL: &str = "local_exec_on_fail";
 pub const KEY_UNLOAD: &str = "local_exec_unload";
 pub const KEY_REVIEW_MODE: &str = "hybrid_review_mode";
+/// The memory of the machine a server on another computer runs on, in GiB, one pair per server kind
+/// like the URLs. No server says how much its machine has — Ollama's `/api/ps` reports only what the
+/// loaded models occupy — so for a URL that is not this machine the user states it, and the fit,
+/// the suggested context and the speed are measured against that machine instead of this one.
+pub const KEY_SERVER_VRAM_OLLAMA: &str = "local_exec_server_vram_gb_ollama";
+pub const KEY_SERVER_RAM_OLLAMA: &str = "local_exec_server_ram_gb_ollama";
+pub const KEY_SERVER_VRAM_OPENAI: &str = "local_exec_server_vram_gb_openai";
+pub const KEY_SERVER_RAM_OPENAI: &str = "local_exec_server_ram_gb_openai";
 
 /// Keychain entry for the optional Bearer key of an OpenAI-compatible server. Never a settings row:
 /// backups copy tables whole.
@@ -90,9 +98,40 @@ pub struct Settings {
     pub on_fail: OnFail,
     pub unload: bool,
     pub review_mode: ReviewMode,
+    /// What the user said the other machine has, per server kind. Read only when that kind's URL is
+    /// not this machine.
+    pub server_memory: ServerMemories,
+}
+
+/// A remote server's machine as the user described it: `None` is "not said".
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ServerMemory {
+    pub vram_bytes: Option<u64>,
+    pub ram_bytes: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ServerMemories {
+    pub ollama: ServerMemory,
+    pub openai: ServerMemory,
+}
+
+/// "24" or "24.5" GiB → bytes. Anything else, zero or negative is "not said".
+fn gib(raw: &str) -> Option<u64> {
+    let value: f64 = raw.trim().replace(',', ".").parse().ok()?;
+    (value.is_finite() && value > 0.0 && value < 1_000_000.0).then(|| (value * (1u64 << 30) as f64) as u64)
 }
 
 impl Settings {
+    /// The remote machine `kind`'s server runs on, as stated. The bundled engine is always this one.
+    pub fn server_memory_for(&self, kind: BackendKind) -> ServerMemory {
+        match kind {
+            BackendKind::Ollama => self.server_memory.ollama,
+            BackendKind::Openai => self.server_memory.openai,
+            BackendKind::Bundled => ServerMemory::default(),
+        }
+    }
+
     pub fn url_for(&self, kind: BackendKind) -> String {
         let chosen = match kind {
             BackendKind::Ollama => self.url_ollama.as_deref(),
@@ -129,6 +168,10 @@ pub fn read(conn: &Connection) -> Result<Settings, String> {
         KEY_ON_FAIL,
         KEY_UNLOAD,
         KEY_REVIEW_MODE,
+        KEY_SERVER_VRAM_OLLAMA,
+        KEY_SERVER_RAM_OLLAMA,
+        KEY_SERVER_VRAM_OPENAI,
+        KEY_SERVER_RAM_OPENAI,
     ]
     .iter()
     .map(|key| key.to_string())
@@ -155,6 +198,16 @@ pub fn read(conn: &Connection) -> Result<Settings, String> {
             Some("report") => ReviewMode::Report,
             Some("fix") => ReviewMode::Fix,
             _ => ReviewMode::Local,
+        },
+        server_memory: ServerMemories {
+            ollama: ServerMemory {
+                vram_bytes: get(KEY_SERVER_VRAM_OLLAMA).as_deref().and_then(gib),
+                ram_bytes: get(KEY_SERVER_RAM_OLLAMA).as_deref().and_then(gib),
+            },
+            openai: ServerMemory {
+                vram_bytes: get(KEY_SERVER_VRAM_OPENAI).as_deref().and_then(gib),
+                ram_bytes: get(KEY_SERVER_RAM_OPENAI).as_deref().and_then(gib),
+            },
         },
     })
 }
@@ -221,5 +274,19 @@ mod tests {
         let settings = read(&conn).expect("read");
         assert_eq!(settings.backend, None);
         assert_eq!(settings.ctx, None);
+    }
+
+    #[test]
+    fn a_remote_servers_memory_is_read_per_kind_in_gib() {
+        let conn = conn();
+        queries::set_setting(&conn, KEY_SERVER_VRAM_OLLAMA, "24").unwrap();
+        queries::set_setting(&conn, KEY_SERVER_RAM_OLLAMA, "62,5").unwrap();
+        queries::set_setting(&conn, KEY_SERVER_VRAM_OPENAI, "-3").unwrap();
+        let settings = read(&conn).expect("read");
+        let ollama = settings.server_memory_for(BackendKind::Ollama);
+        assert_eq!(ollama.vram_bytes, Some(24 << 30));
+        assert_eq!(ollama.ram_bytes, Some((62.5 * (1u64 << 30) as f64) as u64));
+        assert_eq!(settings.server_memory_for(BackendKind::Openai), ServerMemory::default());
+        assert_eq!(settings.server_memory_for(BackendKind::Bundled), ServerMemory::default());
     }
 }

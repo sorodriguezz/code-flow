@@ -225,7 +225,16 @@ pub async fn resolve(settings: &Settings, freshness: Freshness) -> Resolved {
         if settings.backend.is_none() { detect(settings, freshness).await } else { Detected::default() };
     let kind = pick_backend(settings, &detected);
     let url = settings.url_for(kind);
-    let machine = hardware::machine().await;
+    // The machine the model runs on: this one for the bundled engine and a server on loopback, the
+    // other computer — as the user described it — for a server elsewhere on their network. Judging
+    // a 4090 box by the laptop that talks to it gave the laptop's verdict on every figure.
+    let remote = runs_elsewhere(kind, &url);
+    let machine = if remote {
+        let memory = settings.server_memory_for(kind);
+        Machine::remote(memory.vram_bytes, memory.ram_bytes)
+    } else {
+        hardware::machine().await
+    };
 
     let (reachable, server_version, error, available, model, details) = match kind {
         BackendKind::Bundled => {
@@ -333,8 +342,9 @@ pub async fn resolve(settings: &Settings, freshness: Freshness) -> Resolved {
         }
     };
 
-    // Everything else of this app's that holds model memory now, beside the model resolved here.
-    let also_resident = resident_beside(kind, model.as_deref(), &url);
+    // Everything else of this app's that holds model memory now, beside the model resolved here —
+    // on this machine, so none of it is beside a model on another one.
+    let also_resident = if remote { 0 } else { resident_beside(kind, model.as_deref(), &url) };
     let ctx_options = if details.ctx_fixed_by_server {
         details.max_ctx.map(|ctx| vec![ctx]).unwrap_or_else(|| budget::ctx_options(None))
     } else {
@@ -400,6 +410,12 @@ pub async fn resolve(settings: &Settings, freshness: Freshness) -> Resolved {
         delegate_suggested,
         details,
     }
+}
+
+/// Whether `kind` at `url` runs its model on another computer than this one: a server whose URL is
+/// not loopback. The bundled engine always runs here.
+pub fn runs_elsewhere(kind: BackendKind, url: &str) -> bool {
+    kind != BackendKind::Bundled && !local_llm::is_loopback(url)
 }
 
 /// Before a request to an Ollama model, unloads the other models Ollama keeps resident when keeping
@@ -702,6 +718,7 @@ mod tests {
             on_fail: config::OnFail::Review,
             unload: true,
             review_mode: config::ReviewMode::Fix,
+            server_memory: Default::default(),
         }
     }
 

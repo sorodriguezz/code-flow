@@ -120,6 +120,8 @@ export interface LocalExecBudget {
   input: number;
 }
 
+/** The machine the model runs on: this one, or — when {@link LocalExecState.remote} — the server's,
+ *  as the user described it (`ram_bytes` 0 and `gpu_bytes` null when nobody did). */
 export interface LocalExecMachine {
   ram_bytes: number;
   /** Bytes a second the RAM reads at, measured on this machine. */
@@ -211,6 +213,12 @@ export const LOCAL_EXEC_KEYS = {
   reviewMode: "hybrid_review_mode",
   /** {@link LocalReasoning}; read by `model_registry::reasoning`. */
   reasoning: "local_exec_reasoning",
+  /** GiB the machine of a server on another computer has — read only when that kind's URL is not
+   *  this machine. No server reports its host's totals, so the user states them. */
+  serverVramOllama: "local_exec_server_vram_gb_ollama",
+  serverRamOllama: "local_exec_server_ram_gb_ollama",
+  serverVramOpenai: "local_exec_server_vram_gb_openai",
+  serverRamOpenai: "local_exec_server_ram_gb_openai",
 } as const;
 
 export const isLocalExecKey = (key: string) =>

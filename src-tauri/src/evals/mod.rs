@@ -420,6 +420,7 @@ mod bench {
             on_fail: OnFail::Review,
             unload: false,
             review_mode: ReviewMode::Local,
+            server_memory: Default::default(),
         })
     }
 

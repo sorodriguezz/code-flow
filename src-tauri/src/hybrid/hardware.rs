@@ -100,6 +100,35 @@ impl Machine {
     fn ram_only(ram_bytes: u64) -> Self {
         Self { ram_bytes, ram_bandwidth: None, gpu: GpuKind::Unknown, gpu_bytes: None, gpu_name: None, gpu_bandwidth: None }
     }
+
+    /// The machine a server on another computer runs on, from what the user said it has.
+    ///
+    /// Nothing can be measured from here: the RAM test and the GPU listing see this machine, and no
+    /// server's API reports its host's totals. With a GPU figure it is a card with its own memory —
+    /// read at [`DISCRETE_GPU_BANDWIDTH`], the same floor a local card gets; a Mac serving models is
+    /// described by the share of unified memory its GPU may use, which judges the same way. With
+    /// only RAM, the model is judged as if it ran on the CPU. With neither, every figure is unknown
+    /// (`ram_bytes` 0), and the fit says so instead of borrowing this machine's.
+    pub fn remote(vram_bytes: Option<u64>, ram_bytes: Option<u64>) -> Self {
+        let ram_bytes = ram_bytes.unwrap_or(0);
+        match vram_bytes {
+            Some(vram) => Self {
+                ram_bytes,
+                ram_bandwidth: None,
+                gpu: GpuKind::Discrete,
+                gpu_bytes: Some(vram),
+                gpu_name: None,
+                gpu_bandwidth: Some(DISCRETE_GPU_BANDWIDTH),
+            },
+            None => Self::ram_only(ram_bytes),
+        }
+    }
+
+    /// Whether nothing at all is known about this machine's memory — a remote server nobody
+    /// described.
+    pub fn is_unknown(&self) -> bool {
+        self.ram_bytes == 0 && self.gpu_bytes.is_none()
+    }
 }
 
 fn total_ram() -> u64 {

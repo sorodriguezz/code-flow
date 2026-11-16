@@ -205,8 +205,10 @@ pub async fn local_exec_state(db: State<'_, Db>, fresh: Option<bool>) -> Result<
         probes().lock().ok()?.get(&probe_key(resolved.kind, &resolved.url, model, resolved.ctx)).cloned()
     });
     let model_chosen = settings.model_for(resolved.kind).is_some();
+    // The model runs on another computer: this machine's pressure and resident engines are not its.
+    let elsewhere = runtime::runs_elsewhere(resolved.kind, &resolved.url);
     let pullable = if resolved.kind == BackendKind::Ollama && resolved.reachable {
-        pullable_rows(&resolved.available, &resolved.machine)
+        pullable_rows(&resolved.available, &resolved.machine, elsewhere)
     } else {
         Vec::new()
     };
@@ -243,7 +245,12 @@ pub async fn local_exec_state(db: State<'_, Db>, fresh: Option<bool>) -> Result<
         on_fail: settings.on_fail,
         unload: settings.unload,
         review_mode: settings.review_mode,
-        pressure: crate::hybrid::hardware::memory_pressure(),
+        // This machine's pressure says nothing about a model loaded on another one.
+        pressure: if elsewhere {
+            crate::hybrid::hardware::Pressure::Unknown
+        } else {
+            crate::hybrid::hardware::memory_pressure()
+        },
         reasoning: {
             let conn = db.0.lock().map_err(|e| e.to_string())?;
             crate::model_registry::Reasoning::from_setting(
@@ -273,11 +280,12 @@ fn needs(entry: &exec_catalogue::ExecModelSpec, machine: &Machine, via_ollama: b
     (entry.cuda_only && !(via_ollama && nvidia)).then_some("cuda")
 }
 
-fn judge(entry: &exec_catalogue::ExecModelSpec, size_bytes: u64, machine: &Machine) -> (Fit, Option<f64>) {
+fn judge(entry: &exec_catalogue::ExecModelSpec, size_bytes: u64, machine: &Machine, remote: bool) -> (Fit, Option<f64>) {
     // What else holds memory while this one would run: the completion engine, the embedder and an
-    // adapter's server — not the executor, which a catalogue model replaces rather than joins.
+    // adapter's server — not the executor, which a catalogue model replaces rather than joins. All
+    // of them are on this machine, so none is beside a model on a remote server.
     let swapped = executor::resident().map(|(model, _)| model);
-    let also_resident = runtime::resident_beside(BackendKind::Bundled, swapped.as_deref(), "");
+    let also_resident = if remote { 0 } else { runtime::resident_beside(BackendKind::Bundled, swapped.as_deref(), "") };
     let need = budget::memory_need(size_bytes, entry.kv_bytes_per_token, ROW_CTX);
     let fit = budget::fit(need, also_resident, machine);
     if fit == Fit::DoesNotFit {
@@ -287,14 +295,17 @@ fn judge(entry: &exec_catalogue::ExecModelSpec, size_bytes: u64, machine: &Machi
     (fit, budget::write_speed(&shape, ROW_CTX, also_resident, machine))
 }
 
-fn pullable_rows(available: &[local_llm::LocalModel], machine: &Machine) -> Vec<PullableRow> {
+fn pullable_rows(available: &[local_llm::LocalModel], machine: &Machine, remote: bool) -> Vec<PullableRow> {
     let judged: Vec<(&exec_catalogue::OllamaTag, &exec_catalogue::ExecModelSpec, Fit, Option<f64>)> = exec_catalogue::OLLAMA_TAGS
         .iter()
         .filter_map(|tag| {
             let entry = exec_catalogue::find(tag.catalogue_id)?;
-            let (fit, write_tps) = match needs(entry, machine, true) {
+            // A remote server's card has no name here (nobody can list another computer's GPUs), so
+            // a model its Ollama may well run on CUDA is not ruled out on a guess.
+            let lacks = if remote { None } else { needs(entry, machine, true) };
+            let (fit, write_tps) = match lacks {
                 Some(_) => (Fit::DoesNotFit, None),
-                None => judge(entry, tag.size_bytes, machine),
+                None => judge(entry, tag.size_bytes, machine, remote),
             };
             Some((tag, entry, fit, write_tps))
         })
@@ -322,7 +333,7 @@ fn pullable_rows(available: &[local_llm::LocalModel], machine: &Machine) -> Vec<
             thinking: entry.thinking,
             licence: entry.spec.licence.to_string(),
             licence_url: (!entry.licence_url.is_empty()).then(|| entry.licence_url.to_string()),
-            needs: needs(entry, machine, true),
+            needs: if remote { None } else { needs(entry, machine, true) },
         })
         .collect()
 }
@@ -435,7 +446,7 @@ fn bundled_rows(machine: &Machine) -> Vec<ModelRow> {
             let lacks = needs(entry, machine, false);
             let (fit, write_tps) = match lacks {
                 Some(_) => (Fit::DoesNotFit, None),
-                None => judge(entry, spec.size_bytes, machine),
+                None => judge(entry, spec.size_bytes, machine, false),
             };
             ModelRow {
                 id: spec.id.to_string(),
@@ -626,14 +637,14 @@ mod tests {
         // (2026-10-19) the largest comfortable one is Nemotron 3 Nano 30B-A3B (3.6B of 31.6B read
         // a token), ahead of Qwen3-Coder 30B-A3B at the same speed.
         let machine = pc_without_card();
-        let rows = pullable_rows(&[], &machine);
+        let rows = pullable_rows(&[], &machine, false);
         let chosen: Vec<&str> = rows.iter().filter(|row| row.recommended).map(|row| row.tag.as_str()).collect();
         assert_eq!(chosen, ["nemotron-3-nano:30b"]);
         let entry = exec_catalogue::find("nemotron-3-nano-30b-a3b").unwrap();
         assert!(entry.active_share() < 0.2);
         // Already on the server, it is not offered — and the badge does not move to a worse one.
         let pulled = [local_llm::LocalModel { id: "nemotron-3-nano:30b".into(), ..Default::default() }];
-        let rows = pullable_rows(&pulled, &machine);
+        let rows = pullable_rows(&pulled, &machine, false);
         assert_eq!(rows.len(), exec_catalogue::OLLAMA_TAGS.len() - 1);
         assert!(rows.iter().all(|row| !row.recommended));
     }
@@ -641,14 +652,14 @@ mod tests {
     #[test]
     fn a_cuda_only_model_says_what_it_needs() {
         let mac = pc_without_card();
-        let bolt = pullable_rows(&[], &mac).into_iter().find(|row| row.tag == "nemotron-3.5-bolt:74b-a9b").unwrap();
+        let bolt = pullable_rows(&[], &mac, false).into_iter().find(|row| row.tag == "nemotron-3.5-bolt:74b-a9b").unwrap();
         assert_eq!(bolt.needs, Some("cuda"));
         assert_eq!(bolt.fit, Fit::DoesNotFit);
         let mut nvidia = pc_without_card();
         nvidia.gpu = budget::GpuKind::Discrete;
         nvidia.gpu_bytes = Some(24 << 30);
         nvidia.gpu_name = Some("NVIDIA GeForce RTX 4090".into());
-        let bolt = pullable_rows(&[], &nvidia).into_iter().find(|row| row.tag == "nemotron-3.5-bolt:74b-a9b").unwrap();
+        let bolt = pullable_rows(&[], &nvidia, false).into_iter().find(|row| row.tag == "nemotron-3.5-bolt:74b-a9b").unwrap();
         assert_eq!(bolt.needs, None, "Ollama on an NVIDIA card runs it");
         // The bundled engine never can: it is a Metal/Vulkan build.
         let bundled = bundled_rows(&nvidia).into_iter().find(|row| row.id == "nemotron-3.5-bolt-74b-a9b").unwrap();

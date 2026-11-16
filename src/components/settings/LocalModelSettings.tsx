@@ -262,6 +262,15 @@ function Row({ label, hint, stacked = false, children }: { label: string; hint?:
   );
 }
 
+/** `http://gpu-box:11434` → `gpu-box:11434`; what was typed when it does not parse. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 /** Where the memory figure is measured against, as one phrase. */
 function roomPhrase(state: LocalExecState, t: ReturnType<typeof useT>): string {
   const { machine } = state;
@@ -269,7 +278,10 @@ function roomPhrase(state: LocalExecState, t: ReturnType<typeof useT>): string {
     return t("localexec.roomUnified", { gpu: formatBytes(machine.gpu_bytes), ram: formatBytes(machine.ram_bytes) });
   }
   if (machine.gpu === "discrete" && machine.gpu_bytes) {
-    return t("localexec.roomDiscrete", { gpu: formatBytes(machine.gpu_bytes), name: machine.gpu_name ?? "GPU" });
+    // A remote server's card has no name here — nobody can list another computer's GPUs — so it
+    // is named by the host it belongs to.
+    const name = machine.gpu_name ?? (state.remote ? hostOf(state.url) : "GPU");
+    return t("localexec.roomDiscrete", { gpu: formatBytes(machine.gpu_bytes), name });
   }
   // The model lives in RAM here, so how fast it reads is the other half of the answer.
   return machine.ram_bandwidth
@@ -281,6 +293,11 @@ function MemoryLine({ state }: { state: LocalExecState }) {
   const t = useT();
   const room = state.machine.gpu_bytes ?? state.machine.ram_bytes;
   const need = state.need_bytes;
+  // A remote server nobody described: this machine's memory is not the one that counts, and there
+  // is no other to draw a bar against.
+  if (state.remote && room === 0) {
+    return <Status tone="muted" wrap>{t("localexec.serverMemoryMissing")}</Status>;
+  }
   if (need === null) {
     return <Status tone="muted" wrap>{t("localexec.fitUnknown")}</Status>;
   }
@@ -302,7 +319,7 @@ function MemoryLine({ state }: { state: LocalExecState }) {
         {state.also_resident_bytes > 0 && ` ${t("localexec.breakdownCompletion", { size: formatBytes(state.also_resident_bytes) })}`}
       </span>
       <Status tone={FIT_TONE[state.fit]} wrap>
-        {t(FIT_KEY[state.fit])}
+        {t(state.remote && state.fit === "does-not-fit" ? "localexec.fitNoRemote" : FIT_KEY[state.fit])}
       </Status>
       {(state.pressure === "warning" || state.pressure === "critical") && (
         <Note tone="warning">{t(state.pressure === "critical" ? "localexec.pressureCritical" : "localexec.pressureWarning")}</Note>
@@ -504,6 +521,76 @@ function PullProgressLine({ live, fallbackTotal }: { live: LocalAiDownloadEvent 
   );
 }
 
+const GIB = 1024 ** 3;
+
+/** Bytes → "24" or "62.5" GiB, for a field; empty for none. */
+function gibLabel(bytes: number | null): string {
+  if (!bytes) return "";
+  return String(Math.round((bytes / GIB) * 10) / 10);
+}
+
+/** One GiB figure of the remote server's machine, saved on blur or Enter. */
+function GibField({ settingKey, bytes, label }: { settingKey: string; bytes: number | null; label: string }) {
+  const save = useLocalExecStore((s) => s.set);
+  const stored = gibLabel(bytes);
+  const [draft, setDraft] = useState(stored);
+  useEffect(() => setDraft(stored), [stored]);
+  const commit = () => {
+    const next = draft.trim().replace(",", ".");
+    if (next === stored) return;
+    const value = Number(next);
+    // Empty clears the figure; anything that is not a positive number is put back as it was.
+    if (next === "" || (Number.isFinite(value) && value > 0)) void save(settingKey, next);
+    else setDraft(stored);
+  };
+  return (
+    <label className="flex items-center gap-1.5 text-[12px] text-[var(--cf-text-muted)]">
+      {label}
+      <input
+        value={draft}
+        inputMode="decimal"
+        spellCheck={false}
+        aria-label={label}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit();
+        }}
+        className={fieldClass({ size: "sm", className: "w-[64px] tabular-nums" })}
+      />
+      GB
+    </label>
+  );
+}
+
+/**
+ * The memory of the machine a remote server runs on. No server reports its host's totals — Ollama's
+ * `/api/ps` only says what the loaded models occupy — so the user states them, and the backend
+ * judges the fit, the suggested context and the speed against that machine instead of this one.
+ */
+function ServerMemoryFields({ state }: { state: LocalExecState }) {
+  const t = useT();
+  const ollama = state.backend === "ollama";
+  const { machine } = state;
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex flex-wrap items-center gap-3">
+        <GibField
+          settingKey={ollama ? LOCAL_EXEC_KEYS.serverVramOllama : LOCAL_EXEC_KEYS.serverVramOpenai}
+          bytes={machine.gpu === "discrete" ? machine.gpu_bytes : null}
+          label={t("localexec.serverVram")}
+        />
+        <GibField
+          settingKey={ollama ? LOCAL_EXEC_KEYS.serverRamOllama : LOCAL_EXEC_KEYS.serverRamOpenai}
+          bytes={machine.ram_bytes || null}
+          label={t("localexec.serverRam")}
+        />
+      </div>
+      <span className="max-w-[520px] text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("localexec.serverMemoryHint")}</span>
+    </div>
+  );
+}
+
 /** The URL field for a server backend, saved on blur or Enter. */
 function UrlField({ backend, url }: { backend: LocalBackend; url: string }) {
   const save = useLocalExecStore((s) => s.set);
@@ -593,13 +680,7 @@ export function LocalModelSettings() {
   ];
   const detectedNames = [state.detected.ollama && "Ollama", state.detected.lmstudio && "LM Studio"].filter(Boolean);
   const engineRunning = state.engine.kind === "ready" || state.engine.kind === "starting";
-  const host = (() => {
-    try {
-      return new URL(state.url).host;
-    } catch {
-      return state.url;
-    }
-  })();
+  const host = hostOf(state.url);
 
   // A server switch waits for that server's answer — seconds when nothing listens on its port, on
   // Windows. Until it lands, what the pane holds is the other server's: its models, its memory, its
@@ -814,6 +895,12 @@ export function LocalModelSettings() {
               </div>
             )}
           </Row>
+
+          {state.backend !== "bundled" && state.remote && (
+            <Row label={t("localexec.serverMemory")}>
+              <ServerMemoryFields state={state} />
+            </Row>
+          )}
 
           <Row label={t("localexec.memory")}>
             <MemoryLine state={state} />

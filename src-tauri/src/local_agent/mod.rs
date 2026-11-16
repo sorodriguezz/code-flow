@@ -1673,6 +1673,7 @@ mod live {
             on_fail: config::OnFail::Review,
             unload: false,
             review_mode: config::ReviewMode::Local,
+            server_memory: Default::default(),
         })
     }
 
