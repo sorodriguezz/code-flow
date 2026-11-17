@@ -320,16 +320,23 @@ function TreeRow({
       >
         {icon}
       </span>
+      {/* The row truncates as one line read from the right: the detail gives way first, all of it,
+          and only then does the name start losing characters. Both used to shrink at once, so a
+          narrow sidebar cut `ARC_AdmixtureRecAddi…` down to `ARC_AdmixtureRec…` while still
+          spending half the row on its `User.ARC…` echo — the part you read the tree for went first.
+          The detail's basis is 0 so it takes only what the name leaves over and never pushes on it;
+          the name, at its own width, is the only thing left to shrink once that is gone. With no
+          detail the name grows to fill the row, as before. */}
       <span
-        className={`min-w-0 flex-1 truncate text-[13px] text-[var(--cf-text)] ${
-          strong ? "font-semibold" : ""
-        }`}
+        className={`min-w-0 truncate text-[13px] text-[var(--cf-text)] ${
+          detail ? "shrink" : "flex-1"
+        } ${strong ? "font-semibold" : ""}`}
       >
         {name}
       </span>
       {badge}
       {detail && (
-        <span className="max-w-[45%] shrink-0 truncate text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+        <span className="min-w-0 flex-[1_1_0%] truncate text-right text-[11px] tabular-nums text-[var(--cf-text-faint)]">
           {detail}
         </span>
       )}
@@ -1868,6 +1875,24 @@ function SavedConsoleRow({
  * honest than a search box that silently misses half the schema — and the count says how much was
  * looked at.
  */
+/** The heading over one connection's hits: the same engine tile and environment chip as its row in
+ * the tree, so a result under PROD looks like it belongs to PROD. A component of its own because
+ * both come from per-connection hooks. */
+function SearchConnectionHeading({ connection, count }: { connection: DbConnectionRow; count: number }) {
+  const driverSettings = useDriverStore((s) => s.settings);
+  const driver = effectiveDriver(rowDriverId(connection), driverSettings);
+  const environment = useConnectionEnvironment(connection.id);
+  const engineLabel = driverEngineInfo(driver, connection.kind).label;
+  return (
+    <div className={`${sectionLabelClass} normal-case tracking-normal`}>
+      <EngineBadge kind={connection.kind} driver={driver} label={engineLabel} size={14} />
+      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text-muted)]">{connection.name}</span>
+      <EnvironmentChip environment={environment} />
+      <span className="shrink-0 font-medium tabular-nums">{count}</span>
+    </div>
+  );
+}
+
 function SearchResults({ query }: { query: string }) {
   const t = useT();
   const children = useDbStore((s) => s.children);
@@ -1890,8 +1915,27 @@ function SearchResults({ query }: { query: string }) {
         }
       }
     }
-    return { out: out.slice(0, MAX_RESULTS), scanned };
-  }, [children, query]);
+    // Grouped by connection, in the order the tree lists them. A flat list repeated
+    // `TrakCare QA DB2 / UAT-ACHS / SQLUser` under every hit — the one fact you need to tell two
+    // `PA_Person` tables apart was buried in the same line as the parts that never change. The cap
+    // applies before grouping, so it still bounds the rows drawn, not the groups.
+    const capped = out.slice(0, MAX_RESULTS);
+    const byConnection = new Map<string, DbNode[]>();
+    for (const { connectionId, node } of capped) {
+      const list = byConnection.get(connectionId);
+      if (list) list.push(node);
+      else byConnection.set(connectionId, [node]);
+    }
+    const order = new Map(connections.map((c, i) => [c.id, i]));
+    const groups = [...byConnection.entries()]
+      .map(([connectionId, nodes]) => ({ connectionId, nodes }))
+      .sort(
+        (a, b) =>
+          (order.get(a.connectionId) ?? Number.MAX_SAFE_INTEGER) -
+          (order.get(b.connectionId) ?? Number.MAX_SAFE_INTEGER),
+      );
+    return { out: capped, groups, scanned };
+  }, [children, connections, query]);
 
   if (hits.out.length === 0) {
     return (
@@ -1903,23 +1947,39 @@ function SearchResults({ query }: { query: string }) {
 
   return (
     <div className="min-h-0 flex-1 overflow-auto px-2 pb-2.5">
-      {hits.out.map(({ connectionId, node }) => {
-        const Icon = nodeIcon(node.kind);
+      {hits.groups.map(({ connectionId, nodes }) => {
         const connection = connections.find((c) => c.id === connectionId);
         return (
-          <button
-            key={`${connectionId}|${node.id}`}
-            onClick={() => store.openData(connectionId, nodeRefOf(node), node.name)}
-            className={rowClass(false, "py-1.5")}
-          >
-            <Icon size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-[13px] text-[var(--cf-text)]">{node.name}</span>
-              <span className="block truncate text-[11px] text-[var(--cf-text-faint)]">
-                {[connection?.name, node.database, node.schema].filter(Boolean).join(" / ")}
-              </span>
-            </span>
-          </button>
+          <div key={connectionId} role="group" aria-label={connection?.name ?? connectionId}>
+            {connection ? (
+              <SearchConnectionHeading connection={connection} count={nodes.length} />
+            ) : (
+              <div className={sectionLabelClass}>
+                <span className="min-w-0 flex-1 truncate">{connectionId}</span>
+              </div>
+            )}
+            {nodes.map((node) => {
+              const Icon = nodeIcon(node.kind);
+              // The connection is in the heading now; what is left to say is where inside it.
+              const path = [node.database, node.schema].filter(Boolean).join(" / ");
+              return (
+                <button
+                  key={`${connectionId}|${node.id}`}
+                  onClick={() => store.openData(connectionId, nodeRefOf(node), node.name)}
+                  title={[connection?.name, path, node.name].filter(Boolean).join(" / ")}
+                  className={rowClass(false, "py-1.5")}
+                >
+                  <Icon size={14} className="shrink-0 text-[var(--cf-text-faint)]" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[13px] text-[var(--cf-text)]">{node.name}</span>
+                    {path && (
+                      <span className="block truncate text-[11px] text-[var(--cf-text-faint)]">{path}</span>
+                    )}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
         );
       })}
       <p className="px-2 py-2 text-[11px] text-[var(--cf-text-faint)]">

@@ -62,9 +62,3 @@ export function EnvironmentChip({ environment }: { environment: DbEnvironment })
     </span>
   );
 }
-
-/** A 2px bar in the environment's colour along the top of a panel — `null` for none. */
-export function EnvironmentStripe({ environment }: { environment: DbEnvironment }) {
-  if (!environment) return null;
-  return <div aria-hidden className="h-[2px] w-full shrink-0" style={{ background: ENVIRONMENT_COLOR[environment] }} />;
-}

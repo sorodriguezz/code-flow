@@ -11,6 +11,7 @@ import type { editor as MonacoEditorNS } from "monaco-editor";
 // is the code face, which both editors below draw in.
 import { CODE_FONT_FAMILY } from "../../lib/monacoSetup";
 import { paintOnLayout } from "../../lib/monacoPaintOnLayout";
+import { installModifierClickDefinition } from "../../lib/monacoModifierClick";
 import { followViewState } from "../../lib/monacoViewState";
 import {
   Camera,
@@ -2731,6 +2732,9 @@ export function EditorPane({
         useBookmarkStore.getState().toggle(path, line, model.getLineContent(line));
       },
     });
+    // Ctrl+click and Cmd+click both jump to the definition, on every OS — Monaco only answers one
+    // of them (Cmd on a Mac, Ctrl elsewhere). Disposes itself with the editor.
+    installModifierClickDefinition(editorInstance, monacoInstance);
     // Clicking the gutter toggles a breakpoint — the only way anyone expects to set one.
     editorInstance.onMouseDown((event) => {
       if (event.target.type !== monacoInstance.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) return;

@@ -1,5 +1,6 @@
 import * as monaco from "monaco-editor";
 import { snippetsFor } from "../state/snippetsStore";
+import { suppressSnippetsAt } from "./snippetContext";
 
 /**
  * The snippets, as completions.
@@ -36,6 +37,12 @@ export function installSnippets() {
       provideCompletionItems: (model, position) => {
         const snippets = snippetsFor(model.getLanguageId());
         if (snippets.length === 0) return { suggestions: [] };
+        // Not inside `const { … }`: only names of the value fit there — see `snippetContext`.
+        if (
+          suppressSnippetsAt(model.getLanguageId(), (n) => model.getLineContent(n), position.lineNumber, position.column)
+        ) {
+          return { suggestions: [] };
+        }
         // The word under the caret is what the prefix replaces. Monaco does the filtering from
         // there, so `cl` narrows to `clg` without this having to match anything itself.
         const word = model.getWordUntilPosition(position);

@@ -364,12 +364,20 @@ function DbTabStrip() {
             }}
             className={docTabClass(active, `${width} relative cursor-default`)}
           >
-            {/* The connection's environment as a hairline along the tab's top edge: production is
-                the one tab you must not mistake for another, and the strip is where you choose. */}
+            {/* The connection's environment as the tab's top edge: production is the one tab you
+                must not mistake for another, and the strip is where you choose. Full width and
+                painted over the active tab's accent bar (it comes later in the DOM) — an inset,
+                rounded hairline on top of that bar left the accent showing at both ends, a two-tone
+                edge that read as a rendering glitch. On the active tab the environment *is* the
+                top edge; the sheet colour and the melt into the panel already say which is active. */}
             {(() => {
               const env = connection ? parseSpec(connection)?.environment : "";
               return env === "dev" || env === "test" || env === "prod" ? (
-                <span aria-hidden className="absolute inset-x-2 top-0 h-[2px] rounded-full" style={{ background: ENVIRONMENT_COLOR[env] }} />
+                <span
+                  aria-hidden
+                  className={`pointer-events-none absolute inset-x-0 top-0 h-[2px] ${active ? "" : "opacity-60"}`}
+                  style={{ background: ENVIRONMENT_COLOR[env] }}
+                />
               ) : null;
             })()}
             {connection && engine && <EngineBadge kind={connection.kind} driver={driver} label={engine.label} />}

@@ -37,7 +37,7 @@ import { DocumentList, type DocumentActions, type DocumentState } from "./Docume
 import { QueryOptionsPanel } from "./QueryOptionsPanel";
 import { RecordGrid } from "./RecordGrid";
 import { copyFormats, xlsxItem } from "./resultCopy";
-import { EnvironmentChip, EnvironmentStripe, useConnectionEnvironment } from "./EnvironmentChip";
+import { EnvironmentChip, useConnectionEnvironment } from "./EnvironmentChip";
 import { ResultGrid, type GridRowAction } from "./ResultGrid";
 import { cellMenuItems } from "./cellMenu";
 import { nodeLabel } from "./SqlConsolePanel";
@@ -829,7 +829,6 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <EnvironmentStripe environment={environment} />
       {/* Toolbar. 44px like every surface's, and allowed to wrap: on a narrow panel the Discard and
           Apply pair drops to a second line rather than being clipped off the right edge. */}
       <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-b border-[var(--cf-border)] py-[7px] pl-3.5 pr-3">

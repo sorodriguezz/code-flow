@@ -39,7 +39,7 @@ import { fillParams, findParams } from "../../lib/db/queryParams";
 import { installSnippetCompletions } from "../../lib/db/snippetCompletion";
 import { escapeSnippetBody } from "../../lib/db/snippets";
 import { ensureDbPrefsLoaded, useDbPrefsStore } from "../../state/dbPrefsStore";
-import { EnvironmentChip, EnvironmentStripe, useConnectionEnvironment } from "./EnvironmentChip";
+import { EnvironmentChip, useConnectionEnvironment } from "./EnvironmentChip";
 import { PlanView } from "./PlanView";
 import type { PlanEngine } from "../../lib/db/planTree";
 import { ResultChart } from "./ResultChart";
@@ -587,7 +587,6 @@ export function SqlConsolePanel({ tab }: { tab: DbConsoleTab }) {
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
-      <EnvironmentStripe environment={environment} />
       {/* Toolbar */}
       <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-[var(--cf-border)] px-2 py-1.5">
         {connection && <EngineBadge kind={connection.kind} driver={connectionDriver} label={engine?.label ?? ""} />}
