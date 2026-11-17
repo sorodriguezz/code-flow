@@ -113,7 +113,9 @@ describe("startAnalysis", () => {
 
 describe("askInWorkspaceChat", () => {
   it("fills the workspace chat's draft, keeps what was typed, and marks a send", () => {
-    globalThis.requestAnimationFrame ??= ((run: FrameRequestCallback) => setTimeout(() => run(0), 0)) as unknown as typeof requestAnimationFrame;
+    // Node has no frames and no `window`: the focus / send event is the component's half, not this
+    // test's, so the frames are never run (they used to fire after the test, with no `window`).
+    vi.stubGlobal("requestAnimationFrame", () => 0);
     askInWorkspaceChat("ws-1", "why did api fail?");
     const panel = useAiPanelStore.getState();
     const tab = (panel.tabsByWorkspace["ws-1"] ?? []).find((t) => t.kind === "wsChat");
@@ -124,5 +126,6 @@ describe("askInWorkspaceChat", () => {
     const again = useAiPanelStore.getState();
     expect(again.drafts[tab!.key]).toBe("why did api fail?\n\nand web?");
     expect(takePendingSend(tab!.key)).toBe(true);
+    vi.unstubAllGlobals();
   });
 });
