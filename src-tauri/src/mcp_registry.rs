@@ -417,11 +417,38 @@ pub fn live_servers(
     provider: &str,
     overrides: &BTreeMap<String, bool>,
 ) -> Vec<LiveServer> {
+    unseal_live(live_candidates(conn, workspace_id, provider, overrides), store)
+}
+
+/// The servers [`live_servers`] would hand over, with their secrets still sealed — everything that
+/// needs the database, and nothing that needs the keychain.
+///
+/// Split so a caller holding the database lock can drop it before [`unseal_live`]: reading the
+/// keychain can put up a macOS access prompt, and every database command waited on it while the
+/// lock was held — the whole app frozen behind a dialog.
+pub struct LiveCandidates(Vec<Row>);
+
+pub fn live_candidates(
+    conn: &Connection,
+    workspace_id: &str,
+    provider: &str,
+    overrides: &BTreeMap<String, bool>,
+) -> LiveCandidates {
     let rows = rows_for(conn, workspace_id).unwrap_or_default();
-    rows.into_iter()
-        .filter(|row| row.enabled && !row.excluded.iter().any(|p| p == provider))
-        .filter(|row| overrides.get(&switch_key(&row.name)).copied().unwrap_or(row.default_on))
-        .filter(|row| row.transport != "stdio" || trusted(conn, &row.hash()))
+    LiveCandidates(
+        rows.into_iter()
+            .filter(|row| row.enabled && !row.excluded.iter().any(|p| p == provider))
+            .filter(|row| overrides.get(&switch_key(&row.name)).copied().unwrap_or(row.default_on))
+            .filter(|row| row.transport != "stdio" || trusted(conn, &row.hash()))
+            .collect(),
+    )
+}
+
+/// [`live_candidates`] with their secrets read from `store`. Takes no database lock.
+pub fn unseal_live(candidates: LiveCandidates, store: &dyn SecretStore) -> Vec<LiveServer> {
+    candidates
+        .0
+        .into_iter()
         .map(|row| {
             let unseal = |map: &BTreeMap<String, String>| -> Vec<(String, String)> {
                 map.iter()

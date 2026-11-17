@@ -60,6 +60,9 @@ pub fn set_setting(
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::set_setting(&conn, &key, &value).map_err(|e| e.to_string())?;
     }
+    // Mirrored for the git layer, which reads no database (see `git::checkpoint::setting_changed`).
+    crate::git::checkpoint::setting_changed(&key, Some(&value));
+    crate::ai_locks::setting_changed(&key, Some(&value));
     let _ = webview.emit(
         "settings:changed",
         SettingChanged { key: &key, origin: webview.label() },

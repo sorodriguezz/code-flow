@@ -235,11 +235,13 @@ pub fn transcript(conn: &Connection, chat: &ChatRef, from: Option<i64>) -> Strin
 /// whitespace or the closing quote, trailing punctuation dropped.
 fn tagged(message: &str, prefixes: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let lower = message.to_lowercase();
     for prefix in prefixes {
         let mut from = 0;
-        while let Some(at) = lower[from..].find(prefix) {
-            let start = from + at;
+        // Matched on the message's own bytes, ignoring ASCII case. Not on `to_lowercase()`: some
+        // characters change byte length when lowercased (the Kelvin sign, `İ`), so offsets found
+        // there are not offsets into `message` — slicing with them cut a character and panicked,
+        // with the database lock held.
+        while let Some(start) = find_ascii_ci(message, from, prefix) {
             from = start + prefix.len();
             // A whole token: `@` at the start or after whitespace / an opening bracket.
             if start > 0 && !message[..start].ends_with(|c: char| c.is_whitespace() || c == '(' || c == '[') {
@@ -260,6 +262,17 @@ fn tagged(message: &str, prefixes: &[&str]) -> Vec<String> {
         }
     }
     out
+}
+
+/// Where `needle` (ASCII) next occurs in `haystack` at or after byte `from`, ignoring ASCII case.
+/// Every match lands on a character boundary: an ASCII byte never sits inside a multi-byte one.
+fn find_ascii_ci(haystack: &str, from: usize, needle: &str) -> Option<usize> {
+    let hay = haystack.as_bytes();
+    let pin = needle.as_bytes();
+    if pin.is_empty() || from > hay.len() || hay.len() - from < pin.len() {
+        return None;
+    }
+    (from..=hay.len() - pin.len()).find(|&i| hay[i..i + pin.len()].eq_ignore_ascii_case(pin))
 }
 
 pub fn chat_mentions(message: &str) -> Vec<String> {
@@ -347,6 +360,15 @@ mod tests {
         assert!(chat_mentions("correo@chat:test").is_empty());
         assert_eq!(artifact_mentions("usa @artefacto:plan-api. y @artifact:x"), vec!["plan-api", "x"]);
         assert_eq!(chat_mentions("(@chat:«Prueba uno») fin"), vec!["Prueba uno"]);
+    }
+
+    /// Characters whose lowercase has another byte length (Kelvin sign, `İ`) before a mention: the
+    /// offsets used to come from the lowercased copy, which cut a character and panicked.
+    #[test]
+    fn mentions_after_length_changing_characters() {
+        assert_eq!(chat_mentions("\u{212A} @chat:foo"), vec!["foo"]);
+        assert_eq!(chat_mentions("İİİ @CHAT:bar y Ω @chat:baz"), vec!["bar", "baz"]);
+        assert_eq!(artifact_mentions("ẞ @Artefacto:plan"), vec!["plan"]);
     }
 
     /// Over the real schema: a repository chat and a workspace chat, listed as one, cited by name,

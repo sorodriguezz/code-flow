@@ -4642,6 +4642,7 @@ pub fn add_activity_log(
         checkpoint: None,
         context: None,
         usage: None,
+        question_files: None,
     };
     conn.execute(
         "INSERT INTO activity_log (id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id)
@@ -4672,6 +4673,12 @@ pub fn set_activity_usage(conn: &Connection, id: &str, usage: &str) -> rusqlite:
     Ok(())
 }
 
+/// What a question carried — its files and skill — as the JSON `question_files` holds.
+pub fn set_activity_question_files(conn: &Connection, id: &str, json: &str) -> rusqlite::Result<()> {
+    conn.execute("UPDATE activity_log SET question_files = ?1 WHERE id = ?2", params![json, id])?;
+    Ok(())
+}
+
 /// What CodeFlow put in front of the engine for a turn (`crate::context::ContextSource` as JSON).
 pub fn set_activity_context(conn: &Connection, id: &str, context: &str) -> rusqlite::Result<()> {
     conn.execute("UPDATE activity_log SET context = ?1 WHERE id = ?2", params![context, id])?;
@@ -4692,7 +4699,7 @@ pub fn set_activity_checkpoint(conn: &Connection, id: &str, checkpoint: &str) ->
 /// go through [`conversation_turns`] instead, because `trace` is the heaviest column in the
 /// database and reading it to build a list of titles is pure waste.
 const ACTIVITY_COLUMNS: &str =
-    "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint, context, usage";
+    "id, project_id, session_id, engine_session_id, question, answer, trace, created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint, context, usage, question_files";
 
 /// [`ACTIVITY_COLUMNS`] with `trace` replaced by [`TRACE_PRESENCE`], so [`read_activity_row`] can
 /// read it unchanged and the turn comes back with `trace: Some("")` when it has one, `None` when not.
@@ -4703,7 +4710,7 @@ const ACTIVITY_COLUMNS: &str =
 const ACTIVITY_COLUMNS_NO_TRACE: &str =
     "id, project_id, session_id, engine_session_id, question, answer, \
      CASE WHEN trace IS NULL OR trace = '' OR trace = '[]' THEN NULL ELSE '' END, \
-     created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint, context, usage";
+     created_at, response_time_ms, is_error, provider, model, engine_version, account_id, checkpoint, context, usage, question_files";
 
 fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> {
     Ok(ActivityLogEntry {
@@ -4724,6 +4731,7 @@ fn read_activity_row(row: &rusqlite::Row) -> rusqlite::Result<ActivityLogEntry> 
         checkpoint: row.get(14)?,
         context: row.get(15)?,
         usage: row.get(16)?,
+        question_files: row.get(17)?,
     })
 }
 
@@ -6453,7 +6461,8 @@ mod tests {
             account_id: account.map(str::to_string),
             checkpoint: None,
             context: None,
-        usage: None,
+            usage: None,
+            question_files: None,
         }
     }
 

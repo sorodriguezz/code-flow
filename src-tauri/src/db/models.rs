@@ -987,6 +987,10 @@ pub struct ActivityLogEntry {
     /// when the engine said nothing — which is not "free" — and for turns before this was kept.
     #[serde(default)]
     pub usage: Option<String>,
+    /// What the question carried: JSON `{"files": [{id, name, path, isImage}], "skill": "…"}`, or
+    /// `None` — see `migrations::add_question_files_to_activity_log`.
+    #[serde(default)]
+    pub question_files: Option<String>,
 }
 
 /// A finished PR review or pre-commit analysis run — `meta` is a small JSON blob (e.g.

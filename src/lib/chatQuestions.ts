@@ -25,15 +25,21 @@ export interface ChatQuestion {
   multiple: boolean;
 }
 
-const FENCE = /```(?:pregunta|question|preguntas|questions|json)[^\S\n]*\n([\s\S]*?)```/gi;
+const FENCE = /```(pregunta|question|preguntas|questions|json)[^\S\n]*\n([\s\S]*?)```/gi;
 
 /** Where a question's JSON may start without a fence: `{"pregunta":`, or `[` before it. */
 const BARE_START = /(?:\[\s*)?\{\s*"(?:pregunta|question|preguntas|questions)"\s*:/gi;
 
-function readOne(raw: unknown): ChatQuestion | null {
+/**
+ * One question, or `null`. `strict` (a ```json fence, or bare JSON) takes only an object that says
+ * it is a question — a `pregunta` / `question` key. A loose `text` / `texto` is read only inside a
+ * fence named for questions: in a ```json block it is far more often a payload the answer is showing
+ * (`{"text": "hi", "id": 1}`), which must stay the code block it is.
+ */
+function readOne(raw: unknown, strict: boolean): ChatQuestion | null {
   if (!raw || typeof raw !== "object") return null;
   const value = raw as Record<string, unknown>;
-  const question = value.pregunta ?? value.question ?? value.texto ?? value.text;
+  const question = value.pregunta ?? value.question ?? (strict ? undefined : (value.texto ?? value.text));
   if (typeof question !== "string" || !question.trim()) return null;
   const listed = value.opciones ?? value.options ?? [];
   const options = (Array.isArray(listed) ? listed : [])
@@ -44,8 +50,8 @@ function readOne(raw: unknown): ChatQuestion | null {
   return { question: question.trim(), options, multiple: value.multiple === true || value.multiple === "true" };
 }
 
-function readAll(parsed: unknown): ChatQuestion[] {
-  return (Array.isArray(parsed) ? parsed : [parsed]).map(readOne).filter((q): q is ChatQuestion => q !== null);
+function readAll(parsed: unknown, strict: boolean): ChatQuestion[] {
+  return (Array.isArray(parsed) ? parsed : [parsed]).map((raw) => readOne(raw, strict)).filter((q): q is ChatQuestion => q !== null);
 }
 
 /**
@@ -63,7 +69,7 @@ function trailingQuestions(text: string): { text: string; questions: ChatQuestio
     } catch {
       continue;
     }
-    const questions = readAll(parsed);
+    const questions = readAll(parsed, true);
     if (questions.length === 0) return null;
     return { text: trimmed.slice(0, match.index).replace(/\n{3,}/g, "\n\n").trimEnd(), questions };
   }
@@ -73,14 +79,14 @@ function trailingQuestions(text: string): { text: string; questions: ChatQuestio
 /** `text` without its question blocks, and the questions they held. */
 export function splitQuestions(text: string): { text: string; questions: ChatQuestion[] } {
   const questions: ChatQuestion[] = [];
-  const rest = text.replace(FENCE, (block, body: string) => {
+  const rest = text.replace(FENCE, (block, tag: string, body: string) => {
     let parsed: unknown;
     try {
       parsed = JSON.parse(body.trim());
     } catch {
       return block;
     }
-    const found = readAll(parsed);
+    const found = readAll(parsed, tag.toLowerCase() === "json");
     if (found.length === 0) return block;
     questions.push(...found);
     return "";

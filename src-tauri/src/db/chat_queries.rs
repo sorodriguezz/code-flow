@@ -386,9 +386,19 @@ pub fn continue_into(
 ) -> rusqlite::Result<ChatConversation> {
     let tx = conn.unchecked_transaction()?;
     let thread = create_conversation(&tx, &origin.workspace_id, origin.project_id.as_deref(), provider, account_id, model, "")?;
+    // A workspace chat continues as a workspace chat — with the whole workspace in reach and the
+    // chain it was carrying on — and not as a Chat-app thread nobody's panel lists.
     tx.execute(
-        "UPDATE chat_conversations SET parent_conversation_id = ?2, group_id = ?3, continued_from = ?4 WHERE id = ?1",
-        params![thread.id, origin.id, origin.group_id, continuation_column(Some(continuation))],
+        "UPDATE chat_conversations SET parent_conversation_id = ?2, group_id = ?3, continued_from = ?4,
+             workspace_scope = ?5, focus_chain_id = ?6 WHERE id = ?1",
+        params![
+            thread.id,
+            origin.id,
+            origin.group_id,
+            continuation_column(Some(continuation)),
+            origin.workspace_scope,
+            origin.focus_chain_id
+        ],
     )?;
     tx.commit()?;
     get_conversation(conn, &thread.id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
@@ -730,11 +740,33 @@ pub struct TurnNotes {
     pub usage: Option<crate::ai::AiUsage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unprotected_dirs: Vec<String>,
+    /// On a question: the files it was asked with — what the chips under it showed live, so a
+    /// reloaded conversation shows them too (and «Regenerar» can send them again).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<QuestionFile>,
+    /// On a question: the skill picked for it in the composer, by name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
+}
+
+/// One file a question carried: the staged copy's id in the conversation's folder, its name, where
+/// it is, and whether it was offered as an image.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionFile {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub is_image: bool,
 }
 
 impl TurnNotes {
     pub fn is_empty(&self) -> bool {
-        self.context.is_empty() && self.usage.is_none() && self.unprotected_dirs.is_empty()
+        self.context.is_empty()
+            && self.usage.is_none()
+            && self.unprotected_dirs.is_empty()
+            && self.files.is_empty()
+            && self.skill.is_none()
     }
 }
 

@@ -161,6 +161,31 @@ export function openWorkspaceChat(
   });
 }
 
+/**
+ * Puts `text` in a workspace chat's composer — the one on screen in the panel for `workspaceId`, or
+ * the workspace's blank one — and focuses it, or, with `send`, sends it as it stands. The repository
+ * chat's `askInRepoChat` for what belongs to no one repository: a service of the workspace, a
+ * cross-repository question.
+ */
+export function askInWorkspaceChat(workspaceId: string, text: string, opts: { send?: boolean } = {}): void {
+  const panel = useAiPanelStore.getState();
+  const chats = (panel.tabsByWorkspace[workspaceId] ?? []).filter(
+    (tab): tab is Extract<typeof tab, { kind: "wsChat" }> => tab.kind === "wsChat",
+  );
+  const active = panel.activeByWorkspace[workspaceId];
+  const reuse = chats.find((tab) => tab.key === active) ?? chats[chats.length - 1];
+  const key = openWorkspaceChat(workspaceId, { conversationId: reuse?.conversationId ?? null });
+  const draft = useAiPanelStore.getState().drafts[key] ?? "";
+  useAiPanelStore.getState().setDraft(key, draft.trim() ? `${draft.trimEnd()}\n\n${text}` : text);
+  if (opts.send) pendingSends.add(key);
+  // Two frames: one for the panel to open, one for the tab to be shown.
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() =>
+      window.dispatchEvent(new CustomEvent(opts.send ? SEND_CHAT_EVENT : FOCUS_CHAT_EVENT, { detail: key })),
+    ),
+  );
+}
+
 /** The workspace a workspace chat belongs to: its session if open, else the list that has its row. */
 export function workspaceOfWsChat(conversationId: string): string | null {
   const { byConversation, listByWorkspace } = useWorkspaceChatStore.getState();

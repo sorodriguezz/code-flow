@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MutableRefObject } from "react";
 import {
   Eraser,
   Forward,
@@ -54,8 +54,8 @@ export type ChatAppCommand = "new" | "export" | "branch" | "continue" | "compact
  * `/branch`, `/continue` and `/caveman`; a repository conversation in the panel has neither, so there `/compact`
  * is Claude's own and `/clear` is the app's — the next turn simply starts a fresh engine session,
  * which works on every engine rather than only the one whose CLI expands the command headlessly.
- * The workspace chat of the assistant has `/new`, `/export`, `/clear` and `/caveman` (it sends through
- * the free chat's `chat_send`, which applies the row's level).
+ * The workspace chat of the assistant has `/new`, `/export`, `/clear`, `/compact`, `/branch`,
+ * `/continue` and `/caveman` (it sends through the free chat's `chat_send`, which applies the row's level).
  */
 export type CommandSurface = "chat" | "panel" | "workspace";
 
@@ -94,9 +94,10 @@ const APP_COMMANDS: AppCommand[] = [
 const SURFACE_COMMANDS: Record<CommandSurface, ChatAppCommand[]> = {
   chat: ["new", "export", "branch", "continue", "compact", "caveman"],
   panel: ["new", "clear", "export", "move"],
-  // The workspace chat of the assistant: a new one, out as a file, and `/clear`. The rest of the
-  // free chat's act on its sidebar, which this one is not in.
-  workspace: ["new", "export", "clear", "caveman"],
+  // The workspace chat of the assistant: a new one, out as a file, `/clear`, and the app's own
+  // compaction, branch and continuation — the same backend the free chat's use. `/move` acts on the
+  // free chat's sidebar, which this one is not in.
+  workspace: ["new", "export", "clear", "compact", "branch", "continue", "caveman"],
 };
 
 function appCommandsOf(surface: CommandSurface): AppCommand[] {
@@ -170,6 +171,8 @@ export function CommandMenu({
   onInsert,
   onPickSkill,
   onOpenTerminal,
+  keysRef,
+  onDismiss,
 }: {
   /** What has been typed after the `/`, already lowercased by the composer. */
   query: string;
@@ -191,6 +194,12 @@ export function CommandMenu({
   /** Opens the provider's own CLI in a terminal. Absent when there is no working directory to open
    *  one in — a conversation with no repository behind it. */
   onOpenTerminal?: () => void;
+  /** Where the menu leaves its key handler for the composer's `onKeyDown` to call first: arrows walk
+   *  the rows, Enter / Tab pick one, Escape hides the menu. It answers `true` for a key it took.
+   *  `null` while the menu shows nothing. */
+  keysRef?: MutableRefObject<((e: KeyboardEvent) => boolean) | null>;
+  /** Escape: the composer hides the menu until the draft changes. */
+  onDismiss?: () => void;
 }) {
   const t = useT();
   const [passThrough, setPassThrough] = useState<ProviderCommand[]>([]);
@@ -261,12 +270,73 @@ export function CommandMenu({
     [skills, query],
   );
 
+  // Every row the keyboard can reach, in the order they are drawn.
+  const terminalRow = others.length === 0 && !caps.headlessSlashCommands && Boolean(onOpenTerminal);
+  const rows = useMemo(() => {
+    const out: { key: string; run: () => void; exact: boolean }[] = [];
+    for (const command of apps) out.push({ key: `app:${command.id}`, run: () => onRunApp(command.id), exact: false });
+    for (const command of others)
+      out.push({
+        key: `cmd:${command.name}`,
+        run: () => onInsert(command.name),
+        // Typed out whole, a provider command is sent as it is on Enter, as it always was.
+        exact: command.name.replace(/^\//, "").toLowerCase() === query,
+      });
+    if (terminalRow && onOpenTerminal) out.push({ key: "terminal", run: onOpenTerminal, exact: false });
+    if (onPickSkill) for (const skill of pickable) out.push({ key: `skill:${skill.source}:${skill.name}`, run: () => onPickSkill(skill), exact: false });
+    return out;
+  }, [apps, others, pickable, terminalRow, onOpenTerminal, onPickSkill, onRunApp, onInsert, query]);
+  const [active, setActive] = useState(0);
+  useEffect(() => setActive(0), [query]);
+  const at = rows.length === 0 ? -1 : Math.min(active, rows.length - 1);
+  const activeKey = at >= 0 ? rows[at].key : null;
+  const listRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>('[data-active="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [activeKey]);
+  useEffect(() => {
+    if (!keysRef) return;
+    keysRef.current =
+      rows.length === 0
+        ? null
+        : (e) => {
+            if (e.nativeEvent.isComposing) return false;
+            if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+              e.preventDefault();
+              const step = e.key === "ArrowDown" ? 1 : -1;
+              setActive((current) => (Math.min(current, rows.length - 1) + step + rows.length) % rows.length);
+              return true;
+            }
+            if (e.key === "Escape") {
+              e.preventDefault();
+              onDismiss?.();
+              return true;
+            }
+            const row = rows[at];
+            if (!row) return false;
+            if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey && !row.exact)) {
+              e.preventDefault();
+              row.run();
+              return true;
+            }
+            return false;
+          };
+    return () => {
+      keysRef.current = null;
+    };
+  }, [keysRef, rows, at, onDismiss]);
+  const highlight = (key: string) => (key === activeKey ? "bg-[var(--cf-hover)]" : "");
+
   if (apps.length === 0 && others.length === 0 && pickable.length === 0 && !onOpenTerminal) return null;
 
   const providerName = providerDisplayLabel(provider, t);
 
   return (
-    <div className="cf-fade-in mb-1.5 max-h-[320px] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] py-1 shadow-[var(--cf-shadow)]">
+    <div
+      ref={listRef}
+      role="listbox"
+      className="cf-fade-in mb-1.5 max-h-[320px] overflow-y-auto rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] py-1 shadow-[var(--cf-shadow)]"
+    >
       {apps.length > 0 && (
         <>
           <SectionHeading text={t("chat.commandsApp")} />
@@ -274,8 +344,11 @@ export function CommandMenu({
             <button
               key={command.id}
               type="button"
+              role="option"
+              aria-selected={activeKey === `app:${command.id}`}
+              data-active={activeKey === `app:${command.id}`}
               onClick={() => onRunApp(command.id)}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--cf-hover)]"
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--cf-hover)] ${highlight(`app:${command.id}`)}`}
             >
               <command.icon size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
               <span className="font-mono text-[12px] text-[var(--cf-text)]">{command.name}</span>
@@ -296,9 +369,12 @@ export function CommandMenu({
               <button
                 key={command.name}
                 type="button"
+                role="option"
+                aria-selected={activeKey === `cmd:${command.name}`}
+                data-active={activeKey === `cmd:${command.name}`}
                 onClick={() => onInsert(command.name)}
                 title={description || undefined}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--cf-hover)]"
+                className={`flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--cf-hover)] ${highlight(`cmd:${command.name}`)}`}
               >
                 {/* The name keeps its width and the description gives way: in the narrow panel a
                     command you cannot read is useless, a description cut short is only shorter. */}
@@ -325,9 +401,10 @@ export function CommandMenu({
           <button
             type="button"
             disabled={!onOpenTerminal}
+            data-active={activeKey === "terminal"}
             onClick={onOpenTerminal}
             title={onOpenTerminal ? t("chat.commandsNone", { provider: providerName }) : t("chat.noRepoHint")}
-            className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--cf-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+            className={`flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--cf-hover)] disabled:cursor-not-allowed disabled:opacity-40 ${highlight("terminal")}`}
           >
             <SquareTerminal size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
             <span className="text-[12px] text-[var(--cf-text)]">
@@ -344,9 +421,12 @@ export function CommandMenu({
             <button
               key={`${skill.source}:${skill.name}`}
               type="button"
+              role="option"
+              aria-selected={activeKey === `skill:${skill.source}:${skill.name}`}
+              data-active={activeKey === `skill:${skill.source}:${skill.name}`}
               onClick={() => onPickSkill(skill)}
               title={skill.description || undefined}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--cf-hover)]"
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-[var(--cf-hover)] ${highlight(`skill:${skill.source}:${skill.name}`)}`}
             >
               <Puzzle size={12} className="shrink-0 text-[var(--cf-text-muted)]" />
               <span className="min-w-0 max-w-[65%] shrink-0 truncate font-mono text-[12px] text-[var(--cf-text)]">

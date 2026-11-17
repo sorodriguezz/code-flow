@@ -1034,6 +1034,8 @@ export interface ActivityLogEntry {
   /** What the turn spent, as JSON `TurnUsage` (snake_case fields) — `null`/absent when the engine
    *  reported nothing, and for turns recorded before this was kept. */
   usage?: string | null;
+  /** What the question carried: JSON `{files: [{id, name, path, isImage}], skill}`, or null. */
+  question_files?: string | null;
 }
 
 export interface JobHistoryEntry {

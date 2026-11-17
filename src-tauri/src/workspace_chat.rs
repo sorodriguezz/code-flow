@@ -40,6 +40,10 @@ pub struct RepoLine {
     pub is_git: bool,
     /// The [`SPEC_DIRS`] it has, in that order, with a trailing `/`.
     pub spec_dirs: Vec<String>,
+    /// What the working copy is in the middle of, in a few words — uncommitted changes, conflicts,
+    /// commits ahead of or behind its upstream, a rebase or merge under way — or `""` when it is
+    /// clean and level. See [`git_state`].
+    pub git_state: String,
 }
 
 /// Folders where specification-driven or harness tooling keeps a repository's specs, plans and
@@ -65,9 +69,79 @@ pub fn repo_lines(projects: Vec<crate::db::models::Project>) -> Vec<RepoLine> {
             let branch = if on_disk { current_branch(&project.local_path) } else { String::new() };
             let spec_dirs = if on_disk { spec_dirs(root) } else { Vec::new() };
             let is_git = on_disk && git2::Repository::open(&project.local_path).is_ok();
-            RepoLine { id: project.id, name: project.name, path: project.local_path, branch, on_disk, is_git, spec_dirs }
+            let git_state = if is_git { git_state(&project.local_path) } else { String::new() };
+            RepoLine { id: project.id, name: project.name, path: project.local_path, branch, on_disk, is_git, spec_dirs, git_state }
         })
         .collect()
+}
+
+/// A repository's state as the model should know it before touching it — the branch alone said
+/// nothing about the half-finished rebase, the conflicts or the user's uncommitted work an agent
+/// was about to edit on top of. Untracked folders are counted, not walked into, so a big tree costs
+/// one pass of the index.
+pub fn git_state(path: &str) -> String {
+    use git2::{RepositoryState, Status};
+    let Ok(repo) = git2::Repository::open(path) else { return String::new() };
+    let mut parts: Vec<String> = Vec::new();
+    let operation = match repo.state() {
+        RepositoryState::Clean => None,
+        RepositoryState::Merge => Some("merge en curso"),
+        RepositoryState::Rebase | RepositoryState::RebaseInteractive | RepositoryState::RebaseMerge => Some("rebase en curso"),
+        RepositoryState::CherryPick | RepositoryState::CherryPickSequence => Some("cherry-pick en curso"),
+        RepositoryState::Revert | RepositoryState::RevertSequence => Some("revert en curso"),
+        RepositoryState::Bisect => Some("bisect en curso"),
+        _ => Some("operación de git en curso"),
+    };
+    if let Some(operation) = operation {
+        parts.push(operation.to_string());
+    }
+    let mut options = git2::StatusOptions::new();
+    options.include_untracked(true).recurse_untracked_dirs(false).exclude_submodules(true).include_ignored(false);
+    if let Ok(statuses) = repo.statuses(Some(&mut options)) {
+        let (mut conflicts, mut staged, mut changed, mut untracked) = (0, 0, 0, 0);
+        for entry in statuses.iter() {
+            let status = entry.status();
+            if status.is_conflicted() {
+                conflicts += 1;
+                continue;
+            }
+            if status.intersects(Status::INDEX_NEW | Status::INDEX_MODIFIED | Status::INDEX_DELETED | Status::INDEX_RENAMED | Status::INDEX_TYPECHANGE) {
+                staged += 1;
+            }
+            if status.intersects(Status::WT_MODIFIED | Status::WT_DELETED | Status::WT_RENAMED | Status::WT_TYPECHANGE) {
+                changed += 1;
+            }
+            if status.contains(Status::WT_NEW) {
+                untracked += 1;
+            }
+        }
+        for (count, what) in [(conflicts, "en conflicto"), (staged, "preparados"), (changed, "modificados sin preparar"), (untracked, "sin seguimiento")] {
+            if count > 0 {
+                parts.push(format!("{count} {what}"));
+            }
+        }
+    }
+    let level = (|| {
+        let head = repo.head().ok()?;
+        if !head.is_branch() {
+            return None;
+        }
+        let local = head.target()?;
+        let branch = repo.find_branch(head.shorthand()?, git2::BranchType::Local).ok()?;
+        let upstream = branch.upstream().ok()?;
+        let name = upstream.name().ok().flatten()?.to_string();
+        let (ahead, behind) = repo.graph_ahead_behind(local, upstream.get().target()?).ok()?;
+        Some((ahead, behind, name))
+    })();
+    if let Some((ahead, behind, upstream)) = level {
+        match (ahead, behind) {
+            (0, 0) => {}
+            (a, 0) => parts.push(format!("{a} commit(s) por delante de {upstream}")),
+            (0, b) => parts.push(format!("{b} commit(s) por detrás de {upstream}")),
+            (a, b) => parts.push(format!("{a} por delante y {b} por detrás de {upstream}")),
+        }
+    }
+    parts.join(", ")
 }
 
 fn current_branch(path: &str) -> String {
@@ -200,6 +274,9 @@ pub fn live_block(repos: &[RepoLine]) -> String {
         }
         if !repo.branch.is_empty() {
             out.push_str(&format!(" (rama {})", repo.branch));
+        }
+        if !repo.git_state.is_empty() {
+            out.push_str(&format!("; {}", repo.git_state));
         }
         if !repo.spec_dirs.is_empty() {
             out.push_str(&format!("; carpetas de especificación: {}", repo.spec_dirs.join(", ")));
@@ -374,10 +451,33 @@ mod tests {
             on_disk: true,
             is_git: true,
             spec_dirs: spec_dirs(&root),
+            git_state: String::new(),
         };
         let block = live_block(std::slice::from_ref(&line));
         assert!(block.ends_with("(rama main); carpetas de especificación: specs/, .kiro/steering/"), "{block}");
         assert!(system_prompt("Flow", "/tmp/x", true).contains("carpetas de especificación o de harness"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// What the working copy is in the middle of reaches the model: staged, modified and untracked
+    /// files are counted; a clean one says nothing.
+    #[test]
+    fn a_repository_s_uncommitted_work_is_described() {
+        let root = std::env::temp_dir().join(format!("cf-ws-state-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let repo = git2::Repository::init(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new("a.txt")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("T", "t@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        let path = root.to_string_lossy().into_owned();
+        assert_eq!(git_state(&path), "", "clean and with no upstream");
+        std::fs::write(root.join("a.txt"), "two\n").unwrap();
+        std::fs::write(root.join("b.txt"), "new\n").unwrap();
+        assert_eq!(git_state(&path), "1 modificados sin preparar, 1 sin seguimiento");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -386,8 +486,8 @@ mod tests {
         let root = std::env::temp_dir().join(format!("cf-ws-nogit-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let path = root.to_string_lossy().into_owned();
-        let plain = RepoLine { id: "n".into(), name: "notes".into(), path: path.clone(), branch: String::new(), on_disk: true, is_git: false, spec_dirs: vec![] };
-        let missing = RepoLine { id: "g".into(), name: "gone".into(), path: "/nowhere/gone".into(), branch: String::new(), on_disk: false, is_git: false, spec_dirs: vec![] };
+        let plain = RepoLine { id: "n".into(), name: "notes".into(), path: path.clone(), branch: String::new(), on_disk: true, is_git: false, spec_dirs: vec![], git_state: String::new() };
+        let missing = RepoLine { id: "g".into(), name: "gone".into(), path: "/nowhere/gone".into(), branch: String::new(), on_disk: false, is_git: false, spec_dirs: vec![], git_state: String::new() };
         let block = live_block(&[plain.clone(), missing.clone()]);
         assert!(block.contains("(no es un repositorio git: sin punto de restauración"), "{block}");
         assert!(block.contains("- gone — /nowhere/gone (no está en disco)"), "{block}");

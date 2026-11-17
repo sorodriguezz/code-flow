@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ListChecks, ListPlus, MessageSquareShare, Paperclip, Pencil, Play, Search, Square, Users, UsersRound } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
@@ -15,7 +15,7 @@ import { useAutosizeTextarea } from "../../lib/useAutosizeTextarea";
 import type { ChatAttachment } from "../../lib/tauri/chatCommands";
 import { McpMenu } from "../chat/McpMenu";
 import { QueuedMessages, type ComposerQueue } from "../chat/QueuedMessages";
-import { chatQueueKey, discardChatQueue, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
+import { chatQueueKey, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
 import { cancelQuotaResume, resumeQuotaNow, useQuotaResumeAt } from "../../state/quotaResumeStore";
 import { FOCUS_CHAT_EVENT, SEND_CHAT_EVENT, openChat, openNewChat, takePendingSend } from "../../lib/aiPanelNav";
 import { moveChatToApp } from "../../lib/moveChatToApp";
@@ -156,9 +156,17 @@ export function PanelChat({
     const current = useChatStore.getState().byConversation[conversationId];
     if (!current || current.sending || !current.persisted || current.messages.length === 0) return;
     if (conversations.some((c) => c.session_id === conversationId)) return;
+    // A list read before this conversation last changed cannot say it was deleted — a stopped first
+    // turn that changed files is persisted without the list being reloaded, and renaming another
+    // chat then republished the old list. Read again rather than close a live tab.
+    const listedAt = useChatHistoryStore.getState().listedAt[projectId] ?? 0;
+    if (listedAt < current.updatedAt) {
+      void loadHistory(projectId);
+      return;
+    }
     useChatStore.getState().discard(conversationId);
     useAiPanelStore.getState().close(tabKey, workspaceId ?? undefined);
-  }, [conversations, historyLoaded, conversationId, tabKey, workspaceId]);
+  }, [conversations, historyLoaded, conversationId, tabKey, workspaceId, projectId, loadHistory]);
 
   // A question stopped while queued comes back to where it was typed.
   useEffect(() => {
@@ -328,7 +336,12 @@ export function PanelChat({
       openNewChat(projectId);
     } else if (command === "clear") {
       useChatStore.getState().submit(projectId, conversationId, "/clear", { command: { id: "clear", args: "" } });
-    } else if (command === "export" && session.persisted && session.messages.length > 0) {
+    } else if (command === "export") {
+      // Said, rather than nothing happening: a conversation is on disk once its first answer is.
+      if (!session.persisted || session.messages.length === 0) {
+        pushErrorToast(t("chat.exportNothingYet"));
+        return;
+      }
       const rect = boxRef.current?.getBoundingClientRect();
       setExportMenu({ x: rect ? rect.left + 8 : 16, y: rect ? rect.top - 8 : 16 });
     } else if (command === "move") {
@@ -375,13 +388,13 @@ export function PanelChat({
    *  its own session, so the plan it wrote is what it carries out. */
   const runPlan = () => {
     useChatStore.getState().setPlan(conversationId, false);
-    useChatStore.getState().submit(projectId, conversationId, t("assistant.runPlanMessage"), {});
+    useChatStore.getState().submit(projectId, conversationId, t("assistant.runPlanMessage"), { files: [] });
     useAiPanelStore.getState().markChatStarted(tabKey);
     toBottom();
   };
   /** What the card under a model's question sends: the answer, as the next message. */
   const answerQuestion = (text: string) => {
-    useChatStore.getState().submit(projectId, conversationId, text, {});
+    useChatStore.getState().submit(projectId, conversationId, text, { files: [] });
     useAiPanelStore.getState().markChatStarted(tabKey);
     toBottom();
   };
@@ -440,7 +453,7 @@ export function PanelChat({
     }
     const extension = (file.type.split("/")[1] ?? "png").replace(/[^a-z0-9]/gi, "") || "png";
     void file.arrayBuffer().then((buffer) =>
-      useChatStore.getState().attachFileBytes(conversationId, `pegado.${extension}`, new Uint8Array(buffer)),
+      useChatStore.getState().attachFileBytes(conversationId, `${t("chat.pastedName")}.${extension}`, new Uint8Array(buffer)),
     );
   };
   /** Right-click: Copy on a selected passage, Cut / Copy / Paste in the box. */
@@ -471,9 +484,9 @@ export function PanelChat({
       onResume: () => {
         const retriedFailedTurn = resumeQuotaNow(queueKey);
         if (retriedFailedTurn) return;
-        useChatStore.getState().resumeQueue(conversationId);
+        useChatStore.getState().resumeQueue(conversationId, projectId);
       },
-      onDiscardAll: () => discardChatQueue(queueKey),
+      onDiscardAll: () => useChatStore.getState().discardAllQueued(conversationId),
       autoResumeAt,
       onCancelAutoResume: () => cancelQuotaResume(queueKey),
     }),
@@ -481,7 +494,11 @@ export function PanelChat({
   );
   /** The `/` menu is open while the draft is one token that begins with a slash. */
   const slash = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).toLowerCase() : null;
-  const menuOpen = slash !== null && !slash.includes(" ");
+  // Escape hides the `/` menu for the draft it was pressed on; typing brings it back.
+  const [slashDismissed, setSlashDismissed] = useState<string | null>(null);
+  const menuOpen = slash !== null && !slash.includes(" ") && slashDismissed !== draft;
+  /** The open `/` menu's key handler — arrows, Enter / Tab, Escape — called before the box's own. */
+  const slashKeys = useRef<((e: ReactKeyboardEvent) => boolean) | null>(null);
   const stop = () => {
     if (session.runId) void useAiRunStore.getState().cancel(session.runId);
   };
@@ -543,7 +560,8 @@ export function PanelChat({
             onRegenerate:
               canAct && asked?.role === "user"
                 ? () => {
-                    useChatStore.getState().submit(projectId, conversationId, asked.content, {});
+                    // The question again with the files it was asked with — not whatever is staged now.
+                    useChatStore.getState().submit(projectId, conversationId, asked.content, { files: asked.attachments ?? [] });
                     useAiPanelStore.getState().markChatStarted(tabKey);
                     toBottom();
                   }
@@ -568,7 +586,7 @@ export function PanelChat({
           onRegenerate:
             canAct && question?.role === "user"
               ? () => {
-                  useChatStore.getState().submit(projectId, conversationId, question.content, {});
+                  useChatStore.getState().submit(projectId, conversationId, question.content, { files: question.attachments ?? [] });
                   useAiPanelStore.getState().markChatStarted(tabKey);
                   toBottom();
                 }
@@ -637,7 +655,7 @@ export function PanelChat({
       onCompact:
         provider === "claude"
           ? () => {
-              useChatStore.getState().submit(projectId, conversationId, "/compact", {});
+              useChatStore.getState().submit(projectId, conversationId, "/compact", { files: [] });
               toBottom();
             }
           : undefined,
@@ -886,10 +904,12 @@ export function PanelChat({
         )}
         {menuOpen && (
           <CommandMenu
+            keysRef={slashKeys}
+            onDismiss={() => setSlashDismissed(draft)}
             query={slash ?? ""}
             provider={provider}
             surface="panel"
-            scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId }}
+            scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId, conversationId: session.persisted ? conversationId : null }}
             onRunApp={(command) => {
               setDraft("");
               runAppCommand(command);
@@ -947,6 +967,8 @@ export function PanelChat({
               onPaste={onPaste}
               onContextMenu={textMenu.onField}
               onKeyDown={(e) => {
+                // The `/` menu, while it is open: arrows walk it, Enter/Tab pick, Escape hides it.
+                if (menuOpen && slashKeys.current?.(e)) return;
                 // The `@` menu takes its keys first: arrows walk it, Enter/Tab pick, Escape hides it.
                 if (mentions.onKeyDown(e)) return;
                 // Then a shown suggestion: Tab takes it, Ctrl/Cmd+→ a word, Escape hides it.

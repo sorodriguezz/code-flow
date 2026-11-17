@@ -2069,6 +2069,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_source_to_db_history(conn)?;
     add_notes_to_chat_messages(conn)?;
     add_usage_to_activity_log(conn)?;
+    add_question_files_to_activity_log(conn)?;
     add_effort_to_agents(conn)?;
     add_identity_to_agents(conn)?;
     // «Equipo»: teams, their runs, items and channel (`team`).
@@ -2106,6 +2107,17 @@ pub(crate) fn add_notes_to_chat_messages(conn: &Connection) -> rusqlite::Result<
 pub(crate) fn add_usage_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "activity_log", "usage")? {
         conn.execute_batch("ALTER TABLE activity_log ADD COLUMN usage TEXT;")?;
+    }
+    Ok(())
+}
+
+/// What a repository chat question carried besides its text — its files and its skill — as JSON
+/// `{"files": [{id, name, path, isImage}], "skill": "…"}`, so a reloaded conversation draws the same
+/// chips under the question it drew live. `NULL` for questions that carried neither, and for turns
+/// recorded before this was kept.
+pub(crate) fn add_question_files_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
+    if !has_column(conn, "activity_log", "question_files")? {
+        conn.execute_batch("ALTER TABLE activity_log ADD COLUMN question_files TEXT;")?;
     }
     Ok(())
 }

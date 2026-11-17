@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ArrowUp, ListPlus, Paperclip, Puzzle, Square, X } from "lucide-react";
 import { ChatModelPicker } from "../ai/ChatModelPicker";
@@ -260,7 +260,11 @@ export function ChatComposer({
   /** The `/` menu is open while the draft is a single token beginning with a slash. It closes the
    *  moment a space is typed, because by then the user is writing arguments, not choosing. */
   const slash = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).toLowerCase() : null;
-  const menuOpen = slash !== null && !slash.includes(" ");
+  // Escape hides the `/` menu for the draft it was pressed on; typing brings it back.
+  const [slashDismissed, setSlashDismissed] = useState<string | null>(null);
+  const menuOpen = slash !== null && !slash.includes(" ") && slashDismissed !== draft;
+  /** The open `/` menu's key handler — arrows, Enter / Tab, Escape — called before the box's own. */
+  const slashKeys = useRef<((e: ReactKeyboardEvent) => boolean) | null>(null);
 
   /**
    * An image arriving by paste, stored rather than refused.
@@ -295,7 +299,7 @@ export function ChatComposer({
       // it is how the backend decides this is an image, and how several engines decide what they
       // are looking at.
       const extension = (file.type.split("/")[1] ?? "png").replace(/[^a-z0-9]/gi, "") || "png";
-      void onAttachBytes(`pegado.${extension}`, new Uint8Array(buffer));
+      void onAttachBytes(`${t("chat.pastedName")}.${extension}`, new Uint8Array(buffer));
     });
   };
 
@@ -343,6 +347,8 @@ export function ChatComposer({
       <div className={`${READING_COLUMN} ${COLUMN_GUTTER}`}>
         {menuOpen && (
           <CommandMenu
+            keysRef={slashKeys}
+            onDismiss={() => setSlashDismissed(draft)}
             query={slash ?? ""}
             provider={provider}
             surface={surface}
@@ -422,6 +428,8 @@ export function ChatComposer({
             onPaste={onPaste}
             onContextMenu={textMenu.onField}
             onKeyDown={(e) => {
+              // The `/` menu, while it is open: arrows walk it, Enter/Tab pick, Escape hides it.
+              if (menuOpen && slashKeys.current?.(e)) return;
               // `isComposing` covers the IME case; `keyCode === 229` is the same condition for the
               // browsers that still report composition that way, and costs one comparison.
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing && e.keyCode !== 229) {

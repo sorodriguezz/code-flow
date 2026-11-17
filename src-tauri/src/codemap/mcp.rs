@@ -66,6 +66,10 @@ struct Access {
     /// A workspace chat limited to some of its repositories: the project ids it left out, which
     /// `search_knowledge` does not search. Empty for every other run.
     excluded_projects: Vec<String>,
+    /// The working trees of those left-out repositories, canonical. A file tool that would write in
+    /// one is refused: the scope picker's promise was «this turn works in these», and an edit by
+    /// absolute path into an excluded repository got no checkpoint and no review either.
+    excluded_roots: Vec<std::path::PathBuf>,
     /// The AI run the token was granted inside, when there was one — how the chat tools
     /// (`crate::chat_refs`) know which chat is asking.
     run: Option<String>,
@@ -85,6 +89,7 @@ impl Access {
             grounding: false,
             codi: false,
             excluded_projects: Vec::new(),
+            excluded_roots: Vec::new(),
             run: crate::ai_runs::current().map(|ctx| ctx.run_id),
             full: false,
         }
@@ -165,12 +170,48 @@ fn for_grounding_run(root: &str) -> Option<(LiveServer, Grant)> {
 /// when the user switched the map off or the webhook server cannot listen. `acts`: the turn may
 /// write, so a database write (approved one by one) is offered too. `excluded`: the project ids of
 /// a chat limited to some of the workspace's repositories, which `search_knowledge` does not search.
-pub fn for_workspace_chat_without(workspace_id: &str, acts: bool, full: bool, excluded: &[String]) -> Option<(LiveServer, Grant)> {
+///
+/// `excluded_roots`: those repositories' working trees, where the turn's file tools may not write.
+pub fn for_workspace_chat_without(
+    workspace_id: &str,
+    acts: bool,
+    full: bool,
+    excluded: &[String],
+    excluded_roots: &[String],
+) -> Option<(LiveServer, Grant)> {
     if !enabled() {
         return None;
     }
     let root = crate::workspace_chat::working_dir(workspace_id).to_string_lossy().to_string();
-    serve(|token| Access { workspace: true, excluded_projects: excluded.to_vec(), full: acts && full, ..Access::new(&root, acts, token) })
+    let excluded_roots: Vec<std::path::PathBuf> =
+        excluded_roots.iter().filter_map(|path| std::path::Path::new(path).canonicalize().ok()).collect();
+    serve(|token| Access {
+        workspace: true,
+        excluded_projects: excluded.to_vec(),
+        excluded_roots,
+        full: acts && full,
+        ..Access::new(&root, acts, token)
+    })
+}
+
+/// The file tools that write, and the input key that names their file.
+const WRITE_TOOLS: &[(&str, &str)] = &[("Edit", "file_path"), ("MultiEdit", "file_path"), ("Write", "file_path"), ("NotebookEdit", "notebook_path")];
+
+/// The excluded repository a file tool's call would write in, if any — see [`Access::excluded_roots`].
+/// A relative path is the run's folder's; a file that does not exist yet is judged by its parent.
+fn writes_outside_scope<'a>(access: &'a Access, tool_name: &str, input: &Value) -> Option<&'a std::path::Path> {
+    if access.excluded_roots.is_empty() {
+        return None;
+    }
+    let key = WRITE_TOOLS.iter().find(|(name, _)| *name == tool_name).map(|(_, key)| *key)?;
+    let raw = input.get(key).and_then(Value::as_str)?;
+    let path = std::path::Path::new(&access.root).join(raw);
+    let resolved = path
+        .canonicalize()
+        .ok()
+        .or_else(|| path.parent().and_then(|dir| dir.canonicalize().ok()).map(|dir| dir.join(path.file_name().unwrap_or_default())))
+        .unwrap_or(path);
+    access.excluded_roots.iter().find(|root| resolved.starts_with(root)).map(|root| root.as_path())
 }
 
 fn serve(access: impl FnOnce(&str) -> Access) -> Option<(LiveServer, Grant)> {
@@ -462,6 +503,19 @@ async fn answer_permission_prompt(access: &Access, args: &Value) -> String {
     let input = args.get(PERMISSION_INPUT_KEY).cloned().unwrap_or_else(|| json!({}));
     if access.grounding || access.codi {
         return permission_decision(false, input, PERMISSION_NOT_FOR_THIS_RUN.to_string());
+    }
+    // The repositories this turn was scoped away from stay untouched, «Completo» or not: that is
+    // a choice about where the turn works, not about how much it asks.
+    let tool_name_early = args.get(PERMISSION_TOOL_NAME_KEY).and_then(Value::as_str).unwrap_or_default();
+    if let Some(root) = writes_outside_scope(access, tool_name_early, &input) {
+        return permission_decision(
+            false,
+            input,
+            format!(
+                "Not written: {} is outside the repositories this turn was limited to. Work only in the ones in scope, or ask the user to widen it.",
+                root.display()
+            ),
+        );
     }
     let Some(app) = crate::ai_usage::app() else {
         return permission_decision(false, input, CODEFLOW_NOT_READY.to_string());
@@ -1699,6 +1753,31 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    /// A workspace turn limited to some repositories: its file tools may not write in the others,
+    /// by absolute or relative path, a file that does not exist yet included.
+    #[test]
+    fn file_tools_stay_out_of_excluded_repositories() {
+        let base = std::env::temp_dir().join(format!("cf-scope-{}", uuid::Uuid::new_v4()));
+        let chat = base.join("chat");
+        let kept = base.join("kept");
+        let left = base.join("left");
+        for dir in [&chat, &kept, &left] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let access = Access {
+            workspace: true,
+            excluded_roots: vec![left.canonicalize().unwrap()],
+            ..Access::new(chat.to_str().unwrap(), true, "tok-0123456789abcdef")
+        };
+        let at = |p: &std::path::Path| json!({ "file_path": p.to_string_lossy() });
+        assert!(writes_outside_scope(&access, "Write", &at(&left.join("new.rs"))).is_some());
+        assert!(writes_outside_scope(&access, "Edit", &json!({ "file_path": "../left/x.rs" })).is_some());
+        assert!(writes_outside_scope(&access, "Edit", &at(&kept.join("x.rs"))).is_none());
+        assert!(writes_outside_scope(&access, "Read", &at(&left.join("x.rs"))).is_none(), "reading is not writing");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     fn with_token(root: &str) -> (HeaderMap, Grant) {
         with_access(root, false)

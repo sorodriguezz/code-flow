@@ -57,6 +57,7 @@ import { useT, type Translate } from "../../state/languageStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
+import { ChatSafetySettings } from "./ChatSafetySettings";
 import { modelRouteLabel } from "../ai/ModelTag";
 import { chipClass, fieldClass } from "../common/recipes";
 import { Select } from "../common/Select";
@@ -314,6 +315,9 @@ export function AiTasksSettings({ area }: { area?: AiTaskArea } = {}) {
     <div>
       {/* ---------- what only the free chat may do ---------- */}
       <FreeChatOptions query={query} t={t} area={area} scoped={scoped} />
+      {/* How the chats share a repository and what their undo keeps: on the Chat pane, and in the
+          unscoped list. */}
+      {(!area || area === "chat") && <ChatSafetySettings />}
 
       {/* ---------- the toolbar ---------- */}
       <div className="mb-3 flex flex-wrap items-center gap-2">

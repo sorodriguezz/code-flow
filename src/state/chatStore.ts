@@ -45,6 +45,7 @@ import {
   repoChatListStagedAttachments,
   chatFailedTurnChanges,
   type ChatAttachment,
+  questionFiles,
   type SkillPick,
 } from "../lib/tauri/chatCommands";
 import type { ActivityLogEntry, TurnUsage } from "../types/domain";
@@ -109,6 +110,11 @@ async function restoreStagedAttachments(conversationId: string): Promise<void> {
   // The restored queue claims its own files first, so they are not also offered on the composer.
   await restoreChatQueue(queueOf(conversationId), listed);
   const carried = queuedAttachmentIds(queueOf(conversationId));
+  // The backend counts a file as staged when no *saved* question names it — which includes the
+  // question running right now and a stopped turn that was never written. Those files went out
+  // with their question; putting them back on the composer sent them again with the next one.
+  for (const message of useChatStore.getState().byConversation[conversationId]?.messages ?? [])
+    for (const file of message.attachments ?? []) carried.add(file.id);
   const files = (listed ?? []).filter((file) => !carried.has(file.id));
   if (files.length > 0) restageFiles(conversationId, files);
 }
@@ -340,6 +346,17 @@ function markAccountBreak(messages: ChatMessage[], answeredBy: ChatMessage["acco
  * allow one mid-conversation. A failed turn draws no line: the live reply that would have drawn it
  * never arrived either, and the transcript has to read the same reopened as it did live.
  */
+/** `activity_log.question_files`: what a question carried. A malformed value carries nothing. */
+function parseQuestionFiles(json: string | null | undefined): { attachments?: ChatAttachment[]; skill?: string } {
+  if (!json) return {};
+  try {
+    const parsed = JSON.parse(json) as { files?: { id: string; name: string; path: string; isImage: boolean }[]; skill?: string | null };
+    return { attachments: questionFiles(Array.isArray(parsed.files) ? parsed.files : []), skill: parsed.skill || undefined };
+  } catch {
+    return {};
+  }
+}
+
 export function turnsToMessages(entries: ActivityLogEntry[], cleared: readonly number[] = []): ChatMessage[] {
   let session: string | null = null;
   let last: { provider: string; account: string | null } | null = null;
@@ -350,10 +367,14 @@ export function turnsToMessages(entries: ActivityLogEntry[], cleared: readonly n
     if (e.provider) last = { provider: e.provider, account };
     session = e.engine_session_id ?? session;
     const stopped = isCancelledRow(e);
+    const carried = parseQuestionFiles(e.question_files);
     const question: ChatMessage = {
       role: "user",
       content: e.question,
       createdAt: e.created_at,
+      // The chips it was asked with, as they were drawn live — and what «Regenerar» resends.
+      ...(carried.attachments ? { attachments: carried.attachments } : {}),
+      ...(carried.skill ? { skill: carried.skill } : {}),
     };
     if (broke && e.provider)
       question.accountBreak = { provider: e.provider, accountId: account };
@@ -462,6 +483,8 @@ async function guardedEdit(
 const truncationEpoch = new Map<string, number>();
 
 /** Which conversation each in-flight turn belongs to, so a streamed fragment finds its bubble. */
+/** Conversations whose history `ensureLoaded` is reading for the first time, until it lands. */
+const historyLoads = new Map<string, Promise<void>>();
 const runToConversation = new Map<string, string>();
 let deltaListener: Promise<unknown> | null = null;
 
@@ -729,6 +752,8 @@ interface ChatState {
   removeAttachment: (conversationId: string, attachmentId: string) => void;
   /** Takes a queued message out for good — and the copies of its images with it. */
   discardQueued: (conversationId: string, itemId: string) => void;
+  /** «Descartar todo»: the whole queue, and the copies of the files its messages carried. */
+  discardAllQueued: (conversationId: string) => void;
   /**
    * Stops the running turn and asks the same question again — skill and images included — once the
    * stop has landed: what the run card offers when a turn has gone quiet and the user would rather
@@ -750,7 +775,10 @@ interface ChatState {
     projectId: string,
     conversationId: string,
     message: string,
-    opts?: { skill?: ChatSkillPick | null; command?: QueuedCommand },
+    /** `files`: the files this message carries, instead of the composer's staged ones — `[]` for
+     *  none. Every send that is not the composer's own (Regenerate, an answer card, «Ejecutar el
+     *  plan», `/compact`) passes it, so it never takes what was staged for the next question. */
+    opts?: { skill?: ChatSkillPick | null; command?: QueuedCommand; files?: ChatAttachment[] },
   ) => void;
   /** The question each conversation's box is rewriting, if any — see {@link EditingTurn}. */
   editing: Record<string, EditingTurn | undefined>;
@@ -771,9 +799,10 @@ interface ChatState {
     opts?: { skill?: ChatSkillPick | null },
   ) => Promise<boolean>;
   /** Sends the next queued message if the conversation is free and its queue is not held. */
-  drainQueue: (conversationId: string) => void;
-  /** Lets a held queue go again, starting with its oldest message. */
-  resumeQueue: (conversationId: string) => void;
+  drainQueue: (conversationId: string, projectId?: string) => void;
+  /** Lets a held queue go again, starting with its oldest message. `projectId` lets it send into a
+   *  conversation this window holds no copy of (a queue restored after a stopped first turn). */
+  resumeQueue: (conversationId: string, projectId?: string) => void;
   /** Takes one message out of the queue — for good, or to be edited in the box. */
   takeQueued: (conversationId: string, itemId: string) => QueuedChatMessage | null;
   /** `/clear`: the next question in this conversation starts a fresh engine session — on every
@@ -878,6 +907,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     for (const file of taken?.attachments ?? []) void repoChatRemoveAttachment(conversationId, file.id).catch(() => {});
   },
 
+  discardAllQueued: (conversationId) => {
+    // Discarding one row deletes its copies; discarding them all used to leave every copy on disk,
+    // where the next load offered them back on the composer as staged files.
+    for (const item of dropChatQueue(queueOf(conversationId)))
+      for (const file of item.attachments ?? []) void repoChatRemoveAttachment(conversationId, file.id).catch(() => {});
+  },
+
   editQueued: (conversationId, itemId) => {
     const taken = takeQueuedChatMessage(queueOf(conversationId), itemId);
     if (taken?.attachments?.length) restageFiles(conversationId, taken.attachments);
@@ -894,12 +930,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // Only this conversation's own turn blocks — another chat of the same project being mid-answer
     // (or queued) is exactly the case this store exists to allow.
     if (existing?.sending) return;
-    cancelQuotaResume(queueOf(conversationId));
 
     // The images go with this question: a queued one names its own, otherwise the composer's staged
     // ones are taken off the box now — they are the ingredients of the message being sent.
     const files = filesArg ?? get().attachments[conversationId] ?? [];
     if (!filesArg && files.length > 0) set((s) => ({ attachments: { ...s.attachments, [conversationId]: [] } }));
+
+    // A reopened conversation whose history is still being read: sent from an empty copy, the turn
+    // would go out with no session (the engine forgets the thread) and the read, landing after it,
+    // would be skipped — then appended *after* the new turn by a later reconcile. It waits instead.
+    const loading = historyLoads.get(conversationId);
+    if (!existing && loading) {
+      void loading.then(() => get().send(projectId, conversationId, message, skill, files));
+      return;
+    }
+    cancelQuotaResume(queueOf(conversationId));
 
     // Asking a question is the strongest possible "I am using this one", so it counts for the
     // memory cap's recency just as opening it does.
@@ -1158,7 +1203,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // What the stopped or failed turn left changed on disk: attached to the bubble just filed, so
         // the review under it appears like a finished turn's, and keyed to the stored row so a
         // reload does not draw it twice. Best effort — no changes (or no answer) is no review.
-        void chatFailedTurnChanges(conversationId)
+        void chatFailedTurnChanges(conversationId, now)
           .then((failed) => {
             if (!failed) return;
             const changes = parseTurnChanges(failed.checkpoint);
@@ -1220,13 +1265,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const busy = get().byConversation[conversationId]?.sending ?? false;
     if (!busy && queuedMessages(key).length === 0) {
       if (command?.id === "clear") get().clearContext(conversationId);
-      else get().send(projectId, conversationId, trimmed, opts?.skill ?? null);
+      else get().send(projectId, conversationId, trimmed, opts?.skill ?? null, opts?.files);
       return;
     }
     // A queued question takes the staged images with it, like its skill: they were part of what was
-    // written, and the box is free for the next message.
-    const files = command ? [] : (get().attachments[conversationId] ?? []);
-    if (files.length > 0) set((s) => ({ attachments: { ...s.attachments, [conversationId]: [] } }));
+    // written, and the box is free for the next message. One that names its own files keeps them.
+    const files = opts?.files ?? (command ? [] : (get().attachments[conversationId] ?? []));
+    if (!opts?.files && files.length > 0) set((s) => ({ attachments: { ...s.attachments, [conversationId]: [] } }));
     enqueueChatMessage(key, {
       text: trimmed,
       skill: command ? null : (opts?.skill ?? null),
@@ -1235,7 +1280,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
     // A no-op while the turn runs. When the conversation is idle behind a held queue, queuing
     // released it, and the oldest message goes now.
-    get().drainQueue(conversationId);
+    get().drainQueue(conversationId, projectId);
   },
 
   beginEdit: (conversationId, index) => {
@@ -1328,9 +1373,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return true;
     }),
 
-  drainQueue: (conversationId) => {
+  drainQueue: (conversationId, projectIdArg) => {
     const session = get().byConversation[conversationId];
-    if (!session || session.sending) return;
+    if (session?.sending) return;
+    // No copy in memory is not «nothing to send to»: a first turn stopped before anything was
+    // written leaves no conversation on disk, while its queue is restored as held. With the
+    // repository known, `send` starts the conversation the queue belongs to.
+    const projectId = session?.projectId ?? projectIdArg;
+    if (!projectId) return;
+    // A history read still in flight: the queue goes once it lands, so its first message does not
+    // start from an empty conversation (see `historyLoads`).
+    const loading = historyLoads.get(conversationId);
+    if (!session && loading) {
+      void loading.then(() => get().drainQueue(conversationId, projectId));
+      return;
+    }
     const key = queueOf(conversationId);
     // A queued `/clear` is instantaneous — it only marks the next question as a fresh start — so it
     // is applied and the queue moves straight on to that question.
@@ -1339,14 +1396,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().clearContext(conversationId);
         continue;
       }
-      get().send(session.projectId, conversationId, next.text, next.skill ?? null, next.attachments ?? []);
+      get().send(projectId, conversationId, next.text, next.skill ?? null, next.attachments ?? []);
       return;
     }
   },
 
-  resumeQueue: (conversationId) => {
+  resumeQueue: (conversationId, projectId) => {
     releaseChatQueue(queueOf(conversationId));
-    get().drainQueue(conversationId);
+    get().drainQueue(conversationId, projectId);
   },
 
   takeQueued: (conversationId, itemId) => takeQueuedChatMessage(queueOf(conversationId), itemId),
@@ -1379,11 +1436,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    // A conversation this store has never held is read whole.
-    const [entries, resets] = await Promise.all([
+    // A conversation this store has never held is read whole. Registered while it reads, so a
+    // question sent meanwhile waits for it (`send`) instead of starting from nothing.
+    const reading = Promise.all([
       getChatConversation(projectId, conversationId).catch(() => null),
       chatContextResets(projectId, conversationId).catch(() => null),
     ]);
+    const settled = reading.then(() => undefined);
+    historyLoads.set(conversationId, settled);
+    let entries: Awaited<typeof reading>[0];
+    let resets: Awaited<typeof reading>[1];
+    try {
+      [entries, resets] = await reading;
+    } finally {
+      // Cleared after the `set` below has run (a microtask later), so a send that was waiting
+      // finds the loaded copy rather than racing it.
+      void settled.then(() => {
+        if (historyLoads.get(conversationId) === settled) historyLoads.delete(conversationId);
+      });
+    }
     // Nothing on disk under this id — a new chat whose first question has not been asked, which is
     // an empty conversation and nothing to read. Leaving the store alone is the right answer.
     if (!entries || entries.length === 0) return;
@@ -1654,7 +1725,7 @@ async function resumeRepoChatAfterQuota(entry: QuotaResumeEntry): Promise<void> 
   const lastTurnFailed = lastMessage?.isError === true;
   if (!lastTurnFailed) return;
   requeueChatMessageFirst(entry.queueKey, entry.retry);
-  useChatStore.getState().resumeQueue(entry.conversationId);
+  useChatStore.getState().resumeQueue(entry.conversationId, entry.ownerId);
 }
 
 registerQuotaResumeHandler(REPO_CHAT_RESUME_SURFACE, resumeRepoChatAfterQuota);

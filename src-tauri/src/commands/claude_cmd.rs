@@ -1035,6 +1035,26 @@ pub(crate) async fn resolve_finding_on(
 /// directory, and each account has its own (see `crate::ai_accounts`), so a token minted by the
 /// work account is as foreign to the personal one as a Claude token is to Codex. The second value
 /// says the token was dropped for that reason, which the panel turns into a notice.
+/// The JSON `activity_log.question_files` holds for a question: its files and skill, or `None` when
+/// it carried neither.
+fn question_files_json(attachments: &[ai::AiAttachment], skill: Option<&crate::provider_skills::SkillPick>) -> Option<String> {
+    if attachments.is_empty() && skill.is_none() {
+        return None;
+    }
+    let files: Vec<serde_json::Value> = attachments
+        .iter()
+        .map(|file| {
+            serde_json::json!({
+                "id": std::path::Path::new(&file.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                "name": file.name,
+                "path": file.path,
+                "isImage": file.is_image,
+            })
+        })
+        .collect();
+    Some(serde_json::json!({ "files": files, "skill": skill.map(|pick| pick.name.clone()) }).to_string())
+}
+
 fn session_for_engine(
     conn: &Connection,
     project_id: &str,
@@ -1282,6 +1302,10 @@ pub async fn send_chat_message(
     if agent_provider.as_deref() == Some("local-exec") {
         return Err("This task is a step of a hybrid run; it runs from its chain.".to_string());
     }
+    // Cancellable from here, not only once the engine starts: a Stop pressed while the turn reads
+    // its contexts, probes MCP servers or snapshots the repository used to find no run and be
+    // dropped — see `ai_runs::Reservation`. The engine then sees it at once.
+    let _reservation = ai_runs::reserve(&app, run_id.as_deref());
     let presence = ai_locks::enter(&project.local_path, &ai::chat_presence_label(&message));
     // What a hybrid plan or review takes from its run: the run's other repositories, handed to the
     // CLI as extra directories, and whether this review round answers in the review's JSON.
@@ -1659,6 +1683,10 @@ pub async fn send_chat_message(
     // that is removed again must not have evicted an older one — the cap is applied by
     // `settle_turn` to a checkpoint that is kept. A plan turn on an engine that enforces read-only
     // writes nothing, so it takes none.
+    // With «un turno que escribe por repositorio» on, a writing turn holds this working copy until
+    // it ends; a second one waits on the busy marker (`ai_locks::writers`). Before the checkpoint,
+    // so a refused turn has nothing to settle.
+    let _writer = ai_locks::writers(std::slice::from_ref(&project.local_path), !analysis)?;
     let checkpoint = if plan && config.engine.enforces_read_only() {
         None
     } else {
@@ -1741,6 +1769,12 @@ pub async fn send_chat_message(
             run
         }
         Err(e) => {
+            // The session this turn resumed is gone from the CLI's own store (the folder moved,
+            // its history was cleaned): resuming it again would fail every later turn the same
+            // way. A reset is written down after the failed turn is filed, so the next question —
+            // from any window — opens a fresh session instead (`conversation_reset_pending`).
+            let stale = !e.starts_with(ai_runs::CANCELLED_MARKER) && session_id.is_some() && ai::is_stale_session_error(&e);
+            let e = if stale { ai::stale_session_note(&e) } else { e };
             // A run the user stopped isn't history: it has no answer, and filing it would leave
             // a permanent failed turn in the transcript for something they did on purpose — unless
             // it had already changed files. Then the question and the review of what it wrote must
@@ -1773,8 +1807,16 @@ pub async fn send_chat_message(
                         true,
                     );
                     // A turn that failed or was stopped halfway may have changed files all the same.
+                    if let Ok(entry) = filed.as_ref() {
+                        if let Some(json) = question_files_json(&attachments, skill.as_ref()) {
+                            let _ = queries::set_activity_question_files(&conn, &entry.id, &json);
+                        }
+                    }
                     if let (Ok(entry), Some(checkpoint)) = (filed, turn_checkpoint.as_deref()) {
                         let _ = queries::set_activity_checkpoint(&conn, &entry.id, checkpoint);
+                    }
+                    if stale {
+                        let _ = queries::add_conversation_reset(&conn, &project_id, &conversation_id);
                     }
                 }
             }
@@ -1843,6 +1885,10 @@ pub async fn send_chat_message(
         .map(|entry| {
             if let Some(checkpoint) = turn_checkpoint.as_deref() {
                 let _ = queries::set_activity_checkpoint(&conn, &entry.id, checkpoint);
+            }
+            // The question's files and skill, for the chips a reload draws under it.
+            if let Some(json) = question_files_json(&attachments, skill.as_ref()) {
+                let _ = queries::set_activity_question_files(&conn, &entry.id, &json);
             }
             if !context_sources.is_empty() {
                 let _ = queries::set_activity_context(&conn, &entry.id, &serde_json::to_string(&context_sources).unwrap_or_default());

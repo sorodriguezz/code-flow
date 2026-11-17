@@ -6,21 +6,40 @@ import type { ChatConversationSummary } from "../types/domain";
 interface ChatHistoryState {
   byProject: Record<string, ChatConversationSummary[]>;
   loaded: Record<string, boolean>;
+  /** When (ms) the read behind each project's current list *started* — what the list can vouch for.
+   *  A conversation that changed after that is simply not in it yet, which is not «deleted». */
+  listedAt: Record<string, number>;
   load: (projectId: string) => Promise<void>;
   remove: (projectId: string, sessionId: string) => Promise<void>;
   rename: (projectId: string, sessionId: string, title: string) => Promise<void>;
 }
 
+const loadSeq = new Map<string, number>();
+
 export const useChatHistoryStore = create<ChatHistoryState>((set) => ({
   byProject: {},
   loaded: {},
+  listedAt: {},
 
   load: async (projectId) => {
     ensureTitleListener();
-    const conversations = await listChatConversations(projectId);
+    // Sequenced: two loads close together (two conversations finishing at once) could land out of
+    // order, and the older list would overwrite the newer one.
+    const seq = (loadSeq.get(projectId) ?? 0) + 1;
+    loadSeq.set(projectId, seq);
+    const startedAt = Date.now();
+    let conversations: ChatConversationSummary[];
+    try {
+      conversations = await listChatConversations(projectId);
+    } catch {
+      // Left unloaded: the next caller tries again. Never an unhandled rejection.
+      return;
+    }
+    if (loadSeq.get(projectId) !== seq) return;
     set((s) => ({
       byProject: { ...s.byProject, [projectId]: conversations },
       loaded: { ...s.loaded, [projectId]: true },
+      listedAt: { ...s.listedAt, [projectId]: startedAt },
     }));
   },
 

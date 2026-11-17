@@ -1,7 +1,7 @@
 import { DEFAULT_CHAT_PERMISSIONS, permissionsArg, type ChatPermissions } from "../lib/chatPermissions";
 import { create } from "zustand";
 import { speakAnswer } from "../lib/speech/speakAnswer";
-import { isRepoBusy } from "../lib/tauri/commands";
+import { getSetting, isRepoBusy, setSetting } from "../lib/tauri/commands";
 import { COLLAB_BUSY_MARKER } from "../lib/tauri/collabCommands";
 import { markWaitingForTurn } from "./sharedChatStore";
 import {
@@ -18,6 +18,9 @@ import {
   chatListWorkspaceConversations,
   chatListStagedAttachments,
   chatRemoveAttachment,
+  chatUncompact,
+  chatContinueInNewThread,
+  questionFiles,
   chatRenameConversation,
   chatSend,
   chatCavemanLevels,
@@ -41,6 +44,7 @@ import type { ContextSource } from "../lib/editorContext";
 import type { TurnUsage } from "../types/domain";
 import { registerTabBusyProbe, useAiPanelStore } from "./aiPanelStore";
 import {
+  CANCELLED_MARKER,
   isCancellation,
   newRunId,
   snapshotTrace,
@@ -63,6 +67,7 @@ import { traceOf } from "./conversationStore";
 import { translate } from "./languageStore";
 import { notify } from "./notificationStore";
 import { pushErrorToast, pushSuccessToast } from "./toastStore";
+import { useWorkspaceStore } from "./workspaceStore";
 import { confirmAction } from "./confirmStore";
 import type { EditingTurn } from "./chatStore";
 import { learnedKey } from "../lib/memoryToast";
@@ -187,7 +192,10 @@ interface WsChatState {
   /** The running turn is stopped and the same question asked again — for a run that has stalled. */
   retryTurn: (conversationId: string) => void;
   /** `/clear`: the next question starts without the earlier history (the transcript stays). */
-  clearContext: (conversationId: string) => Promise<void>;
+  /** Undoes a compaction: the next turn is sent the full transcript again, not the summary. */
+  uncompact: (conversationId: string) => Promise<void>;
+  /** `fromQueue`: the queue is applying a `/clear` it held — applied now, never queued again. */
+  clearContext: (conversationId: string, opts?: { fromQueue?: boolean }) => Promise<void>;
   /** «Bifurcar desde aquí»: a new workspace chat holding the turns up to `atTurn`, opened in its own tab. */
   branchAt: (conversationId: string, atTurn: number) => Promise<void>;
   /** Reads a persisted conversation's transcript (and a turn another window is running in it). */
@@ -214,7 +222,11 @@ interface WsChatState {
    * answered as one (user report, 2026-10-19). The backend already compacts these conversations by
    * itself when a turn would overflow — this is the same operation, asked for.
    */
-  compact: (conversationId: string) => Promise<void>;
+  /** The app's compaction; `guidance` is what `/compact …` asked the summary to keep. */
+  compact: (conversationId: string, guidance?: string) => Promise<void>;
+  /** `/continue`: a new workspace chat that starts from a summary of this one, on the same engine,
+   *  opened in its own tab. */
+  continueInNewThread: (conversationId: string, guidance?: string) => Promise<void>;
   /** The question each conversation's box is rewriting, if any («Editar y reenviar»). */
   editing: Record<string, EditingTurn | undefined>;
   beginEdit: (conversationId: string, index: number) => void;
@@ -231,12 +243,16 @@ interface WsChatState {
     opts?: { skill?: SkillPick | null },
   ) => Promise<boolean>;
   /** Sends now, or queues behind the turn that is running. */
-  submit: (conversationId: string, text: string, opts?: { skill?: SkillPick | null }) => void;
+  /** `files`: what this message carries instead of the composer's staged files (`[]` for none) —
+   *  passed by every send that is not the composer's own, so it never takes what was staged. */
+  submit: (conversationId: string, text: string, opts?: { skill?: SkillPick | null; files?: ChatAttachment[] }) => void;
   /** `files` are a queued question's own images; absent, the composer's staged ones go. */
   send: (conversationId: string, text: string, files?: ChatAttachment[], skill?: SkillPick | null) => void;
   drainQueue: (conversationId: string) => void;
   resumeQueue: (conversationId: string) => void;
   discardQueued: (conversationId: string, itemId: string) => void;
+  /** «Descartar todo»: the whole queue, and the copies of the files its messages carried. */
+  discardAllQueued: (conversationId: string) => void;
   editQueued: (conversationId: string, itemId: string) => QueuedChatMessage | null;
   stop: (conversationId: string) => void;
   takeRestored: (conversationId: string) => string | null;
@@ -343,6 +359,9 @@ export function messageFromRow(row: ChatMessageRow): WsChatMessage {
       row.unprotectedDirs && row.unprotectedDirs.length > 0
         ? row.unprotectedDirs
         : undefined,
+    // A question's chips — the files and skill it was asked with — as they were drawn live.
+    attachments: questionFiles(row.attachments),
+    skill: row.skill || undefined,
   };
 }
 
@@ -428,6 +447,11 @@ export function sessionFromRow(row: ChatConversation): WsChatSession {
     persisted: true,
   };
 }
+
+/** The exclusive lock's refusal (`ai_locks::WRITER_BUSY` after the busy marker): another turn is
+ *  writing in one of this turn's repositories. Waited on, not held. */
+const WRITER_BUSY_MARKER = "REPO_BUSY::writer:";
+const WRITER_RETRY_MS = 4000;
 
 /** The backend's refusal of a scope naming a repository that is not in the workspace. */
 const UNKNOWN_REPO_MARKER = "unknown repository for this workspace";
@@ -531,6 +555,105 @@ function listen(): void {
   });
 }
 
+// ── Per-conversation picks that outlive the window ─────────────────────────────────────────────
+//
+// Plan mode, «Completo» and the repository scope lived in this window's memory only: a restart (or
+// the panel copy of a chat an island had narrowed) started every chat back on «all repositories,
+// restricted, not planning». Kept in one setting, as the repository chat keeps its own picks
+// (`chatStore`'s `ai_panel_conversation_prefs`).
+const WS_PREFS_KEY = "ws_chat_prefs";
+const WS_MAX_PREFS = 200;
+interface WsPrefs {
+  plan?: true;
+  permissions?: "full";
+  scope?: string[];
+}
+let wsPrefs: Record<string, WsPrefs> = {};
+let wsPrefsLoad: Promise<void> | null = null;
+let wsPrefsTimer: ReturnType<typeof setTimeout> | null = null;
+/** Conversations whose picks were changed in this window: what is stored never overrides them. */
+const wsPrefsTouched = new Set<string>();
+
+function parseWsPrefs(raw: string | null): Record<string, WsPrefs> {
+  const out: Record<string, WsPrefs> = {};
+  try {
+    const parsed: unknown = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== "object") return out;
+    for (const [id, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!value || typeof value !== "object") continue;
+      const v = value as Record<string, unknown>;
+      const prefs: WsPrefs = {};
+      if (v.plan === true) prefs.plan = true;
+      if (v.permissions === "full") prefs.permissions = "full";
+      if (Array.isArray(v.scope) && v.scope.every((x) => typeof x === "string") && v.scope.length > 0) prefs.scope = v.scope as string[];
+      if (Object.keys(prefs).length > 0) out[id] = prefs;
+    }
+  } catch {
+    // A corrupt blob is a lost preference, never a broken chat.
+  }
+  return out;
+}
+
+function loadWsPrefs(): Promise<void> {
+  if (!wsPrefsLoad) {
+    wsPrefsLoad = getSetting(WS_PREFS_KEY)
+      .catch(() => null)
+      .then((raw) => {
+        wsPrefs = { ...parseWsPrefs(raw), ...wsPrefs };
+      });
+  }
+  return wsPrefsLoad;
+}
+
+/** Puts `conversationId`'s stored picks on its session, unless they were changed here already. */
+function applyWsPrefs(conversationId: string): void {
+  const prefs = wsPrefs[conversationId];
+  if (!prefs || wsPrefsTouched.has(conversationId)) return;
+  useWorkspaceChatStore.setState((s) => {
+    const session = s.byConversation[conversationId];
+    if (!session) return s;
+    return {
+      byConversation: {
+        ...s.byConversation,
+        [conversationId]: {
+          ...session,
+          plan: session.plan || prefs.plan === true,
+          permissions: prefs.permissions === "full" ? "full" : session.permissions,
+        },
+      },
+      scopeRepos:
+        prefs.scope && s.scopeRepos[conversationId] === undefined ? { ...s.scopeRepos, [conversationId]: prefs.scope } : s.scopeRepos,
+    };
+  });
+}
+
+function rememberWsPrefs(conversationId: string): void {
+  wsPrefsTouched.add(conversationId);
+  const s = useWorkspaceChatStore.getState();
+  const session = s.byConversation[conversationId];
+  const prefs: WsPrefs = {};
+  if (session?.plan) prefs.plan = true;
+  if (session?.permissions === "full") prefs.permissions = "full";
+  const scope = s.scopeRepos[conversationId];
+  if (scope && scope.length > 0) prefs.scope = scope;
+  const { [conversationId]: _old, ...rest } = wsPrefs;
+  wsPrefs = Object.keys(prefs).length > 0 ? { ...rest, [conversationId]: prefs } : rest;
+  if (wsPrefsTimer) clearTimeout(wsPrefsTimer);
+  wsPrefsTimer = setTimeout(() => {
+    wsPrefsTimer = null;
+    void loadWsPrefs().then(() =>
+      setSetting(WS_PREFS_KEY, JSON.stringify(Object.fromEntries(Object.entries(wsPrefs).slice(-WS_MAX_PREFS)))).catch(() => {}),
+    );
+  }, 400);
+}
+
+function forgetWsPrefs(conversationId: string): void {
+  if (!(conversationId in wsPrefs)) return;
+  const { [conversationId]: _gone, ...rest } = wsPrefs;
+  wsPrefs = rest;
+  void loadWsPrefs().then(() => setSetting(WS_PREFS_KEY, JSON.stringify(wsPrefs)).catch(() => {}));
+}
+
 export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
   const patch = (conversationId: string, change: (session: WsChatSession) => WsChatSession) =>
     set((s) => {
@@ -575,29 +698,70 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
     },
 
     scopeRepos: {},
-    setScope: (conversationId, projectIds) =>
+    setScope: (conversationId, projectIds) => {
       set((s) => ({
         scopeRepos: {
           ...s.scopeRepos,
           [conversationId]:
             projectIds && projectIds.length > 0 ? projectIds : null,
         },
-      })),
-    scopeFor: (conversationId) => get().scopeRepos[conversationId] ?? null,
+      }));
+      rememberWsPrefs(conversationId);
+    },
+    scopeFor: (conversationId) => {
+      const scope = get().scopeRepos[conversationId] ?? null;
+      if (!scope) return null;
+      // A repository removed from the workspace since it was picked is dropped from the scope here,
+      // before the turn goes out — rather than letting the backend refuse it and then widening the
+      // whole selection to every repository. Only against a loaded project list: one that has not
+      // loaded says nothing about what was removed.
+      const workspaceId = get().byConversation[conversationId]?.workspaceId;
+      const projects = workspaceId ? useWorkspaceStore.getState().projectsByWorkspace[workspaceId] : undefined;
+      if (!projects || projects.length === 0) return scope;
+      const kept = scope.filter((id) => projects.some((p) => p.id === id));
+      // Every picked repository is gone: kept as is, so the backend names it and the turn is refused,
+      // instead of an empty list silently meaning «all of them».
+      return kept.length > 0 ? kept : scope;
+    },
 
     retryTurn: (conversationId) => {
       const session = get().byConversation[conversationId];
       if (!session?.sending || !session.runId) return;
+      // A turn another window started has no promise here to re-ask from: the flag would never be
+      // cleared, and a later Stop of this window's own turn would re-send that question unasked.
+      // It is stopped, and its question asked again once its answer has been read back.
+      if (session.adopted) {
+        const question = [...session.messages].reverse().find((m) => m.role === "user");
+        const runId = session.runId;
+        void useAiRunStore
+          .getState()
+          .cancel(runId)
+          .then(() => {
+            if (!question) return;
+            const unsubscribe = useWorkspaceChatStore.subscribe((s) => {
+              const now = s.byConversation[conversationId];
+              if (now?.sending && now.runId === runId) return;
+              unsubscribe();
+              // Gone (deleted), or already busy with something else: nothing to re-ask into.
+              if (now && !now.sending) get().submit(conversationId, question.content, { files: [] });
+            });
+          });
+        return;
+      }
       retryAfterStop.add(conversationId);
       void useAiRunStore.getState().cancel(session.runId);
     },
 
-    clearContext: async (conversationId) => {
+    clearContext: async (conversationId, opts) => {
       const session = get().byConversation[conversationId];
       // Nothing stored has nothing to forget; and the backend refuses while a turn runs.
       if (!session || !session.persisted) return;
-      if (session.sending) {
-        pushErrorToast(translate("assistant.wsChatClearBusy"));
+      // Behind the running turn (or compaction), as the repository chat does it: queued, so it falls
+      // between that answer and the next question rather than being refused — or applied ahead of
+      // questions already waiting.
+      if (!opts?.fromQueue && (session.sending || get().compacting[conversationId] || queuedMessages(wsChatQueueKey(conversationId)).length > 0)) {
+        enqueueChatMessage(wsChatQueueKey(conversationId), { text: "/clear", command: { id: "clear", args: "" } });
+        get().drainQueue(conversationId);
         return;
       }
       try {
@@ -658,6 +822,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
         },
       }));
       pruneSessions();
+      void loadWsPrefs().then(() => applyWsPrefs(conversationId));
     },
 
     ensureLoaded: async (conversationId, workspaceId) => {
@@ -706,6 +871,11 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
         // A turn of this window's own is in flight: memory is the only copy of it.
         if (live?.sending && !live.adopted) return s;
         const base = { ...sessionFromRow(row), ...(live ? { streamText: live.streamText, restored: live.restored } : {}) };
+        // What only memory knows about a message is kept through a re-read — merged by exchange
+        // (turn and role, which memory and disk now number alike), never replaced wholesale. A remount
+        // (switching workspace, a tab past the kept-alive ones, an island coming back) used to drop
+        // the plan flag behind «Ejecutar el plan» and the chips of a live question.
+        const remembered = new Map((live?.messages ?? []).map((m) => [`${m.turn}:${m.role}`, m]));
         return {
           byConversation: {
             ...s.byConversation,
@@ -715,7 +885,14 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
                 ? rows.map((row) => {
                     const message = messageFromRow(row);
                     const changes = parseWsTurnChanges(checkpoints[row.id]);
-                    return changes ? { ...message, changes } : message;
+                    const mine = remembered.get(`${message.turn}:${message.role}`);
+                    return {
+                      ...message,
+                      ...(changes ? { changes } : mine?.changes ? { changes: mine.changes } : {}),
+                      ...(mine?.plan ? { plan: true } : {}),
+                      ...(!message.attachments && mine?.attachments ? { attachments: mine.attachments } : {}),
+                      ...(!message.skill && mine?.skill ? { skill: mine.skill } : {}),
+                    };
                   })
                 : (live?.messages ?? []),
               plan: live?.plan ?? false,
@@ -738,6 +915,17 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
           target: { openAiPanel: true, select: { kind: "workspaceChat", id: `${workspaceId}::${conversationId}` } },
           workspaceId,
         });
+        // The in-flight list was read before three other reads were awaited: a turn that ended in
+        // between sent its `ai:done` before this session was marked as adopting it, so nothing would
+        // ever settle it — Stop doing nothing, every question queued. Asked once more now.
+        const still = await chatInflightTurns().catch(() => null);
+        const current = get().byConversation[conversationId];
+        if (still && current?.adopted && current.runId === running.runId && !still.some((turn) => turn.runId === running.runId)) {
+          runToConversation.delete(running.runId);
+          useAiRunStore.getState().finish(running.runId);
+          patch(conversationId, (s) => ({ ...s, sending: false, adopted: false, runId: null, runStartedAt: null, streamText: "", loaded: false }));
+          await get().ensureLoaded(conversationId, workspaceId);
+        }
       }
     },
 
@@ -795,12 +983,18 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       if (session.persisted) await chatSetEffort(conversationId, effort).catch((e: unknown) => pushErrorToast(String(e)));
     },
 
-    setPlan: (conversationId, on) => patch(conversationId, (s) => ({ ...s, plan: on })),
-    setPermissions: (conversationId, permissions) => patch(conversationId, (s) => ({ ...s, permissions })),
+    setPlan: (conversationId, on) => {
+      patch(conversationId, (s) => ({ ...s, plan: on }));
+      rememberWsPrefs(conversationId);
+    },
+    setPermissions: (conversationId, permissions) => {
+      patch(conversationId, (s) => ({ ...s, permissions }));
+      rememberWsPrefs(conversationId);
+    },
 
     compacting: {},
 
-    compact: async (conversationId) => {
+    compact: async (conversationId, guidance) => {
       const session = get().byConversation[conversationId];
       // Nothing to summarise, or something already using this conversation's lease: the backend
       // refuses both as well, and refusing here is what keeps the button from looking broken.
@@ -814,7 +1008,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
         workspaceId: session.workspaceId,
       });
       try {
-        await chatCompact(conversationId, runId);
+        await chatCompact(conversationId, runId, guidance?.trim() || undefined);
         // What was measured described the context that has just been replaced, and the session it
         // was measured in is gone with it — `chat_compact` clears both on the row.
         patch(conversationId, (s) => ({ ...s, contextTokens: null, engineSessionId: null }));
@@ -823,6 +1017,55 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
         pushErrorToast(String(e));
       } finally {
         set((s) => ({ compacting: { ...s.compacting, [conversationId]: false } }));
+        // Settled here as the repository chat's is: `ai:done` only settles it locally, and a refusal
+        // before the run started (another window holds the lease) never sends one at all.
+        useAiRunStore.getState().finish(runId);
+        // What was written while the summary was being made goes now.
+        get().drainQueue(conversationId);
+      }
+    },
+
+    continueInNewThread: async (conversationId, guidance) => {
+      const session = get().byConversation[conversationId];
+      if (!session?.persisted || session.sending || get().compacting[conversationId]) return;
+      const runId = newRunId("chat");
+      // Shown as compacting: the summary is written by this thread's engine, under its lease.
+      set((s) => ({ compacting: { ...s.compacting, [conversationId]: true } }));
+      useAiRunStore.getState().start(runId, {
+        kindKey: "chat.compacting",
+        detail: session.title,
+        target: { openAiPanel: true, select: { kind: "workspaceChat", id: `${session.workspaceId}::${conversationId}` } },
+        workspaceId: session.workspaceId,
+      });
+      try {
+        const thread = await chatContinueInNewThread(
+          conversationId,
+          { provider: session.provider, model: session.model, account: session.accountId },
+          guidance ?? "",
+          runId,
+        );
+        await get().loadList(session.workspaceId);
+        await useChatLineageStore.getState().load(session.workspaceId, { force: true });
+        useAiPanelStore.getState().open({ kind: "wsChat", workspaceId: session.workspaceId, conversationId: thread.id });
+      } catch (e) {
+        pushErrorToast(String(e));
+      } finally {
+        set((s) => ({ compacting: { ...s.compacting, [conversationId]: false } }));
+        useAiRunStore.getState().finish(runId);
+        get().drainQueue(conversationId);
+      }
+    },
+
+    uncompact: async (conversationId) => {
+      const session = get().byConversation[conversationId];
+      if (!session?.persisted) return;
+      try {
+        await chatUncompact(conversationId);
+        // As the Chat app's: the measured figure described the compacted context.
+        patch(conversationId, (s) => ({ ...s, contextTokens: null }));
+        await get().loadList(session.workspaceId);
+      } catch (e) {
+        pushErrorToast(String(e));
       }
     },
 
@@ -887,11 +1130,18 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
             let cutId = wsEditPlan(current.messages, edit.index).cutId;
             if (!cutId) {
               // Neither message of the exchange has met its row id in this window (a stopped or failed
-              // turn): the question is the n-th user row on disk.
+              // turn): its row on disk. Matched by turn and words first — a question that failed
+              // before reaching the engine is not on disk, which shifts any count of user rows — then
+              // by its words alone, and only then by position.
               const rows = await chatGetConversation(conversationId, false);
+              const asked = current.messages[edit.index];
+              const questions = rows.filter((row) => row.role === "user");
+              const sameWords = asked?.content.trim() ? questions.filter((row) => (row.content ?? "").trim() === asked.content.trim()) : [];
               cutId =
-                rows.filter((row) => row.role === "user")[plan.userOrdinal]
-                  ?.id ?? null;
+                sameWords.find((row) => row.turn === asked?.turn)?.id ??
+                sameWords[sameWords.length - 1]?.id ??
+                questions[plan.userOrdinal]?.id ??
+                null;
             }
             if (cutId)
               contextResets =
@@ -924,22 +1174,32 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       if (!trimmed || !session) return;
       const key = wsChatQueueKey(conversationId);
       const skill = opts?.skill ?? null;
-      if (!session.sending && queuedMessages(key).length === 0) {
-        get().send(conversationId, trimmed, undefined, skill);
+      // A compaction holds the conversation's lease: a question sent beside it would be refused as
+      // busy and held. It waits in the queue instead and goes when the summary is done.
+      const busy = session.sending || Boolean(get().compacting[conversationId]);
+      if (!busy && queuedMessages(key).length === 0) {
+        get().send(conversationId, trimmed, opts?.files, skill);
         return;
       }
-      // A queued question takes the staged images with it: the box is free for the next one.
-      const files = get().attachments[conversationId] ?? [];
-      if (files.length > 0) set((s) => ({ attachments: { ...s.attachments, [conversationId]: [] } }));
+      // A queued question takes the staged images with it: the box is free for the next one. One
+      // that names its own files keeps them.
+      const files = opts?.files ?? get().attachments[conversationId] ?? [];
+      if (!opts?.files && files.length > 0) set((s) => ({ attachments: { ...s.attachments, [conversationId]: [] } }));
       enqueueChatMessage(key, { text: trimmed, attachments: files.length > 0 ? files : undefined, skill: skill ?? undefined });
       get().drainQueue(conversationId);
     },
 
     drainQueue: (conversationId) => {
       const session = get().byConversation[conversationId];
-      if (!session || session.sending) return;
+      if (!session || session.sending || get().compacting[conversationId]) return;
       const next = shiftChatQueue(wsChatQueueKey(conversationId));
-      if (next) get().send(conversationId, next.text, next.attachments ?? [], next.skill ?? null);
+      if (!next) return;
+      // A queued `/clear` is applied, and the queue moves on to what was written after it.
+      if (next.command?.id === "clear") {
+        void get().clearContext(conversationId, { fromQueue: true }).then(() => get().drainQueue(conversationId));
+        return;
+      }
+      get().send(conversationId, next.text, next.attachments ?? [], next.skill ?? null);
     },
 
     resumeQueue: (conversationId) => {
@@ -948,7 +1208,14 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
     },
 
     discardQueued: (conversationId, itemId) => {
-      takeQueuedChatMessage(wsChatQueueKey(conversationId), itemId);
+      const taken = takeQueuedChatMessage(wsChatQueueKey(conversationId), itemId);
+      // Its staged copies go with it, as the repository chat's do.
+      for (const file of taken?.attachments ?? []) void chatRemoveAttachment(conversationId, file.id).catch(() => {});
+    },
+
+    discardAllQueued: (conversationId) => {
+      for (const item of dropChatQueue(wsChatQueueKey(conversationId)))
+        for (const file of item.attachments ?? []) void chatRemoveAttachment(conversationId, file.id).catch(() => {});
     },
 
     editQueued: (conversationId, itemId) => takeQueuedChatMessage(wsChatQueueKey(conversationId), itemId),
@@ -980,10 +1247,13 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       try {
         await chatDeleteConversation(conversationId);
       } catch (e) {
-        pushErrorToast(String(e));
+        // The backend refuses while any window's turn holds the conversation's lease — a turn this
+        // window never adopted (an island's) included.
+        pushErrorToast(isRepoBusy(e) ? translate("assistant.wsChatDeleteBusy") : String(e));
         return false;
       }
       dropChatQueue(wsChatQueueKey(conversationId));
+      forgetWsPrefs(conversationId);
       recent = recent.filter((id) => id !== conversationId);
       set((s) => {
         const { [conversationId]: _gone, ...byConversation } = s.byConversation;
@@ -1025,7 +1295,9 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
       useAiRunStore.getState().start(runId, { kindKey: "agents.liveKindChat", detail: trimmed, target, workspaceId });
       runToConversation.set(runId, conversationId);
 
-      const lastTurn = session.messages.length > 0 ? session.messages[session.messages.length - 1].turn : -1;
+      // The highest turn so far, as `next_turn` reads it on disk (`MAX + 1`): a question and its
+      // answer share one number.
+      const lastTurn = session.messages.reduce((high, m) => Math.max(high, m.turn), -1);
       // Read when the turn goes out, as the repository chat does: a queued question takes the mode
       // the composer is in by the time its turn comes.
       const plan = session.plan;
@@ -1081,19 +1353,31 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
             model: row.model,
           }));
         }
-        return chatSend(
-          conversationId,
-          trimmed,
-          runId,
-          null,
-          null,
-          true,
-          files.map((file) => file.id),
-          skill ?? null,
-          plan,
-          scope,
-          permissionsArg(get().byConversation[conversationId]?.permissions, plan),
-        );
+        // Another turn writing in one of these repositories, with «un turno que escribe por
+        // repositorio» on: the question waits and goes when it is free, as the repository chat's
+        // does (`whenRepoFree`). A Stop meanwhile ends it as stopped. Anything else is thrown as is.
+        for (;;) {
+          try {
+            return await chatSend(
+              conversationId,
+              trimmed,
+              runId,
+              null,
+              null,
+              true,
+              files.map((file) => file.id),
+              skill ?? null,
+              plan,
+              scope,
+              permissionsArg(get().byConversation[conversationId]?.permissions, plan),
+            );
+          } catch (e) {
+            if (!String(e).includes(WRITER_BUSY_MARKER)) throw e;
+            if (useAiRunStore.getState().cancelling[runId]) throw new Error(CANCELLED_MARKER);
+            await new Promise((resolve) => setTimeout(resolve, WRITER_RETRY_MS));
+            if (useAiRunStore.getState().cancelling[runId]) throw new Error(CANCELLED_MARKER);
+          }
+        }
       };
 
       void run()
@@ -1103,7 +1387,10 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
             id: reply.message_id,
             role: "assistant",
             content: reply.text,
-            turn: lastTurn + 2,
+            // Its question's turn: both halves of an exchange share one, as the rows on disk do. It was
+            // `+ 2`, which numbered a transcript grown in this window as if each message were a turn,
+            // so a branch taken from it copied turns past the branch point.
+            turn: lastTurn + 1,
             createdAt: reply.created_at,
             provider: reply.provider,
             model: reply.model ?? undefined,
@@ -1188,8 +1475,15 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
           }
           // A repository in the scope was removed since it was picked: the picker's choice is stale,
           // and the error already names it. Back to all, so the next question is not refused too.
-          if (String(e).includes(UNKNOWN_REPO_MARKER))
-            get().setScope(conversationId, null);
+          // Only the repository it names leaves the scope: widening a narrowed selection to every
+          // repository would reach the ones the user excluded. When it was the last one, the scope
+          // goes back to all, and the error toast has said why the turn failed.
+          const unknownAt = String(e).indexOf(UNKNOWN_REPO_MARKER);
+          if (unknownAt >= 0) {
+            const unknown = String(e).slice(unknownAt + UNKNOWN_REPO_MARKER.length).replace(/^[:\s]+/, "").replace(/["\s]+$/, "");
+            const current = get().scopeRepos[conversationId] ?? [];
+            get().setScope(conversationId, current.filter((id) => id !== unknown));
+          }
           const cancelled = isCancellation(e);
           holdChatQueue(wsChatQueueKey(conversationId), cancelled ? "stopped" : "error");
           if (!cancelled) {
@@ -1211,7 +1505,7 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
                 id: `${questionId}-failed`,
                 role: "assistant",
                 content: cancelled ? "" : String(e),
-                turn: lastTurn + 2,
+                turn: lastTurn + 1,
                 createdAt: new Date().toISOString(),
                 provider: s.provider || undefined,
                 isError: !cancelled,

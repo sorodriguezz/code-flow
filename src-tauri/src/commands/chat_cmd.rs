@@ -488,6 +488,11 @@ pub struct LoadedMessage {
     usage: Option<ai::AiUsage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     unprotected_dirs: Vec<String>,
+    /// A question's files and skill (`TurnNotes::files` / `::skill`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<chat_queries::QuestionFile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skill: Option<String>,
 }
 
 fn loaded_messages(conn: &rusqlite::Connection, conversation_id: &str, with_trace: bool) -> rusqlite::Result<Vec<LoadedMessage>> {
@@ -496,7 +501,14 @@ fn loaded_messages(conn: &rusqlite::Connection, conversation_id: &str, with_trac
         .into_iter()
         .map(|row| {
             let n = notes.remove(&row.id).unwrap_or_default();
-            LoadedMessage { row, context: n.context, usage: n.usage, unprotected_dirs: n.unprotected_dirs }
+            LoadedMessage {
+                row,
+                context: n.context,
+                usage: n.usage,
+                unprotected_dirs: n.unprotected_dirs,
+                attachments: n.files,
+                skill: n.skill,
+            }
         })
         .collect())
 }
@@ -647,14 +659,20 @@ pub fn chat_list_workspace_conversations(
 
 /// What a workspace chat's next turn is told about the workspace — the same block `chat_send`
 /// appends — so the panel can show it without a turn.
+///
+/// Async, with the repositories read on a blocking thread: a synchronous command runs on the main
+/// thread, and opening two git repositories per project there stalled the window on a workspace
+/// with many of them every time the panel asked.
 #[tauri::command]
-pub fn workspace_chat_snapshot(db: State<'_, Db>, workspace_id: String) -> Result<WorkspaceChatSnapshot, String> {
-    let conn = db.0.lock().map_err(|e| e.to_string())?;
-    let projects = queries::list_projects(&conn, &workspace_id).map_err(|e| e.to_string())?;
+pub async fn workspace_chat_snapshot(db: State<'_, Db>, workspace_id: String) -> Result<WorkspaceChatSnapshot, String> {
+    let projects = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        queries::list_projects(&conn, &workspace_id).map_err(|e| e.to_string())?
+    };
     // Every repository is opened to read its branch: not under the lock.
-    drop(conn);
-    let repos = crate::workspace_chat::repo_lines(projects);
-    Ok(snapshot_of(&repos))
+    tokio::task::spawn_blocking(move || snapshot_of(&crate::workspace_chat::repo_lines(projects)))
+        .await
+        .map_err(|e| e.to_string())
 }
 
 fn snapshot_of(repos: &[crate::workspace_chat::RepoLine]) -> WorkspaceChatSnapshot {
@@ -1055,8 +1073,14 @@ pub fn chat_set_conversation_group(
 }
 
 /// Deletes the conversation and, by `ON DELETE CASCADE`, every message under it.
+///
+/// Refused with the busy marker while a turn of the conversation runs — in this window or another
+/// one: deleting under a live turn left the agent editing repositories and then writing orphaned
+/// message, checkpoint and notes rows for a conversation that no longer existed.
 #[tauri::command]
 pub fn chat_delete_conversation(db: State<'_, Db>, conversation_id: String) -> Result<(), String> {
+    let _lease = ai_locks::acquire_key(&conversation_id)
+        .ok_or_else(|| format!("{}{conversation_id}", ai_locks::BUSY_MARKER))?;
     {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         chat_queries::delete_conversation(&conn, &conversation_id).map_err(|e| e.to_string())?;
@@ -1282,13 +1306,22 @@ pub struct FailedTurnChanges {
 /// the turn changed nothing, it finished normally, or there is nothing yet. Works for both chats:
 /// a workspace conversation reads `chat_turn_checkpoints`, a repository one the `activity_log` row
 /// the failed turn was filed as (`claude_cmd::send_chat_message`).
+///
+/// `since_ms` (Unix milliseconds) is when the turn being asked about started. A repository
+/// conversation files a stopped turn only when it changed something, so without it the newest row
+/// could be an *earlier* failed turn's — whose review then showed twice, and whose row a later
+/// edit of the stopped turn cut from disk.
 #[tauri::command]
-pub fn chat_failed_turn_changes(db: State<'_, Db>, conversation_id: String) -> Result<Option<FailedTurnChanges>, String> {
+pub fn chat_failed_turn_changes(
+    db: State<'_, Db>,
+    conversation_id: String,
+    since_ms: Option<i64>,
+) -> Result<Option<FailedTurnChanges>, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    failed_turn_changes(&conn, &conversation_id)
+    failed_turn_changes(&conn, &conversation_id, since_ms)
 }
 
-fn failed_turn_changes(conn: &Connection, conversation_id: &str) -> Result<Option<FailedTurnChanges>, String> {
+fn failed_turn_changes(conn: &Connection, conversation_id: &str, since_ms: Option<i64>) -> Result<Option<FailedTurnChanges>, String> {
     let rows = chat_queries::list_messages(conn, conversation_id, false).map_err(|e| e.to_string())?;
     if let Some(last) = rows.iter().rev().find(|row| row.role == "assistant") {
         if !(last.is_error || last.is_cancelled) {
@@ -1300,14 +1333,22 @@ fn failed_turn_changes(conn: &Connection, conversation_id: &str) -> Result<Optio
             .find(|(message_id, _)| message_id == &last.id)
             .map(|(message_id, checkpoints)| FailedTurnChanges { message_id, checkpoint: None, checkpoints: Some(checkpoints) }));
     }
-    let latest: Option<(String, Option<String>, bool)> = conn
+    let latest: Option<(String, Option<String>, bool, String)> = conn
         .query_row(
-            "SELECT id, checkpoint, is_error FROM activity_log WHERE session_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            "SELECT id, checkpoint, is_error, created_at FROM activity_log WHERE session_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 1",
             rusqlite::params![conversation_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .ok();
-    Ok(latest.and_then(|(message_id, checkpoint, is_error)| {
+    Ok(latest.and_then(|(message_id, checkpoint, is_error, created_at)| {
+        // Filed before this turn started: it is another turn's. A row is written when its turn
+        // ends, so this turn's own is never older than its start.
+        if let Some(since) = since_ms {
+            let filed_ms = chrono::DateTime::parse_from_rfc3339(&created_at).map(|at| at.timestamp_millis()).ok()?;
+            if filed_ms < since {
+                return None;
+            }
+        }
         let checkpoint = checkpoint.filter(|json| is_error && !json.trim().is_empty())?;
         Some(FailedTurnChanges { message_id, checkpoint: Some(checkpoint), checkpoints: None })
     }))
@@ -1527,7 +1568,11 @@ pub async fn chat_send(
     // Only the repositories this turn was scoped to — before anything is derived from the list, so
     // the live block, `--add-dir`, the presence locks, the restore points, the knowledge and the
     // `@` mentions all see the same set.
+    let all_paths: Vec<(String, String)> = ws_projects.iter().map(|p| (p.id.clone(), p.local_path.clone())).collect();
     let (ws_projects, ws_excluded) = select_repos(ws_projects, repos.as_deref().filter(|_| workspace_scope))?;
+    // Where the left-out repositories live: the turn's file tools may not write there (`codemap::mcp`).
+    let ws_excluded_roots: Vec<String> =
+        all_paths.into_iter().filter(|(id, _)| ws_excluded.contains(id)).map(|(_, path)| path).collect();
     // A shared chat (`crate::collab`) works in this person's session worktrees, and only in the
     // repositories of the session, never in their own checkouts.
     let shared = if workspace_scope { crate::collab::chat::session_of(db.inner(), &conversation_id)? } else { None };
@@ -1558,6 +1603,13 @@ pub async fn chat_send(
         let name = if conversation.title.trim().is_empty() { &conversation_id } else { &conversation.title };
         format!("{}{name}", ai_locks::BUSY_MARKER)
     })?;
+    // The run is cancellable from here on, through every step before the engine and across the
+    // compaction that may precede it — see `ai_runs::Reservation`. Its `ai:done` is sent when this
+    // turn returns, not when the first of its scopes does.
+    let reservation = ai_runs::reserve(&app, run_id.as_deref());
+    // The id itself moves into the run's scope; its failed-turn cost is looked up by it afterwards.
+    let run_key = run_id.clone();
+    let stopped = || reservation.as_ref().is_some_and(ai_runs::Reservation::cancelled);
     // A shared turn takes its repositories for everyone (one turn at a time per repository), hears
     // what the others did since this machine's last turn, and posts the question to the thread.
     // Dropped without `finish` (an early return), it releases its locks on its own.
@@ -1577,6 +1629,12 @@ pub async fn chat_send(
     // A workspace chat is listed in every repository it can reach, so the turns working in any of
     // them know it is there — and it hears who else is in them.
     let ws_presence = ai_locks::enter_all(&ws_extra_dirs, &ai::chat_presence_label(&message));
+    // With «un turno que escribe por repositorio» on, a writing turn holds every working copy it may
+    // write in until it ends — all of them or none; a second one waits on the busy marker
+    // (`ai_locks::writers`). Here, before the question is written down, so a refused turn leaves
+    // nothing behind: no question without an answer, no restore point to settle.
+    let writer_paths: Vec<String> = project.iter().map(|p| p.local_path.clone()).chain(ws_extra_dirs.iter().cloned()).collect();
+    let _writer = ai_locks::writers(&writer_paths, !plan && (project.is_some() || workspace_scope))?;
 
     // Routing, most specific first: what this turn asked for, then what the conversation was
     // opened on, then the global `chat` route. The middle step is what keeps a reopened
@@ -1630,6 +1688,11 @@ pub async fn chat_send(
     // compaction, so its token is still in this variable and resuming it would continue the very
     // session whose contents were just replaced with a summary.
     let session_id = session_id.filter(|_| !auto_compacted);
+    // Stopped while preparing or compacting: nothing of this turn is on disk yet (the question is
+    // written below), so it ends here — the way a stop that reached the engine ends, as cancelled.
+    if stopped() {
+        return Err(ai_runs::CANCELLED_MARKER.to_string());
+    }
 
     // Before the lock below, never inside it: for most engines this reads a setting through
     // `ai_usage::setting`, which takes the same `Db` mutex — and a `std` mutex locked twice from one
@@ -1706,10 +1769,11 @@ pub async fn chat_send(
     let turn = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let turn = chat_queries::next_turn(&conn, &conversation_id).map_err(|e| e.to_string())?;
+        let question_id = uuid::Uuid::new_v4().to_string();
         chat_queries::append_message(
             &conn,
             &ChatMessageRow {
-                id: uuid::Uuid::new_v4().to_string(),
+                id: question_id.clone(),
                 conversation_id: conversation_id.clone(),
                 turn,
                 role: "user".to_string(),
@@ -1729,6 +1793,24 @@ pub async fn chat_send(
             },
         )
         .map_err(|e| e.to_string())?;
+        // What the question carried, on the question — the chips a reload draws under it.
+        let _ = chat_queries::set_message_notes(
+            &conn,
+            &question_id,
+            &chat_queries::TurnNotes {
+                files: attachments
+                    .iter()
+                    .map(|file| chat_queries::QuestionFile {
+                        id: std::path::Path::new(&file.path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                        name: file.name.clone(),
+                        path: file.path.clone(),
+                        is_image: file.is_image,
+                    })
+                    .collect(),
+                skill: skill.as_ref().map(|pick| pick.name.clone()),
+                ..Default::default()
+            },
+        );
         // A no-op once the thread has any title, including one the user typed, so calling it every
         // turn is both safe and intended. It does not bump `updated_at` — the append above already
         // did.
@@ -1832,7 +1914,7 @@ pub async fn chat_send(
     // statement, on a turn that may write. Held until the turn ends: dropping the grant
     // revokes its token. Agy and Grok get the best passages with the question instead, below.
     let ws_knowledge = if workspace_scope && matches!(config.provider.as_str(), "claude" | "codex" | "opencode" | "cline") {
-        crate::codemap::mcp::for_workspace_chat_without(&conversation.workspace_id, may_write, full_access, &ws_excluded)
+        crate::codemap::mcp::for_workspace_chat_without(&conversation.workspace_id, may_write, full_access, &ws_excluded, &ws_excluded_roots)
     } else {
         None
     };
@@ -2181,7 +2263,9 @@ pub async fn chat_send(
     // apply (`checkpoint::settle_turn`), so a read-only question never evicts a real one.
     let mut snapshot_paths: Vec<String> = project.iter().map(|p| p.local_path.clone()).collect();
     snapshot_paths.extend(ws_extra_dirs.iter().cloned());
-    let taken: Vec<(String, Option<String>)> = if snapshot {
+    // Not for a turn already stopped: snapshotting every repository of a workspace is the slowest
+    // step before the engine, and the engine call below ends at once as cancelled.
+    let taken: Vec<(String, Option<String>)> = if snapshot && !stopped() {
         let ids = crate::git::checkpoint::snapshot_turn(&snapshot_paths, "chat").await;
         snapshot_paths.into_iter().zip(ids).collect()
     } else {
@@ -2274,7 +2358,18 @@ pub async fn chat_send(
         }
         Err(e) => {
             let cancelled = e.starts_with(ai_runs::CANCELLED_MARKER);
+            // The session this turn resumed is gone from the CLI's own store: every later turn
+            // would fail the same way while the row keeps naming it. Dropped below, so the next
+            // question opens a fresh session and is handed the transcript (`replayed_prefix`).
+            let stale = !cancelled && session_id.is_some() && ai::is_stale_session_error(&e);
+            let e = if stale { ai::stale_session_note(&e) } else { e };
             if let Ok(conn) = db.0.lock() {
+                if stale {
+                    let _ = conn.execute(
+                        "UPDATE chat_conversations SET engine_session_id = NULL, context_tokens = NULL WHERE id = ?1",
+                        rusqlite::params![conversation_id],
+                    );
+                }
                 // A failure is worth a mark too — arguably more than an answer is. A run that died
                 // while the user was in another conversation is exactly the thing that otherwise
                 // goes unnoticed until they wonder why a thread never replied. A turn the user
@@ -2316,7 +2411,13 @@ pub async fn chat_send(
                 let _ = chat_queries::set_message_notes(
                     &conn,
                     &assistant_message_id,
-                    &chat_queries::TurnNotes { context: context_sources.clone(), usage: None, unprotected_dirs: ws_unprotected.clone() },
+                    &chat_queries::TurnNotes {
+                        context: context_sources.clone(),
+                        // What it spent before it failed or was stopped, when the CLI said.
+                        usage: run_key.as_deref().and_then(ai::take_failed_usage).filter(|usage| !usage.is_empty()),
+                        unprotected_dirs: ws_unprotected.clone(),
+                        ..Default::default()
+                    },
                 );
             }
             if let Some(t) = shared_turn.take() {
@@ -2369,6 +2470,7 @@ pub async fn chat_send(
                         context: context_sources.clone(),
                         usage: run.usage.clone().filter(|usage| !usage.is_empty()),
                         unprotected_dirs: ws_unprotected.clone(),
+                        ..Default::default()
                     },
                 );
                 // An answer has landed. Marked unread here rather than left to the frontend,
@@ -2379,13 +2481,37 @@ pub async fn chat_send(
                 let _ = chat_queries::set_unread(&conn, &conversation_id, true);
                 // Written back so the next turn resumes this session, and so the transcript can say
                 // which model answered when the engine picked for itself.
+                // An engine the user re-picked while this turn ran (`chat_set_engine` takes no
+                // lease, on purpose: the picker must not freeze during a long answer) is theirs and
+                // stays. Writing this turn's provider, model and account over it reverted the pick
+                // without a word. A provider or account switch also dropped the session — the one
+                // this turn reports belongs to the engine that was replaced, so it is not kept.
+                let now_row = chat_queries::get_conversation(&conn, &conversation_id).ok().flatten();
+                let repicked = now_row.as_ref().filter(|row| {
+                    row.provider != conversation.provider
+                        || row.account_id != conversation.account_id
+                        || row.model != conversation.model
+                });
+                let switched = repicked.is_some_and(|row| {
+                    row.provider != conversation.provider || row.account_id != conversation.account_id
+                });
+                let (kept_provider, kept_account, kept_model) = match repicked {
+                    Some(row) => (row.provider.clone(), row.account_id.clone(), Some(row.model.clone())),
+                    None => (config.provider.clone(), config.account_id().map(str::to_string), None),
+                };
                 let _ = chat_queries::update_session(
                     &conn,
                     &conversation_id,
-                    run.session_id.as_deref(),
-                    &config.provider,
-                    config.account_id(),
-                    run.model.as_deref().unwrap_or(&config.model),
+                    // A run that reported no session (some engines, some exits) keeps the one the
+                    // row had: writing NULL over it made the next turn forget the whole thread.
+                    if switched {
+                        None
+                    } else {
+                        run.session_id.as_deref().or(now_row.as_ref().and_then(|row| row.engine_session_id.as_deref()))
+                    },
+                    &kept_provider,
+                    kept_account.as_deref(),
+                    kept_model.as_deref().unwrap_or_else(|| run.model.as_deref().unwrap_or(&config.model)),
                     // The engine's own figure for what it was holding on the last step of this
                     // turn — see `AiRun::context_tokens` for why that is a different number from
                     // `usage.input_tokens` and why the meter must not use the latter. `None` from
@@ -3508,13 +3634,23 @@ pub(crate) async fn mcp_plan(
     overrides: &str,
 ) -> crate::chat_mcp::TurnMcp {
     let overrides = crate::chat_mcp::parse_overrides(overrides);
-    let app = match db.0.lock() {
+    let candidates = match db.0.lock() {
         Ok(conn) => {
             let store = crate::db::api_secrets::os_store();
             let _ = crate::mcp_registry::absorb_legacy(&conn, &store);
-            crate::mcp_registry::live_servers(&conn, &store, workspace_id, provider, &overrides)
+            Some(crate::mcp_registry::live_candidates(&conn, workspace_id, provider, &overrides))
         }
-        Err(_) => Vec::new(),
+        Err(_) => None,
+    };
+    // The secrets are read with the database lock released, and off the async threads: a keychain
+    // access prompt used to hold every database command behind it (`mcp_registry::LiveCandidates`).
+    let app = match candidates {
+        Some(candidates) => tokio::task::spawn_blocking(move || {
+            crate::mcp_registry::unseal_live(candidates, &crate::db::api_secrets::os_store())
+        })
+        .await
+        .unwrap_or_default(),
+        None => Vec::new(),
     };
     let (servers, allowed) = native_mcp(provider, binary, env, None).await;
     crate::chat_mcp::plan(provider, &servers, &overrides, &allowed, app)
@@ -4074,6 +4210,7 @@ mod tests {
             on_disk,
             is_git,
             spec_dirs: vec![],
+            git_state: String::new(),
         };
         let snapshot = snapshot_of(&[
             line("a", "/x/a", true, true, "main"),
@@ -4107,7 +4244,7 @@ mod tests {
         let conn = install();
         let ws = workspace(&conn);
         let conv = chat_queries::create_conversation(&conn, &ws, None, "claude", None, "m", "").unwrap();
-        assert!(failed_turn_changes(&conn, &conv.id).unwrap().is_none(), "nothing yet");
+        assert!(failed_turn_changes(&conn, &conv.id, None).unwrap().is_none(), "nothing yet");
         say(&conn, &conv.id, 1, "user", "q");
         let row = |id: &str, turn: i64, cancelled: bool| ChatMessageRow {
             id: id.into(),
@@ -4126,16 +4263,16 @@ mod tests {
             created_at: String::new(),
         };
         chat_queries::append_message(&conn, &row("a1", 1, true)).unwrap();
-        assert!(failed_turn_changes(&conn, &conv.id).unwrap().is_none(), "a cancelled turn that changed nothing");
+        assert!(failed_turn_changes(&conn, &conv.id, None).unwrap().is_none(), "a cancelled turn that changed nothing");
         chat_queries::set_turn_checkpoints(&conn, "a1", &conv.id, "[{\"repo\":\"r\"}]").unwrap();
-        let found = failed_turn_changes(&conn, &conv.id).unwrap().unwrap();
+        let found = failed_turn_changes(&conn, &conv.id, None).unwrap().unwrap();
         assert_eq!(found.message_id, "a1");
         assert_eq!(found.checkpoints.as_deref(), Some("[{\"repo\":\"r\"}]"));
         assert!(found.checkpoint.is_none());
         // The next turn finishes normally: the earlier failure is not the latest turn any more.
         say(&conn, &conv.id, 2, "user", "q2");
         chat_queries::append_message(&conn, &row("a2", 2, false)).unwrap();
-        assert!(failed_turn_changes(&conn, &conv.id).unwrap().is_none());
+        assert!(failed_turn_changes(&conn, &conv.id, None).unwrap().is_none());
     }
 
     #[test]
@@ -4151,15 +4288,19 @@ mod tests {
         let meta = || crate::db::queries::TurnMeta { provider: None, account_id: None, model: None, engine_version: None, response_time_ms: None };
         let finished = crate::db::queries::add_activity_log(&conn, "p", "conv", None, "q1", "a1", None, meta(), false).unwrap();
         crate::db::queries::set_activity_checkpoint(&conn, &finished.id, r#"{"id":"x","paths":["f"]}"#).unwrap();
-        assert!(failed_turn_changes(&conn, "conv").unwrap().is_none(), "a finished turn is not a failure");
+        assert!(failed_turn_changes(&conn, "conv", None).unwrap().is_none(), "a finished turn is not a failure");
         let failed =
             crate::db::queries::add_activity_log(&conn, "p", "conv", None, "q2", ai_runs::CANCELLED_MARKER, None, meta(), true).unwrap();
-        assert!(failed_turn_changes(&conn, "conv").unwrap().is_none(), "no checkpoint, no changes");
+        assert!(failed_turn_changes(&conn, "conv", None).unwrap().is_none(), "no checkpoint, no changes");
         crate::db::queries::set_activity_checkpoint(&conn, &failed.id, r#"{"id":"y","paths":["g"]}"#).unwrap();
-        let found = failed_turn_changes(&conn, "conv").unwrap().unwrap();
+        let found = failed_turn_changes(&conn, "conv", None).unwrap().unwrap();
         assert_eq!(found.message_id, failed.id);
         assert_eq!(found.checkpoint.as_deref(), Some(r#"{"id":"y","paths":["g"]}"#));
         assert!(found.checkpoints.is_none());
+        // A later turn, stopped before it changed anything, files no row: the failed one above is
+        // not its review.
+        let later = chrono::Utc::now().timestamp_millis() + 60_000;
+        assert!(failed_turn_changes(&conn, "conv", Some(later)).unwrap().is_none(), "an earlier turn's row");
     }
 
     fn say(conn: &Connection, conversation_id: &str, turn: i64, role: &str, content: &str) {
@@ -4207,6 +4348,7 @@ mod tests {
             }],
             usage: Some(ai::AiUsage { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0, cost_usd: Some(0.5) }),
             unprotected_dirs: vec!["/plain".into()],
+            ..Default::default()
         };
         chat_queries::set_message_notes(&conn, &answer, &notes).unwrap();
         // Empty notes file nothing.
@@ -4221,6 +4363,24 @@ mod tests {
         for key in ["context", "usage", "unprotectedDirs"] {
             assert!(json[0].get(key).is_none() && json[2].get(key).is_none(), "{key} only on a turn that has it");
         }
+        // A question's chips: its files and skill, camelCase like the rest.
+        let question = rows[0].id.clone();
+        chat_queries::set_message_notes(
+            &conn,
+            &question,
+            &chat_queries::TurnNotes {
+                files: vec![chat_queries::QuestionFile { id: "x-a.png".into(), name: "a.png".into(), path: "/c/x-a.png".into(), is_image: true }],
+                skill: Some("lint".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let loaded = loaded_messages(&conn, &c.id, false).unwrap();
+        let json = serde_json::to_value(&loaded[0]).unwrap();
+        assert_eq!(json["attachments"][0]["isImage"], true);
+        assert_eq!(json["attachments"][0]["id"], "x-a.png");
+        assert_eq!(json["skill"], "lint");
+        assert!(serde_json::to_value(&loaded[1]).unwrap().get("attachments").is_none());
     }
 
     /// The ordinary first turn: there is nothing behind it, so nothing is replayed and the user

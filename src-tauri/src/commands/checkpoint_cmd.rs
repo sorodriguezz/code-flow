@@ -83,6 +83,51 @@ pub fn ai_checkpoint_file(repo_path: String, checkpoint_id: String, path: String
     }
 }
 
+/// One repository's part of a turn, as the workspace chat's review lists it.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnPart {
+    pub repo_path: String,
+    pub checkpoint_id: String,
+    pub paths: Vec<String>,
+}
+
+/// «Deshacer el turno»: every file a workspace-chat turn changed, in every repository, put back as
+/// it was before the turn — one action where there used to be one per repository.
+///
+/// All or nothing as far as it can be: every repository's write lock is taken and every checkpoint
+/// is read for every file **before** any file is written, so a rotated restore point (or an
+/// unreadable file) in the third repository refuses the whole undo instead of leaving the first
+/// two reverted. Like the review's «Descartar todo», it reverts what was written after the turn in
+/// those files as well — which is why the panel asks first.
+#[tauri::command(async)]
+pub fn restore_ai_turn(parts: Vec<TurnPart>) -> Result<Vec<String>, String> {
+    let guards = crate::git::write_locks(parts.iter().map(|part| part.repo_path.as_str()));
+    let mut prepared: Vec<(&TurnPart, Vec<checkpoint::ReviewedEdit>)> = Vec::new();
+    for part in &parts {
+        let mut edits = Vec::new();
+        for rel in &part.paths {
+            // Read now so a missing checkpoint fails here, before anything is written anywhere.
+            checkpoint::file_at(&part.repo_path, &part.checkpoint_id, rel)?;
+            let current = crate::fsops::read_bytes_in_repo(&part.repo_path, rel)?;
+            edits.push(checkpoint::ReviewedEdit {
+                path: rel.clone(),
+                expected_revision: checkpoint::file_revision(current.as_deref()),
+                content: None,
+            });
+        }
+        prepared.push((part, edits));
+    }
+    let mut restored = Vec::new();
+    for (part, edits) in prepared {
+        let done = checkpoint::restore_reviewed(&part.repo_path, &part.checkpoint_id, &edits)?;
+        record_revert(&part.repo_path, &part.checkpoint_id, &done);
+        restored.extend(done.into_iter().map(|path| format!("{}/{path}", part.repo_path.trim_end_matches('/'))));
+    }
+    drop(guards);
+    Ok(restored)
+}
+
 /// Puts the named files back as the checkpoint has them — "discard" on a file of the per-turn
 /// review. Sync, like [`restore_ai_checkpoint`]: a write.
 #[tauri::command(async)]
@@ -91,4 +136,60 @@ pub fn restore_ai_checkpoint_paths(repo_path: String, checkpoint_id: String, edi
     let restored = checkpoint::restore_reviewed(&repo_path, &checkpoint_id, &edits)?;
     record_revert(&repo_path, &checkpoint_id, &restored);
     Ok(restored)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn repo_with(file: &str, text: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("cf-turn-undo-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let repo = git2::Repository::init(&dir).unwrap();
+        fs::write(dir.join(file), text).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(std::path::Path::new(file)).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("T", "t@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+        dir
+    }
+
+    /// Two repositories changed by one turn come back together; a missing restore point in either
+    /// refuses the undo before anything is written.
+    #[test]
+    fn a_turn_is_undone_in_every_repository_or_in_none() {
+        let a = repo_with("a.txt", "before a\n");
+        let b = repo_with("b.txt", "before b\n");
+        let (pa, pb) = (a.to_str().unwrap().to_string(), b.to_str().unwrap().to_string());
+        let ca = checkpoint::create(&pa, "chat").unwrap();
+        let cb = checkpoint::create(&pb, "chat").unwrap();
+        fs::write(a.join("a.txt"), "after a\n").unwrap();
+        fs::write(b.join("b.txt"), "after b\n").unwrap();
+
+        let broken = vec![
+            TurnPart { repo_path: pa.clone(), checkpoint_id: ca.clone(), paths: vec!["a.txt".into()] },
+            TurnPart { repo_path: pb.clone(), checkpoint_id: "gone".into(), paths: vec!["b.txt".into()] },
+        ];
+        assert!(restore_ai_turn(broken).is_err());
+        assert_eq!(fs::read_to_string(a.join("a.txt")).unwrap(), "after a\n", "nothing was written");
+
+        let parts = vec![
+            TurnPart { repo_path: pa.clone(), checkpoint_id: ca, paths: vec!["a.txt".into()] },
+            TurnPart { repo_path: pb.clone(), checkpoint_id: cb, paths: vec!["b.txt".into()] },
+        ];
+        assert_eq!(restore_ai_turn(parts).unwrap().len(), 2);
+        assert_eq!(fs::read_to_string(a.join("a.txt")).unwrap(), "before a\n");
+        assert_eq!(fs::read_to_string(b.join("b.txt")).unwrap(), "before b\n");
+        let _ = (fs::remove_dir_all(&a), fs::remove_dir_all(&b));
+    }
+
+    /// Two paths on one stripe are locked once, not twice (which would wait forever).
+    #[test]
+    fn several_write_locks_never_take_one_stripe_twice() {
+        let guards = crate::git::write_locks(["/x/repo", "/x/repo/", "/X/REPO"]);
+        assert_eq!(guards.len(), 1);
+    }
 }

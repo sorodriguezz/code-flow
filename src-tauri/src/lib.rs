@@ -654,6 +654,16 @@ pub fn run() {
             // layout migration could not vouch for the state root, no connection is put on it at all
             // (`db::init_scratch`) and `DataDirsNotice` blocks the window, as before. See `boot_guard`.
             boot_guard::open(app.handle());
+            // The AI CLIs a crash or a force-quit of the last session left running (and editing
+            // repositories): stopped now, each only if it is provably the process that was started —
+            // see `ai_runs::orphans`. After the single-instance check, so a second launch never stops
+            // the first one's runs; on a thread, since it waits a moment for them to exit.
+            std::thread::spawn(|| {
+                let stopped = ai_runs::orphans::sweep();
+                if !stopped.is_empty() {
+                    applog::warn(&format!("stopped {} AI process(es) left running by the last session: {stopped:?}", stopped.len()));
+                }
+            });
             // Before `take_over`, so no launch is without it: the cleanup for the exits that skip
             // `RunEvent::Exit` — a Windows update installed from the frontend above all. See `shutdown`.
             {
@@ -896,6 +906,17 @@ pub fn run() {
             if let Ok(conn) = app.state::<db::Db>().0.lock() {
                 if let Ok(stored) = db::queries::get_setting(&conn, git::lock_rules::SETTING_KEY) {
                     git::lock_rules::set_rules(git::lock_rules::resolve_stored(stored.as_deref()));
+                }
+                // The checkpoint cap and whether ignored env files are snapshotted — mirrored for the
+                // same reason (`git::checkpoint::setting_changed`).
+                for key in [git::checkpoint::MAX_SETTING, git::checkpoint::ENV_SETTING] {
+                    if let Ok(stored) = db::queries::get_setting(&conn, key) {
+                        git::checkpoint::setting_changed(key, stored.as_deref());
+                    }
+                }
+                // Whether writing chat turns are exclusive per working copy (`ai_locks::writers`).
+                if let Ok(stored) = db::queries::get_setting(&conn, ai_locks::EXCLUSIVE_SETTING) {
+                    ai_locks::setting_changed(ai_locks::EXCLUSIVE_SETTING, stored.as_deref());
                 }
             }
             // The IRIS driver reaches its bundled Java runtime through this. Recorded here because
@@ -1751,6 +1772,7 @@ sharded_invoke_handler! {
         commands::checkpoint_cmd::ai_checkpoint_file,
         commands::tests_cmd::run_test_command,
         commands::checkpoint_cmd::restore_ai_checkpoint_paths,
+        commands::checkpoint_cmd::restore_ai_turn,
         commands::activity_cmd::search_assistant_chats,
         commands::checkpoint_cmd::delete_ai_checkpoint,
         commands::ado_cmd::ado_verify_pat,

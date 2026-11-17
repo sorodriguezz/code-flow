@@ -26,10 +26,52 @@ use super::repo::open;
 
 const REF_PREFIX: &str = "refs/codeflow/checkpoints/";
 
-/// How many checkpoints a repo keeps. Snapshots are cheap (git dedupes every unchanged blob), but
-/// they're refs that would otherwise pile up forever and keep their objects from ever being
-/// collected — and nobody undoes the fortieth-most-recent AI run.
+/// How many checkpoints a repo keeps by default. Snapshots are cheap (git dedupes every unchanged
+/// blob), but they're refs that would otherwise pile up forever and keep their objects from ever
+/// being collected. Twenty was the fixed cap; a busy day of workspace-chat turns rotated the review
+/// of the morning's turns out from under it, so it is now a setting ([`MAX_SETTING`]).
 const MAX_CHECKPOINTS: usize = 20;
+
+/// `app_settings` key: how many checkpoints each repository keeps (5–200).
+pub const MAX_SETTING: &str = "checkpoint_max";
+/// `app_settings` key: `"false"` leaves ignored `.env` files out of the snapshots.
+pub const ENV_SETTING: &str = "checkpoint_include_env";
+
+/// The two settings, mirrored here because this layer is handed a repository path and no database
+/// — and reading `app_settings` from a caller that already holds the database lock would wait on
+/// itself. Seeded at startup and on every write of either key (`commands::settings::set_setting`).
+static MAX_KEPT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(MAX_CHECKPOINTS);
+static INCLUDE_ENV: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Applies a stored value of [`MAX_SETTING`] or [`ENV_SETTING`]; any other key is ignored.
+pub fn setting_changed(key: &str, value: Option<&str>) {
+    use std::sync::atomic::Ordering;
+    match key {
+        MAX_SETTING => MAX_KEPT.store(parse_max(value), Ordering::Relaxed),
+        ENV_SETTING => INCLUDE_ENV.store(value.map(str::trim) != Some("false"), Ordering::Relaxed),
+        _ => {}
+    }
+}
+
+/// A stored cap: a number between 5 and 200, anything else the default.
+fn parse_max(value: Option<&str>) -> usize {
+    value.and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(MAX_CHECKPOINTS).clamp(5, 200)
+}
+
+fn max_checkpoints() -> usize {
+    MAX_KEPT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The largest ignored env file a snapshot carries. Env files are a few lines; anything bigger
+/// under that name is not one, and is not worth a blob per turn.
+const ENV_FILE_MAX_BYTES: u64 = 256 * 1024;
+
+/// Whether `path` names an env file: `.env`, `.env.local`, `.env.production`, `app.env`… The kind
+/// of ignored file a turn can overwrite and git can never give back.
+fn is_env_file(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name == ".env" || name.starts_with(".env.") || (name.ends_with(".env") && name.len() > 4)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointInfo {
@@ -46,8 +88,43 @@ pub struct CheckpointInfo {
     pub changed_paths: Vec<String>,
 }
 
-fn checkpoint_ref(id: &str) -> String {
-    format!("{REF_PREFIX}{id}")
+/// Where this working tree's checkpoints live.
+///
+/// Everything under `refs/` outside `refs/worktree/` is shared by every linked worktree of a
+/// repository, so one flat namespace let a second worktree's turns prune the first one's
+/// checkpoints, list them, and restore another branch's snapshot into the wrong tree. The main
+/// worktree keeps the flat namespace (every checkpoint taken before this split is there); a linked
+/// worktree files under `wt/<its name>/`, which the main one skips. Ids stay the last segment, so
+/// what the database stores is unchanged.
+fn namespace(repo: &Repository) -> String {
+    if !repo.is_worktree() {
+        return REF_PREFIX.to_string();
+    }
+    // A linked worktree's git dir is `<common>/worktrees/<name>/`: that name is unique per repo.
+    let name: String = repo
+        .path()
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .collect();
+    let name = name.trim_matches('.');
+    format!("{REF_PREFIX}wt/{}/", if name.is_empty() { "_" } else { name })
+}
+
+fn checkpoint_ref(repo: &Repository, id: &str) -> String {
+    format!("{}{id}", namespace(repo))
+}
+
+/// This working tree's checkpoint refs, by full name — never another worktree's.
+fn own_refs(repo: &Repository) -> Vec<git2::Reference<'_>> {
+    let ns = namespace(repo);
+    let Ok(refs) = repo.references_glob(&format!("{ns}*")) else { return Vec::new() };
+    refs.flatten()
+        // The main namespace's glob also matches `wt/…`: a checkpoint id never holds a `/`.
+        .filter(|reference| reference.name().and_then(|n| n.strip_prefix(&ns)).is_some_and(|id| !id.contains('/')))
+        .collect()
 }
 
 /// Snapshot signature. The repo's own identity when it has one, so `git log` on the checkpoint ref
@@ -62,7 +139,12 @@ fn signature(repo: &Repository) -> Result<git2::Signature<'static>, String> {
 
 /// Builds an in-memory index holding the current working tree: HEAD's tree as the base, then every
 /// path git reports as changed (staged, unstaged or untracked) overwritten with what's on disk.
-/// Ignored files are absent, since `statuses` never reports them here.
+///
+/// Ignored files are absent — with one exception: ignored env files ([`is_env_file`], up to
+/// [`ENV_FILE_MAX_BYTES`]), unless [`ENV_SETTING`] is off. An agent that rewrote `.env` left
+/// nothing to restore it from, and it is exactly the file git cannot give back. Ignored folders
+/// are not walked into (`node_modules` is one entry), so this costs nothing on a big tree. The
+/// snapshot is a local ref (`refs/codeflow/…`), never pushed by a normal push.
 fn snapshot_tree(repo: &Repository) -> Result<git2::Oid, String> {
     let mut index = git2::Index::new().map_err(|e| e.message().to_string())?;
     // `add_path` reads through the repo's workdir, which an unattached in-memory index doesn't
@@ -76,13 +158,22 @@ fn snapshot_tree(repo: &Repository) -> Result<git2::Oid, String> {
         }
     }
 
+    let include_env = INCLUDE_ENV.load(std::sync::atomic::Ordering::Relaxed);
     let mut opts = git2::StatusOptions::new();
-    opts.include_untracked(true).recurse_untracked_dirs(true).include_ignored(false);
+    opts.include_untracked(true).recurse_untracked_dirs(true).include_ignored(include_env).recurse_ignored_dirs(false);
     let statuses = repo.statuses(Some(&mut opts)).map_err(|e| e.message().to_string())?;
 
     let workdir = repo.workdir().ok_or_else(|| "bare repository".to_string())?.to_path_buf();
     for entry in statuses.iter() {
         let Some(path) = entry.path() else { continue };
+        if entry.status().contains(git2::Status::IGNORED) {
+            let file = workdir.join(path);
+            let small = std::fs::metadata(&file).map(|m| m.is_file() && m.len() <= ENV_FILE_MAX_BYTES).unwrap_or(false);
+            if is_env_file(path) && small {
+                index.add_path(Path::new(path)).map_err(|e| e.message().to_string())?;
+            }
+            continue;
+        }
         if workdir.join(path).is_file() {
             index.add_path(Path::new(path)).map_err(|e| e.message().to_string())?;
         } else {
@@ -97,7 +188,7 @@ fn snapshot_tree(repo: &Repository) -> Result<git2::Oid, String> {
 
 /// Takes a checkpoint of `path`'s working tree. Returns the new checkpoint's id.
 ///
-/// Prunes to [`MAX_CHECKPOINTS`] on the way, so every caller whose checkpoint is kept by
+/// Prunes to the cap ([`MAX_SETTING`]) on the way, so every caller whose checkpoint is kept by
 /// construction (an agent run, a fix) behaves as it always has. A chat turn does not know yet
 /// whether its checkpoint will be kept — most turns change nothing — and must use
 /// [`create_unpruned`] followed by [`prune_path`] only once the turn proved it changed files.
@@ -115,7 +206,7 @@ pub fn create_unpruned(path: &str, kind: &str) -> Result<String, String> {
     commit_snapshot(&repo, kind)
 }
 
-/// Applies the [`MAX_CHECKPOINTS`] cap to a repo. Called when a checkpoint taken with
+/// Applies the checkpoint cap ([`MAX_SETTING`]) to a repo. Called when a checkpoint taken with
 /// [`create_unpruned`] turns out to be worth keeping. Best-effort.
 pub fn prune_path(path: &str) {
     if let Ok(repo) = open(path) {
@@ -202,27 +293,27 @@ fn commit_snapshot(repo: &Repository, kind: &str) -> Result<String, String> {
     let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
 
     let id = format!("{}-{}", chrono::Utc::now().timestamp(), &uuid::Uuid::new_v4().to_string()[..8]);
-    repo.commit(Some(&checkpoint_ref(&id)), &sig, &sig, kind, &tree, &parent_refs)
+    repo.commit(Some(&checkpoint_ref(repo, &id)), &sig, &sig, kind, &tree, &parent_refs)
         .map_err(|e| e.message().to_string())?;
     Ok(id)
 }
 
-/// Drops the oldest checkpoints past [`MAX_CHECKPOINTS`]. Best-effort: failing to prune is never
+/// Drops the oldest checkpoints past the cap ([`MAX_SETTING`]). Best-effort: failing to prune is never
 /// a reason to fail the snapshot the user is actually protected by.
 fn prune(repo: &Repository) {
-    let Ok(refs) = repo.references_glob(&format!("{REF_PREFIX}*")) else { return };
-    let mut dated: Vec<(i64, String)> = refs
-        .flatten()
+    let mut dated: Vec<(i64, String)> = own_refs(repo)
+        .into_iter()
         .filter_map(|reference| {
             let name = reference.name()?.to_string();
             Some((reference.peel_to_commit().ok()?.time().seconds(), name))
         })
         .collect();
-    if dated.len() <= MAX_CHECKPOINTS {
+    let max = max_checkpoints();
+    if dated.len() <= max {
         return;
     }
     dated.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, name) in dated.into_iter().skip(MAX_CHECKPOINTS) {
+    for (_, name) in dated.into_iter().skip(max) {
         if let Ok(mut reference) = repo.find_reference(&name) {
             let _ = reference.delete();
         }
@@ -231,7 +322,7 @@ fn prune(repo: &Repository) {
 
 fn read_checkpoint<'r>(repo: &'r Repository, id: &str) -> Result<git2::Commit<'r>, String> {
     let reference = repo
-        .find_reference(&checkpoint_ref(id))
+        .find_reference(&checkpoint_ref(repo, id))
         .map_err(|_| format!("checkpoint '{id}' no longer exists"))?;
     reference.peel_to_commit().map_err(|e| e.message().to_string())
 }
@@ -304,14 +395,10 @@ pub fn changed_paths(path: &str, id: &str) -> Result<Vec<String>, String> {
 /// what the modal draws.
 pub fn list(path: &str) -> Result<Vec<CheckpointInfo>, String> {
     let repo = open(path)?;
-    let refs = match repo.references_glob(&format!("{REF_PREFIX}*")) {
-        Ok(refs) => refs,
-        Err(_) => return Ok(Vec::new()),
-    };
-
+    let ns = namespace(&repo);
     let mut out: Vec<CheckpointInfo> = Vec::new();
-    for reference in refs.flatten() {
-        let Some(name) = reference.name().and_then(|n| n.strip_prefix(REF_PREFIX)) else { continue };
+    for reference in own_refs(&repo) {
+        let Some(name) = reference.name().and_then(|n| n.strip_prefix(&ns)) else { continue };
         let Ok(commit) = reference.peel_to_commit() else { continue };
         let changed_paths = diff_paths(&repo, &commit).unwrap_or_default();
         out.push(CheckpointInfo {
@@ -430,7 +517,7 @@ pub fn restore_reviewed(path: &str, id: &str, edits: &[ReviewedEdit]) -> Result<
 /// Forgets a checkpoint. Its objects stay in the odb until git's own gc reaps them.
 pub fn remove(path: &str, id: &str) -> Result<(), String> {
     let repo = open(path)?;
-    if let Ok(mut reference) = repo.find_reference(&checkpoint_ref(id)) {
+    if let Ok(mut reference) = repo.find_reference(&checkpoint_ref(&repo, id)) {
         reference.delete().map_err(|e| e.message().to_string())?;
     }
     Ok(())
@@ -706,6 +793,63 @@ mod tests {
         assert_eq!(count(path), MAX_CHECKPOINTS, "nothing was evicted");
     }
 
+    /// An ignored `.env` the turn rewrote comes back with the restore; other ignored files and
+    /// ignored folders stay out of the snapshot.
+    #[test]
+    fn ignored_env_files_are_snapshotted_and_restored() {
+        let (dir, _repo) = fixture();
+        let path = dir.to_str().unwrap();
+        fs::write(dir.join(".gitignore"), ".env\nbuild/\n*.log\n").unwrap();
+        fs::write(dir.join(".env"), "TOKEN=original\n").unwrap();
+        fs::create_dir_all(dir.join("build")).unwrap();
+        fs::write(dir.join("build/.env"), "inside an ignored folder\n").unwrap();
+        fs::write(dir.join("debug.log"), "noise\n").unwrap();
+        let id = create(path, "chat").unwrap();
+        fs::write(dir.join(".env"), "TOKEN=overwritten\n").unwrap();
+        fs::write(dir.join("debug.log"), "more noise\n").unwrap();
+        assert_eq!(changed_paths(path, &id).unwrap(), vec![".env".to_string()]);
+        restore(path, &id).unwrap();
+        assert_eq!(fs::read_to_string(dir.join(".env")).unwrap(), "TOKEN=original\n");
+        assert_eq!(fs::read_to_string(dir.join("debug.log")).unwrap(), "more noise\n", "other ignored files are not touched");
+        assert!(is_env_file("config/.env.local") && is_env_file("app.env") && !is_env_file(".envrc") && !is_env_file("env"));
+    }
+
+    /// The cap follows its setting, within bounds.
+    #[test]
+    fn the_cap_is_a_setting_within_bounds() {
+        // The pure half: the stored value is not written to the shared cap here, which the other
+        // tests of this module prune against in parallel.
+        assert_eq!(parse_max(Some("3")), 5);
+        assert_eq!(parse_max(Some(" 60 ")), 60);
+        assert_eq!(parse_max(Some("5000")), 200);
+        assert_eq!(parse_max(Some("nonsense")), MAX_CHECKPOINTS);
+        assert_eq!(parse_max(None), MAX_CHECKPOINTS);
+    }
+
+    /// Two worktrees of one repository: each lists, prunes and restores only its own checkpoints.
+    #[test]
+    fn linked_worktrees_keep_their_checkpoints_apart() {
+        let (dir, repo) = fixture();
+        let main = dir.to_str().unwrap().to_string();
+        let wt_dir = std::env::temp_dir().join(format!("cf-checkpoint-wt-{}", uuid::Uuid::new_v4()));
+        repo.worktree("feature", &wt_dir, None).unwrap();
+        let linked = wt_dir.to_str().unwrap().to_string();
+
+        let mine = create(&main, "chat").unwrap();
+        let theirs = create(&linked, "chat").unwrap();
+        assert_eq!(list(&main).unwrap().iter().map(|c| c.id.clone()).collect::<Vec<_>>(), vec![mine.clone()]);
+        assert_eq!(list(&linked).unwrap().iter().map(|c| c.id.clone()).collect::<Vec<_>>(), vec![theirs.clone()]);
+        // A busy worktree past the cap prunes only itself.
+        for _ in 0..MAX_CHECKPOINTS + 3 {
+            create(&linked, "chat").unwrap();
+        }
+        assert_eq!(count(&linked), MAX_CHECKPOINTS);
+        assert_eq!(count(&main), 1, "the main worktree's checkpoint survived");
+        // Another worktree's id is not found here.
+        assert!(restore(&main, &theirs).is_err());
+        let _ = fs::remove_dir_all(&wt_dir);
+    }
+
     #[test]
     fn the_checkpoint_past_the_cap_prunes_the_oldest_once_kept() {
         let (dir, repo) = fixture();
@@ -714,7 +858,7 @@ mod tests {
         let tree = repo.head().unwrap().peel_to_commit().unwrap().tree().unwrap();
         let sig = |secs: i64| git2::Signature::new("T", "t@example.com", &git2::Time::new(secs, 0)).unwrap();
         for n in 0..MAX_CHECKPOINTS as i64 {
-            repo.commit(Some(&checkpoint_ref(&format!("old-{n}"))), &sig(1_000 + n), &sig(1_000 + n), "chat", &tree, &[]).unwrap();
+            repo.commit(Some(&checkpoint_ref(&repo, &format!("old-{n}"))), &sig(1_000 + n), &sig(1_000 + n), "chat", &tree, &[]).unwrap();
         }
         let id = create_unpruned(path, "chat").unwrap();
         assert_eq!(count(path), MAX_CHECKPOINTS + 1, "unpruned until the turn proves itself");

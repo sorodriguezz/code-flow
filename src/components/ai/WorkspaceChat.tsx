@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { AlertCircle, ArrowDown, ArrowUp, Download, Eraser, FolderGit2, History, Link2, ListChecks, ListPlus, Loader2, Paperclip, Pencil, Play, RotateCcw, Search, SquarePen, Square, Trash2, UsersRound } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AiRunLog } from "./AiRunLog";
@@ -21,12 +21,13 @@ import { GhostOverlay, useComposerGhost } from "../chat/useComposerGhost";
 import { ContextMenu } from "../common/ContextMenu";
 import { TurnReview } from "./TurnReview";
 import { EffortPicker } from "../chat/EffortPicker";
-import { ChatMessageBubble, dayDivider, type ChatBubbleActions } from "../chat/ChatMessageBubble";
+import { ChatMessageBubble, dayDivider, type ChatBubbleActions, type CodeBlockTarget } from "../chat/ChatMessageBubble";
+import { insertCodeAtCaret, useApplyCodeStore } from "../../lib/codeToEditor";
 import { QueuedMessages, type ComposerQueue } from "../chat/QueuedMessages";
 import { popoverClass } from "../common/recipes";
 import { useTextMenu } from "../common/TextMenu";
 import { DictationBar, DictationMic, useDictatingHere } from "../dictation/DictationControls";
-import { openWorkspaceChat } from "../../lib/aiPanelNav";
+import { FOCUS_CHAT_EVENT, SEND_CHAT_EVENT, openWorkspaceChat, takePendingSend } from "../../lib/aiPanelNav";
 import { resolveAccount } from "../../lib/aiAccounts";
 import { providerCapabilities, providerDisplayLabel } from "../../lib/aiProviders";
 import { estimateTokens } from "../../lib/contextWindow";
@@ -42,13 +43,15 @@ import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore
 import { useAiAccountsStore } from "../../state/aiAccountsStore";
 import { useAiRunStore } from "../../state/aiRunStore";
 import { useChainStore } from "../../state/chainStore";
-import { discardChatQueue, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
+import { useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
 import { cancelQuotaResume, resumeQuotaNow, useQuotaResumeAt } from "../../state/quotaResumeStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useConversationStore } from "../../state/conversationStore";
+import { usePreferencesStore } from "../../state/preferencesStore";
 import { registerDictationSend } from "../../state/dictationStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
-import { pushErrorToast, useToastStore } from "../../state/toastStore";
+import { pushErrorToast, pushSuccessToast, useToastStore } from "../../state/toastStore";
+import { restoreAiTurn } from "../../lib/tauri/commands";
 import { EMPTY_WS_CHAT, EMPTY_WS_LIST, pinWsChat, useWorkspaceChatStore, wsChatQueueKey, type WsChatMessage } from "../../state/workspaceChatStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { ChatLineageButtons, SubchatRow } from "./ChatLineage";
@@ -62,6 +65,8 @@ const MAX_COMPOSER_HEIGHT = 180;
 const PENDING_SHELL = { role: "assistant" as const, content: "" };
 const NO_FILES: ChatAttachment[] = [];
 const NO_PROJECTS: { name: string; local_path: string; id: string }[] = [];
+
+const ApplyCodeModal = lazy(() => import("./ApplyCodeModal").then((m) => ({ default: m.ApplyCodeModal })));
 
 /**
  * A chat with every repository of the workspace, in its own tab of the assistant — beside, not
@@ -248,6 +253,14 @@ export function WorkspaceChat({
       openWorkspaceChat(workspaceId);
     } else if (command === "clear") {
       void useWorkspaceChatStore.getState().clearContext(conversationId);
+    } else if (command === "compact") {
+      void useWorkspaceChatStore.getState().compact(conversationId, args);
+    } else if (command === "continue") {
+      void useWorkspaceChatStore.getState().continueInNewThread(conversationId, args);
+    } else if (command === "branch") {
+      // A copy of the whole thread so far, as «Ramificar desde aquí» on its last answer.
+      const last = session.messages[session.messages.length - 1];
+      if (last && session.persisted) void useWorkspaceChatStore.getState().branchAt(conversationId, last.turn);
     } else if (command === "export" && canExport) {
       const rect = boxRef.current?.getBoundingClientRect();
       setExportMenu({ x: rect ? rect.left + 8 : 16, y: rect ? rect.top - 8 : 16 });
@@ -293,7 +306,7 @@ export function WorkspaceChat({
    * same wiring for the workspace one.
    */
   const answerQuestion = (text: string) => {
-    useWorkspaceChatStore.getState().submit(conversationId, text);
+    useWorkspaceChatStore.getState().submit(conversationId, text, { files: [] });
     useAiPanelStore.getState().markChatStarted(tabKey);
     toBottom();
   };
@@ -301,7 +314,7 @@ export function WorkspaceChat({
   /** «Ejecutar el plan»: plan mode off, and the go-ahead as the next question. */
   const runPlan = () => {
     useWorkspaceChatStore.getState().setPlan(conversationId, false);
-    useWorkspaceChatStore.getState().submit(conversationId, t("assistant.runPlanMessage"));
+    useWorkspaceChatStore.getState().submit(conversationId, t("assistant.runPlanMessage"), { files: [] });
     useAiPanelStore.getState().markChatStarted(tabKey);
     toBottom();
   };
@@ -321,6 +334,12 @@ export function WorkspaceChat({
     if (wasSending.current && !session.sending && meterModel) useConversationStore.getState().ensureContextWindow(meterModel, true);
     wasSending.current = session.sending;
   }, [session.sending, meterModel]);
+  // The row as last listed: what a compaction left on it (the summary, and the turn it covers to).
+  // `compact` and every answer re-list the workspace's chats, so this follows both.
+  const listedRow = useWorkspaceChatStore((s) => s.listByWorkspace[workspaceId]?.find((c) => c.id === conversationId));
+  const compactedThrough = listedRow?.compactedThroughTurn ?? null;
+  const compactedSummary = listedRow?.compactedSummary ?? "";
+  const autoCompactEnabled = usePreferencesStore((s) => s.chatAutoCompactEnabled);
   const contextReading = useMemo<ContextReading | undefined>(() => {
     if (session.messages.length === 0) return undefined;
     // The turns since the last reset (a `/clear`, or a change of account): what a fresh engine
@@ -329,10 +348,17 @@ export function WorkspaceChat({
     const startsAt = session.contextResets.reduce((at, reset) => Math.max(at, reset.turn), -1);
     const lastTurn = session.messages[session.messages.length - 1]?.turn ?? -1;
     const waiting = startsAt > lastTurn;
-    const counted = session.messages
-      .filter((m) => m.turn >= startsAt)
-      .map((m) => m.content)
+    // On a compacted thread the turns the summary stands for are not sent again: the summary is,
+    // in their place — counting them reported a context the compaction had already got rid of.
+    const summarised = compactedThrough !== null && compactedThrough >= startsAt;
+    const counted = [
+      summarised ? compactedSummary : "",
+      ...session.messages.filter((m) => m.turn >= startsAt && (!summarised || m.turn > compactedThrough)).map((m) => m.content),
+    ]
+      .filter(Boolean)
       .join("\n\n");
+    const window = meterModel ? (windowByModel[meterModel] ?? null) : null;
+    const resumes = providerCapabilities(session.provider || provider).resumesSessions && Boolean(session.engineSessionId) && !waiting;
     const measured = waiting ? null : session.contextTokens;
     const estimated = estimateTokens(counted);
     return {
@@ -342,28 +368,91 @@ export function WorkspaceChat({
       // A measurement from an earlier turn is drawn as an approximation rather than as a fact.
       stale: waiting ? false : session.contextStale,
       conversationTokens: estimated,
-      window: meterModel ? (windowByModel[meterModel] ?? null) : null,
-      resumes: providerCapabilities(session.provider || provider).resumesSessions && Boolean(session.engineSessionId) && !waiting,
-      compactedTurns: 0,
-      autoCompacts: false,
-      summary: "",
+      window,
+      resumes,
+      // `chat_send` compacts a workspace chat on its own as it does the Chat app's — see `ChatView`.
+      compactedTurns: compactedThrough === null ? 0 : compactedThrough + 1,
+      autoCompacts: autoCompactEnabled && (!resumes || window !== null),
+      summary: summarised ? compactedSummary : "",
       compacting,
       // The app's own compaction, which works on any engine, and not the word `/compact` sent as a
       // question — this chat replays its prefix rather than resuming a CLI session, so that word
       // reached the model and was answered as the question it looked like.
       onCompact: session.persisted ? () => void useWorkspaceChatStore.getState().compact(conversationId) : undefined,
-      onUncompact: () => {},
+      onUncompact: () => void useWorkspaceChatStore.getState().uncompact(conversationId),
     };
-  }, [session.messages, session.contextResets, session.contextTokens, session.contextStale, session.engineSessionId, session.provider, session.persisted, provider, meterModel, windowByModel, conversationId, compacting]);
+  }, [session.messages, session.contextResets, session.contextTokens, session.contextStale, session.engineSessionId, session.provider, session.persisted, provider, meterModel, windowByModel, conversationId, compacting, compactedThrough, compactedSummary, autoCompactEnabled]);
 
   /** The `/` menu is open while the draft is one token that begins with a slash. */
   const slash = draft.startsWith("/") && !draft.includes("\n") ? draft.slice(1).toLowerCase() : null;
-  const menuOpen = slash !== null && !slash.includes(" ");
+  // Escape hides the `/` menu for the draft it was pressed on; typing brings it back.
+  const [slashDismissed, setSlashDismissed] = useState<string | null>(null);
+  const menuOpen = slash !== null && !slash.includes(" ") && slashDismissed !== draft;
+  /** The open `/` menu's key handler — arrows, Enter / Tab, Escape — called before the box's own. */
+  const slashKeys = useRef<((e: ReactKeyboardEvent) => boolean) | null>(null);
+
+  // ── Code blocks → editor ──────────────────────────────────────────────────────────────────
+  // A workspace chat spans repositories; the editor has one in front. A block goes to that one, when
+  // it is a repository of this workspace — the same «insert at caret» and «apply to file» the
+  // repository chat offers. With none of them open, the buttons are not drawn.
+  const codeProject = projects.find((p) => p.id === activeProjectId) ?? null;
+  const codeTarget = useMemo<CodeBlockTarget | undefined>(
+    () =>
+      codeProject
+        ? {
+            insert: (code) => insertCodeAtCaret(codeProject.id, code),
+            apply: (code, path) => useApplyCodeStore.getState().open({ tabKey, projectId: codeProject.id, code, path }),
+            projectId: codeProject.id,
+          }
+        : undefined,
+    [codeProject, tabKey],
+  );
+  const applyRequest = useApplyCodeStore((s) => (s.request?.tabKey === tabKey ? s.request : null));
+
+  /** Bumped after «Deshacer el turno», so each repository's review re-reads what is on disk now. */
+  const [undoEpoch, setUndoEpoch] = useState(0);
+  /** «Deshacer el turno»: every repository the turn changed, in one action — see `restoreAiTurn`. */
+  const undoTurn = async (changes: readonly { repoPath: string; checkpointId: string; paths: string[] }[]) => {
+    const files = changes.reduce((sum, change) => sum + change.paths.length, 0);
+    const ok = await confirmAction(t("turnReview.undoTurnConfirm", { files, count: changes.length }), true, t("turnReview.undoTurn", { count: changes.length }));
+    if (!ok) return;
+    try {
+      const restored = await restoreAiTurn(changes.map(({ repoPath, checkpointId, paths }) => ({ repoPath, checkpointId, paths })));
+      pushSuccessToast(t("turnReview.undoTurnDone", { files: restored.length }));
+    } catch (e) {
+      pushErrorToast(String(e));
+    } finally {
+      setUndoEpoch((n) => n + 1);
+    }
+  };
   const rootRef = useRef<HTMLDivElement>(null);
   const find = useChatFind({ rootRef, contentRef, scrollRef });
   const submitRef = useRef(submit);
   submitRef.current = submit;
   useEffect(() => registerDictationSend(boxRef.current, () => submitRef.current()));
+  // `askInWorkspaceChat` put text in this tab's draft: the box takes focus, the caret at the end —
+  // or, asked to send, the draft goes as it stands. The repository chat's wiring, for this tab.
+  useEffect(() => {
+    const onFocus = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== tabKey) return;
+      const box = boxRef.current;
+      if (!box) return;
+      box.focus();
+      const end = box.value.length;
+      box.setSelectionRange(end, end);
+    };
+    const onSend = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === tabKey && takePendingSend(tabKey)) submitRef.current();
+    };
+    // Opened for it, and mounted after the event went out.
+    if (takePendingSend(tabKey)) requestAnimationFrame(() => submitRef.current());
+    window.addEventListener(FOCUS_CHAT_EVENT, onFocus);
+    window.addEventListener(SEND_CHAT_EVENT, onSend);
+    return () => {
+      window.removeEventListener(FOCUS_CHAT_EVENT, onFocus);
+      window.removeEventListener(SEND_CHAT_EVENT, onSend);
+    };
+  }, [tabKey]);
   const dictating = useDictatingHere(boxRef);
   const textMenu = useTextMenu();
 
@@ -393,7 +482,7 @@ export function WorkspaceChat({
     }
     const extension = (file.type.split("/")[1] ?? "png").replace(/[^a-z0-9]/gi, "") || "png";
     void file.arrayBuffer().then((buffer) =>
-      useWorkspaceChatStore.getState().attachFileBytes(conversationId, `pegado.${extension}`, new Uint8Array(buffer)),
+      useWorkspaceChatStore.getState().attachFileBytes(conversationId, `${t("chat.pastedName")}.${extension}`, new Uint8Array(buffer)),
     );
   };
   const composerRef = useRef<HTMLDivElement>(null);
@@ -432,7 +521,12 @@ export function WorkspaceChat({
         const askAgain =
           canAct && message.role === "assistant" && question?.role === "user"
             ? () => {
-                useWorkspaceChatStore.getState().submit(conversationId, question.content);
+                // The question with the files it was asked with — not whatever is staged now.
+                useWorkspaceChatStore.getState().submit(conversationId, question.content, {
+                  // Live chips are the staged copies themselves (with an id); a reloaded one names a
+                  // file only, and is not resent.
+                  files: (question.attachments ?? []).filter((file): file is ChatAttachment => "id" in file),
+                });
                 useAiPanelStore.getState().markChatStarted(tabKey);
                 toBottom();
               }
@@ -493,7 +587,7 @@ export function WorkspaceChat({
         if (retriedFailedTurn) return;
         useWorkspaceChatStore.getState().resumeQueue(conversationId);
       },
-      onDiscardAll: () => discardChatQueue(queueKey),
+      onDiscardAll: () => useWorkspaceChatStore.getState().discardAllQueued(conversationId),
       autoResumeAt,
       onCancelAutoResume: () => cancelQuotaResume(queueKey),
     }),
@@ -517,9 +611,22 @@ export function WorkspaceChat({
   /** The workspace's project a turn's repository folder belongs to — «Abrir» switches to it. */
   const projectOfPath = (path: string) => projects.find((p) => samePath(p.local_path, path));
 
+  // Announced politely to a screen reader, as in the repository chat: that a reply is coming and
+  // that it is in — never the streamed text, which would be read out token by token.
+  const [liveStatus, setLiveStatus] = useState("");
+  const announced = useRef(session.sending);
+  useEffect(() => {
+    if (announced.current === session.sending) return;
+    announced.current = session.sending;
+    setLiveStatus(session.sending ? t("assistant.liveResponding") : t("assistant.liveReady"));
+  }, [session.sending, t]);
+
   return (
     <div ref={rootRef} className="flex h-full min-h-0 flex-col">
       <ChatFindBar find={find} />
+      <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
+        {liveStatus}
+      </div>
       {/* Outside the scroller on purpose: this strip says which repositories the chat can see, and
           carries find, export, history and "new chat". Inside it, it was the first thing to scroll
           away — so a conversation long enough to be worth searching was exactly the one whose
@@ -649,13 +756,25 @@ export function WorkspaceChat({
                   message={message}
                   sessionId={session.engineSessionId}
                   actions={actionsByMessage[i]}
+                  codeTarget={codeTarget}
                 />
                 {message.role === "assistant" && message.context && <ContextSources sources={message.context} />}
                 {message.role === "assistant" && <TurnNotes message={message} />}
+                {message.role === "assistant" && (message.changes?.length ?? 0) > 1 && (
+                  <button
+                    type="button"
+                    disabled={session.sending}
+                    onClick={() => void undoTurn(message.changes ?? [])}
+                    className="flex items-center gap-1 self-start rounded-md px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40"
+                  >
+                    <RotateCcw size={11} />
+                    {t("turnReview.undoTurn", { count: message.changes?.length ?? 0 })}
+                  </button>
+                )}
                 {message.role === "assistant" &&
                   message.changes?.map((change) => (
                     <TurnReview
-                      key={change.repoPath}
+                      key={`${change.repoPath}:${undoEpoch}`}
                       repoPath={change.repoPath}
                       repoLabel={change.repo}
                       changes={{ checkpointId: change.checkpointId, paths: change.paths }}
@@ -732,6 +851,8 @@ export function WorkspaceChat({
         )}
         {menuOpen && (
           <CommandMenu
+            keysRef={slashKeys}
+            onDismiss={() => setSlashDismissed(draft)}
             query={slash ?? ""}
             provider={provider}
             surface="workspace"
@@ -786,6 +907,8 @@ export function WorkspaceChat({
               onPaste={onPaste}
               onContextMenu={textMenu.onField}
               onKeyDown={(e) => {
+                // The `/` menu, while it is open: arrows walk it, Enter/Tab pick, Escape hides it.
+                if (menuOpen && slashKeys.current?.(e)) return;
                 if (mentions.onKeyDown(e)) return;
                 // Then a shown suggestion: Tab takes it, Ctrl/Cmd+→ a word, Escape hides it.
                 if (completion.onKeyDown(e)) return;
@@ -916,6 +1039,11 @@ export function WorkspaceChat({
           )}
         </div>
       </div>
+      {applyRequest && codeProject && (
+        <Suspense fallback={null}>
+          <ApplyCodeModal request={applyRequest} repoPath={codeProject.local_path} />
+        </Suspense>
+      )}
     </div>
   );
 }

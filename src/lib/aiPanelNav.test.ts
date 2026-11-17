@@ -15,7 +15,8 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {}, emit: async () => {} }));
 
-const { changesToAnalyze, startAnalysis } = await import("./aiPanelNav");
+const { askInWorkspaceChat, changesToAnalyze, startAnalysis, takePendingSend } = await import("./aiPanelNav");
+const { useAiPanelStore } = await import("../state/aiPanelStore");
 const { useJobsStore } = await import("../state/jobsStore");
 const { useRepoStore } = await import("../state/repoStore");
 const { useToastStore } = await import("../state/toastStore");
@@ -107,5 +108,21 @@ describe("startAnalysis", () => {
     startAnalysis("p-web");
     await vi.waitFor(() => expect(useJobsStore.getState().byProject["p-web"] ?? []).toHaveLength(0));
     expect(useToastStore.getState().toasts.map((t) => t.type)).toEqual(["info"]);
+  });
+});
+
+describe("askInWorkspaceChat", () => {
+  it("fills the workspace chat's draft, keeps what was typed, and marks a send", () => {
+    globalThis.requestAnimationFrame ??= ((run: FrameRequestCallback) => setTimeout(() => run(0), 0)) as unknown as typeof requestAnimationFrame;
+    askInWorkspaceChat("ws-1", "why did api fail?");
+    const panel = useAiPanelStore.getState();
+    const tab = (panel.tabsByWorkspace["ws-1"] ?? []).find((t) => t.kind === "wsChat");
+    expect(tab).toBeDefined();
+    expect(panel.drafts[tab!.key]).toBe("why did api fail?");
+    // Asked again into the same tab: appended under what is there, and sent.
+    askInWorkspaceChat("ws-1", "and web?", { send: true });
+    const again = useAiPanelStore.getState();
+    expect(again.drafts[tab!.key]).toBe("why did api fail?\n\nand web?");
+    expect(takePendingSend(tab!.key)).toBe(true);
   });
 });

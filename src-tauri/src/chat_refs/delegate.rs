@@ -113,9 +113,13 @@ pub async fn request(app: &AppHandle, target: &ChatRef, message: &str, from_id: 
     let (accept_tx, accept_rx) = oneshot::channel();
     let (answer_tx, answer_rx) = oneshot::channel();
     {
+        // Claimed in the same step as the check: two delegations to one target could both pass
+        // `check` above and then both be sent. `insert` answering `false` is the second one.
+        if !DELEGATED.lock().map_err(|e| e.to_string())?.insert(target.id.clone()) {
+            return Err(format!("«{}» ya está atendiendo otro pedido", target.title));
+        }
         let mut pending = PENDING.lock().map_err(|e| e.to_string())?;
         pending.insert(request_id.clone(), Pending { accepted: Some(accept_tx), answered: Some(answer_tx), target: target.id.clone() });
-        DELEGATED.lock().map_err(|e| e.to_string())?.insert(target.id.clone());
     }
     let _cleanup = Cleanup(request_id.clone(), target.id.clone());
     let from_label = if from_title.trim().is_empty() { from_id.to_string() } else { from_title.trim().to_string() };

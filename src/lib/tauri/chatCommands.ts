@@ -165,6 +165,10 @@ export interface ChatMessageRow {
   context?: ContextSource[];
   usage?: TurnUsage;
   unprotectedDirs?: string[];
+  /** On a question: the files it was asked with, as the chips showed them live. */
+  attachments?: { id: string; name: string; path: string; isImage: boolean }[];
+  /** On a question: the skill picked for it, by name. */
+  skill?: string;
   createdAt: string;
 }
 
@@ -573,8 +577,9 @@ export const chatClearContext = (conversationId: string) =>
 /** Right after a send rejected as cancelled or failed: what that turn changed on disk, or `null`
  *  (it changed nothing, or the latest turn did not end that way). Works for repository and
  *  workspace conversations alike — see `FailedTurnChanges`. */
-export const chatFailedTurnChanges = (conversationId: string) =>
-  invoke<FailedTurnChanges | null>("chat_failed_turn_changes", { conversationId });
+export const chatFailedTurnChanges = (conversationId: string, sinceMs?: number) =>
+  // `sinceMs`: when the turn started — a row filed before it is an earlier turn's, not this one's.
+  invoke<FailedTurnChanges | null>("chat_failed_turn_changes", { conversationId, sinceMs: sinceMs ?? null });
 
 // ---------- provider surface ----------
 
@@ -904,3 +909,10 @@ export const crewAttachFile = (sourcePath: string) => invoke<ChatAttachment>("cr
 
 /** A pasted screenshot for such a goal. */
 export const crewAttachBytes = (name: string, data: number[]) => invoke<ChatAttachment>("crew_attach_bytes", { name, data });
+
+/** The files a stored question names, as staged copies the composer can send again (the size is not
+ *  kept: nothing reads it once a file has been sent). */
+export function questionFiles(files: readonly { id: string; name: string; path: string; isImage: boolean }[] | null | undefined): ChatAttachment[] | undefined {
+  const out = (files ?? []).filter((file) => file && file.id && file.name).map((file) => ({ ...file, bytes: 0 }));
+  return out.length > 0 ? out : undefined;
+}

@@ -2,6 +2,7 @@ import { useState, type MouseEvent, type ReactNode } from "react";
 import {
   Bug,
   ChevronDown,
+  MessageSquareText,
   ChevronRight,
   CirclePlay,
   Container,
@@ -18,6 +19,9 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { canDebugService } from "../../lib/serviceDebug";
+import { askInWorkspaceChat } from "../../lib/aiPanelNav";
+import { serviceLog } from "../../lib/tauri/services";
+import { pushErrorToast } from "../../state/toastStore";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { Tooltip } from "../common/Tooltip";
 import { confirmAction } from "../../state/confirmStore";
@@ -421,6 +425,9 @@ function GroupSection({
   );
 }
 
+/** How much of a service's log a question to the chat carries: the end, where a failure says why. */
+const LOG_LINES_TO_ASK = 80;
+
 function ServiceRowItem({
   service,
   runtime,
@@ -460,12 +467,29 @@ function ServiceRowItem({
   const duplicate = () =>
     void add({ ...service, id: "", name: t("services.copyOf", { name: service.name }), detected_ports: "[]" });
 
+  /** «Preguntar al chat del workspace»: the service is the workspace's, not one repository's, so its
+   *  question goes to the workspace chat — the command, where it runs, how it ended and the tail of
+   *  its log, for the user to finish and send. */
+  const askChat = async () => {
+    try {
+      const log = (await serviceLog(service.id)).text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "");
+      const tail = log.split("\n").slice(-LOG_LINES_TO_ASK).join("\n").trim();
+      const ended =
+        runtime?.exitCode !== null && runtime?.exitCode !== undefined ? t("services.exitCodeShort", { code: runtime.exitCode }) : statusLabel(status, t);
+      const text = t("services.askChatPrompt", { name: service.name, command: service.command, cwd: service.cwd || "—", status: ended });
+      askInWorkspaceChat(service.workspace_id, tail ? `${text}\n\n\`\`\`\n${tail}\n\`\`\`\n` : text);
+    } catch (e) {
+      pushErrorToast(String(e));
+    }
+  };
+
   const items: MenuItem[] = [
     active
       ? { label: t("services.stop"), leading: still(Square), onClick: () => void stop(service.id), disabled: status === "stopping" }
       : { label: t("services.start"), icon: CirclePlay, onClick: () => void start(service.id) },
     ...(!active && debuggable ? [{ label: t("services.debug"), icon: Bug, onClick: () => void debug(service.id) }] : []),
     { label: t("services.restart"), leading: still(RotateCw), onClick: () => void restart(service.id), disabled: !active },
+    { label: t("services.askChat"), icon: MessageSquareText, onClick: () => void askChat(), separated: true },
     { label: t("services.edit"), icon: Pencil, onClick: onEdit, separated: true },
     { label: t("services.duplicate"), icon: Copy, onClick: duplicate },
     { label: t("services.delete"), icon: Trash2, danger: true, onClick: () => void confirmRemove() },

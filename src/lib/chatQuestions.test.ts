@@ -25,6 +25,16 @@ describe("chatQuestions", () => {
     expect(splitQuestions(plain).questions).toEqual([]);
   });
 
+  it("keeps a ```json payload with a loose text key as the code block it is", () => {
+    const text = 'La respuesta del API:\n\n```json\n{"text": "hi", "id": 1}\n```';
+    expect(splitQuestions(text)).toEqual({ text, questions: [] });
+    // A json fence that does say it is a question is still read as one.
+    const asked = '```json\n{"pregunta": "¿Seguimos?", "opciones": ["Sí", "No"]}\n```';
+    expect(splitQuestions(asked).questions).toEqual([{ question: "¿Seguimos?", options: ["Sí", "No"], multiple: false }]);
+    // Inside a fence named for questions, the loose key is fine.
+    expect(splitQuestions('```pregunta\n{"texto": "¿Cuál?"}\n```').questions).toEqual([{ question: "¿Cuál?", options: [], multiple: false }]);
+  });
+
   it("reads a question written as bare JSON at the end, and nothing else bare", () => {
     const text = 'No veo los repos.{"pregunta":"¿A qué proyecto te refieres?","opciones":[],"multiple":false}';
     expect(splitQuestions(text)).toEqual({

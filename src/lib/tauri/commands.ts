@@ -2426,6 +2426,12 @@ export const searchAssistantChats = (projectIds: string[], workspaceId: string |
 export const restoreAiCheckpointPaths = (repoPath: string, checkpointId: string, edits: ReviewedEdit[]) =>
   invoke<string[]>("restore_ai_checkpoint_paths", { repoPath, checkpointId, edits });
 
+/** «Deshacer el turno»: every file a workspace-chat turn changed, in every repository, back to how it
+ *  was before the turn. Validated in full before anything is written; reverts later edits to those
+ *  files too. Returns the absolute paths it put back. */
+export const restoreAiTurn = (parts: { repoPath: string; checkpointId: string; paths: string[] }[]) =>
+  invoke<string[]>("restore_ai_turn", { parts });
+
 /** A version of a file in the editor's local history (`local_history.rs`); `savedAt` in unix ms. */
 export interface LocalVersion {
   id: string;

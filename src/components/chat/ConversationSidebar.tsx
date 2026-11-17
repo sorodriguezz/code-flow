@@ -35,6 +35,8 @@ import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
 import { useConversationStore } from "../../state/conversationStore";
 import { useT } from "../../state/languageStore";
+import { pushErrorToast } from "../../state/toastStore";
+import { isRepoBusy } from "../../lib/tauri/commands";
 import { fieldClass } from "../common/recipes";
 
 /** How long the search box waits before asking the backend. Title matches are filtered locally and
@@ -404,7 +406,11 @@ export function ConversationSidebar() {
           separated: true,
           onClick: () => {
             void confirmAction(t("chat.deleteConfirm", { title: conversation.title })).then((ok) => {
-              if (ok) void store.remove(conversation.id);
+              // Refused while a turn runs in it, in any window: said, rather than an unhandled rejection.
+              if (ok)
+                store.remove(conversation.id).catch((e: unknown) =>
+                  pushErrorToast(isRepoBusy(e) ? t("assistant.wsChatDeleteBusy") : String(e)),
+                );
             });
           },
         },

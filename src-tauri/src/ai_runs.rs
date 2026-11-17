@@ -171,10 +171,15 @@ pub async fn scoped_with_trace<F: Future>(
         return (fut.await, Vec::new());
     };
     // Registered here rather than at spawn time so a cancel that arrives during the (potentially
-    // slow) DB reads and diff building before the process even starts is still observed.
-    let (tx, _) = watch::channel(false);
+    // slow) DB reads and diff building before the process even starts is still observed. A run
+    // [`reserve`]d by its caller is already registered — and may already be cancelled, which the
+    // future then sees at once — and its caller, not this scope, ends it.
+    let reserved = is_reserved(&run_id);
     if let Ok(mut map) = registry().lock() {
-        map.insert(run_id.clone(), tx);
+        if !(reserved && map.contains_key(&run_id)) {
+            let (tx, _) = watch::channel(false);
+            map.insert(run_id.clone(), tx);
+        }
     }
     let trace = Arc::new(Mutex::new(VecDeque::new()));
     // Kept aside because `app` is about to move into the `RunCtx`, and the completion event below
@@ -210,6 +215,13 @@ pub async fn scoped_with_trace<F: Future>(
     // the caller emits its "this run is done" event the moment it gets control back, and the tail
     // of a run must never arrive after the signal that the run is over.
     drop(ticker);
+    let collected: Vec<TraceLine> = trace.lock().map(|t| t.iter().cloned().collect()).unwrap_or_default();
+    // A reserved run spans more than this one scope (a turn that compacts first, then answers): it
+    // stays registered — a Stop between the two is still heard — and its `ai:done` is sent once,
+    // when the reservation ends, not here after its first half.
+    if reserved {
+        return (output, collected);
+    }
     if let Ok(mut map) = registry().lock() {
         map.remove(&run_id);
     }
@@ -224,8 +236,61 @@ pub async fn scoped_with_trace<F: Future>(
     // ticker is what flushes the last partial batch, so the tail of the output is already on the
     // wire before anything says the run is done. A listener can therefore treat this as final.
     let _ = app_for_done.emit("ai:done", AiDoneEvent { run_id: run_id.clone() });
-    let collected = trace.lock().map(|t| t.iter().cloned().collect()).unwrap_or_default();
     (output, collected)
+}
+
+fn reserved() -> &'static Mutex<std::collections::HashSet<String>> {
+    static RESERVED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    RESERVED.get_or_init(Default::default)
+}
+
+fn is_reserved(run_id: &str) -> bool {
+    reserved().lock().map(|set| set.contains(run_id)).unwrap_or(false)
+}
+
+/// A run registered for its whole turn, before any of the work that precedes the engine.
+///
+/// [`scoped_with_trace`] registers a run only when its engine call starts, so a Stop pressed while
+/// a turn was still preparing (probing MCP servers, searching the knowledge, snapshotting every
+/// repository of a workspace) found no run and was dropped — and the turn then ran to the end. A
+/// turn that compacts before it answers ran two scopes under one id: the first one's end removed
+/// the run and announced `ai:done` before the answer had even started, and a Stop in between was
+/// lost the same way. Held for the turn, this keeps the id cancellable throughout, every scope
+/// under it sees the same cancel signal, and `ai:done` goes out once, when it is dropped.
+pub struct Reservation {
+    app: AppHandle,
+    run_id: String,
+}
+
+/// Reserves `run_id` for a turn — see [`Reservation`]. `None` for an untracked run.
+pub fn reserve(app: &AppHandle, run_id: Option<&str>) -> Option<Reservation> {
+    let run_id = run_id.map(str::trim).filter(|id| !id.is_empty())?.to_string();
+    if let Ok(mut set) = reserved().lock() {
+        set.insert(run_id.clone());
+    }
+    if let Ok(mut map) = registry().lock() {
+        map.entry(run_id.clone()).or_insert_with(|| watch::channel(false).0);
+    }
+    Some(Reservation { app: app.clone(), run_id })
+}
+
+impl Reservation {
+    /// Whether Stop has been pressed for this run.
+    pub fn cancelled(&self) -> bool {
+        registry().lock().ok().and_then(|map| map.get(&self.run_id).map(|tx| *tx.borrow())).unwrap_or(false)
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if let Ok(mut set) = reserved().lock() {
+            set.remove(&self.run_id);
+        }
+        let had = registry().lock().map(|mut map| map.remove(&self.run_id).is_some()).unwrap_or(false);
+        if had {
+            let _ = self.app.emit("ai:done", AiDoneEvent { run_id: self.run_id.clone() });
+        }
+    }
 }
 
 /// The batch ticker, plus the promise that whatever it was holding still goes out.
@@ -296,7 +361,13 @@ pub fn active() -> Vec<String> {
 pub fn cancel(run_id: &str) -> bool {
     let Ok(map) = registry().lock() else { return false };
     match map.get(run_id) {
-        Some(tx) => tx.send(true).is_ok(),
+        // `send_replace`, not `send`: `send` refuses — and leaves the value unchanged — while no
+        // receiver exists, which is exactly the window before the engine subscribes. The value is
+        // what a receiver created later reads first, so the Stop is not lost.
+        Some(tx) => {
+            tx.send_replace(true);
+            true
+        }
         None => false,
     }
 }
@@ -560,15 +631,174 @@ impl Drop for LiveProcess {
         if let Ok(mut live) = live().lock() {
             live.remove(&self.0);
         }
+        orphans::forget(self.0);
     }
 }
 
-/// Puts a freshly spawned CLI on the quit path's list.
+/// Puts a freshly spawned CLI on the quit path's list — and on disk, for the launch after a crash.
 pub(crate) fn register_process(pid: u32, run_id: Option<&str>) -> LiveProcess {
     if let Ok(mut live) = live().lock() {
         live.insert(pid, run_id.map(str::to_string));
     }
+    orphans::remember(pid);
     LiveProcess(pid)
+}
+
+/// The AI processes a crash left behind.
+///
+/// The quit path stops every CLI by hand (see above). A crash, a force-quit or a `kill -9` runs no
+/// quit path at all: each CLI is in a process group of its own, so it is not taken down with the
+/// app — it is reparented to init and carries on editing the repository with nothing on screen to
+/// say so. So every live CLI is also written to a small file, and the next launch stops the ones
+/// still running.
+///
+/// **Only a process that is provably the one that was started.** A pid alone is not an identity: it
+/// is reused, and after a reboot or a long while it names some unrelated program — signalling that
+/// would be the app killing the user's work. Each entry carries the process's start time and its
+/// executable as `ps` reported them when it was registered, and a process is stopped only when
+/// both still match exactly. Anything else is left alone and forgotten.
+pub mod orphans {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    fn file() -> std::path::PathBuf {
+        crate::paths::state_dir().join("ai_live_processes.json")
+    }
+
+    /// pid → identity, as written to [`file`].
+    fn known() -> &'static Mutex<HashMap<u32, String>> {
+        static KNOWN: OnceLock<Mutex<HashMap<u32, String>>> = OnceLock::new();
+        KNOWN.get_or_init(Default::default)
+    }
+
+    /// `ps`'s start time and command for `pid`, in the C locale so the same process always reads the
+    /// same; `None` when it is not running (or `ps` cannot say).
+    #[cfg(unix)]
+    pub(crate) fn identity(pid: u32) -> Option<String> {
+        let out = std::process::Command::new("ps")
+            .env("LC_ALL", "C")
+            .args(["-o", "lstart=", "-o", "comm=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (out.status.success() && !text.is_empty()).then_some(text)
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn identity(_pid: u32) -> Option<String> {
+        None
+    }
+
+    fn write(map: &HashMap<u32, String>) {
+        let path = file();
+        if map.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            return;
+        }
+        let entries: Vec<serde_json::Value> =
+            map.iter().map(|(pid, identity)| serde_json::json!({ "pid": pid, "identity": identity })).collect();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        // Through a temporary file, so a crash mid-write leaves the previous list, not half of one.
+        let tmp = path.with_extension("json.tmp");
+        if std::fs::write(&tmp, serde_json::Value::Array(entries).to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+
+    /// Records `pid` — off the calling thread: asking `ps` takes a few milliseconds, and the caller
+    /// is the async run that just spawned it.
+    pub(super) fn remember(pid: u32) {
+        // Never from a unit test: the file is the user's real state directory.
+        if cfg!(not(unix)) || cfg!(test) {
+            return;
+        }
+        std::thread::spawn(move || {
+            let Some(identity) = identity(pid) else { return };
+            // Gone already (a fast run): nothing to remember.
+            let still = super::live().lock().map(|live| live.contains_key(&pid)).unwrap_or(false);
+            if !still {
+                return;
+            }
+            if let Ok(mut map) = known().lock() {
+                map.insert(pid, identity);
+                write(&map);
+            }
+        });
+    }
+
+    pub(super) fn forget(pid: u32) {
+        if let Ok(mut map) = known().lock() {
+            if map.remove(&pid).is_some() {
+                write(&map);
+            }
+        }
+    }
+
+    /// The entries of a stored list, by pid. Unreadable entries are skipped.
+    pub(crate) fn parse(text: &str) -> Vec<(u32, String)> {
+        let Ok(serde_json::Value::Array(entries)) = serde_json::from_str::<serde_json::Value>(text) else { return Vec::new() };
+        entries
+            .iter()
+            .filter_map(|entry| {
+                let pid = u32::try_from(entry.get("pid")?.as_u64()?).ok()?;
+                let identity = entry.get("identity")?.as_str()?.to_string();
+                (pid > 1 && !identity.is_empty()).then_some((pid, identity))
+            })
+            .collect()
+    }
+
+    /// At launch, before any run starts: stops every process the last session left running whose
+    /// identity still matches, then forgets the list. Returns the pids it stopped. Blocks for up to
+    /// a couple of seconds when there is something to stop — call it off the main thread.
+    pub fn sweep() -> Vec<u32> {
+        let path = file();
+        let Ok(text) = std::fs::read_to_string(&path) else { return Vec::new() };
+        let _ = std::fs::remove_file(&path);
+        stop_matching(parse(&text))
+    }
+
+    /// [`sweep`]'s body, on a parsed list: stops each entry still running as that same process.
+    pub(crate) fn stop_matching(entries: Vec<(u32, String)>) -> Vec<u32> {
+        let matched: Vec<(u32, String)> =
+            entries.into_iter().filter(|(pid, identity)| self::identity(*pid).as_deref() == Some(identity.as_str())).collect();
+        // Still that very process — never merely "something with that pid".
+        let same = |pid: u32, identity: &str| self::identity(pid).as_deref() == Some(identity);
+        let matching: Vec<u32> = matched.iter().map(|(pid, _)| *pid).collect();
+        #[cfg(unix)]
+        {
+            if matching.is_empty() {
+                return matching;
+            }
+            // The groups its descendants lead, read before anything is signalled (`kill_tree`).
+            let strays: Vec<i32> = matching.iter().copied().flat_map(super::stray_groups).collect();
+            for &pid in &matching {
+                // SAFETY: as in `kill_tree`. The pid leads its own group (`proc::own_process_group`).
+                unsafe {
+                    libc::kill(-(pid as i32), libc::SIGTERM);
+                    libc::kill(pid as i32, libc::SIGTERM);
+                }
+            }
+            super::signal_groups(&strays, libc::SIGTERM);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while std::time::Instant::now() < deadline && matched.iter().any(|(pid, identity)| same(*pid, identity)) {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+            }
+            for (pid, identity) in &matched {
+                let pid = *pid;
+                // Still the same process after the grace period: it is not stopping on its own.
+                if same(pid, identity) {
+                    unsafe {
+                        libc::kill(-(pid as i32), libc::SIGKILL);
+                        libc::kill(pid as i32, libc::SIGKILL);
+                    }
+                }
+            }
+            super::signal_groups(&strays, libc::SIGKILL);
+        }
+        matching
+    }
 }
 
 /// Whether the app is quitting. A run that ends while this is set ended *because* of it — a
@@ -871,6 +1101,42 @@ fn idle_message(engine: &str, limit: Duration, spanish: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    /// A process left from "the last session" is stopped when it is provably that process; a pid
+    /// whose identity no longer matches is left alone.
+    #[cfg(unix)]
+    #[test]
+    fn orphans_are_stopped_only_when_they_are_the_same_process() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sleep").arg("30").process_group(0).spawn().unwrap();
+        let pid = child.id();
+        let identity = orphans::identity(pid).expect("ps sees it");
+        // Someone else's process under a reused pid: not touched.
+        assert!(orphans::stop_matching(vec![(pid, "Mon Jan  1 00:00:00 2001 sleep".into())]).is_empty());
+        assert!(child.try_wait().unwrap().is_none(), "still running");
+        assert_eq!(orphans::stop_matching(vec![(pid, identity)]), vec![pid]);
+        let status = child.wait().unwrap();
+        assert!(!status.success(), "it was signalled");
+        assert_eq!(
+            orphans::parse(r#"[{"pid":12,"identity":"x"},{"pid":"no"},{"pid":1,"identity":"init"}]"#),
+            vec![(12, "x".to_string())],
+            "pid 1 and malformed entries are never read"
+        );
+    }
+
+
+    /// A Stop that arrives before anything subscribes (a turn still preparing) is kept, and the
+    /// receiver the engine creates later reads it first.
+    #[test]
+    fn a_cancel_before_any_receiver_is_not_lost() {
+        let id = format!("test-early-{}", uuid::Uuid::new_v4());
+        registry().lock().unwrap().insert(id.clone(), watch::channel(false).0);
+        assert!(cancel(&id));
+        let mut rx = subscribe(&id).unwrap();
+        assert!(*rx.borrow_and_update(), "the engine sees the stop at once");
+        registry().lock().unwrap().remove(&id);
+    }
 
     /// Unset is the default, `0` is off, a number is minutes — and a typo is the default, never off.
     #[test]

@@ -109,10 +109,13 @@ describe("appCommandFor, per composer", () => {
 });
 
 describe("appCommandFor on the workspace chat", () => {
-  it("offers only /new and /export", () => {
+  it("offers the app's own commands, and not /move", () => {
     expect(appCommandFor("/new", "workspace")).toEqual({ id: "new", args: "" });
     expect(appCommandFor("/export", "workspace")).toEqual({ id: "export", args: "" });
     expect(appCommandFor("/clear", "workspace")).toEqual({ id: "clear", args: "" });
-    expect(appCommandFor("/compact", "workspace")).toBeNull();
+    expect(appCommandFor("/compact keep the paths", "workspace")).toEqual({ id: "compact", args: "keep the paths" });
+    expect(appCommandFor("/branch", "workspace")).toEqual({ id: "branch", args: "" });
+    expect(appCommandFor("/continue", "workspace")).toEqual({ id: "continue", args: "" });
+    expect(appCommandFor("/move", "workspace")).toBeNull();
   });
 });

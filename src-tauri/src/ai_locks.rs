@@ -158,9 +158,104 @@ pub fn acquire_key(key: &str) -> Option<RepoLease> {
 // Deliberately no `is_busy` for a conversation: a caller that intends to run must take
 // `acquire_key`, because any separate check is already stale by the time it is acted on.
 
+// ---------- the optional exclusive lock ----------
+//
+// Sharing is the default, and the README's promise. Some teams prefer the old guarantee for their
+// chats — one turn that *writes* in a working copy at a time — because two agents editing the same
+// repository make each turn's review and undo include the other's edits (both are measured against
+// the working tree). Settings › Asistente de IA turns it on: a writing chat turn then takes every
+// working copy it may write in, all or nothing, and a second writing turn waits on the busy marker
+// as a conversation's second turn does. Read-only (plan) turns never take it.
+
+/// What follows [`BUSY_MARKER`] when the refusal is this lock's — another turn is writing in that
+/// working copy — rather than the conversation's own lease. The workspace chat waits on the first
+/// and holds its queue on the second.
+pub const WRITER_BUSY: &str = "writer:";
+
+/// `app_settings` key: `"true"` makes writing chat turns exclusive per working copy.
+pub const EXCLUSIVE_SETTING: &str = "chat_exclusive_repo_lock";
+
+static EXCLUSIVE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Mirrors [`EXCLUSIVE_SETTING`] — seeded at startup and on every write of it (`set_setting`), so
+/// a turn never reads the database to know (it may be holding the lock already).
+pub fn setting_changed(key: &str, value: Option<&str>) {
+    if key == EXCLUSIVE_SETTING {
+        EXCLUSIVE.store(value.map(str::trim) == Some("true"), Ordering::Relaxed);
+    }
+}
+
+/// Whether writing chat turns are exclusive per working copy.
+pub fn exclusive() -> bool {
+    EXCLUSIVE.load(Ordering::Relaxed)
+}
+
+/// The working copies a writing turn holds while [`exclusive`] is on. Released on drop.
+#[derive(Debug)]
+pub struct WriterLease {
+    keys: Vec<String>,
+}
+
+impl Drop for WriterLease {
+    fn drop(&mut self) {
+        if let Ok(mut held) = leases().lock() {
+            for key in &self.keys {
+                held.remove(key);
+            }
+        }
+    }
+}
+
+/// Takes every working copy of `local_paths` for one writing turn — all of them, or none and the
+/// busy marker naming the first that is taken. `None` (nothing to hold) when the lock is off or the
+/// turn does not write.
+pub fn writers(local_paths: &[String], writes: bool) -> Result<Option<WriterLease>, String> {
+    writers_if(exclusive() && writes, local_paths)
+}
+
+fn writers_if(on: bool, local_paths: &[String]) -> Result<Option<WriterLease>, String> {
+    if !on || local_paths.is_empty() {
+        return Ok(None);
+    }
+    let mut keys: Vec<String> = local_paths.iter().map(|path| format!("writer::{}", key_for(path))).collect();
+    keys.sort();
+    keys.dedup();
+    let mut held = leases().lock().map_err(|e| e.to_string())?;
+    if let Some(taken) = keys.iter().position(|key| held.contains(key)) {
+        let path = local_paths
+            .iter()
+            .find(|path| format!("writer::{}", key_for(path)) == keys[taken])
+            .map(String::as_str)
+            .unwrap_or_default();
+        let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| path.to_string());
+        return Err(format!("{BUSY_MARKER}{WRITER_BUSY}{name}"));
+    }
+    for key in &keys {
+        held.insert(key.clone());
+    }
+    Ok(Some(WriterLease { keys }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    /// With the exclusive lock on, a second writing turn in a working copy is refused with the busy
+    /// marker, all of its copies or none are taken, and dropping the first frees them.
+    #[test]
+    fn exclusive_writers_take_all_their_copies_or_none() {
+        let a = format!("/tmp/cf-excl-{}/a", uuid::Uuid::new_v4());
+        let b = format!("/tmp/cf-excl-{}/b", uuid::Uuid::new_v4());
+        let first = writers_if(true, std::slice::from_ref(&a)).unwrap().unwrap();
+        let refused = writers_if(true, &[b.clone(), format!("{a}/")]).unwrap_err();
+        assert!(refused.starts_with(BUSY_MARKER) && refused.ends_with("a"), "{refused}");
+        // `b` was not taken by the refused call.
+        drop(writers_if(true, std::slice::from_ref(&b)).unwrap().unwrap());
+        drop(first);
+        assert!(writers_if(true, &[a, b]).unwrap().is_some());
+        assert!(writers_if(false, &["/x".to_string()]).unwrap().is_none(), "off: nothing held");
+    }
 
     /// The point of the change: a second run in a repository is not refused — it is told.
     #[test]

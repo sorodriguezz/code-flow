@@ -45,6 +45,17 @@ pub fn write_lock(repo_path: &str) -> std::sync::MutexGuard<'static, ()> {
     WRITES[write_stripe(repo_path)].lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// [`write_lock`] for several working copies at once — each stripe taken once, in stripe order. Taking
+/// them one by one with `write_lock` would wait forever on two repositories that share a stripe (a
+/// `std` mutex is not reentrant), and two callers taking overlapping sets in different orders could
+/// each hold what the other waits for.
+pub fn write_locks<'a>(repo_paths: impl IntoIterator<Item = &'a str>) -> Vec<std::sync::MutexGuard<'static, ()>> {
+    let mut stripes: Vec<(usize, &str)> = repo_paths.into_iter().map(|path| (write_stripe(path), path)).collect();
+    stripes.sort_by_key(|(stripe, _)| *stripe);
+    stripes.dedup_by_key(|(stripe, _)| *stripe);
+    stripes.into_iter().map(|(_, path)| write_lock(path)).collect()
+}
+
 const WRITE_STRIPES: usize = 64;
 
 /// The stripe of a working copy: separators made one kind, the trailing one dropped and case

@@ -123,8 +123,8 @@ describe("workspace chat", () => {
     const store = useWorkspaceChatStore.getState();
     store.prepare("11111111-1111-4111-8111-111111111111", "ws-1", { focusChainId: "chain-9" });
     await store.setEffort("11111111-1111-4111-8111-111111111111", "high");
-    // Nothing persisted yet: the picks wait for the row.
-    expect(backend.calls.map((c) => c.name)).toEqual([]);
+    // Nothing persisted yet: the picks wait for the row. (Reading the stored picks is not a write.)
+    expect(backend.calls.map((c) => c.name).filter((name) => name !== "get_setting")).toEqual([]);
 
     store.send("11111111-1111-4111-8111-111111111111", "where is the story at?");
     await flush();
@@ -161,6 +161,82 @@ describe("workspace chat", () => {
     expect(backend.calls.filter((c) => c.name === "chat_create_workspace_conversation")).toHaveLength(1);
   });
 
+  it("drops a repository removed from the workspace from the scope, without widening it", async () => {
+    const { useWorkspaceStore } = await import("./workspaceStore");
+    const id = "24242424-2424-4242-8242-242424242424";
+    const store = useWorkspaceChatStore.getState();
+    store.prepare(id, "ws-1");
+    store.setScope(id, ["a", "b"]);
+    // B left the workspace after it was picked.
+    useWorkspaceStore.setState({ projectsByWorkspace: { "ws-1": [{ id: "a" }, { id: "c" }] as never } });
+    expect(useWorkspaceChatStore.getState().scopeFor(id)).toEqual(["a"]);
+    store.send(id, "hi");
+    await flush();
+    expect(backend.calls.find((c) => c.name === "chat_send")!.args.repos).toEqual(["a"]);
+    backend.sends[0].reject("unknown repository for this workspace: a");
+    await flush();
+    // Only the id the backend named leaves; the scope did not become «all».
+    useWorkspaceStore.setState({ projectsByWorkspace: {} });
+    useWorkspaceChatStore.getState().setScope(id, ["a", "z"]);
+    store.send(id, "again");
+    await flush();
+    backend.sends[1].reject("unknown repository for this workspace: z");
+    await flush();
+    expect(useWorkspaceChatStore.getState().scopeRepos[id]).toEqual(["a"]);
+  });
+
+  it("queues a /clear typed while a turn runs, between that answer and the next question", async () => {
+    const id = "25252525-2525-4252-8252-252525252525";
+    const store = useWorkspaceChatStore.getState();
+    store.prepare(id, "ws-1");
+    store.send(id, "first");
+    await flush();
+    backend.clearReply = { id, contextResets: [{ turn: 1, reason: "clear" }] };
+    await store.clearContext(id);
+    store.submit(id, "second");
+    // Nothing was refused or applied ahead of the turn.
+    expect(backend.calls.some((c) => c.name === "chat_clear_context")).toBe(false);
+    backend.sends[0].resolve(reply("one"));
+    await flush();
+    await flush();
+    const order = backend.calls.map((c) => c.name).filter((n) => n === "chat_clear_context" || n === "chat_send");
+    expect(order).toEqual(["chat_send", "chat_clear_context", "chat_send"]);
+    expect(useWorkspaceChatStore.getState().byConversation[id].contextResets).toEqual([{ turn: 1, reason: "clear" }]);
+  });
+
+  it("keeps plan mode, «Completo» and the scope for the next window", async () => {
+    const id = "26262626-2626-4262-8262-262626262626";
+    const store = useWorkspaceChatStore.getState();
+    store.prepare(id, "ws-1");
+    store.setPlan(id, true);
+    store.setPermissions(id, "full");
+    store.setScope(id, ["a"]);
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const written = backend.calls.filter((c) => c.name === "set_setting" && c.args.key === "ws_chat_prefs").pop();
+    expect(JSON.parse(String(written?.args.value))[id]).toEqual({ plan: true, permissions: "full", scope: ["a"] });
+  });
+
+  it("numbers both halves of an exchange with one turn, as the rows on disk do", async () => {
+    const id = "23232323-2323-4232-8232-232323232323";
+    const store = useWorkspaceChatStore.getState();
+    store.prepare(id, "ws-1");
+    store.send(id, "first");
+    await flush();
+    backend.sends[0].resolve(reply("one"));
+    await flush();
+    store.send(id, "second");
+    await flush();
+    backend.sends[1].resolve(reply("two"));
+    await flush();
+    const turns = useWorkspaceChatStore.getState().byConversation[id].messages.map((m) => [m.role, m.turn]);
+    expect(turns).toEqual([
+      ["user", 0],
+      ["assistant", 0],
+      ["user", 1],
+      ["assistant", 1],
+    ]);
+  });
+
   it("keeps /caveman for the row a fresh chat's first question creates, and writes it live after", async () => {
     const id = "44444444-4444-4444-8444-444444444444";
     const store = useWorkspaceChatStore.getState();
@@ -190,6 +266,14 @@ describe("workspace chat", () => {
     expect(full.context).toHaveLength(1);
     const bare = messageFromRow({ ...base, context: [], unprotectedDirs: [] } as never);
     expect([bare.context, bare.usage, bare.unprotectedDirs]).toEqual([undefined, undefined, undefined]);
+  });
+
+  it("restores a question's chips — its files and skill — from a stored row", () => {
+    const base = { id: "q", turn: 0, role: "user", content: "mira", createdAt: "t", isError: false, isCancelled: false };
+    const asked = messageFromRow({ ...base, attachments: [{ id: "x-a.txt", name: "a.txt", path: "/c/x-a.txt", isImage: false }], skill: "lint" } as never);
+    expect(asked.attachments).toEqual([{ id: "x-a.txt", name: "a.txt", path: "/c/x-a.txt", isImage: false, bytes: 0 }]);
+    expect(asked.skill).toBe("lint");
+    expect(messageFromRow(base as never).attachments).toBeUndefined();
   });
 
   it("files a failure in the transcript and holds the queue", async () => {
@@ -534,6 +618,23 @@ describe("editing a question in a workspace chat", () => {
     await useWorkspaceChatStore.getState().submitEdit(id, "again");
     expect(backend.calls.find((c) => c.name === "chat_truncate_from")?.args.messageId).toBe("r-u1");
     expect(contents()).toEqual(["user 0", "assistant 0", "again"]);
+  });
+
+  it("finds the row by its turn and words when a question never reached the disk", async () => {
+    await seed([
+      msg(0, "user", { id: "pending-user-1", content: "lost" }),
+      msg(0, "assistant", { id: "pending-user-1-failed", isError: true }),
+      msg(1, "user", { id: "pending-user-2", content: "kept" }),
+      msg(1, "assistant", { id: "pending-user-2-failed", isError: true }),
+    ]);
+    // The first question failed before the engine: only the second is on disk, numbered 0 there.
+    backend.rows = [
+      { id: "r-kept", role: "user", turn: 0, content: "kept" },
+      { id: "r-kept-a", role: "assistant", turn: 0, content: "boom" },
+    ];
+    useWorkspaceChatStore.getState().beginEdit(id, 2);
+    await useWorkspaceChatStore.getState().submitEdit(id, "again");
+    expect(backend.calls.find((c) => c.name === "chat_truncate_from")?.args.messageId).toBe("r-kept");
   });
 
   it("leaves what is queued behind queued", async () => {

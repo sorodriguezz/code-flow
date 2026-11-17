@@ -116,6 +116,20 @@ describe("turnsToMessages usage", () => {
   });
 });
 
+describe("turnsToMessages question files", () => {
+  it("puts back the files and skill a question was asked with, and ignores bad JSON", () => {
+    const carried = JSON.stringify({ files: [{ id: "a-1.png", name: "shot.png", path: "/x/a-1.png", isImage: true }], skill: "review" });
+    const out = turnsToMessages([turn(1, { question_files: carried }), turn(2, { question_files: "{bad" }), turn(3)]);
+    const questions = out.filter((m) => m.role === "user");
+    expect(questions[0].attachments).toEqual([{ id: "a-1.png", name: "shot.png", path: "/x/a-1.png", isImage: true, bytes: 0 }]);
+    expect(questions[0].skill).toBe("review");
+    expect(questions.slice(1).map((m) => [m.attachments, m.skill])).toEqual([
+      [undefined, undefined],
+      [undefined, undefined],
+    ]);
+  });
+});
+
 describe("turnsToMessages", () => {
   it("draws the line above the first question another account answered", () => {
     const messages = turnsToMessages([turn(1), turn(2, { account_id: "acct-home" }), turn(3, { account_id: "acct-home" })]);

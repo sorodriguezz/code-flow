@@ -23,14 +23,16 @@ const mocks = vi.hoisted(() => ({
   loadList: vi.fn(),
   detach: vi.fn(),
   focus: vi.fn(),
+  getConversation: vi.fn(),
+  list: {} as Record<string, { id: string; provider: string; title: string }[]>,
 }));
 
-vi.mock("./tauri/chatCommands", () => ({ chatCreateWorkspaceConversation: mocks.create }));
+vi.mock("./tauri/chatCommands", () => ({ chatCreateWorkspaceConversation: mocks.create, chatGetConversation: mocks.getConversation }));
 vi.mock("../state/aiPanelStore", () => ({
   useAiPanelStore: { getState: () => ({ load: mocks.load, open: mocks.open }) },
 }));
 vi.mock("../state/workspaceChatStore", () => ({
-  useWorkspaceChatStore: { getState: () => ({ loadList: mocks.loadList }) },
+  useWorkspaceChatStore: { getState: () => ({ loadList: mocks.loadList, listByWorkspace: mocks.list }) },
 }));
 vi.mock("../state/windowStore", () => ({
   useWindowStore: { getState: () => ({ satellites: mocks.satellites, detach: mocks.detach, focus: mocks.focus }) },
@@ -49,6 +51,8 @@ beforeEach(() => {
   mocks.load.mockResolvedValue(undefined);
   mocks.loadList.mockResolvedValue(undefined);
   mocks.detach.mockResolvedValue(true);
+  mocks.getConversation.mockResolvedValue([]);
+  mocks.list = {};
   vi.spyOn(crypto, "randomUUID").mockReturnValue(FIXTURE.conversationId as ReturnType<typeof crypto.randomUUID>);
 });
 
@@ -73,6 +77,20 @@ describe("workspace chat islands", () => {
     const createdAt = mocks.create.mock.invocationCallOrder[FIXTURE.noCalls];
     const detachedAt = mocks.detach.mock.invocationCallOrder[FIXTURE.noCalls];
     expect(createdAt).toBeLessThan(detachedAt);
+  });
+
+  it("opens the blank chat an earlier island left instead of minting another", async () => {
+    mocks.list = { [FIXTURE.workspaceId]: [{ id: "blank-one", provider: FIXTURE.empty, title: FIXTURE.empty }] };
+    await openWorkspaceChatIsland(FIXTURE.workspaceId, FIXTURE.title);
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.open).toHaveBeenCalledWith({ kind: WORKSPACE_CHAT_KIND, workspaceId: FIXTURE.workspaceId, conversationId: "blank-one" }, BACKGROUND_TAB);
+  });
+
+  it("does not reuse a chat that has messages, even with no engine yet", async () => {
+    mocks.list = { [FIXTURE.workspaceId]: [{ id: "used", provider: FIXTURE.empty, title: FIXTURE.empty }] };
+    mocks.getConversation.mockResolvedValue([{ id: "m" }]);
+    await openWorkspaceChatIsland(FIXTURE.workspaceId, FIXTURE.title);
+    expect(mocks.create).toHaveBeenCalledTimes(FIXTURE.oneCall);
   });
 
   it("focuses an already open chat without creating another conversation", async () => {
