@@ -56,96 +56,126 @@ static SHUTDOWN: RunOnce = RunOnce::new();
 /// [`run_outside_runtime`].
 pub fn shutdown_cleanup(app: &AppHandle) {
     SHUTDOWN.run(|| {
-        // The quit paths that never touch the close handler: the tray's Quit, ⌘Q, the
-        // in-app quit. All three end in `AppHandle::exit`, which is here.
-        crate::window_state::save(app);
-        // A meeting being recorded: its last piece closed, queued for the next launch. Early, so
-        // a hang in anything below cannot cost the end of a meeting.
-        crate::commands::meetings_cmd::shutdown(app);
-        // The power hold «Evitar que el equipo se suspenda» took, if any — it dies with the process
-        // anyway; let go here so the log says so on a normal quit.
-        crate::keep_awake::release_on_exit();
-        // A vault secret still on the clipboard, its clear not yet due: cleared now, not left there.
-        crate::secret_clipboard::clear_on_exit();
-        // The last four seconds of every bench terminal's output, which the flusher's timer
-        // has not come round for. The shells themselves die with the process — that is what
-        // a pty is — so this is the whole of what "don't lose my work" can mean here, and
-        // it is the moment it has to happen.
-        crate::commands::terminal_cmd::flush_transcripts(app);
-        // Every AI CLI still running, with everything it started. Each was spawned into a
-        // process group of its own — that is what makes Stop work — so none of them dies
-        // with this process: left alone, an agent would go on editing a repository after
-        // the app that started it is gone. Early in this block because it is the step whose
-        // absence does damage. Then the turns it cut short are filed as stopped, and the
-        // prompt files their runs never got to delete are deleted.
-        crate::ai_runs::stop_all(std::time::Duration::from_secs(3));
-        crate::commands::chat_cmd::record_turns_stopped_at_quit(app);
-        crate::ai_prompt_files::remove_own();
-        // The voice-cloning engine's Python and Codi's microphone: neither outlives the app.
-        crate::speech::clone::stop_server();
-        crate::codi::listen::stop();
-        // Flow runs, and every process their nodes started: each sits in a process group of its
-        // own (that is what Stop needs), so a `npm run build` a flow started would outlive the app.
-        // Cancelled first so each run files itself as canceled; the processes that have not gone
-        // when the grace is up are ended directly.
-        crate::flows::triggers::shutdown();
-        // The API client's mock servers: in-process listeners, cancelled here so a quit by any path
-        // leaves no port bound and no connection half-answered.
-        crate::api::mock::shutdown();
-        // The panel's `kubectl port-forward`s: children of a task no runtime will run again.
-        crate::containers::forward::shutdown();
-        crate::flows::runs::shutdown(std::time::Duration::from_secs(3));
-        // Services, stopped the way the Stop button stops them — Ctrl-C first — rather than
-        // by the process exiting under them. The difference is Compose: its Ctrl-C takes the
-        // containers down, and an app that simply exits leaves them running.
-        let supervisor = app.state::<Arc<crate::services::Supervisor>>();
-        supervisor.shutdown(app, std::time::Duration::from_secs(8));
-        // What each printed, so the console still has it on the next launch.
-        supervisor.persist_logs();
-        let registry = app.state::<DbRegistry>();
-        tauri::async_runtime::block_on(registry.close_all());
-        // The Remote workspace's own `static` maps, for the reason the comment in `lib.rs` gives:
-        // `forward`'s registry and the two file-session maps hold children that
-        // `process::exit` walks straight past. Without this every quit leaves an `ssh -N`
-        // holding a forwarded port, and an `ssh -s … sftp` holding a channel on somebody
-        // else's machine, both reparented to init.
-        tauri::async_runtime::block_on(crate::remotes::hold::release_all());
-        // And every language server, for exactly the reason above: each is a separate
-        // process holding an index of the repository, and a reparented `rust-analyzer`
-        // keeps several hundred megabytes that nothing is left to reap.
-        tauri::async_runtime::block_on(crate::lsp::stop_all());
-        // The editor's tsserver is a `node` of its own, outside the LSP registry.
-        tauri::async_runtime::block_on(crate::tsserver::ts_stop());
-        // Every notebook's Jupyter kernel: asked to shut down, then its process group killed if it
-        // has not left. Each sits in a group of its own for interrupting, so none dies with this
-        // process — and a kernel is a Python holding whatever the notebook loaded into memory.
-        tauri::async_runtime::block_on(crate::jupyter::shutdown_all(std::time::Duration::from_secs(2)));
-        // A debug session, whichever backend runs it. The program sits in a process group of its
-        // own — that is what lets Stop reach what it started — so it would outlive this process,
-        // quite possibly paused at a breakpoint for ever, holding whatever port it had opened.
-        tauri::async_runtime::block_on(crate::commands::debug_cmd::stop_all());
-        // The Reviewer's local SonarQube and the review in flight. The server is four JVMs and an
-        // Elasticsearch index in a process group of their own; left behind they would hold two
-        // gigabytes and the data folder the next launch needs.
-        crate::reviewer::shutdown(std::time::Duration::from_secs(10));
-        // The hybrid task's local model, if one is loaded. A child process does not die with its
-        // parent, and this one can be holding twenty gigabytes; the sweep at the next launch would
-        // find it, but only after it had sat in memory for however long the app was closed.
-        tauri::async_runtime::block_on(crate::localai::executor::shutdown());
-        tauri::async_runtime::block_on(crate::localai::embedder::shutdown());
-        // A training run and the adapter server: Python processes that would otherwise keep the
-        // GPU and gigabytes of weights after the app is gone.
-        crate::learning::trainer::shutdown();
-        crate::learning::serving::shutdown();
-        // And the editor completion's `llama-server`, for the same reason: the quit ends in
-        // `process::exit`, where no destructor runs, so `kill_on_drop` never fires and the server
-        // sat on its gigabyte until the next launch's sweep.
-        tauri::async_runtime::block_on(crate::localai::engine::shutdown());
-        // Last, once everything above has actually finished: the marker's whole meaning is
-        // "the previous session did not get this far", so clearing it early would call a
-        // shutdown clean that a hang in any of the steps above could still spoil.
-        crate::applog::mark_clean_exit();
+        arm_deadline();
+        // A panic here would not unwind: on macOS the `Exit` event is handled inside the native
+        // event loop's callback, where Rust aborts instead — a quit reported as a crash. The steps
+        // that did not run are lost either way; the process still ends the way it was asked to.
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cleanup_steps(app))).is_err() {
+            crate::applog::warn("shutdown: a cleanup step panicked; the rest of the cleanup was skipped");
+        }
     });
+}
+
+/// How long the cleanup may take before the process ends without it. Every step has a bound of its
+/// own, but they run one after another and a few wait on locks with none — a quit should not.
+const SHUTDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Ends the process if the cleanup outlives [`SHUTDOWN_DEADLINE`]. `_exit`, not `process::exit`: the
+/// cleanup is still running on another thread, and the destructors `exit` would run under it are a
+/// crash of their own. The clean-exit marker stays set, so the next launch says what happened.
+fn arm_deadline() {
+    let _ = std::thread::Builder::new().name("shutdown-deadline".into()).spawn(|| {
+        std::thread::sleep(SHUTDOWN_DEADLINE);
+        crate::applog::warn(&format!("shutdown: cleanup still running after {} s; ending the process", SHUTDOWN_DEADLINE.as_secs()));
+        #[cfg(unix)]
+        unsafe {
+            libc::_exit(0)
+        };
+        #[cfg(not(unix))]
+        std::process::exit(0);
+    });
+}
+
+fn cleanup_steps(app: &AppHandle) {
+    // The quit paths that never touch the close handler: the tray's Quit, ⌘Q, the
+    // in-app quit. All three end in `AppHandle::exit`, which is here.
+    crate::window_state::save(app);
+    // A meeting being recorded: its last piece closed, queued for the next launch. Early, so
+    // a hang in anything below cannot cost the end of a meeting.
+    crate::commands::meetings_cmd::shutdown(app);
+    // The power hold «Evitar que el equipo se suspenda» took, if any — it dies with the process
+    // anyway; let go here so the log says so on a normal quit.
+    crate::keep_awake::release_on_exit();
+    // A vault secret still on the clipboard, its clear not yet due: cleared now, not left there.
+    crate::secret_clipboard::clear_on_exit();
+    // The last four seconds of every bench terminal's output, which the flusher's timer
+    // has not come round for. The shells themselves die with the process — that is what
+    // a pty is — so this is the whole of what "don't lose my work" can mean here, and
+    // it is the moment it has to happen.
+    crate::commands::terminal_cmd::flush_transcripts(app);
+    // Every AI CLI still running, with everything it started. Each was spawned into a
+    // process group of its own — that is what makes Stop work — so none of them dies
+    // with this process: left alone, an agent would go on editing a repository after
+    // the app that started it is gone. Early in this block because it is the step whose
+    // absence does damage. Then the turns it cut short are filed as stopped, and the
+    // prompt files their runs never got to delete are deleted.
+    crate::ai_runs::stop_all(std::time::Duration::from_secs(3));
+    crate::commands::chat_cmd::record_turns_stopped_at_quit(app);
+    crate::ai_prompt_files::remove_own();
+    // The voice-cloning engine's Python and Codi's microphone: neither outlives the app.
+    crate::speech::clone::stop_server();
+    crate::codi::listen::stop();
+    // Flow runs, and every process their nodes started: each sits in a process group of its
+    // own (that is what Stop needs), so a `npm run build` a flow started would outlive the app.
+    // Cancelled first so each run files itself as canceled; the processes that have not gone
+    // when the grace is up are ended directly.
+    crate::flows::triggers::shutdown();
+    // The API client's mock servers: in-process listeners, cancelled here so a quit by any path
+    // leaves no port bound and no connection half-answered.
+    crate::api::mock::shutdown();
+    // The panel's `kubectl port-forward`s: children of a task no runtime will run again.
+    crate::containers::forward::shutdown();
+    crate::flows::runs::shutdown(std::time::Duration::from_secs(3));
+    // Services, stopped the way the Stop button stops them — Ctrl-C first — rather than
+    // by the process exiting under them. The difference is Compose: its Ctrl-C takes the
+    // containers down, and an app that simply exits leaves them running.
+    let supervisor = app.state::<Arc<crate::services::Supervisor>>();
+    supervisor.shutdown(app, std::time::Duration::from_secs(8));
+    // What each printed, so the console still has it on the next launch.
+    supervisor.persist_logs();
+    let registry = app.state::<DbRegistry>();
+    tauri::async_runtime::block_on(registry.close_all());
+    // The Remote workspace's own `static` maps, for the reason the comment in `lib.rs` gives:
+    // `forward`'s registry and the two file-session maps hold children that
+    // `process::exit` walks straight past. Without this every quit leaves an `ssh -N`
+    // holding a forwarded port, and an `ssh -s … sftp` holding a channel on somebody
+    // else's machine, both reparented to init.
+    tauri::async_runtime::block_on(crate::remotes::hold::release_all());
+    // And every language server, for exactly the reason above: each is a separate
+    // process holding an index of the repository, and a reparented `rust-analyzer`
+    // keeps several hundred megabytes that nothing is left to reap.
+    tauri::async_runtime::block_on(crate::lsp::stop_all());
+    // The editor's tsserver is a `node` of its own, outside the LSP registry.
+    tauri::async_runtime::block_on(crate::tsserver::ts_stop());
+    // Every notebook's Jupyter kernel: asked to shut down, then its process group killed if it
+    // has not left. Each sits in a group of its own for interrupting, so none dies with this
+    // process — and a kernel is a Python holding whatever the notebook loaded into memory.
+    tauri::async_runtime::block_on(crate::jupyter::shutdown_all(std::time::Duration::from_secs(2)));
+    // A debug session, whichever backend runs it. The program sits in a process group of its
+    // own — that is what lets Stop reach what it started — so it would outlive this process,
+    // quite possibly paused at a breakpoint for ever, holding whatever port it had opened.
+    tauri::async_runtime::block_on(crate::commands::debug_cmd::stop_all());
+    // The Reviewer's local SonarQube and the review in flight. The server is four JVMs and an
+    // Elasticsearch index in a process group of their own; left behind they would hold two
+    // gigabytes and the data folder the next launch needs.
+    crate::reviewer::shutdown(std::time::Duration::from_secs(10));
+    // The hybrid task's local model, if one is loaded. A child process does not die with its
+    // parent, and this one can be holding twenty gigabytes; the sweep at the next launch would
+    // find it, but only after it had sat in memory for however long the app was closed.
+    tauri::async_runtime::block_on(crate::localai::executor::shutdown());
+    tauri::async_runtime::block_on(crate::localai::embedder::shutdown());
+    // A training run and the adapter server: Python processes that would otherwise keep the
+    // GPU and gigabytes of weights after the app is gone.
+    crate::learning::trainer::shutdown();
+    crate::learning::serving::shutdown();
+    // And the editor completion's `llama-server`, for the same reason: the quit ends in
+    // `process::exit`, where no destructor runs, so `kill_on_drop` never fires and the server
+    // sat on its gigabyte until the next launch's sweep.
+    tauri::async_runtime::block_on(crate::localai::engine::shutdown());
+    // Last, once everything above has actually finished: the marker's whole meaning is
+    // "the previous session did not get this far", so clearing it early would call a
+    // shutdown clean that a hang in any of the steps above could still spoil.
+    crate::applog::mark_clean_exit();
 }
 
 /// Runs `job` where `tauri::async_runtime::block_on` is allowed, which is anywhere but inside a

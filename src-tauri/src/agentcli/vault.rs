@@ -336,30 +336,32 @@ fn connections_here(app: &AppHandle, request: &Request) -> Vec<(crate::db::model
         .collect()
 }
 
-const CLOSED_CONNECTION_APPROVAL_KIND: &str = "db";
-const CLOSED_CONNECTION_TARGET_PREFIX: &str = "read-closed";
-
-/// The connection named `name`, with what the model may do on it — a connection closed to AI is
-/// read only after the user approves it in the app — or the reply that says why not.
+/// The connection named `name`, with what the model may do on it — or the reply that says why not.
+///
+/// A connection closed to AI («Sin acceso») is closed: not read after an approval, not read in
+/// «Completo». It used to be readable once the user said yes — and «Completo» answers every question
+/// yes without asking, so a connection the settings said no chat could see was read silently (user
+/// report, 2026-11-18). The setting's own words are «los chats y agentes no ven ni usan esta conexión».
 async fn usable(app: &AppHandle, request: &Request, name: &str) -> Result<(crate::db::models::DbConnectionRow, AiAccess), Reply> {
-    let candidates = connections_here(app, request);
-    let (row, access) = match pick(candidates, name, |(row, _)| row.name.as_str()) {
-        Ok(found) => found,
-        Err(names) if names.is_empty() => return Err(Reply::no(format!("no saved database connection named {name} here — db_connections lists them"))),
-        Err(names) => return Err(Reply::no(format!("{name} matches several connections: {}", names.join(", ")))),
-    };
-    if access != AiAccess::None {
-        return Ok((row, access));
+    let (open, closed): (Vec<_>, Vec<_>) = connections_here(app, request).into_iter().partition(|(_, access)| *access != AiAccess::None);
+    match pick(open, name, |(row, _)| row.name.as_str()) {
+        Ok(found) => Ok(found),
+        Err(names) if names.is_empty() => {
+            // Named outright by the user, most likely: say it is closed and how to open it, rather
+            // than "no such connection", which would send the model looking for another way in.
+            if closed.iter().any(|(row, _)| row.name.eq_ignore_ascii_case(name.trim())) {
+                return Err(Reply::no(format!(
+                    "{name} is closed to AI (Acceso de IA: Sin acceso) and cannot be read or written from here, by any means. \
+                     Tell the user; they can open it in Base de datos › Opciones › Acceso de IA."
+                )));
+            }
+            Err(Reply::no(format!("no database connection named {name} open to AI here — db_connections lists them")))
+        }
+        Err(names) => Err(Reply::no(format!("{name} matches several connections: {}", names.join(", ")))),
     }
-    let mut event = AskEvent::new(CLOSED_CONNECTION_APPROVAL_KIND, format!("«{}» — read it (closed to AI)", row.name), &request.cwd);
-    event.detail = format!("Read-only session on «{}». Opening it in Base de datos › Opciones › Acceso de IA stops this question.", row.name);
-    event.always = true;
-    let target = format!("{CLOSED_CONNECTION_TARGET_PREFIX}|{}", row.id);
-    approve(app, request, &target, event).await?;
-    Ok((row, AiAccess::Read))
 }
 
-/// `cf dbs`: the connections a model may use here, and the names of the ones it may not.
+/// `cf dbs`: the connections a model may use here, and how many it may not.
 pub fn dbs(request: &Request, app: &AppHandle) -> Reply {
     let all = connections_here(app, request);
     if all.is_empty() {
@@ -376,11 +378,11 @@ pub fn dbs(request: &Request, app: &AppHandle) -> Reply {
             out.push_str(&format!("- {} · {} · {} · {} · {}{read_only}\n", row.name, row.kind, field("environment"), field("database"), access.label()));
         }
     }
+    // The closed ones counted, never named: «no ven» means not seen.
     if !closed.is_empty() {
-        let names: Vec<&str> = closed.iter().map(|(row, _)| row.name.as_str()).collect();
         out.push_str(&format!(
-            "Closed to AI — still usable: db_schema and db_read on one ask the user to approve reading it in CodeFlow (read-only; no writes): {}\n",
-            names.join(", ")
+            "{} more connection(s) are closed to AI and cannot be used; the user can open one in Base de datos › Opciones › Acceso de IA.\n",
+            closed.len()
         ));
     }
     Reply::ok(out.trim_end().to_string())

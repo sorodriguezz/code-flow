@@ -25,8 +25,11 @@ use super::{destination, BackupContents, BackupSettings};
 const TICK: Duration = Duration::from_secs(60);
 
 /// A backup on the way out has to finish before the process does, but it must not be able to hold
-/// a quit open. Local writes take milliseconds; the bound exists for the Drive upload.
-const EXIT_BUDGET: Duration = Duration::from_secs(20);
+/// a quit open. Local writes take milliseconds; the bound exists for the Drive upload and for the
+/// synchronous steps a timer cannot interrupt — the database lock, the keychain, the key derivation.
+/// A backup cut short loses nothing: the local file is written to a temporary name and renamed, and
+/// the next scheduled run catches up.
+const EXIT_BUDGET: Duration = Duration::from_secs(10);
 
 /// The outcome of one run. `wrote = false` with no error is the good, common case: nothing had
 /// changed, so nothing needed writing.
@@ -275,10 +278,18 @@ pub fn flush_on_exit(app: &AppHandle) {
     if !wanted {
         return;
     }
+    // On a thread of its own, waited for with a deadline: `tokio::time::timeout` only fires at an
+    // await, and the slow parts of `run` are not awaits — a quit waited 25 s on a 20 s budget.
     let app = app.clone();
-    let _ = tauri::async_runtime::block_on(async move {
-        tokio::time::timeout(EXIT_BUDGET, run(&app, false)).await
+    let (done, finished) = std::sync::mpsc::channel();
+    let started = std::time::Instant::now();
+    let spawned = std::thread::Builder::new().name("backup-on-exit".into()).spawn(move || {
+        let _ = tauri::async_runtime::block_on(run(&app, false));
+        let _ = done.send(());
     });
+    if spawned.is_ok() && finished.recv_timeout(EXIT_BUDGET).is_err() {
+        crate::applog::warn(&format!("backup: the closing backup did not finish in {} ms; quitting without it", started.elapsed().as_millis()));
+    }
 }
 
 #[cfg(test)]

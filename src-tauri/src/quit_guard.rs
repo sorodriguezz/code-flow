@@ -169,8 +169,14 @@ pub fn request_quit(app: &AppHandle) {
 /// backup is least likely to have caught), and the flag that stops the close handler from hiding the
 /// window instead of letting it go.
 fn finish(app: &AppHandle) {
-    crate::backup::auto::flush_on_exit(app);
     app.state::<QuittingFlag>().mark_quitting();
+    // Gone from the screen first: what is left of a quit — the backup, then `shutdown_cleanup` —
+    // is the app's business, not something to watch frozen. A window left up through it read as a
+    // hang, and after 25 s of one the user force-quit (log, 2026-11-17 23:12).
+    for window in app.webview_windows().values() {
+        let _ = window.hide();
+    }
+    crate::backup::auto::flush_on_exit(app);
 }
 
 /// `RunEvent::ExitRequested`, decided. Called from the run loop in `lib.rs`.
@@ -210,10 +216,15 @@ pub fn quit_guard_cancel(app: AppHandle) {
 }
 
 /// The answer that ends the app: nothing was unsaved, or the user saved it or chose to lose it.
+///
+/// Async, and the closing steps on a blocking thread: a sync command runs on the main thread, and
+/// the backup in `finish` held it for 7–25 s — the windows frozen, macOS calling the app not
+/// responding, and a force-quit that left the next launch recovering an unclean shutdown.
 #[tauri::command]
-pub fn quit_app_confirmed(app: AppHandle) {
+pub async fn quit_app_confirmed(app: AppHandle) {
     app.state::<QuitGuard>().approve();
-    finish(&app);
+    let closing = app.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || finish(&closing)).await;
     app.exit(0);
 }
 

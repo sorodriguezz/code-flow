@@ -437,23 +437,50 @@ export function severityOf(usedPercent: number): "normal" | "low" | "critical" {
   return "normal";
 }
 
+function fullestOf(limits: QuotaLimit[]): QuotaLimit | null {
+  return limits.reduce<QuotaLimit | null>((best, l) => (!best || l.used_percent > best.used_percent ? l : best), null);
+}
+
 /** The two windows one account's rail ring draws: the session inside, the longer window outside.
  *
- * "Longer" is the unscoped week when there is one, then the fullest scoped week (Gemini reports its
- * week only per model group), then the month, then — for a provider whose windows have no kind at
- * all — the fullest remaining whole window. Slices of a total never win, for the reason
- * [`wholeWindows`] gives: a model you never touch must not paint the ring for the week. */
+ * "Longer" is the fullest of every non-session limit — week, month, a model's slice of the week or a
+ * kindless per-model bucket. It used to prefer the unscoped week, which hid exactly the limit about to
+ * stop you: OpenCode's month at 100% behind a quiet week, or Fable's week at 90% behind a 4% total
+ * (user report, 2026-11-18). A slice can only be full if you have been using that model, so it
+ * earning the ring is the point, not noise. */
 export function railWindows(quota: ProviderQuota): { session: QuotaLimit | null; long: QuotaLimit | null } {
-  const whole = wholeWindows(quota);
-  const fullest = (limits: QuotaLimit[]) =>
-    limits.reduce<QuotaLimit | null>((best, l) => (!best || l.used_percent > best.used_percent ? l : best), null);
-  const session = fullest(whole.filter((l) => l.kind === "session"));
-  const long =
-    whole.find((l) => l.kind === "weekly" && !l.scope) ??
-    fullest(whole.filter((l) => l.kind === "weekly")) ??
-    fullest(whole.filter((l) => l.kind === "monthly")) ??
-    fullest(whole.filter((l) => l.kind !== "session"));
+  const session = fullestOf(quota.limits.filter((l) => l.kind === "session"));
+  const long = fullestOf(quota.limits.filter((l) => l.kind !== "session"));
   return { session, long };
+}
+
+/** One limit as the rail popover draws it: its own heading, bar and reset line. */
+export interface QuotaBlock {
+  /** `session`, `weekly`, `monthly` — or anything else, which the popover names by the scope. */
+  kind: string;
+  limit: QuotaLimit;
+}
+
+const BLOCK_ORDER = ["session", "weekly", "monthly"];
+
+/** Every limit a provider reported, in the order the rail popover draws them: session → week →
+ *  month, each kind's total before the model slices of it («Semanal», then «Semanal · Fable»), then
+ *  every kindless bucket (Gemini's per-model rows). Each is a block of its own — a slice nested under
+ *  its total read oddly (user report, 2026-11-18). Nothing is dropped: a popover that shows two of
+ *  four limits is the one that says "fine" while the third is at 100%. */
+export function quotaBlocks(quota: ProviderQuota): QuotaBlock[] {
+  const byFullness = (a: QuotaLimit, b: QuotaLimit) => b.used_percent - a.used_percent;
+  const blocks: QuotaBlock[] = [];
+  for (const kind of BLOCK_ORDER) {
+    const ofKind = quota.limits.filter((l) => l.kind === kind);
+    const totals = ofKind.filter((l) => !l.scope).sort(byFullness);
+    const slices = ofKind.filter((l) => l.scope).sort(byFullness);
+    for (const limit of [...totals.slice(0, 1), ...slices]) blocks.push({ kind, limit });
+  }
+  for (const limit of quota.limits.filter((l) => !BLOCK_ORDER.includes(l.kind)).sort(byFullness)) {
+    blocks.push({ kind: limit.kind, limit });
+  }
+  return blocks;
 }
 
 /** A run-reported session that has rolled over since: the backend drops it (its percentage belonged

@@ -156,7 +156,9 @@ pub struct FullStatus {
     recordings_dir: String,
 }
 
-#[tauri::command]
+/// Off the main thread (`async`): the cloud key is a keychain read, which took ~4 s on the quit
+/// path — the quit guard asks this before letting the app go — with every window frozen meanwhile.
+#[tauri::command(async)]
 pub fn meetings_status(state: State<MeetingsState>) -> FullStatus {
     let recording = state.active.lock().ok().and_then(|active| {
         active.as_ref().map(|a| Recording {

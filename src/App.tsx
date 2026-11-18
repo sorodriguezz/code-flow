@@ -625,10 +625,35 @@ function AiEdge() {
   const open = useUiStore((s) => s.aiPanelOpen);
   const edgeRef = useRef<HTMLDivElement>(null);
   const phase = useEdgeSlide(open, (opening) => slideAiPanel(edgeRef.current, opening));
+  /**
+   * Built once and kept, hidden, while shut — and built ahead of the first open, a moment after the
+   * window is up.
+   *
+   * It used to mount on every open: the tab strip, a chat's whole transcript, the inbox, all built
+   * in the commit the slide starts from, so the panel stood still for that long and then moved —
+   * the hitch on opening that closing never had (user report, 2026-11-18). Shut, it is collapsed to
+   * no width and not painted, its contents still laid out at their own width — see `AiPanel` — so
+   * opening is only the slide. Nothing in it keys off being mounted — "seen" reads `aiPanelOpen`.
+   */
+  const [built, setBuilt] = useState(open);
+  useEffect(() => {
+    if (open) setBuilt(true);
+  }, [open]);
+  useEffect(() => {
+    if (built) return;
+    // WebKit has no `requestIdleCallback`: a timer late enough to stay out of the boot's way.
+    const idle = (window as Window & { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback;
+    if (idle) {
+      const id = idle(() => setBuilt(true), { timeout: 5000 });
+      return () => (window as Window & { cancelIdleCallback?: (id: number) => void }).cancelIdleCallback?.(id);
+    }
+    const timer = window.setTimeout(() => setBuilt(true), 2500);
+    return () => window.clearTimeout(timer);
+  }, [built]);
   return (
     <div ref={edgeRef} className="flex shrink-0">
       <ShellAppRail />
-      {phase !== "closed" && <ShellAiPanel key="ai-panel" />}
+      {(built || phase !== "closed") && <ShellAiPanel key="ai-panel" hidden={phase === "closed"} />}
     </div>
   );
 }

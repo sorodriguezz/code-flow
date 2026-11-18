@@ -1,5 +1,5 @@
 import { TreeGuide } from "../common/TreeGuide";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   CirclePlay,
@@ -211,7 +211,13 @@ export function ServicesDock() {
   /** Services exist only where they can be started. See the note at the top. */
   const showServices = isMainWindow();
   /** The panel on screen — always the terminals in a satellite, which has nothing else. */
-  const view: DockView = showServices ? dockView : "terminal";
+  /**
+   * Deferred: the click is answered first — the sidebar's box slides at once, it reads the store
+   * itself — and the panel it asked for is built after, in a render React can set aside for a frame.
+   * Switching between Terminal, Contenedores and Servicios built the new list and pane in the click's
+   * own frame, which is what stuttered (user report, 2026-11-18).
+   */
+  const view: DockView = useDeferredValue(showServices ? dockView : "terminal");
   /** What the body renders: the panel asked for while the dock is open, only the terminals (kept,
    *  hidden) while it is closed. */
   const shown: DockView = open ? view : "terminal";

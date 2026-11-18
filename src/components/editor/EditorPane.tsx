@@ -67,6 +67,7 @@ import { blameLabel, blameStatusText } from "../../lib/blameText";
 import { formatWhen } from "../remote/remoteChrome";
 import { useDebugStore, normalizePath } from "../../state/debugStore";
 import { useBreakpointGutter } from "./useBreakpointGutter";
+import { useDebugEditorValues } from "./useDebugEditorValues";
 import { useBookmarkStore } from "../../state/bookmarkStore";
 import { useBlameStore } from "../../state/blameStore";
 import { useCursorBlameStore } from "../../state/cursorBlameStore";
@@ -1698,6 +1699,8 @@ export function EditorPane({
   // Breakpoints (which follow the code as it is edited) and the stopped line: their own decoration
   // set, on their own rhythm — see the hook.
   useBreakpointGutter(editorRef, monacoRef, activeAbsolutePath, editorReady, activeTab?.loading);
+  // While paused: values on hover and at the end of the lines of the stopped function — see the hook.
+  useDebugEditorValues(editorRef, monacoRef, activeAbsolutePath, editorReady);
 
   /**
    * Bookmarked lines, in the lines-decorations lane rather than the glyph margin.

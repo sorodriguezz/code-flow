@@ -293,8 +293,13 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
     <ApiModal
       icon={Layers}
       title={t("api.env.manage")}
-      width="max-w-6xl"
-      height="h-[80vh]"
+      // Sized to the window, not to a fixed cap: it is a workspace (a list, a table of values that can
+      // be long URLs and tokens), and at 1152px on a large display it sat small in the middle of an
+      // empty screen with the values truncated (user report, 2026-11-18). The gutter keeps it a
+      // dialog over the app rather than a second view.
+      width="max-w-[min(1760px,94vw)]"
+      height="h-[90vh]"
+      maxHeight="max-h-[90vh]"
       onClose={onClose}
     >
       {/*
@@ -308,7 +313,7 @@ export function EnvironmentModal({ onClose }: { onClose: () => void }) {
       <div className="flex min-h-0 flex-1">
         {/* Environment list — the explorer of this dialog, half a step into the sunken tone so the
             sheet beside it reads as the page. */}
-        <div className={`${explorerClass} w-[240px]`}>
+        <div className={`${explorerClass} w-[clamp(240px,18vw,320px)]`}>
           <div className="shrink-0 px-2.5">
             <div className={sectionLabelClass}>
               <span className="min-w-0 flex-1 truncate">{t("api.environments")}</span>

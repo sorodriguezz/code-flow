@@ -3992,10 +3992,17 @@ body.cf-dragging * {
    stacking context (`.cf-ambient-bg` isolates it), so a `fixed` scrim inside it — z-index or not —
    could never climb out of it, and the terminal dock, a later sibling, painted over the bottom of
    every modal opened from a view. Lifting the whole sheet only while a dialog is in it keeps the
-   normal order (dock over the view's own content) the rest of the time. */
+   normal order (dock over the view's own content) the rest of the time.
+
+   35, between the title bar (`z-30`, which a scrim in here must cover) and the dialogs portalled to
+   the body (`ApiModal`, `z-40` and up). At 50 it rose *over* those: Excalidraw marks its own panels
+   `aria-modal` — the properties island the pen tool opens among them — so with the pen picked the
+   diagram's sheet climbed above «Historial de versiones», whose scrim dimmed the window around a
+   canvas that stayed on top, and the dialog only showed once the pen was put down (user report,
+   2026-11-18). */
 .cf-sheet:has(.fixed.inset-0, [aria-modal="true"]) {
   position: relative;
-  z-index: 50;
+  z-index: 35;
 }
 
 /* The frame, as a class rather than `bg-[var(--cf-bg)]` on each window's root, so the see-through
@@ -4437,18 +4444,18 @@ html:has(.cf-codi-shell) body {
 .cf-quota-orbit:is(:hover, :focus-visible) .cf-quota-value { opacity: 1; scale: 1; }
 .cf-quota-segment { transition: stroke-dasharray 600ms, stroke 300ms; animation: cf-quota-fill 650ms var(--cf-quota-delay) both; }
 .cf-quota-plan { font-size: 9px; font-weight: 600; text-transform: uppercase; color: var(--cf-text-muted); border: 1px solid var(--cf-border); border-radius: 4px; padding: 2px 5px; }
-.cf-quota-details { display: block; width: 230px; max-width: 100%; padding-top: 6px; }
+.cf-quota-details { display: block; width: 240px; max-width: 100%; padding-top: 10px; }
 .cf-quota-window { display: block; }
-.cf-quota-window + .cf-quota-window { margin-top: 12px; }
-.cf-quota-window-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.cf-quota-window-name { display: flex; align-items: center; gap: 5px; min-width: 0; }
-.cf-quota-key { width: 7px; height: 7px; flex-shrink: 0; border: 1.5px solid var(--cf-quota-color); border-radius: 50%; }
-.cf-quota-key-inner { background: var(--cf-quota-color); }
-.cf-quota-window-value { flex-shrink: 0; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--cf-text); }
-.cf-quota-meter { display: block; height: 4px; overflow: hidden; margin-top: 5px; border-radius: 4px; background: var(--cf-press); }
-.cf-quota-meter > span { display: block; height: 100%; border-radius: inherit; background: var(--cf-quota-color); transform-origin: left; animation: cf-quota-meter-in 350ms cubic-bezier(.22, 1, .36, 1) both; }
-.cf-quota-reset { display: flex; align-items: center; gap: 4px; margin-top: 4px; font-size: 10px; font-variant-numeric: tabular-nums; }
-.cf-quota-hint { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--cf-border); font-size: 10px; color: var(--cf-text-muted); }
+.cf-quota-window + .cf-quota-window { margin-top: 14px; }
+.cf-quota-window-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; color: var(--cf-text); }
+.cf-quota-window-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cf-quota-value-text { flex-shrink: 0; font-variant-numeric: tabular-nums; color: var(--cf-text-muted); }
+.cf-quota-value-text > b { font-weight: 600; color: var(--cf-text); }
+.cf-quota-meter { display: block; height: 4px; overflow: hidden; margin-top: 6px; border-radius: 4px; background: var(--cf-press); }
+.cf-quota-meter > span { display: block; height: 100%; border-radius: inherit; transform-origin: left; animation: cf-quota-meter-in 350ms cubic-bezier(.22, 1, .36, 1) both; }
+.cf-quota-reset { display: flex; justify-content: space-between; gap: 8px; margin-top: 5px; font-size: 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cf-quota-reset-left { flex-shrink: 0; }
+.cf-quota-hint { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; padding-top: 8px; border-top: 1px solid var(--cf-border); font-size: 10px; color: var(--cf-text-muted); }
 @keyframes cf-quota-arrive { from { opacity: 0; translate: 0 5px; } to { opacity: 1; translate: 0 0; } }
 @keyframes cf-quota-fill { from { opacity: 0; } to { opacity: 1; } }
 @keyframes cf-quota-meter-in { from { transform: scaleX(0); } to { transform: scaleX(1); } }
@@ -5538,4 +5545,19 @@ svg.\-rotate-180 {
 }
 .cf-crew-msg > :last-child {
   margin-bottom: 0;
+}
+
+/* A seam being dragged (`ResizeHandle`): its cursor over the whole window, so it does not flicker
+   back to an arrow when the pointer outruns the handle; no transitions, which would ease every
+   intermediate size the layout passes through; and no text selected along the way. */
+html[data-cf-resizing="x"], html[data-cf-resizing="x"] * { cursor: col-resize !important; }
+html[data-cf-resizing="y"], html[data-cf-resizing="y"] * { cursor: row-resize !important; }
+html[data-cf-resizing] * { transition: none !important; user-select: none !important; }
+
+/* The debugger's inline values (`useDebugEditorValues`): `name = value` after a line of the stopped
+   function, in the faint italic of a comment so it reads as annotation, never as code. */
+.monaco-editor .cf-debug-inline-value {
+  color: var(--cf-text-faint) !important;
+  font-style: italic;
+  opacity: 0.9;
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react";
-import { ArrowUpRight, Clock3 } from "lucide-react";
+import { ArrowUpRight } from "lucide-react";
 import { useLanguageStore, useT } from "../../state/languageStore";
-import { formatResetAt, formatResetIn, formatUsed, missingClaudeWeekly, quotaKey, railWindows, useQuotaStore } from "../../state/quotaStore";
+import { formatResetAt, formatResetIn, formatUsed, missingClaudeWeekly, quotaBlocks, quotaKey, railWindows, useQuotaStore, type QuotaBlock } from "../../state/quotaStore";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import { useUiStore } from "../../state/uiStore";
 import { providerDisplayLabel } from "../../lib/aiProviders";
@@ -136,7 +136,7 @@ export function RailQuotaRings() {
         const narrowed = narrowedKinds(quota);
         const fullest = Math.max(session?.used_percent ?? 0, long?.used_percent ?? 0);
         const style = ringStyleFor(fullest);
-        const summary = [session, long].filter((limit) => limit !== null)
+        const summary = quota.limits
           .map((limit) => `${limitLabel(limit, narrowed, t)}: ${t("quota.used", { percent: formatUsed(limit.used_percent) })}`)
           .join(" · ");
         return (
@@ -148,8 +148,9 @@ export function RailQuotaRings() {
             trailing={quota.plan ? <span className="cf-quota-plan">{quota.plan}</span> : undefined}
             description={
               <span className="cf-quota-details">
-                {session && <QuotaWindow limit={session} narrowed={narrowed} inner />}
-                {long && <QuotaWindow limit={long} narrowed={narrowed} />}
+                {quotaBlocks(quota).map((block) => (
+                  <QuotaBlockView key={`${block.kind}|${block.limit.scope}`} block={block} />
+                ))}
                 {missingClaudeWeekly(quota) && <span className="mt-3 block"><MissingWeeklyQuota /></span>}
                 <span className="cf-quota-hint">
                   {t("quota.railOpenLimits")} <ArrowUpRight size={12} aria-hidden />
@@ -182,28 +183,60 @@ export function RailQuotaRings() {
   );
 }
 
-function QuotaWindow({ limit, narrowed, inner = false }: { limit: QuotaLimit; narrowed: Set<string>; inner?: boolean }) {
-  const t = useT();
-  const used = clampedUsedPercent(limit);
+/** The popover's color for a window: the ring's own color, except that the calm one is the full
+ *  accent — the ring mixes it down to sit quietly in the rail, which on a 4px bar reads as faded. */
+function meterColor(used: number): string {
   const style = ringStyleFor(used);
-  // Like the quota panel: how long, and the clock reading it comes back at, in the app's language.
+  return style === RING_STYLE.normal ? "var(--cf-accent)" : style.stroke;
+}
+
+/** "5% used" with only the number in weight: the word is the same on every row, so it steps back. */
+function UsedValue({ used }: { used: number }) {
+  const t = useT();
+  const mark = "\u0001";
+  const [before, after = ""] = t("quota.used", { percent: mark }).split(mark);
+  return (
+    <span className="cf-quota-value-text">
+      {before}<b>{formatUsed(used)}</b>{after}
+    </span>
+  );
+}
+
+/** When a window comes back: the clock reading on the left, how long until then on the right. */
+function ResetLine({ resetsAt }: { resetsAt: string }) {
+  const t = useT();
   const language = useLanguageStore((s) => s.language);
   const now = Date.now();
-  const reset = formatResetIn(limit.resets_at, now);
-  const resetAt = formatResetAt(limit.resets_at, now, language);
+  const left = formatResetIn(resetsAt, now);
+  if (!left) return null;
+  const at = formatResetAt(resetsAt, now, language);
   return (
-    <span className="cf-quota-window" style={{ "--cf-quota-color": style.stroke } as CSSProperties}>
+    <span className="cf-quota-reset">
+      <span className="truncate">{at ? t("quota.resetsOn", { when: resetAtLabel(at, t) }) : t("quota.resetsIn", { time: left })}</span>
+      {at && <span className="cf-quota-reset-left">{left}</span>}
+    </span>
+  );
+}
+
+const NO_NARROWING = new Set<string>();
+
+function QuotaBlockView({ block }: { block: QuotaBlock }) {
+  const t = useT();
+  const { limit } = block;
+  // «Semanal» for the total, «Semanal · Fable» for a model's slice, the scope alone for a kindless
+  // bucket — `limitLabel`'s rule, minus the «· Todos los modelos» the slices now make needless.
+  const title = limitLabel(limit, NO_NARROWING, t) || block.kind;
+  const used = clampedUsedPercent(limit);
+  return (
+    <span className="cf-quota-window">
       <span className="cf-quota-window-heading">
-        <span className="cf-quota-window-name">
-          <span className={`cf-quota-key ${inner ? "cf-quota-key-inner" : ""}`} aria-hidden />
-          {limitLabel(limit, narrowed, t)}
-        </span>
-        <span className="cf-quota-window-value">{t("quota.used", { percent: formatUsed(used) })}</span>
+        <span className="cf-quota-window-name" title={title}>{title}</span>
+        <UsedValue used={used} />
       </span>
       <span className="cf-quota-meter" aria-hidden>
-        <span style={{ width: `${used}%` }} />
+        <span style={{ width: `${used}%`, background: meterColor(used) }} />
       </span>
-      {reset && <span className="cf-quota-reset"><Clock3 size={10} aria-hidden />{t("quota.resetsIn", { time: reset })}{resetAt && ` · ${resetAtLabel(resetAt, t)}`}</span>}
+      {limit.resets_at && <ResetLine resetsAt={limit.resets_at} />}
     </span>
   );
 }

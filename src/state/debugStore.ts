@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { type DebugAdapter } from "../lib/debugAdapters";
 import {
   debugAttach,
+  debugInspectorTarget,
   debugContinue,
   debugEvaluate,
   debugIsRunning,
@@ -25,6 +26,7 @@ import {
 } from "../lib/tauri/commands";
 import { onDebugOutput, onDebugPaused, onDebugResumed, onDebugTerminated } from "../lib/tauri/events";
 import { useWorkspaceStore } from "./workspaceStore";
+import { translate } from "./languageStore";
 
 /** Paths cross three boundaries here (editor, store, V8) and each has its own opinion about
  * separators. Everything is compared and stored slash-normalized; the backend accepts both. */
@@ -35,6 +37,8 @@ export function normalizePath(path: string): string {
 export interface ConsoleLine {
   kind: string;
   text: string;
+  /** A console result that is an object: what the console expands it by, as the variables do. */
+  objectId?: string | null;
 }
 
 /** One breakpoint in one file. */
@@ -101,6 +105,9 @@ interface DebugState {
   /** A stop asked for the Debug panel to be on screen. The editor shows it and clears this — a flag
    *  rather than a counter, so an editor that mounts *because* of the stop still sees it. */
   wantsPanel: boolean;
+  /** A step is under way: the last stop's stack and variables stay on screen, dimmed, until the
+   *  next stop replaces them — instead of the panel emptying and refilling on every F10. */
+  stepping: boolean;
   clearPanelRequest: () => void;
   init: () => void;
   loadWorkspace: (workspaceId: string | null) => Promise<void>;
@@ -134,11 +141,15 @@ interface DebugState {
    *  skipped and the session stays as it is; the program's own replaces whatever was attached. */
   attachService: (serviceId: string, wsUrl: string, cwd: string | null) => Promise<void>;
   stop: () => Promise<void>;
+  /** Leaves an attached service running and undebugged: the socket closes, a paused program resumes. */
+  detach: () => Promise<void>;
   resume: () => Promise<void>;
   pause: () => Promise<void>;
   step: (kind: "over" | "into" | "out") => Promise<void>;
   selectFrame: (index: number) => Promise<void>;
-  expand: (objectId: string) => Promise<void>;
+  /** `path`: the row's names from its scope down (`Local/documento/direccion`) — what keeps it open
+   *  across stops, whose object ids are new every time. */
+  expand: (objectId: string, path?: string) => Promise<void>;
   evaluate: (expression: string) => Promise<void>;
   clearConsole: () => void;
 }
@@ -152,6 +163,49 @@ const FILTERS_KEY = "debug_exception_filters";
 let subscribed = false;
 /** Numbers every stop, resume and frame change, so a slow answer for an earlier one is dropped. */
 let pauseSeq = 0;
+
+/** The variable rows the user has open, by path — reopened on every stop. Object ids die with the
+ *  stop they belong to; the path is what the user actually opened. */
+const openPaths = new Set<string>();
+const MAX_OPEN_PATHS = 200;
+
+/** The attached service, kept for this window's life: the backend knows the session, not whose it
+ *  is, and after a reload the panel took a service's session for a plain one — its stops no longer
+ *  brought the editor forward, and Stop only detached. */
+const SERVICE_KEY = "cf-debug-service";
+function rememberService(serviceId: string | null): void {
+  try {
+    if (serviceId) sessionStorage.setItem(SERVICE_KEY, serviceId);
+    else sessionStorage.removeItem(SERVICE_KEY);
+  } catch {
+    // Without storage a reload only forgets whose session it was.
+  }
+}
+function rememberedService(): string | null {
+  try {
+    return sessionStorage.getItem(SERVICE_KEY);
+  } catch {
+    return null;
+  }
+}
+/** How many levels down a stop reopens what was open. */
+const REOPEN_DEPTH = 5;
+
+/**
+ * Which Node process of a service the session follows, and the one waiting behind it.
+ *
+ * `--inspect` reaches every Node a service starts (it rides `NODE_OPTIONS`), so a type checker, a
+ * worker, or the new process of a restart overlapping the old one all announce an inspector — and
+ * each used to take the session over, silently: breakpoints in the API stopped hitting (review,
+ * 2026-11-18). Now the program being debugged keeps the session; another of the service's processes
+ * waits here and is attached to when that one ends — which is what a restart looks like.
+ */
+let attachedTarget = "";
+let reserve: { serviceId: string; wsUrl: string; cwd: string | null } | null = null;
+/** A tool's script, not the user's program: an installed package's bin. */
+const isToolScript = (url: string) => /[\\/]node_modules[\\/]/.test(url);
+/** A script url as the console names it: the path, without the scheme. */
+const scriptName = (url: string) => url.replace(/^file:\/\//, "");
 /** The files a session was last sent breakpoints for. A file whose last one was removed has to be
  * sent again with an empty list — an adapter keeps a file's breakpoints until told otherwise. */
 let sentFiles = new Set<string>();
@@ -281,6 +335,21 @@ async function revealFrame(frame: StackFrame): Promise<void> {
 }
 
 export const useDebugStore = create<DebugState>((set, get) => {
+  /** Opens again, under `rows`, every row whose path the user had open — level by level, a few deep,
+   *  dropped as soon as another stop or frame takes over. */
+  const reopen = async (rows: DebugVariable[], parent: string, depth: number, seq: number): Promise<void> => {
+    if (depth > REOPEN_DEPTH || openPaths.size === 0) return;
+    for (const row of rows) {
+      const path = parent ? `${parent}/${row.name}` : row.name;
+      // Open if the user opened it, or if it opened by itself (the innermost scope).
+      if (!row.object_id || !(openPaths.has(path) || get().expanded[row.object_id])) continue;
+      const children = get().expanded[row.object_id] ?? (await debugProperties(row.object_id).catch(() => [] as DebugVariable[]));
+      if (seq !== pauseSeq) return;
+      set((s) => ({ expanded: { ...s.expanded, [row.object_id as string]: children } }));
+      await reopen(children, path, depth + 1, seq);
+    }
+  };
+
   /** Sends the current breakpoints to a live session. With none running this is a no-op, and the
    * set is sent again at launch. */
   const push = () => {
@@ -324,6 +393,7 @@ export const useDebugStore = create<DebugState>((set, get) => {
     error: null,
     serviceId: null,
     wantsPanel: false,
+    stepping: false,
     clearPanelRequest: () => set({ wantsPanel: false }),
 
     init: () => {
@@ -333,6 +403,7 @@ export const useDebugStore = create<DebugState>((set, get) => {
         pauseSeq += 1;
         set({
           status: "paused",
+          stepping: false,
           frames: event.frames,
           selectedFrame: 0,
           pauseReason: event.reason,
@@ -341,16 +412,21 @@ export const useDebugStore = create<DebugState>((set, get) => {
         });
         // The top frame's locals are what anyone looks at first, so they're fetched without asking.
         void get().selectFrame(0);
-        // A service stopping at a breakpoint is noticed in whatever view is open, as an IDE does:
-        // the editor comes forward on the line, with the Debug panel beside it.
-        if (get().serviceId && event.frames[0]) {
-          set({ wantsPanel: true });
+        // The editor follows every stop, as an IDE's does — a Step Into another file used to leave it
+        // where it was, and with it the paused line, the hovers and the inline values, which all
+        // belong to the frame's file. A service stopping also brings the Debug panel forward,
+        // whatever view is open.
+        if (event.frames[0]) {
+          if (get().serviceId) set({ wantsPanel: true });
           void revealFrame(event.frames[0]);
         }
       });
       void onDebugResumed(() => {
         pauseSeq += 1;
-        set({ status: "running", frames: [], pauseReason: null, pauseDescription: null, ...freshStop() });
+        // A step keeps the last stop on screen (dimmed by the panel) until the next one lands; a
+        // Continue clears it, as the program is off doing something else.
+        if (get().stepping) set({ status: "running", pauseReason: null, pauseDescription: null });
+        else set({ status: "running", frames: [], pauseReason: null, pauseDescription: null, ...freshStop() });
       });
       // A line per event, and a chatty program prints thousands a second: each one copying the
       // console and re-rendering it was the cost. They are gathered and added once per frame.
@@ -371,7 +447,15 @@ export const useDebugStore = create<DebugState>((set, get) => {
       });
       void onDebugTerminated(() => {
         pauseSeq += 1;
+        const endedService = get().serviceId;
         set({ status: "idle", serviceId: null, frames: [], selectedFrame: 0, pauseReason: null, pauseDescription: null, ...freshStop() });
+        attachedTarget = "";
+        rememberService(null);
+        // The process that ended had another of the service's waiting behind it — a restart's new
+        // process, usually: the session follows it.
+        const next = reserve;
+        reserve = null;
+        if (next && next.serviceId === endedService) void get().attachService(next.serviceId, next.wsUrl, next.cwd);
       });
       void getSetting(FILTERS_KEY)
         .then((stored) => set({ exceptionFilters: { ...parseFilters(stored), ...get().exceptionFilters } }))
@@ -388,6 +472,8 @@ export const useDebugStore = create<DebugState>((set, get) => {
         const debuggerId = info.backend === "node" ? "node" : "adapter";
         set((s) => ({
           sessionDebugger: debuggerId,
+          // Whose session it is, as this window remembered it — a Node session is a service's.
+          serviceId: info.backend === "node" ? rememberedService() : null,
           offeredFilters: { ...s.offeredFilters, [debuggerId]: info.exceptionFilters },
           status: info.paused ? "paused" : "running",
           frames: info.paused?.frames ?? [],
@@ -571,19 +657,43 @@ export const useDebugStore = create<DebugState>((set, get) => {
 
     attachService: async (serviceId, wsUrl, cwd) => {
       get().init();
+      if (get().status !== "idle" && get().serviceId === serviceId) {
+        const target = await debugInspectorTarget(wsUrl).catch(() => null);
+        if (target === "" || target === null) return; // a launcher's, or gone already
+        // The one exception: the session follows a tool (a CLI running the app in a child) and this
+        // is the user's own code — that is the program, and it takes over.
+        if (!(isToolScript(attachedTarget) && !isToolScript(target))) {
+          reserve = { serviceId, wsUrl, cwd };
+          set((s) => ({ console: [...s.console, { kind: "log", text: translate("debug.otherProcess", { target: scriptName(target) }) }] }));
+          return;
+        }
+      }
       const breakpoints = specsFor(get().breakpoints, new Set());
+      // What the session had seen before the attach went out. A request already in flight can hit a
+      // breakpoint before `debug_attach` returns — the backend applies the breakpoints first — and
+      // that pause must stand: writing "running" over it left a paused process, a hung request and
+      // a panel showing no stack.
+      const seqBefore = pauseSeq;
       try {
         const attached = await debugAttach(wsUrl, cwd ?? "", breakpoints, get().enabledFiltersFor("node"));
-        if (!attached) return;
+        if (attached === null) return;
+        attachedTarget = attached;
+        if (reserve?.wsUrl === wsUrl) reserve = null;
+        rememberService(serviceId);
         startToken += 1;
         sentFiles = new Set(Object.keys(breakpoints));
+        if (pauseSeq !== seqBefore) {
+          set({ sessionDebugger: "node", serviceId, error: null });
+          return;
+        }
         pauseSeq += 1;
         set({
           sessionDebugger: "node",
           serviceId,
           status: "running",
           error: null,
-          console: [],
+          // Said, so a switch of process is never invisible.
+          console: [{ kind: "log", text: translate("debug.attachedTo", { target: scriptName(attached) || wsUrl }) }],
           frames: [],
           pauseReason: null,
           pauseDescription: null,
@@ -596,10 +706,13 @@ export const useDebugStore = create<DebugState>((set, get) => {
 
     stop: async () => {
       startToken += 1;
+      // Stopped on purpose: nothing waiting takes the session over when this one ends.
+      reserve = null;
       const serviceId = get().serviceId;
       await debugStop().catch(() => {});
       pauseSeq += 1;
       set({ status: "idle", serviceId: null, frames: [], pauseReason: null, pauseDescription: null, ...freshStop() });
+      rememberService(null);
       // An attached session only detaches; stopping a service's debug run means stopping the service.
       if (serviceId) {
         const { useServicesStore } = await import("./servicesStore");
@@ -607,7 +720,17 @@ export const useDebugStore = create<DebugState>((set, get) => {
       }
     },
 
+    detach: async () => {
+      startToken += 1;
+      reserve = null;
+      await debugStop().catch(() => {});
+      pauseSeq += 1;
+      rememberService(null);
+      set({ status: "idle", stepping: false, serviceId: null, frames: [], pauseReason: null, pauseDescription: null, ...freshStop() });
+    },
+
     resume: async () => {
+      set({ stepping: false });
       await debugContinue().catch((e) => set({ error: String(e) }));
     },
 
@@ -616,11 +739,14 @@ export const useDebugStore = create<DebugState>((set, get) => {
     },
 
     step: async (kind) => {
-      await debugStep(kind).catch((e) => set({ error: String(e) }));
+      set({ stepping: true });
+      await debugStep(kind).catch((e) => set({ error: String(e), stepping: false }));
     },
 
     selectFrame: async (index) => {
       const frame = get().frames[index];
+      // An async frame (the caller across an `await`) has no live scope to read or evaluate in.
+      if (frame?.is_async) return;
       pauseSeq += 1;
       const seq = pauseSeq;
       set({ selectedFrame: index, scopes: [], expanded: {}, watchValues: {} });
@@ -639,17 +765,24 @@ export const useDebugStore = create<DebugState>((set, get) => {
         if (seq !== pauseSeq) return;
         set((s) => ({ expanded: { ...s.expanded, [first.object_id as string]: children } }));
       }
+      await reopen(scopes, "", 0, seq);
+      if (seq !== pauseSeq) return;
       await get().refreshWatches();
     },
 
-    expand: async (objectId) => {
+    expand: async (objectId, path) => {
       if (get().expanded[objectId]) {
+        if (path) for (const open of [...openPaths]) if (open === path || open.startsWith(`${path}/`)) openPaths.delete(open);
         set((s) => {
           const expanded = { ...s.expanded };
           delete expanded[objectId];
           return { expanded };
         });
         return;
+      }
+      if (path) {
+        openPaths.add(path);
+        if (openPaths.size > MAX_OPEN_PATHS) openPaths.delete(openPaths.values().next().value as string);
       }
       const seq = pauseSeq;
       const children = await debugProperties(objectId).catch(() => []);
@@ -664,7 +797,7 @@ export const useDebugStore = create<DebugState>((set, get) => {
       set((s) => ({ console: [...s.console, { kind: "input", text: expression }] }));
       try {
         const result = await debugEvaluate(frame.id, expression, "repl");
-        set((s) => ({ console: [...s.console, { kind: "result", text: result.value }] }));
+        set((s) => ({ console: [...s.console, { kind: "result", text: result.value, objectId: result.object_id }] }));
       } catch (e) {
         set((s) => ({ console: [...s.console, { kind: "error", text: String(e) }] }));
       }

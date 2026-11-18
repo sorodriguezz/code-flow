@@ -1256,6 +1256,77 @@ pub async fn db_ai_assist(
     .await
 }
 
+/// One column of the grid, as the filter generator is told about it: the shape only, never a value.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DbFilterColumn {
+    pub name: String,
+    pub type_name: String,
+}
+
+/// Writes the data grid's filter from a description («los que tengan solo números en rut», «que el
+/// nombre contenga una L») — a WHERE condition, a Mongo filter or a Redis MATCH pattern, whichever
+/// the connection speaks.
+///
+/// Same security shape as [`db_ai_assist`]: the model gets the table's columns and types, read by
+/// the grid, and nothing else — no connection, no rows. The answer goes into the filter box, where
+/// the user sees what runs.
+#[tauri::command]
+pub async fn db_ai_filter(
+    app: tauri::AppHandle,
+    db: State<'_, Db>,
+    registry: State<'_, DbRegistry>,
+    connection_id: String,
+    node: DbNodeRef,
+    columns: Vec<DbFilterColumn>,
+    current_filter: String,
+    request: String,
+    run_id: Option<String>,
+    workspace_id: Option<String>,
+) -> Result<String, String> {
+    let config = resolve_config(&db, &connection_id)?;
+    let ai_config = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        super::claude_cmd::load_ai_config_in(&conn, super::claude_cmd::AiTask::DbQuery, workspace_id.as_deref())?
+    };
+    let language = config.kind.console_language();
+    let table = [node.schema.as_deref(), node.name.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(".");
+    let columns = columns
+        .iter()
+        .map(|column| if column.type_name.is_empty() { column.name.clone() } else { format!("{} {}", column.name, column.type_name) })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    crate::ai_runs::scoped(app, run_id, async {
+        // The version decides the dialect (Oracle 11 has no `FETCH`, MySQL 5 no `REGEXP_LIKE`). A
+        // connection that cannot be reached still gets a filter, written for the engine alone.
+        let version = registry
+            .read(&config, node.database.as_deref(), |session| async move { Ok(session.info().version) })
+            .await
+            .unwrap_or_default();
+        let dialect = format!("{} {version}", config.engine_label()).trim().to_string();
+        crate::ai::db_filter(
+            &*ai_config.engine,
+            &ai_config.binary,
+            &ai_config.model,
+            crate::ai::DbFilterContext {
+                dialect: &dialect,
+                language,
+                table: &table,
+                columns: &columns,
+                current: &current_filter,
+                request: &request,
+            },
+        )
+        .await
+    })
+    .await
+}
+
 // ---------------------------------------------------------------------------
 // Drivers — the files a JDBC driver needs, and the runtime they run on
 // ---------------------------------------------------------------------------

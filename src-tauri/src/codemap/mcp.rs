@@ -70,6 +70,14 @@ struct Access {
     /// one is refused: the scope picker's promise was «this turn works in these», and an edit by
     /// absolute path into an excluded repository got no checkpoint and no review either.
     excluded_roots: Vec<std::path::PathBuf>,
+    /// A run in one repository that may act: the working trees it may write in — its own, and the
+    /// extra ones a run across several repositories was handed (`AiInvocation::extra_dirs`) —
+    /// canonical. A file tool that would write anywhere else is refused, and its shell commands run
+    /// unable to write in the folders next to it or in any other repository CodeFlow knows. A chat in
+    /// one repository had edited a sibling one by absolute path, with everything approved — working
+    /// across repositories is the workspace chat's job (user report, 2026-11-18). Empty for every
+    /// other run, which is then judged by [`excluded_roots`](Self::excluded_roots) alone.
+    confined_to: Vec<std::path::PathBuf>,
     /// The AI run the token was granted inside, when there was one — how the chat tools
     /// (`crate::chat_refs`) know which chat is asking.
     run: Option<String>,
@@ -90,6 +98,7 @@ impl Access {
             codi: false,
             excluded_projects: Vec::new(),
             excluded_roots: Vec::new(),
+            confined_to: Vec::new(),
             run: crate::ai_runs::current().map(|ctx| ctx.run_id),
             full: false,
         }
@@ -150,8 +159,17 @@ impl Drop for Grant {
 /// The server entry for a run in `root`, and the grant that keeps it valid — `None` when the
 /// webhook server cannot listen (its port is taken), in which case the run simply goes without.
 /// `acts`: the run may act, so it gets the app's action tools as well as the queries.
-pub fn for_run(root: &str, acts: bool, full: bool) -> Option<(LiveServer, Grant)> {
-    serve(|token| Access { full: acts && full, ..Access::new(root, acts, token) })
+/// `extra_dirs`: the other working trees the run was handed — with `root`, the only places it may
+/// write ([`Access::confined_to`]).
+pub fn for_run(root: &str, acts: bool, full: bool, extra_dirs: &[String]) -> Option<(LiveServer, Grant)> {
+    let confined_to = if acts {
+        std::iter::once(root).chain(extra_dirs.iter().map(String::as_str))
+            .filter_map(|path| std::path::Path::new(path).canonicalize().ok())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    serve(|token| Access { full: acts && full, confined_to, ..Access::new(root, acts, token) })
 }
 
 /// The server for one of «Codi»'s turns, in its working folder `root`: the interface's tools only, and
@@ -197,10 +215,11 @@ pub fn for_workspace_chat_without(
 /// The file tools that write, and the input key that names their file.
 const WRITE_TOOLS: &[(&str, &str)] = &[("Edit", "file_path"), ("MultiEdit", "file_path"), ("Write", "file_path"), ("NotebookEdit", "notebook_path")];
 
-/// The excluded repository a file tool's call would write in, if any — see [`Access::excluded_roots`].
-/// A relative path is the run's folder's; a file that does not exist yet is judged by its parent.
-fn writes_outside_scope<'a>(access: &'a Access, tool_name: &str, input: &Value) -> Option<&'a std::path::Path> {
-    if access.excluded_roots.is_empty() {
+/// Why a file tool's call may not write where it would, if it may not — see [`Access::excluded_roots`]
+/// and [`Access::confined_to`]. A relative path is the run's folder's; a file that does not exist yet
+/// is judged by its parent.
+fn writes_outside_scope(access: &Access, tool_name: &str, input: &Value) -> Option<String> {
+    if access.excluded_roots.is_empty() && access.confined_to.is_empty() {
         return None;
     }
     let key = WRITE_TOOLS.iter().find(|(name, _)| *name == tool_name).map(|(_, key)| *key)?;
@@ -211,7 +230,49 @@ fn writes_outside_scope<'a>(access: &'a Access, tool_name: &str, input: &Value) 
         .ok()
         .or_else(|| path.parent().and_then(|dir| dir.canonicalize().ok()).map(|dir| dir.join(path.file_name().unwrap_or_default())))
         .unwrap_or(path);
-    access.excluded_roots.iter().find(|root| resolved.starts_with(root)).map(|root| root.as_path())
+    if let Some(root) = access.excluded_roots.iter().find(|root| resolved.starts_with(root)) {
+        return Some(format!(
+            "Not written: {} is outside the repositories this turn was limited to. Work only in the ones in scope, or ask the user to widen it.",
+            root.display()
+        ));
+    }
+    let inside = access.confined_to.iter().any(|root| resolved.starts_with(root));
+    if access.confined_to.is_empty() || inside || always_writable(&resolved) {
+        return None;
+    }
+    let roots: Vec<String> = access.confined_to.iter().map(|root| root.display().to_string()).collect();
+    Some(format!(
+        "Not written: {} is outside the repository this turn works in ({}). Change files only there; to work across several repositories the user has to use a workspace chat.",
+        resolved.display(),
+        roots.join(", ")
+    ))
+}
+
+/// Places any run may write outside its repository: the temporary folders, and Claude Code's own
+/// folder (its plans and memories live there).
+fn always_writable(path: &std::path::Path) -> bool {
+    let temp = std::env::temp_dir();
+    let mut places = vec![std::path::PathBuf::from("/private/tmp"), std::path::PathBuf::from("/private/var/folders"), std::path::PathBuf::from("/tmp")];
+    places.push(temp.canonicalize().unwrap_or(temp));
+    if let Some(home) = dirs::home_dir() {
+        places.push(home.join(".claude"));
+    }
+    places.iter().any(|place| path.starts_with(place))
+}
+
+/// The input of a shell call, its command run unable to write outside the run's repositories — see
+/// [`Access::confined_to`] and [`crate::chat_exec::confined`]. Any other call, or a run that is not
+/// confined, as it came.
+fn confine_shell(access: &Access, tool_name: &str, mut input: Value) -> Value {
+    if tool_name != SHELL_TOOL || !access.acts || access.confined_to.is_empty() {
+        return input;
+    }
+    let Some(command) = input.get(PERMISSION_COMMAND_KEY).and_then(Value::as_str).map(str::to_string) else { return input };
+    let wrapped = crate::chat_exec::confined(&command, &access.confined_to, &crate::chat_exec::known_repositories());
+    if let Some(fields) = input.as_object_mut() {
+        fields.insert(PERMISSION_COMMAND_KEY.to_string(), Value::String(wrapped));
+    }
+    input
 }
 
 fn serve(access: impl FnOnce(&str) -> Access) -> Option<(LiveServer, Grant)> {
@@ -507,16 +568,13 @@ async fn answer_permission_prompt(access: &Access, args: &Value) -> String {
     // The repositories this turn was scoped away from stay untouched, «Completo» or not: that is
     // a choice about where the turn works, not about how much it asks.
     let tool_name_early = args.get(PERMISSION_TOOL_NAME_KEY).and_then(Value::as_str).unwrap_or_default();
-    if let Some(root) = writes_outside_scope(access, tool_name_early, &input) {
-        return permission_decision(
-            false,
-            input,
-            format!(
-                "Not written: {} is outside the repositories this turn was limited to. Work only in the ones in scope, or ask the user to widen it.",
-                root.display()
-            ),
-        );
+    if let Some(refusal) = writes_outside_scope(access, tool_name_early, &input) {
+        return permission_decision(false, input, refusal);
     }
+    // A run in one repository: its commands, «Completo» included, cannot write outside it. The
+    // policy below still reads the command as the model wrote it.
+    let original_command = input.get(PERMISSION_COMMAND_KEY).and_then(Value::as_str).unwrap_or_default().to_string();
+    let input = confine_shell(access, tool_name_early, input);
     let Some(app) = crate::ai_usage::app() else {
         return permission_decision(false, input, CODEFLOW_NOT_READY.to_string());
     };
@@ -529,7 +587,7 @@ async fn answer_permission_prompt(access: &Access, args: &Value) -> String {
     // The shell and the browser, by the chat's execution policy (`crate::chat_exec`): a turn that may
     // act runs everything but what `cf guard` holds; a plan turn runs what looks and is sandboxed.
     if tool_name == SHELL_TOOL {
-        let command = input.get(PERMISSION_COMMAND_KEY).and_then(Value::as_str).unwrap_or_default().to_string();
+        let command = original_command;
         if access.acts {
             let Some(reason) = crate::shell_rules::dangerous(&command) else {
                 return permission_decision(true, input, String::new());
@@ -585,7 +643,8 @@ pub fn loadable(servers: &[LiveServer], read_only: bool) -> Vec<LiveServer> {
 /// `acts`: the run is not read-only — see [`Access::acts`]. `full`: it asks the user nothing — see
 /// [`Access::full`]; ignored unless it acts. `grounding`: the run reads material
 /// someone else wrote and gets the queries alone — see [`Access::grounding`]; it never acts.
-pub fn for_repository(cwd: &str, acts: bool, full: bool, grounding: bool) -> Option<(LiveServer, Grant)> {
+/// `extra_dirs`: the other working trees the run may write in — see [`Access::confined_to`].
+pub fn for_repository(cwd: &str, acts: bool, full: bool, grounding: bool, extra_dirs: &[String]) -> Option<(LiveServer, Grant)> {
     if !enabled() {
         return None;
     }
@@ -593,7 +652,7 @@ pub fn for_repository(cwd: &str, acts: bool, full: bool, grounding: bool) -> Opt
     if grounding {
         for_grounding_run(&root)
     } else {
-        for_run(&root, acts, full)
+        for_run(&root, acts, full, extra_dirs)
     }
 }
 
@@ -1332,15 +1391,16 @@ pub(crate) fn db_tools(acts: bool) -> Vec<Value> {
     tools
 }
 
-/// Whether a run at `root` has a saved database connection — its project's workspace, or the
+/// Whether a run at `root` has a database connection **open to AI** — its project's workspace, or the
 /// workspace chat's — so the database tools are worth their definitions. A connection closed to AI
-/// counts: reading it asks the user first (`agentcli::vault`).
+/// («Sin acceso») does not count: the model is not to see it at all (`agentcli::vault`).
 fn db_saved_here(root: &str) -> bool {
     crate::ai_usage::with_conn(|conn| {
         let owning_workspace = crate::knowledge::owning_project(conn, root).map(|project| project.workspace_id);
         let workspace = owning_workspace.or_else(|| crate::workspace_chat::workspace_of_dir(conn, root)).unwrap_or_default();
         let tree = crate::db::datasource_queries::load_tree(conn, &workspace);
-        tree.map(|tree| !tree.connections.is_empty()).unwrap_or(false)
+        tree.map(|tree| tree.connections.iter().any(|c| crate::agentcli::AiAccess::of_spec(&c.spec) != crate::agentcli::AiAccess::None))
+            .unwrap_or(false)
     })
     .unwrap_or(false)
 }
@@ -1629,14 +1689,14 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
             let db_saved = db_saved_here(&access.root);
             if !access.codi && !access.grounding && db_saved {
                 instructions.push_str(if access.acts {
-                    " The database connections saved in CodeFlow's database app are reachable too: db_connections lists them, db_schema reads \
-                     their tables, db_read answers a question about the data (read-only; on a connection closed to AI the user approves the \
-                     read in the app first) and db_write changes data once the user approves the exact statement. When asked about data, \
+                    " The database connections the user opened to AI in CodeFlow's database app are reachable too: db_connections lists \
+                     them, db_schema reads their tables, db_read answers a question about the data (read-only) and db_write changes data \
+                     once the user approves the exact statement. A connection closed to AI cannot be used at all. When asked about data, \
                      query it and answer in words."
                 } else {
-                    " The database connections saved in CodeFlow's database app are reachable too: db_connections lists them, db_schema reads \
-                     their tables and db_read answers a question about the data (read-only; on a connection closed to AI the user approves \
-                     the read in the app first). When asked about data, query it and answer in words."
+                    " The database connections the user opened to AI in CodeFlow's database app are reachable too: db_connections lists \
+                     them, db_schema reads their tables and db_read answers a question about the data (read-only). A connection closed to AI \
+                     cannot be used at all. When asked about data, query it and answer in words."
                 });
             }
             result_reply(
@@ -1777,6 +1837,50 @@ mod tests {
         assert!(writes_outside_scope(&access, "Edit", &at(&kept.join("x.rs"))).is_none());
         assert!(writes_outside_scope(&access, "Read", &at(&left.join("x.rs"))).is_none(), "reading is not writing");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A run in one repository writes only there: a sibling repository is refused by absolute or
+    /// relative path, its own files and the temporary folder are not, and a run handed a second
+    /// working tree may write in it.
+    #[test]
+    fn a_repository_run_writes_only_in_its_repository() {
+        // Not under the temporary folder, which every run may write in.
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join(format!("cf-confine-{}", uuid::Uuid::new_v4()));
+        let repo = base.join("repo");
+        let sibling = base.join("sibling");
+        for dir in [&repo, &sibling] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let confined = |extra: &[&std::path::Path]| Access {
+            confined_to: std::iter::once(repo.as_path()).chain(extra.iter().copied()).map(|p| p.canonicalize().unwrap()).collect(),
+            ..Access::new(repo.to_str().unwrap(), true, "tok-0123456789abcdef")
+        };
+        let at = |p: &std::path::Path| json!({ "file_path": p.to_string_lossy() });
+        let alone = confined(&[]);
+        assert!(writes_outside_scope(&alone, "Edit", &at(&sibling.join("x.ts"))).is_some());
+        assert!(writes_outside_scope(&alone, "Write", &json!({ "file_path": "../sibling/new.ts" })).is_some());
+        assert!(writes_outside_scope(&alone, "Edit", &at(&repo.join("src/x.ts"))).is_none());
+        assert!(writes_outside_scope(&alone, "Write", &json!({ "file_path": "notes.md" })).is_none());
+        assert!(writes_outside_scope(&alone, "Write", &at(&std::env::temp_dir().join("scratch.txt"))).is_none(), "the temporary folder is writable");
+        assert!(writes_outside_scope(&alone, "Read", &at(&sibling.join("x.ts"))).is_none(), "reading is not writing");
+        let across = confined(&[sibling.as_path()]);
+        assert!(writes_outside_scope(&across, "Edit", &at(&sibling.join("x.ts"))).is_none());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Only a confined run's shell commands are wrapped, and only the shell's.
+    #[test]
+    fn only_a_confined_run_has_its_commands_wrapped() {
+        let repo = std::env::temp_dir();
+        let cmd = json!({ "command": "pnpm test" });
+        let free = Access::new(repo.to_str().unwrap(), true, "tok-0123456789abcdef");
+        assert_eq!(confine_shell(&free, "Bash", cmd.clone()), cmd);
+        let confined = Access { confined_to: vec![repo.canonicalize().unwrap()], ..Access::new(repo.to_str().unwrap(), true, "tok-0123456789abcdef") };
+        assert_eq!(confine_shell(&confined, "Edit", cmd.clone()), cmd);
+        if crate::tool_gateway::sandbox_available() {
+            let wrapped = confine_shell(&confined, "Bash", cmd.clone());
+            assert!(wrapped["command"].as_str().unwrap().starts_with("/usr/bin/sandbox-exec"), "{wrapped}");
+        }
     }
 
     fn with_token(root: &str) -> (HeaderMap, Grant) {

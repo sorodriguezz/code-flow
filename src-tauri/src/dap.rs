@@ -63,6 +63,11 @@ struct Session {
 
 type SessionSlot = Mutex<Option<Arc<Session>>>;
 
+/// Bumped by every stop and every move on. A stack assembled for a stop that is no longer the
+/// latest — the program continued, or stopped again, while its round trips were out — is dropped
+/// instead of written over the current state as a pause that is not happening.
+static STOP_GENERATION: AtomicI64 = AtomicI64::new(0);
+
 fn slot() -> &'static SessionSlot {
     static SLOT: std::sync::OnceLock<SessionSlot> = std::sync::OnceLock::new();
     SLOT.get_or_init(SessionSlot::default)
@@ -156,6 +161,7 @@ impl Session {
 /// the frame's scopes have been asked for.
 fn parse_frame(frame: &Value) -> StackFrame {
     StackFrame {
+        is_async: false,
         id: frame.get("id").map(|id| id.to_string()).unwrap_or_default(),
         name: frame.get("name").and_then(Value::as_str).unwrap_or("(anonymous)").to_string(),
         file: frame
@@ -404,8 +410,12 @@ pub async fn start<R: Runtime>(
                             // the reader task without deadlocking on itself.
                             let stack_session = Arc::clone(&reader_session);
                             let stack_app = reader_app.clone();
+                            let generation = STOP_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
                             tokio::spawn(async move {
                                 let event = collect_stack(&stack_session, thread_id, reason, description).await;
+                                if STOP_GENERATION.load(Ordering::SeqCst) != generation {
+                                    return;
+                                }
                                 if let Ok(mut paused) = stack_session.paused.lock() {
                                     *paused = Some(event.clone());
                                 }
@@ -413,6 +423,7 @@ pub async fn start<R: Runtime>(
                             });
                         }
                         Some("continued") => {
+                            STOP_GENERATION.fetch_add(1, Ordering::SeqCst);
                             if let Ok(mut paused) = reader_session.paused.lock() {
                                 paused.take();
                             }
@@ -629,16 +640,46 @@ fn stopped_thread(session: &Session) -> i64 {
     session.stopped_thread.lock().ok().and_then(|t| *t).unwrap_or(1)
 }
 
+/// The program was told to move — continue or a step — and the adapter agreed. DAP does not
+/// promise a `continued` event for that (the spec says an adapter is not expected to send one in
+/// reply to these requests), so without this the panel stayed "paused" on dead frame ids after
+/// Continue with such an adapter. Only when no new stop has arrived since the request went out:
+/// a step's `stopped` can beat its own response here.
+fn moved_on(session: &Session, generation_before: i64) {
+    if STOP_GENERATION.compare_exchange(generation_before, generation_before + 1, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return;
+    }
+    if let Ok(mut paused) = session.paused.lock() {
+        paused.take();
+    }
+    if let Some(app) = crate::ai_usage::app() {
+        let _ = app.emit("debug:resumed", ());
+    }
+}
+
 pub async fn resume() -> Result<(), String> {
     let session = current().ok_or_else(|| "no debug session".to_string())?;
     let thread = stopped_thread(&session);
+    let generation = STOP_GENERATION.load(Ordering::SeqCst);
     session.request("continue", json!({ "threadId": thread })).await?;
+    moved_on(&session, generation);
     Ok(())
 }
 
 pub async fn pause() -> Result<(), String> {
     let session = current().ok_or_else(|| "no debug session".to_string())?;
-    let thread = stopped_thread(&session);
+    // Before any stop there is no stopped thread to name, and `1` is not a thread of an adapter
+    // that uses the system's thread ids (netcoredbg): ask which threads there are.
+    let known = session.stopped_thread.lock().ok().and_then(|t| *t);
+    let thread = match known {
+        Some(thread) => thread,
+        None => session
+            .request("threads", json!({}))
+            .await
+            .ok()
+            .and_then(|body| body.get("threads")?.as_array()?.first()?.get("id")?.as_i64())
+            .unwrap_or(1),
+    };
     session.request("pause", json!({ "threadId": thread })).await?;
     Ok(())
 }
@@ -651,7 +692,9 @@ pub async fn step(kind: &str) -> Result<(), String> {
         "out" => "stepOut",
         _ => "next",
     };
+    let generation = STOP_GENERATION.load(Ordering::SeqCst);
     session.request(command, json!({ "threadId": thread })).await?;
+    moved_on(&session, generation);
     Ok(())
 }
 

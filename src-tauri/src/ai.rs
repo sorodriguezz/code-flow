@@ -3113,7 +3113,7 @@ async fn run_engine(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) 
             // A run that is not read-only also gets the app's action tools (`codemap::mcp::Access`) —
             // except a run that reads someone else's material, which gets the queries alone.
             let grounding = GROUNDING_TASKS.contains(&inv.task);
-            crate::codemap::mcp::for_repository(cwd, !inv.read_only && !grounding, inv.full_access, grounding).map(|(server, grant)| {
+            crate::codemap::mcp::for_repository(cwd, !inv.read_only && !grounding, inv.full_access, grounding, inv.extra_dirs).map(|(server, grant)| {
                 inv.app_mcp.push(server);
                 grant
             })
@@ -5524,6 +5524,98 @@ pub async fn db_assistant(
         return Err("El modelo respondió vacío".to_string());
     }
     Ok(DbAssistantAnswer { query: runnable_block(&answer, language), answer })
+}
+
+/// The data grid's «generar filtro con IA»: what the user described, as the filter box's own syntax.
+pub const DEFAULT_DB_FILTER_PROMPT: &str =
+    "Conviertes una descripción en lenguaje natural en el filtro de una grilla de datos que muestra \
+     UNA tabla (o colección) de una base de datos real. Por stdin recibes el motor y su versión, la \
+     tabla, sus columnas con su tipo, el filtro que ya está aplicado (si hay uno) y lo que pide el \
+     usuario.\n\n\
+     Responde SOLO con el filtro, en una línea, sin explicación, sin comillas alrededor y sin bloque \
+     de código:\n\
+     - Motor SQL: la condición que va después de WHERE, sin la palabra WHERE. Usa la sintaxis exacta \
+       de ese motor y versión (comillas de identificadores, LIKE/ILIKE, REGEXP_LIKE, ~, PATINDEX, \
+       %MATCHES, etc. según corresponda). Cita un nombre de columna solo si lo necesita.\n\
+     - MongoDB: el documento de filtro en JSON (lo que va en find), por ejemplo {\"edad\": {\"$gt\": 30}}.\n\
+     - Redis: el patrón glob de SCAN MATCH, por ejemplo user:*.\n\n\
+     Usa solo columnas que existan en la lista. \"Solo números\" en una columna de texto significa que \
+     el valor completo está formado por dígitos; \"contiene la L\" es una búsqueda de subcadena, y \
+     distingue mayúsculas solo si el usuario lo pide. Si te piden afinar (\"ahora solo los de 2024\", \
+     \"y que no sean nulos\"), combina con el FILTRO ACTUAL en vez de reemplazarlo. Si lo pedido no \
+     se puede expresar con estas columnas, responde exactamente: NO_SE_PUEDE: <motivo breve>.";
+
+/// What [`db_filter`] is told — named fields for the same reason as [`DbAssistantContext`].
+pub struct DbFilterContext<'a> {
+    /// `PostgreSQL 16.2`, `MongoDB 7.0`.
+    pub dialect: &'a str,
+    /// `"sql"`, `"javascript"` (Mongo) or `"redis"` — which of the three syntaxes to answer in.
+    pub language: &'a str,
+    /// The table or collection, qualified as the grid shows it.
+    pub table: &'a str,
+    /// `nombre tipo` per line; empty when the grid has not loaded a page yet.
+    pub columns: &'a str,
+    /// The filter already applied, so a follow-up can refine it.
+    pub current: &'a str,
+    pub request: &'a str,
+}
+
+/// Writes the grid's filter from a description. Text in, one line out, no tools: like
+/// [`db_assistant`], the engine never sees the connection or a single row — only the table's shape —
+/// and what it writes lands in the filter box, where the user sees it before and after it runs.
+pub async fn db_filter(engine: &dyn AiEngine, binary: &str, model: &str, ctx: DbFilterContext<'_>) -> Result<String, String> {
+    if ctx.request.trim().is_empty() {
+        return Err("Describe qué filas quieres ver".to_string());
+    }
+    let syntax = match ctx.language {
+        "sql" => "SQL (condición del WHERE)",
+        "javascript" => "MongoDB (filtro JSON)",
+        _ => "Redis (patrón MATCH)",
+    };
+    let columns: String = ctx.columns.chars().take(MAX_DB_SCHEMA_CHARS).collect();
+    let mut stdin_payload = format!(
+        "=== MOTOR ===\n{}\n\n=== SINTAXIS ===\n{syntax}\n\n=== TABLA ===\n{}\n",
+        ctx.dialect, ctx.table
+    );
+    if !columns.trim().is_empty() {
+        stdin_payload.push_str(&format!("\n=== COLUMNAS ===\n{columns}\n"));
+    }
+    if !ctx.current.trim().is_empty() {
+        stdin_payload.push_str(&format!("\n=== FILTRO ACTUAL ===\n{}\n", ctx.current.trim()));
+    }
+    stdin_payload.push_str(&format!("\n=== PEDIDO ===\n{}", ctx.request.trim()));
+
+    let mut inv = AiInvocation::new("Escribe el filtro.", &stdin_payload);
+    inv.system_prompt = Some(DEFAULT_DB_FILTER_PROMPT);
+    inv.model = model;
+    inv.task = task::DB_ASSIST;
+    inv.text_only = true;
+    let run = run(engine, binary, inv).await?;
+    clean_filter(&run.text, ctx.language)
+}
+
+/// The model's reply as something the filter box takes: no fence, no `WHERE`, one line, and its
+/// refusal turned into an error the user reads instead of a predicate that fails on the server.
+fn clean_filter(text: &str, language: &str) -> Result<String, String> {
+    let mut body: Vec<&str> = text.lines().filter(|line| !is_fence(line)).collect();
+    while body.first().is_some_and(|line| line.trim().is_empty()) {
+        body.remove(0);
+    }
+    let joined = body.iter().map(|line| line.trim()).filter(|line| !line.is_empty()).collect::<Vec<_>>().join(" ");
+    let mut filter = joined.trim().trim_end_matches(';').trim().to_string();
+    if let Some(reason) = filter.strip_prefix("NO_SE_PUEDE:") {
+        return Err(format!("La IA no pudo armar ese filtro: {}", reason.trim()));
+    }
+    if language == "sql" && filter.len() > 6 && filter[..6].eq_ignore_ascii_case("where ") {
+        filter = filter[6..].trim().to_string();
+    }
+    if filter.len() >= 2 && filter.starts_with('`') && filter.ends_with('`') {
+        filter = filter[1..filter.len() - 1].trim().to_string();
+    }
+    if filter.is_empty() {
+        return Err("El modelo respondió vacío".to_string());
+    }
+    Ok(filter)
 }
 
 /// The statement the answer proposes, out of the fenced blocks it contains.
@@ -9352,5 +9444,20 @@ mod mention_tests {
         assert_eq!(found, vec!["src/app.ts (líneas 3-9)".to_string(), "src".to_string()]);
         assert!(mention_note(&[]).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod db_filter_tests {
+    use super::clean_filter;
+
+    #[test]
+    fn a_reply_becomes_the_filter_box_text() {
+        assert_eq!(clean_filter("WHERE nombre LIKE '%L%';", "sql").unwrap(), "nombre LIKE '%L%'");
+        assert_eq!(clean_filter("```sql\ncodigo ~ '^[0-9]+$'\n```", "sql").unwrap(), "codigo ~ '^[0-9]+$'");
+        assert_eq!(clean_filter("`id > 3`", "sql").unwrap(), "id > 3");
+        assert_eq!(clean_filter("{\"edad\": {\"$gt\": 30}}", "javascript").unwrap(), "{\"edad\": {\"$gt\": 30}}");
+        assert!(clean_filter("NO_SE_PUEDE: no hay columna de fecha", "sql").unwrap_err().contains("no hay columna de fecha"));
+        assert!(clean_filter("  \n ", "sql").is_err());
     }
 }

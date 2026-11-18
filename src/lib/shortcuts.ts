@@ -6,6 +6,7 @@ import { useWindowStore } from "../state/windowStore";
 import { useTerminalStore } from "../state/terminalStore";
 import { useNavigationStore } from "../state/navigationStore";
 import { useEditorCommandStore } from "../state/editorCommandStore";
+import { useDebugStore } from "../state/debugStore";
 import { useEditorDisplayStore } from "../state/editorDisplayStore";
 import { useApiCommandStore } from "../state/apiCommandStore";
 import { useDbCommandStore } from "../state/dbCommandStore";
@@ -85,6 +86,11 @@ export type ShortcutId =
   | "editor.anchors"
   | "editor.bookmarks"
   | "editor.debug"
+  | "debug.continue"
+  | "debug.stop"
+  | "debug.stepOver"
+  | "debug.stepInto"
+  | "debug.stepOut"
   | "editor.bookmarkToggle"
   | "editor.splitRight"
   | "editor.splitDown"
@@ -695,6 +701,61 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     // system-wide for hiding the Dock, so on a Mac the press never reached the app.
     defaultChord: "Mod+Alt+Shift+D",
     run: () => useEditorCommandStore.getState().send("debug"),
+  },
+  /**
+   * The debugger's own keys, the ones every IDE shares (user request, 2026-11-18: «algo más completo
+   * de debug»): F5 continues, ⇧F5 stops, F10 / F11 / ⇧F11 step over, into and out. Each does nothing
+   * without a session — and the steps nothing unless it is paused — so the keys are free otherwise.
+   */
+  {
+    id: "debug.continue",
+    group: "editor",
+    labelKey: "debug.continue",
+    defaultChord: "F5",
+    run: () => {
+      const debug = useDebugStore.getState();
+      if (debug.status === "paused") void debug.resume();
+    },
+  },
+  {
+    id: "debug.stop",
+    group: "editor",
+    labelKey: "debug.stop",
+    defaultChord: "Shift+F5",
+    run: () => {
+      const debug = useDebugStore.getState();
+      if (debug.status !== "idle") void debug.stop();
+    },
+  },
+  {
+    id: "debug.stepOver",
+    group: "editor",
+    labelKey: "debug.stepOver",
+    defaultChord: "F10",
+    run: () => {
+      const debug = useDebugStore.getState();
+      if (debug.status === "paused") void debug.step("over");
+    },
+  },
+  {
+    id: "debug.stepInto",
+    group: "editor",
+    labelKey: "debug.stepInto",
+    defaultChord: "F11",
+    run: () => {
+      const debug = useDebugStore.getState();
+      if (debug.status === "paused") void debug.step("into");
+    },
+  },
+  {
+    id: "debug.stepOut",
+    group: "editor",
+    labelKey: "debug.stepOut",
+    defaultChord: "Shift+F11",
+    run: () => {
+      const debug = useDebugStore.getState();
+      if (debug.status === "paused") void debug.step("out");
+    },
   },
   {
     id: "editor.bookmarkToggle",

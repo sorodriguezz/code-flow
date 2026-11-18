@@ -47,6 +47,10 @@ pub struct StackFrame {
     /// Object id of this frame's local scope, for expanding variables. Every scope of any frame
     /// is available through [`scopes`]; this is the one a panel opens on.
     pub scope_id: Option<String>,
+    /// A frame of the async stack — the caller across an `await` (`Debugger.setAsyncCallStackDepth`).
+    /// Shown and openable, but it has no live scope: nothing can be evaluated in it.
+    #[serde(default)]
+    pub is_async: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -301,7 +305,9 @@ fn hex_pattern(byte: u8) -> String {
 fn url_pattern(path: &str, ignore_case: bool) -> String {
     let rooted = url_path(path);
     let body = rooted.strip_prefix("//").unwrap_or(&rooted);
-    let mut out = String::from("file:\\/\\/");
+    // The scheme optional: Vite's `ssrLoadModule` names a module by its bare absolute path
+    // (`//# sourceURL=/abs/file.ts`), which a `file://`-only pattern never matched.
+    let mut out = String::from("(?:file:\\/\\/)?");
     for ch in body.chars() {
         match ch {
             '/' => out.push_str("\\/"),
@@ -333,7 +339,8 @@ fn url_regex(spellings: &[String], ignore_case: bool) -> String {
         .map(|path| url_pattern(path, ignore_case))
         .filter(|pattern| seen.insert(pattern.clone()))
         .collect();
-    format!("^(?:{})$", alternatives.join("|"))
+    // Any query or fragment after the path — the `?t=` / `?v=` a dev server's module reload appends.
+    format!("^(?:{})(?:[?#].*)?$", alternatives.join("|"))
 }
 
 /// Maps the paths V8 reports back onto the ones the user knows.
@@ -561,7 +568,7 @@ fn parse_paused(params: &Value, scripts: &HashMap<String, String>, maps: &HashMa
                         .get("scriptId")
                         .and_then(Value::as_str)
                         .and_then(|id| maps.get(id))
-                        .and_then(|map| map.original(generated_line, generated_column))
+                        .and_then(|map| map.original_near(generated_line, generated_column))
                         .map(|(source, line)| (source.to_string(), line + 1));
                     let (file, line) = match original {
                         Some((source, line)) => (paths.to_user(&source), line),
@@ -576,11 +583,50 @@ fn parse_paused(params: &Value, scripts: &HashMap<String, String>, maps: &HashMa
                         file,
                         line,
                         scope_id,
+                        is_async: false,
                     }
                 })
-                .collect()
+                .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    // The async parents: where this code was awaited from, chain by chain — a NestJS service's
+    // controller, after an `await`, instead of a stack that ends at the service.
+    let mut frames = frames;
+    let mut chain = params.get("asyncStackTrace");
+    let mut added = 0;
+    while let Some(trace) = chain {
+        for frame in trace.get("callFrames").and_then(Value::as_array).into_iter().flatten() {
+            if added >= MAX_ASYNC_FRAMES {
+                break;
+            }
+            let url = frame.get("url").and_then(Value::as_str).unwrap_or_default().to_string();
+            let line = frame.get("lineNumber").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let column = frame.get("columnNumber").and_then(Value::as_u64).unwrap_or(0) as u32;
+            let original = frame
+                .get("scriptId")
+                .and_then(Value::as_str)
+                .and_then(|id| maps.get(id))
+                .and_then(|map| map.original_near(line, column))
+                .map(|(source, line)| (source.to_string(), line + 1));
+            let (file, line) = match original {
+                Some((source, line)) => (paths.to_user(&source), line),
+                None => (paths.to_user(&url_to_path(&url)), line + 1),
+            };
+            frames.push(StackFrame {
+                id: String::new(),
+                name: match frame.get("functionName").and_then(Value::as_str) {
+                    Some(name) if !name.is_empty() => name.to_string(),
+                    _ => "(anonymous)".to_string(),
+                },
+                file,
+                line,
+                scope_id: None,
+                is_async: true,
+            });
+            added += 1;
+        }
+        chain = trace.get("parent");
+    }
     // A pause on an exception carries the exception itself; its first line is the message.
     let description = params
         .get("data")
@@ -631,6 +677,49 @@ fn ends_the_program(main_context: Option<i64>, params: &Value) -> bool {
     }
 }
 
+/// Scripts the debugger steps over and never pauses in (`Debugger.setBlackboxPatterns`, regexes over
+/// script urls): installed dependencies, on either separator, and Node's own internals.
+/// Set just before the resume that ends an instrumentation stop, so the `Debugger.resumed` it causes
+/// is not passed to the UI (one session at a time, so one flag).
+static SILENT_RESUME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The scripts whose maps are being read right now — so the instrumentation stop for one waits for
+/// that read instead of starting a second.
+static LEARNING: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+/// How many async parents a pause lists — enough to reach the controller, not a whole event loop.
+const MAX_ASYNC_FRAMES: usize = 24;
+/// The editor hover's evaluation budget inside V8, and any evaluation's on this side.
+const HOVER_TIMEOUT_MS: u64 = 500;
+const EVALUATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+const BLACKBOX_PATTERNS: &[&str] = &[r"[/\\]node_modules[/\\]", r"^node:", r"^internal[/\\]"];
+
+/// One `console.*` argument as Node prints it: a string as itself, not quoted; anything else the way
+/// the variables panel shows it, or its preview when V8 sent one.
+fn console_text(arg: &Value) -> String {
+    if arg.get("type").and_then(Value::as_str) == Some("string") {
+        return arg.get("value").and_then(Value::as_str).unwrap_or_default().to_string();
+    }
+    if let Some(preview) = arg.get("preview") {
+        let fields: Vec<String> = preview
+            .get("properties")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|field| {
+                let name = field.get("name").and_then(Value::as_str).unwrap_or_default();
+                let value = field.get("value").and_then(Value::as_str).unwrap_or_default();
+                let value = if field.get("type").and_then(Value::as_str) == Some("string") { format!("'{value}'") } else { value.to_string() };
+                if preview.get("subtype").and_then(Value::as_str) == Some("array") { value } else { format!("{name}: {value}") }
+            })
+            .collect();
+        let more = if preview.get("overflow").and_then(Value::as_bool) == Some(true) { ", …" } else { "" };
+        let open_close = if preview.get("subtype").and_then(Value::as_str) == Some("array") { ("[", "]") } else { ("{ ", " }") };
+        return format!("{}{}{more}{}", open_close.0, fields.join(", "), open_close.1);
+    }
+    render_value(arg).value
+}
+
 /// Flattens a CDP `RemoteObject` into the one-line rendering the variables panel shows.
 fn render_value(object: &Value) -> Variable {
     let value = object.get("value");
@@ -645,6 +734,10 @@ fn render_value(object: &Value) -> Variable {
             .next()
             .unwrap_or("function")
             .to_string(),
+        // CDP sends `null` as an object of subtype `null`, with no description — which fell through
+        // to "Object", so a variable that was null read as one that held something, with no arrow
+        // to open it by (user report, 2026-11-18: «¿por qué no se sabe qué viene en cachedPaciente?»).
+        Some("object") if object.get("subtype").and_then(Value::as_str) == Some("null") => "null".to_string(),
         Some("object") => object
             .get("description")
             .and_then(Value::as_str)
@@ -869,6 +962,42 @@ async fn connect<R: Runtime>(
             let params = value.get("params").cloned().unwrap_or(Value::Null);
             match value.get("method").and_then(Value::as_str) {
                 Some("Debugger.paused") => {
+                    // A source-mapped script about to run its first line (the instrumentation break
+                    // set in `connect`): its map is read and its breakpoints placed *before* it runs,
+                    // then it carries on — the UI never hears of this stop. Without it, a module's
+                    // import-time code (decorators, bootstrap, a lazy module's first run) ran before
+                    // its mapped breakpoints existed.
+                    if params.get("reason").and_then(Value::as_str) == Some("instrumentation") {
+                        let data = params.get("data").cloned().unwrap_or(Value::Null);
+                        let session = Arc::clone(&reader_session);
+                        tokio::spawn(async move {
+                            let script_id = data.get("scriptId").and_then(Value::as_str).unwrap_or_default().to_string();
+                            let url = data.get("url").and_then(Value::as_str).unwrap_or_default().to_string();
+                            let map_url = data.get("sourceMapURL").and_then(Value::as_str).unwrap_or_default().to_string();
+                            // `scriptParsed` has usually started reading this map already: wait for it
+                            // (briefly), else read it here. Either way it is in place before the
+                            // script's first line — which is the point of this stop.
+                            let known = |session: &Session| session.maps.lock().map(|maps| maps.contains_key(&script_id)).unwrap_or(true);
+                            let in_flight = || LEARNING.lock().ok().and_then(|l| l.as_ref().map(|set| set.contains(&script_id))).unwrap_or(false);
+                            // Until that read is *finished* — its breakpoints placed, not merely its map
+                            // stored, which happens first: resuming in between let the line run with
+                            // the map known and the breakpoint not yet set.
+                            if in_flight() {
+                                for _ in 0..80 {
+                                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                                    if !in_flight() {
+                                        break;
+                                    }
+                                }
+                            }
+                            if !known(&session) && !in_flight() && !map_url.is_empty() && !script_id.is_empty() {
+                                learn_source_map(Arc::clone(&session), script_id, url, map_url).await;
+                            }
+                            SILENT_RESUME.store(true, Ordering::SeqCst);
+                            let _ = session.call("Debugger.resume", json!({})).await;
+                        });
+                        continue;
+                    }
                     if is_entry_break(!entry_seen.swap(true, Ordering::Relaxed), &params) {
                         // Fire-and-forget: nothing waits on this reply, and the next thing the UI
                         // should see is a real stop.
@@ -910,6 +1039,10 @@ async fn connect<R: Runtime>(
                     }
                 }
                 Some("Debugger.resumed") => {
+                    // The resume that ends an instrumentation stop is nobody's business but ours.
+                    if SILENT_RESUME.swap(false, Ordering::SeqCst) {
+                        continue;
+                    }
                     if let Ok(mut paused) = reader_session.paused.lock() {
                         paused.take();
                     }
@@ -936,10 +1069,24 @@ async fn connect<R: Runtime>(
                         let _ = reader_session.outbound.send(Message::Close(None));
                     }
                 }
-                // `Runtime.consoleAPICalled` is deliberately not forwarded. Node writes every
-                // `console.*` call to its stdout/stderr *as well as* announcing it here, and those
-                // streams are already piped into the console above — so forwarding both printed
-                // every line twice, a logpoint's included.
+                // `Runtime.consoleAPICalled` is forwarded only for an attached session. A launched one
+                // has Node write every `console.*` call to its stdout/stderr as well, and those
+                // streams are already piped into the console — forwarding both printed every line
+                // twice. An attached service has no stream here at all: this is the only way its
+                // `console.log` and its logpoints reach the debug console.
+                Some("Runtime.consoleAPICalled") if reader_session.attached => {
+                    let kind = match params.get("type").and_then(Value::as_str) {
+                        Some("error" | "assert") => "error",
+                        Some("warning") => "stderr",
+                        _ => "log",
+                    };
+                    let text = params
+                        .get("args")
+                        .and_then(Value::as_array)
+                        .map(|args| args.iter().map(console_text).collect::<Vec<_>>().join(" "))
+                        .unwrap_or_default();
+                    let _ = reader_app.emit("debug:output", OutputEvent { kind: kind.to_string(), text });
+                }
                 _ => {}
             }
         }
@@ -952,9 +1099,32 @@ async fn connect<R: Runtime>(
     if let Ok(mut slot) = slot().lock() {
         *slot = Some(Arc::clone(&session));
     }
+    SILENT_RESUME.store(false, Ordering::SeqCst);
+    if let Ok(mut learning) = LEARNING.lock() {
+        *learning = None;
+    }
     let configured = async {
         session.call("Runtime.enable", json!({})).await?;
         session.call("Debugger.enable", json!({})).await?;
+        // Library and runtime code is stepped over and never paused in — VS Code's default
+        // `skipFiles` (`<node_internals>/**`) plus the dependencies. Without it a step past an
+        // `await` or off the end of a handler landed in Vite's file watcher (`node.js`,
+        // `setFSEventsListener`): the request it was serving hung paused, the client cancelled it,
+        // and every request after queued behind that stop (user report, 2026-11-18). A breakpoint
+        // set in such a file still stops; only stepping and exception stops skip it. Best effort:
+        // a runtime without the call debugs as before.
+        let _ = session
+            .call("Debugger.setBlackboxPatterns", json!({ "patterns": BLACKBOX_PATTERNS }))
+            .await;
+        // Breakpoints in source-mapped code placed before that code runs — see the `instrumentation`
+        // pause in the reader. Best effort: a runtime without it falls back to placing them as the
+        // maps arrive.
+        let _ = session
+            .call("Debugger.setInstrumentationBreakpoint", json!({ "instrumentation": "beforeScriptWithSourceMapExecution" }))
+            .await;
+        // Async stacks: the frames an `await` left behind come with every pause (`asyncStackTrace`),
+        // so the stack shows who called the code — VS Code's default depth.
+        let _ = session.call("Debugger.setAsyncCallStackDepth", json!({ "maxDepth": 32 })).await;
         apply_breakpoints(&session, breakpoints).await?;
         session
             .call("Debugger.setPauseOnExceptions", json!({ "state": pause_state(exception_filters) }))
@@ -1042,6 +1212,19 @@ async fn learn_source_map(session: Arc<Session>, script_id: String, script_url: 
     if script_url.replace('\\', "/").contains("/node_modules/") {
         return;
     }
+    if let Ok(mut learning) = LEARNING.lock() {
+        learning.get_or_insert_with(HashSet::new).insert(script_id.clone());
+    }
+    let id = script_id.clone();
+    learn_source_map_now(session, script_id, script_url, map_url).await;
+    if let Ok(mut learning) = LEARNING.lock() {
+        if let Some(set) = learning.as_mut() {
+            set.remove(&id);
+        }
+    }
+}
+
+async fn learn_source_map_now(session: Arc<Session>, script_id: String, script_url: String, map_url: String) {
     let script_path = if script_url.starts_with("file://") {
         Some(url_to_path(&script_url))
     } else {
@@ -1056,8 +1239,34 @@ async fn learn_source_map(session: Arc<Session>, script_id: String, script_url: 
     // Kept *before* the breakpoints are read, the reverse of `apply_breakpoints` (which records them
     // before reading the maps): whichever runs second sees the other's half, so a map arriving while
     // the session is still being configured is never missed by both.
+    // A dev server's reload evaluates the same file again under a new script id. The older versions
+    // are dropped: they never run again, and every breakpoint edit was placing breakpoints in all of
+    // them — with line numbers computed from the newest — while the tables grew for the whole session.
+    let same_file = |url: &str| url.split(['?', '#']).next().unwrap_or(url).to_string();
+    let this_file = same_file(&script_url);
+    let older: Vec<String> = session
+        .scripts
+        .lock()
+        .map(|scripts| {
+            scripts
+                .iter()
+                .filter(|(id, url)| **id != script_id && same_file(url) == this_file)
+                .map(|(id, _)| id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
     if let Ok(mut maps) = session.maps.lock() {
+        for id in &older {
+            maps.remove(id);
+        }
         maps.insert(script_id, Arc::clone(&map));
+    }
+    if !older.is_empty() {
+        if let Ok(mut scripts) = session.scripts.lock() {
+            for id in &older {
+                scripts.remove(id);
+            }
+        }
     }
     let wanted = session.wanted.lock().map(|w| w.clone()).unwrap_or_default();
     let covers_wanted = wanted.keys().any(|path| spellings(path).iter().any(|s| map.covers(s)));
@@ -1093,6 +1302,7 @@ async fn apply_breakpoints(session: &Session, breakpoints: &Breakpoints) -> Resu
         .map(|maps| maps.iter().map(|(id, map)| (id.clone(), Arc::clone(map))).collect())
         .unwrap_or_default();
     let mut fresh = Vec::new();
+    let mut first_error: Option<String> = None;
     for (path, specs) in breakpoints {
         let spellings = spellings(path);
         if let Ok(mut paths) = session.paths.lock() {
@@ -1115,9 +1325,18 @@ async fn apply_breakpoints(session: &Session, breakpoints: &Breakpoints) -> Resu
                 if let Some(condition) = &condition {
                     params["condition"] = json!(condition);
                 }
-                let result = session.call("Debugger.setBreakpointByUrl", params).await?;
-                if let Some(id) = result.get("breakpointId").and_then(Value::as_str) {
-                    fresh.push(id.to_string());
+                // One refused breakpoint must not abandon the rest — nor the ones already set, whose
+                // ids would never be stored and so could never be removed: the gutter's breakpoint
+                // would be gone and the code would still stop there.
+                match session.call("Debugger.setBreakpointByUrl", params).await {
+                    Ok(result) => {
+                        if let Some(id) = result.get("breakpointId").and_then(Value::as_str) {
+                            fresh.push(id.to_string());
+                        }
+                    }
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                    }
                 }
                 continue;
             }
@@ -1140,7 +1359,10 @@ async fn apply_breakpoints(session: &Session, breakpoints: &Breakpoints) -> Resu
     if let Ok(mut ids) = session.breakpoint_ids.lock() {
         *ids = fresh;
     }
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 pub async fn set_breakpoints(breakpoints: &Breakpoints) -> Result<(), String> {
@@ -1183,6 +1405,33 @@ pub async fn step(kind: &str) -> Result<(), String> {
 /// fetched eagerly is both slow and mostly unread.
 pub async fn properties(object_id: &str) -> Result<Vec<Variable>, String> {
     let session = current().ok_or_else(|| "no debug session".to_string())?;
+    // A getter the user chose to run, or one slice of a long array — see `GETTER` and `SLICE`.
+    if let Some(rest) = object_id.strip_prefix(GETTER) {
+        let (parent, name) = rest.split_once(SEP).ok_or_else(|| "bad getter id".to_string())?;
+        let value = call_on(&session, parent, "function(name) { return this[name]; }", &[json!(name)]).await?;
+        let mut row = render_value(&value);
+        row.name = "→".to_string();
+        return Ok(vec![row]);
+    }
+    if let Some(rest) = object_id.strip_prefix(SLICE) {
+        let mut parts = rest.split(SEP);
+        let (Some(parent), Some(start), Some(end)) = (parts.next(), parts.next(), parts.next()) else {
+            return Err("bad slice id".to_string());
+        };
+        let (start, end): (u64, u64) = (start.parse().unwrap_or(0), end.parse().unwrap_or(0));
+        let holder = call_on(
+            &session,
+            parent,
+            "function(start, end) { const out = {}; for (let i = start; i < end && i < this.length; i++) out[i] = this[i]; return out; }",
+            &[json!(start), json!(end)],
+        )
+        .await?;
+        let Some(holder_id) = holder.get("objectId").and_then(Value::as_str) else { return Ok(Vec::new()) };
+        // The indexes only: the holder is a plain object made for this, and its own `[[Prototype]]`
+        // is nothing of the array's.
+        let rows = Box::pin(properties(holder_id)).await?;
+        return Ok(rows.into_iter().filter(|row| !row.name.starts_with("[[")).collect());
+    }
     let result = session
         .call(
             "Runtime.getProperties",
@@ -1194,9 +1443,11 @@ pub async fn properties(object_id: &str) -> Result<Vec<Variable>, String> {
         for entry in list {
             let name = entry.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
             // A getter has no `value` until it's called; showing it as "(getter)" beats invoking
-            // side effects behind the user's back just to fill a row.
+            // side effects behind the user's back just to fill a row. Opening the row is the user
+            // asking for it: it runs then, and only then.
             let Some(value) = entry.get("value") else {
-                out.push(Variable { name, value: "(getter)".to_string(), object_id: None });
+                let invoke = entry.get("get").is_some().then(|| format!("{GETTER}{object_id}{SEP}{name}"));
+                out.push(Variable { name, value: "(getter)".to_string(), object_id: invoke });
                 continue;
             };
             let mut rendered = render_value(value);
@@ -1204,7 +1455,67 @@ pub async fn properties(object_id: &str) -> Result<Vec<Variable>, String> {
             out.push(rendered);
         }
     }
+    // A long array, in slices of `SLICE_SIZE` opened one at a time: every index of a 50,000-row result
+    // set reached the panel as one list nobody scrolls. Decided from what came back, so no other
+    // object pays a round trip to ask whether it is an array.
+    let indexes = out.iter().filter(|row| row.name.parse::<u64>().is_ok()).count() as u64;
+    if indexes > SLICE_SIZE * 2 {
+        let mut rows: Vec<Variable> = out.into_iter().filter(|row| row.name.parse::<u64>().is_err()).collect();
+        let mut start = 0;
+        let mut slices = 0;
+        while start < indexes && slices < MAX_SLICES {
+            let end = (start + SLICE_SIZE).min(indexes);
+            rows.push(Variable {
+                name: format!("[{start} … {}]", end - 1),
+                value: String::new(),
+                object_id: Some(format!("{SLICE}{object_id}{SEP}{start}{SEP}{end}")),
+            });
+            start = end;
+            slices += 1;
+        }
+        return Ok(rows);
+    }
+    // What V8 keeps outside the own properties: `[[Prototype]]` (where a class's getters live),
+    // a Map's or Set's `[[Entries]]`, a Promise's `[[PromiseState]]` and `[[PromiseResult]]` (the
+    // forgotten `await`), a Proxy's `[[Target]]` — and `#private` fields. Expanding a Map used to
+    // show nothing at all.
+    for key in ["privateProperties", "internalProperties"] {
+        for entry in result.get(key).and_then(Value::as_array).into_iter().flatten() {
+            let name = entry.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+            let Some(value) = entry.get("value") else { continue };
+            let mut rendered = render_value(value);
+            rendered.name = name;
+            out.push(rendered);
+        }
+    }
     Ok(out)
+}
+
+/// Ids for rows that are not V8 objects: a getter to run on its holder, a slice of a long array.
+/// `SEP` cannot occur in a CDP object id (which may hold `:`), nor in a property name a user writes.
+const GETTER: &str = "cf-getter\u{1}";
+const SLICE: &str = "cf-slice\u{1}";
+const SEP: char = '\u{1}';
+/// How many items one slice of a long array holds, and how many slices a level lists.
+const SLICE_SIZE: u64 = 100;
+const MAX_SLICES: usize = 1000;
+
+/// `function` run with `this` = `object_id`, its result kept until the program resumes.
+async fn call_on(session: &Session, object_id: &str, function: &str, args: &[Value]) -> Result<Value, String> {
+    let arguments: Vec<Value> = args.iter().map(|value| json!({ "value": value })).collect();
+    let result = session
+        .call(
+            "Runtime.callFunctionOn",
+            json!({ "objectId": object_id, "functionDeclaration": function, "arguments": arguments, "objectGroup": "backtrace", "silent": true }),
+        )
+        .await?;
+    if let Some(details) = result.get("exceptionDetails") {
+        return Err(details
+            .get("exception")
+            .map(|e| render_value(e).value)
+            .unwrap_or_else(|| "the getter threw".to_string()));
+    }
+    Ok(result.get("result").cloned().unwrap_or(Value::Null))
 }
 
 /// The scopes of one paused frame — any frame, not only the top one. CDP hands every frame's scope
@@ -1230,17 +1541,26 @@ pub fn scopes(frame_id: &str) -> Result<Vec<Variable>, String> {
 /// program or print.
 pub async fn evaluate(frame_id: &str, expression: &str, context: Option<&str>) -> Result<Variable, String> {
     let session = current().ok_or_else(|| "no debug session".to_string())?;
-    let result = session
-        .call(
-            "Debugger.evaluateOnCallFrame",
-            json!({
-                "callFrameId": frame_id,
-                "expression": expression,
-                "returnByValue": false,
-                "silent": context == Some("watch"),
-            }),
-        )
-        .await?;
+    let hover = context == Some("hover");
+    let mut params = json!({
+        "callFrameId": frame_id,
+        "expression": expression,
+        "returnByValue": false,
+        "silent": context == Some("watch") || hover,
+        // Released by V8 when the program resumes, with the stop's scopes. Bound to no group,
+        // every object an evaluation returned — and every child read from it — was held by a strong
+        // handle for the whole session: request objects, result sets, in a service attached for hours.
+        "objectGroup": "backtrace",
+    });
+    if hover {
+        // The editor's hover may not run anything: a getter, a lazy ORM relation, a proxy trap is
+        // refused instead of executed, and a slow expression gives up rather than hold the program.
+        params["throwOnSideEffect"] = json!(true);
+        params["timeout"] = json!(HOVER_TIMEOUT_MS);
+    }
+    let result = tokio::time::timeout(EVALUATE_TIMEOUT, session.call("Debugger.evaluateOnCallFrame", params))
+        .await
+        .map_err(|_| "the evaluation took too long".to_string())??;
     if let Some(details) = result.get("exceptionDetails") {
         let text = details
             .get("exception")
@@ -1588,6 +1908,7 @@ mod tests {
         assert_eq!(render_value(&json!({ "type": "string", "value": "hi" })).value, "\"hi\"");
         assert_eq!(render_value(&json!({ "type": "number", "value": 42 })).value, "42");
         assert_eq!(render_value(&json!({ "type": "undefined" })).value, "undefined");
+        assert_eq!(render_value(&json!({ "type": "object", "subtype": "null", "value": null })).value, "null");
         let object = render_value(&json!({ "type": "object", "description": "Array(3)", "objectId": "o-1" }));
         assert_eq!(object.value, "Array(3)");
         assert_eq!(object.object_id.as_deref(), Some("o-1"));
@@ -2028,5 +2349,125 @@ mod live_tests {
         )
         .unwrap();
         stops_at_the_typescript_line(&root, "runner.js").await;
+    }
+
+    /// The session as the app drives it — `start`, the real `connect` — against a real Node: the async
+    /// stack across an `await`, a hover refused rather than run where it would have side effects, a
+    /// getter run only when asked, a long array in slices, a Map's entries, and null as null.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_real_session_shows_what_an_ide_would() {
+        let _turn = SLOT_TESTS.lock().await;
+        if !node_available() {
+            return;
+        }
+        let fixture = Fixture::new(
+            "class Box { constructor() { this.hits = 0; } get touched() { this.hits++; return 'yes'; } }\n\
+             async function inner(box, list, map, nothing) {\n\
+               await null;\n\
+               return [box, list, map, nothing];\n\
+             }\n\
+             async function outer() {\n\
+               const box = new Box(); const list = Array.from({ length: 500 }, (_, i) => i);\n\
+               const map = new Map([['a', 1]]); const nothing = null;\n\
+               await inner(box, list, map, nothing);\n\
+             }\n\
+             outer();\n",
+        );
+        let app = tauri::test::mock_app();
+        let mut breakpoints = Breakpoints::new();
+        breakpoints.insert(fixture.script.clone(), vec![BreakpointSpec { line: 4, ..BreakpointSpec::default() }]);
+        let cwd = std::path::Path::new(&fixture.script).parent().unwrap().to_string_lossy().into_owned();
+        start(app.handle().clone(), &cwd, "node", &fixture.script, &[], &breakpoints, &[]).await.expect("starts");
+
+        let mut found = None;
+        for _ in 0..100 {
+            if let Some(event) = paused_state() {
+                found = Some(event);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let paused = found.expect("stops at the breakpoint after the await");
+        let top = &paused.frames[0];
+        assert_eq!(top.line, 4, "{:?}", paused.frames);
+        assert!(paused.frames.iter().any(|frame| frame.is_async && frame.name == "outer"), "the awaiting caller shows: {:?}", paused.frames);
+
+        // The hover runs nothing with side effects: the getter would bump `hits`.
+        assert!(evaluate(&top.id, "box.touched", Some("hover")).await.is_err(), "a side-effecting getter is refused on hover");
+        assert_eq!(evaluate(&top.id, "box.hits", Some("hover")).await.unwrap().value, "0");
+
+        // Asked for, it runs.
+        let box_ = evaluate(&top.id, "box", Some("watch")).await.unwrap();
+        let fields = properties(box_.object_id.as_deref().unwrap()).await.unwrap();
+        assert!(fields.iter().any(|f| f.name == "hits"), "{fields:?}");
+        let prototype = fields.iter().find(|f| f.name == "[[Prototype]]").expect("the prototype is listed");
+        let on_prototype = properties(prototype.object_id.as_deref().unwrap()).await.unwrap();
+        let getter = on_prototype.iter().find(|f| f.name == "touched").expect("the class getter shows on its prototype");
+        assert_eq!(getter.value, "(getter)");
+        let ran = properties(getter.object_id.as_deref().expect("a getter can be run")).await.unwrap();
+        assert_eq!(ran[0].value, "\"yes\"");
+
+        // 500 items come as slices; a slice opens to its own indexes.
+        let list = evaluate(&top.id, "list", Some("watch")).await.unwrap();
+        let rows = properties(list.object_id.as_deref().unwrap()).await.unwrap();
+        let slice = rows.iter().find(|r| r.name == "[100 … 199]").expect("sliced");
+        let items = properties(slice.object_id.as_deref().unwrap()).await.unwrap();
+        assert_eq!(items.first().map(|i| i.name.as_str()), Some("100"));
+        assert_eq!(items.len(), 100);
+
+        // A Map's entries, and null.
+        let map = evaluate(&top.id, "map", Some("watch")).await.unwrap();
+        let map_rows = properties(map.object_id.as_deref().unwrap()).await.unwrap();
+        assert!(map_rows.iter().any(|r| r.name == "[[Entries]]"), "{map_rows:?}");
+        assert_eq!(evaluate(&top.id, "nothing", Some("watch")).await.unwrap().value, "null");
+
+        stop().await;
+    }
+
+    /// A source-mapped module loaded later, run as a script (as `vite-node` does), with the breakpoint
+    /// on code that runs once, at import —
+    /// the case the instrumentation break exists for: its map is read and the breakpoint placed
+    /// before the module's first line runs. Without it, the line ran before the breakpoint existed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_breakpoint_in_import_time_code_of_a_mapped_module_stops() {
+        if !node_available() {
+            return;
+        }
+        let _turn = SLOT_TESTS.lock().await;
+        // Loaded the way `vite-node` loads a module: its compiled code run as a script, named by its
+        // file. (A CommonJS `require` compiles a function rather than running a script, and V8 has no
+        // instrumentation stop for that; its maps arrive from `scriptParsed` instead.)
+        let fixture = Fixture::in_folder(
+            "import-time",
+            "const vm = require('vm'), fs = require('fs'), path = require('path');\n\
+             setTimeout(() => { const file = path.join(__dirname, 'dist', 'app.js'); vm.runInThisContext(fs.readFileSync(file, 'utf8'), { filename: file }); }, 200);\n\
+             setTimeout(() => {}, 3000);\n",
+        );
+        let root = std::path::Path::new(&fixture.script).parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("dist")).unwrap();
+        std::fs::write(root.join("src/app.ts"), TS_SOURCE.replace("setInterval(f, 50);", "f();")).unwrap();
+        std::fs::write(root.join("dist/app.js"), format!("{}//# sourceMappingURL=app.js.map", TS_COMPILED.replace("setInterval(f, 50);", "f();"))).unwrap();
+        let map = format!(r#"{{"version":3,"file":"app.js","sourceRoot":"","sources":["../src/app.ts"],"names":[],"mappings":"{TS_MAPPINGS}"}}"#);
+        std::fs::write(root.join("dist/app.js.map"), map).unwrap();
+
+        let app = tauri::test::mock_app();
+        let mut breakpoints = Breakpoints::new();
+        let source = root.join("src/app.ts").to_string_lossy().into_owned();
+        // `const a: number = 1;` — line 5 of the source, run once as the module loads.
+        breakpoints.insert(source, vec![BreakpointSpec { line: 5, ..BreakpointSpec::default() }]);
+        start(app.handle().clone(), &root.to_string_lossy(), "node", &fixture.script, &[], &breakpoints, &[]).await.expect("starts");
+        let mut found = None;
+        for _ in 0..60 {
+            if let Some(event) = paused_state() {
+                found = Some(event);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        stop().await;
+        let paused = found.expect("stops at the import-time line of the mapped module");
+        assert!(paused.frames[0].file.ends_with("app.ts"), "{:?}", paused.frames[0]);
+        assert_eq!(paused.frames[0].line, 5);
     }
 }

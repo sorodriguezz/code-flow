@@ -2627,6 +2627,8 @@ export interface StackFrame {
   /** 1-based. */
   line: number;
   scope_id: string | null;
+  /** A frame of the async stack — the caller across an `await`. Openable, not evaluable. */
+  is_async?: boolean;
 }
 
 export interface DebugVariable {
@@ -2707,7 +2709,10 @@ export const debugAttach = (
   cwd: string,
   breakpoints: Record<string, BreakpointSpec[]>,
   exceptionFilters: string[],
-) => invoke<boolean>("debug_attach", { wsUrl, cwd, breakpoints, exceptionFilters });
+) => invoke<string | null>("debug_attach", { wsUrl, cwd, breakpoints, exceptionFilters });
+/** The script a Node inspector belongs to; `""` for a launcher's (`pnpm`, a CLI), `null` when it
+ *  does not answer. */
+export const debugInspectorTarget = (wsUrl: string) => invoke<string | null>("debug_inspector_target", { wsUrl });
 
 export const debugStop = () => invoke<void>("debug_stop");
 export const debugContinue = () => invoke<void>("debug_continue");
@@ -2721,8 +2726,9 @@ export const debugProperties = (objectId: string) =>
   invoke<DebugVariable[]>("debug_properties", { objectId });
 /** Every scope of a paused frame — any frame, not only the top one — as expandable rows. */
 export const debugScopes = (frameId: string) => invoke<DebugVariable[]>("debug_scopes", { frameId });
-/** `context`: `repl` for the console, `watch` for the watch list (never stops or prints). */
-export const debugEvaluate = (frameId: string, expression: string, context?: "repl" | "watch") =>
+/** `context`: `repl` for the console, `watch` for the watch list (never stops or prints), `hover` for
+ *  the editor's hover (as `watch`, and refused outright when it would have side effects). */
+export const debugEvaluate = (frameId: string, expression: string, context?: "repl" | "watch" | "hover") =>
   invoke<DebugVariable>("debug_evaluate", { frameId, expression, context: context ?? null });
 export const debugIsRunning = () => invoke<boolean>("debug_is_running");
 export const debugSession = () => invoke<DebugSessionInfo | null>("debug_session");

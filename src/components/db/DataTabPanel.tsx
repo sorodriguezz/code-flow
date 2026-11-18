@@ -6,7 +6,7 @@ import {
   ChevronRight,
   CircleX,
   Braces,
-  Columns3,
+  Check,
   Copy,
   CopyPlus,
   Download,
@@ -35,6 +35,7 @@ import { recordModel } from "../../lib/db/engineModel";
 import { documentWithoutId } from "../../lib/db/mongoDocument";
 import { DocumentList, type DocumentActions, type DocumentState } from "./DocumentList";
 import { QueryOptionsPanel } from "./QueryOptionsPanel";
+import { AiFilterButton } from "./AiFilterButton";
 import { RecordGrid } from "./RecordGrid";
 import { copyFormats, xlsxItem } from "./resultCopy";
 import { EnvironmentChip, useConnectionEnvironment } from "./EnvironmentChip";
@@ -831,7 +832,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
     <div className="flex h-full min-h-0 flex-col overflow-hidden">
       {/* Toolbar. 44px like every surface's, and allowed to wrap: on a narrow panel the Discard and
           Apply pair drops to a second line rather than being clipped off the right edge. */}
-      <div className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-b border-[var(--cf-border)] py-[7px] pl-3.5 pr-3">
+      <div className="@container flex min-h-11 shrink-0 flex-wrap items-center gap-x-1 gap-y-1 border-b border-[var(--cf-border)] py-[7px] pl-3.5 pr-3">
         {connection && <EngineBadge kind={connection.kind} driver={connectionDriver} label={engine?.label ?? ""} size={18} />}
         {/* Which connection these rows came from, in words. The engine badge says *what kind* of
             server it is, which is not the same question — two of the three connections in a
@@ -865,49 +866,54 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
           to controls that do nothing to the data at all. The pair now reads as one question, at the
           far end of the bar, where the eye finishes reading it.
         */}
-        <div className="flex items-center gap-0.5">
+        {/* No primary key: said here, small, all the time — and as the full sentence under the bar
+            only while there are edits it applies to. The full-width warning on every keyless table
+            was a second toolbar's worth of height for something that only matters when saving. */}
+        {tab.result && tab.columns.length > 0 && !identified && staged === 0 && (
+          <Tooltip label={t("db.noPrimaryKey")} description={t("db.noPrimaryKeyWarning")}>
+            <span className="flex shrink-0 items-center gap-1 rounded-full border border-[color-mix(in_oklab,var(--cf-warning)_45%,var(--cf-border))] bg-[color-mix(in_oklab,var(--cf-warning)_9%,transparent)] px-2 py-[1px] text-[11px] text-[var(--cf-text)]">
+              <AlertTriangle size={11} className="text-[var(--cf-warning)]" />
+              {t("db.noPrimaryKey")}
+            </span>
+          </Tooltip>
+        )}
+
+        {/* The actions, on the right and worded: they used to be five bare icons packed against the
+            table name, which read as part of the breadcrumb and had to be hovered one by one to
+            find (user report, 2026-11-18). The words drop to icons when the panel is narrow. */}
+        <div className="ml-auto flex items-center gap-1 pl-2">
           {tab.loading ? (
-            <ToolbarButton size="sm" onClick={() => void store.cancelRun(tab.id)} title={t("db.cancel")}>
-              <Square size={14} className="text-[var(--cf-danger)]" />
-            </ToolbarButton>
+            <LabelledButton icon={Square} danger onClick={() => void store.cancelRun(tab.id)} label={t("db.cancel")} />
           ) : (
-            <ToolbarButton
-              size="sm"
+            <LabelledButton
+              icon={RefreshCw}
               onClick={() => void reload()}
+              label={t("db.refreshShort")}
               title={t("db.refresh")}
               shortcut={chord("db.refresh")}
-            >
-              <RefreshCw size={15} />
-            </ToolbarButton>
+            />
           )}
-
           {/* On a collection this writes a document, not a row of nulls: there is no column list to
               make one from, and a schemaless store's "add" has always meant "write one". */}
-          <ToolbarButton
-            size="sm"
+          <LabelledButton
+            icon={Plus}
             onClick={() => (documentStore ? addDocument() : store.addRow(tab.id))}
+            label={documentStore ? t("db.addDocumentShort") : t("db.addRowShort")}
             title={documentStore ? t("db.addDocument") : t("db.addRow")}
-          >
-            <Plus size={15} />
-          </ToolbarButton>
+          />
           {/* SQL tables only, and not on a read-only connection — the import writes. */}
           {engine?.sql && !readOnly && tab.node.kind === "table" && (
-            <ToolbarButton
-              size="sm"
-              onClick={() =>
-                openModal({ kind: "importCsv", connectionId: tab.connectionId, node: tab.node, tabId: tab.id })
-              }
+            <LabelledButton
+              icon={FileUp}
+              onClick={() => openModal({ kind: "importCsv", connectionId: tab.connectionId, node: tab.node, tabId: tab.id })}
+              label={t("db.importShort")}
               title={t("db.importCsv")}
-            >
-              <FileUp size={15} />
-            </ToolbarButton>
+            />
           )}
 
           <ToolbarSeparator />
 
-          {/* Three ways to read documents, in Compass's own order: the list, the raw text, the
-              grid. A segmented control rather than the two-state toggle beside it, because these
-              are three alternatives and a toggle can only ever say "the other one". */}
+          {/* Three ways to read documents, in Compass's own order: the list, the raw text, the grid. */}
           {hasDocuments && (
             <>
               <Segmented
@@ -925,73 +931,70 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
             </>
           )}
 
-          {/* How to look at the page, not what to do with a selection — which is why the "read
-              these as records" action lives on the selection bar instead of beside this. Hidden
-              while documents are up: transposing a grid is a question about a grid. */}
-          {(!hasDocuments || docView === "grid") && (
-            <ToolbarButton
+          {/* The two layouts named, as a choice: the old single toggle showed the icon of the layout
+              you were *not* in, which nobody reads right the first time. */}
+          {(!hasDocuments || docView === "grid") && tab.result && (
+            <Segmented
               size="sm"
-              onClick={() => setUi(tab.id, { layout: layout === "grid" ? "record" : "grid" })}
-              active={layout === "record"}
-              disabled={!tab.result}
-              title={layout === "grid" ? t("db.recordLayout") : t("db.gridLayout")}
-            >
-              {layout === "grid" ? <Columns3 size={15} /> : <Rows3 size={15} />}
-            </ToolbarButton>
+              layoutId={`cf-db-layout-${tab.id}`}
+              value={layout}
+              onChange={(next) => setUi(tab.id, { layout: next })}
+              options={[
+                { value: "grid", icon: TableIcon, label: <span className="hidden @[1000px]:inline">{t("db.layoutGridShort")}</span>, title: t("db.gridLayout") },
+                { value: "record", icon: Rows3, label: <span className="hidden @[1000px]:inline">{t("db.layoutRecordShort")}</span>, title: t("db.recordLayout") },
+              ]}
+            />
           )}
-          <ToolbarButton
-            size="sm"
+          <LabelledButton
+            icon={Download}
             onClick={(e) => {
               const rect = e.currentTarget.getBoundingClientRect();
               setMenu({ x: rect.right - 180, y: rect.bottom + 2, kind: "export", rows: selectedRows });
             }}
             disabled={!tab.result || tab.result.rows.length === 0}
-            title={
-              selectedRows.length > 0
-                ? t("db.exportSelectedN", { n: String(selectedRows.length) })
-                : t("db.export")
-            }
-          >
-            <Download size={15} />
-          </ToolbarButton>
-        </div>
+            label={t("db.exportShort")}
+            title={selectedRows.length > 0 ? t("db.exportSelectedN", { n: String(selectedRows.length) }) : t("db.export")}
+          />
 
-        <div className="ml-auto flex items-center gap-1.5 pl-2">
-          {/* Worded, not an icon: it is the other answer to the question Apply asks, and an icon
-              beside a labelled button reads as a lesser control rather than as the alternative.
-              `CircleX` and not a bin — nothing is deleted here. The staged edits are dropped and the
-              rows go back to what the server last said, which is a cancel, not a destruction. */}
-          <Tooltip label={t("db.revert")}>
-            <button
-              type="button"
-              onClick={() => store.revertEdits(tab.id)}
-              disabled={staged === 0}
-              className={buttonClass({ variant: "secondary" })}
-            >
-              <CircleX size={14} />
-              {t("db.discard")}
-            </button>
-          </Tooltip>
-          <Tooltip
-            label={staged > 0 ? t("db.applyTitle", { n: String(staged) }) : t("db.apply")}
-            description={t("db.applySubtitle")}
-            trailing={chord("db.apply") ? <Kbd>{chord("db.apply")}</Kbd> : undefined}
-          >
-            <button
-              type="button"
-              onClick={apply}
-              disabled={staged === 0}
-              className={buttonClass({ variant: "primary" })}
-            >
-              <Save size={14} />
-              {staged > 0 ? t("db.applyN", { n: String(staged) }) : t("db.apply")}
-            </button>
-          </Tooltip>
+          <ToolbarSeparator />
+
+          {/* What to do with what you changed — only once there is something. Two large disabled
+              buttons on every untouched table were the heaviest thing on the bar and said nothing. */}
+          {staged > 0 ? (
+            <span className="flex items-center gap-1.5">
+              <span className="hidden text-[11.5px] font-medium tabular-nums text-[var(--cf-accent)] @[760px]:inline">
+                {t("db.pendingChanges", { n: String(staged) })}
+              </span>
+              {/* Worded, not an icon: it is the other answer to the question Apply asks. `CircleX`
+                  and not a bin — nothing is deleted; the staged edits are dropped. */}
+              <Tooltip label={t("db.revert")}>
+                <button type="button" onClick={() => store.revertEdits(tab.id)} className={buttonClass({ variant: "secondary", size: "sm" })}>
+                  <CircleX size={13} />
+                  {t("db.discard")}
+                </button>
+              </Tooltip>
+              <Tooltip
+                label={t("db.applyTitle", { n: String(staged) })}
+                description={t("db.applySubtitle")}
+                trailing={chord("db.apply") ? <Kbd>{chord("db.apply")}</Kbd> : undefined}
+              >
+                <button type="button" onClick={apply} className={buttonClass({ variant: "primary", size: "sm" })}>
+                  <Save size={13} />
+                  {t("db.applyN", { n: String(staged) })}
+                </button>
+              </Tooltip>
+            </span>
+          ) : (
+            <span className="flex items-center gap-1 px-1 text-[11.5px] text-[var(--cf-text-faint)]">
+              <Check size={12} />
+              <span className="hidden @[760px]:inline">{t("db.noChanges")}</span>
+            </span>
+          )}
         </div>
       </div>
 
       {/* The warning that matters: without a primary key, an edit is matched by every column. */}
-      {tab.result && tab.columns.length > 0 && !identified && (
+      {tab.result && tab.columns.length > 0 && !identified && staged > 0 && (
         <p className="flex shrink-0 items-start gap-2 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_9%,transparent)] py-1.5 pl-3.5 pr-3 text-[12px] leading-snug text-[var(--cf-text)]">
           <AlertTriangle size={14} className="mt-px shrink-0 text-[var(--cf-warning)]" />
           {t("db.noPrimaryKeyWarning")}
@@ -1290,6 +1293,15 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
               spellCheck={false}
               className={fieldClass({ size: "sm", className: "flex-1 font-mono placeholder:font-sans" })}
             />
+            <AiFilterButton
+              tab={tab}
+              onFilter={(filter) => {
+                // Applied as it lands, like Enter in the box: the condition stays on screen there,
+                // editable, and the grid shows what it selects.
+                store.updateData(tab.id, { filterDraft: filter, filter, options: tab.optionsDraft, offset: 0 });
+                void store.loadData(tab.id);
+              }}
+            />
             {/* Only on the engines that have more to ask than a predicate. The dot says an option is
                 set while the panel is shut, so a page narrowed by a projection or a limit can never
                 look like an unfiltered one. */}
@@ -1367,4 +1379,39 @@ function describeEdit(kind: string, values: number, keys: number, document: bool
   if (kind === "insert") return `INSERT — ${values} column(s)`;
   if (kind === "delete") return `DELETE — matched on ${keys} column(s)`;
   return `UPDATE — ${values} column(s), matched on ${keys}`;
+}
+
+/** A toolbar action with its name beside the icon — dropped to the icon alone when the toolbar is
+ *  narrow (`@container` on the bar), where the tooltip still names it. */
+function LabelledButton({
+  icon: Icon,
+  label,
+  title,
+  shortcut,
+  onClick,
+  disabled,
+  danger,
+}: {
+  icon: React.ComponentType<{ size?: number; className?: string }>;
+  label: string;
+  title?: string;
+  shortcut?: string | null;
+  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  disabled?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <Tooltip label={title ?? label} trailing={shortcut ? <Kbd>{shortcut}</Kbd> : undefined}>
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        aria-label={title ?? label}
+        className={buttonClass({ variant: "ghost", size: "sm", className: "px-2" })}
+      >
+        <Icon size={14} className={danger ? "text-[var(--cf-danger)]" : undefined} />
+        <span className="hidden @[1000px]:inline">{label}</span>
+      </button>
+    </Tooltip>
+  );
 }

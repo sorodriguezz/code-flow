@@ -51,7 +51,7 @@ vi.mock("./collabStore", () => ({
   useCollabStore: { getState: () => ({ refresh: () => Promise.resolve() }) },
 }));
 
-const { useApiStore } = await import("./apiStore");
+const { useApiStore, requestDirty, sameValue, parseSpec } = await import("./apiStore");
 
 /** Lets the next call to `name` hang until `release(name)`. */
 const hold = (name: string) => holding.add(name);
@@ -162,5 +162,40 @@ describe("a refresh answering after a workspace switch", () => {
     await release("api_load_tree");
     await first;
     expect(useApiStore.getState().collections[0]?.id).toBe("col-A2");
+  });
+});
+
+describe("a request tab's unsaved state", () => {
+  const row = {
+    id: "r1",
+    collection_id: "c1",
+    folder_id: null,
+    name: "Prod",
+    protocol: "http" as const,
+    method: "POST",
+    url: "https://example.test/search",
+    spec: JSON.stringify({ protocol: "http", method: "POST", url: "https://example.test/search" }),
+    sort_order: 0,
+    created_at: "",
+    updated_at: "",
+  };
+  const tab = { requestId: "r1", name: "Prod" };
+
+  it("is unsaved after an edit, and saved again once the edit is undone", () => {
+    const opened = parseSpec(row);
+    expect(requestDirty([row], { ...tab, draft: { ...opened, url: "https://example.test/other" } })).toBe(true);
+    expect(requestDirty([row], { ...tab, draft: { ...opened, url: row.url } })).toBe(false);
+    expect(requestDirty([row], { ...tab, name: "Prod 2", draft: opened })).toBe(true);
+  });
+
+  it("is always unsaved on a scratch tab, which has no row to agree with", () => {
+    expect(requestDirty([row], { requestId: null, name: "", draft: parseSpec(row) })).toBe(true);
+  });
+
+  it("compares JSON-shaped values, with undefined keys as absent", () => {
+    expect(sameValue({ a: [1, { b: 2 }] }, { a: [1, { b: 2 }] })).toBe(true);
+    expect(sameValue({ a: 1, b: undefined }, { a: 1 })).toBe(true);
+    expect(sameValue({ a: [1, 2] }, { a: [2, 1] })).toBe(false);
+    expect(sameValue([], {})).toBe(false);
   });
 });

@@ -1,6 +1,9 @@
-import { useEffect, type ReactNode, type RefObject } from "react";
-import { ArrowUp, Mic, Square, X } from "lucide-react";
+import { useEffect, useState, type ReactNode, type RefObject } from "react";
+import { ArrowUp, Check, ChevronDown, Mic, Settings2, Square, X } from "lucide-react";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { Tooltip } from "../common/Tooltip";
+import { dictationInputs, type MicInput } from "../../lib/tauri/dictationCommands";
+import { useUiStore } from "../../state/uiStore";
 import { chordLabel } from "../../lib/keys";
 import type { DictationField } from "../../lib/dictation/insert";
 import { useT } from "../../state/languageStore";
@@ -49,6 +52,7 @@ export function DictationMic({
   }, [load]);
   if (!ready) return null;
   return (
+    <span className="flex shrink-0 items-center">
     <Tooltip label={t("dictation.dictate")} trailing={chord ? <span className="opacity-70">{chord}</span> : undefined}>
       <button
         type="button"
@@ -61,6 +65,84 @@ export function DictationMic({
         <Mic size={iconSize} />
       </button>
     </Tooltip>
+    <MicPicker disabled={busy} />
+    </span>
+  );
+}
+
+/**
+ * Which microphone «Dictar» listens to, chosen where it is used — the chevron beside the mic, as the
+ * meeting recorder's has. It used to be only in Ajustes › Voz › Dispositivos, three screens away from
+ * the field where you notice the wrong one is on (user report, 2026-11-18). The same setting
+ * (`dictation_device`): a choice here is the choice there.
+ */
+function MicPicker({ disabled }: { disabled: boolean }) {
+  const t = useT();
+  const device = useDictationStore((s) => s.device);
+  const setDevice = useDictationStore((s) => s.setDevice);
+  const [menu, setMenu] = useState<{ top: number; bottom: number; left: number; right: number } | null>(null);
+  const [inputs, setInputs] = useState<MicInput[] | null>(null);
+
+  const open = (rect: DOMRect) => {
+    setMenu({ top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right });
+    // Read on every open: a headset plugged in since the last look is the usual reason to be here.
+    void dictationInputs()
+      .then(setInputs)
+      .catch(() => setInputs([]));
+  };
+
+  const mark = (on: boolean) => (on ? <Check size={13} className="text-[var(--cf-accent)]" /> : <span className="inline-block w-[13px]" />);
+  const fallback = inputs?.find((input) => input.isDefault);
+  const items: MenuItem[] = [
+    {
+      label: fallback ? t("dictation.micDefaultNamed", { name: fallback.name }) : t("dictation.micDefault"),
+      leading: mark(device === ""),
+      onClick: () => void setDevice(""),
+    },
+    ...(inputs ?? []).map((input) => ({
+      label: input.name,
+      leading: mark(device === input.id),
+      onClick: () => void setDevice(input.id),
+    })),
+  ];
+  // Chosen once and unplugged now: still the choice, and recordings use the default meanwhile.
+  if (device && inputs && !inputs.some((input) => input.id === device)) {
+    items.push({ label: t("dictation.micAbsent"), leading: mark(true), onClick: () => {}, disabled: true });
+  }
+  items.push({
+    label: t("dictation.voiceSettings"),
+    icon: Settings2,
+    separated: true,
+    onClick: () => useUiStore.getState().openSettingsAt("voice", "devices"),
+  });
+
+  return (
+    <>
+      <Tooltip label={t("dictation.chooseMic")}>
+        <button
+          type="button"
+          onMouseDown={keepFocus}
+          onClick={(e) => open(e.currentTarget.getBoundingClientRect())}
+          disabled={disabled}
+          aria-label={t("dictation.chooseMic")}
+          aria-haspopup="menu"
+          aria-expanded={menu !== null}
+          className="-ml-1 flex h-[22px] w-[14px] shrink-0 items-center justify-center rounded text-[var(--cf-text-faint)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40"
+        >
+          <ChevronDown size={11} />
+        </button>
+      </Tooltip>
+      {menu && (
+        <ContextMenu
+          x={menu.left}
+          y={menu.bottom}
+          anchor={{ ...menu, align: "end" }}
+          heading={inputs === null ? t("dictation.micLoading") : t("dictation.microphone")}
+          items={inputs === null ? [] : items}
+          onClose={() => setMenu(null)}
+        />
+      )}
+    </>
   );
 }
 

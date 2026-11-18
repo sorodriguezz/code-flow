@@ -1037,9 +1037,11 @@ export const useApiStore = create<ApiState>((set, get) => ({
 
   updateEntityDraft: (tabId, patch) => {
     set((s) => ({
-      entityTabs: s.entityTabs.map((tab) =>
-        tab.id === tabId ? { ...tab, draft: { ...tab.draft, ...patch }, dirty: true } : tab,
-      ),
+      entityTabs: s.entityTabs.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        const draft = { ...tab.draft, ...patch };
+        return { ...tab, draft, dirty: entityDirty(s, tab, draft) };
+      }),
     }));
     schedulePersistTabs(get);
   },
@@ -1083,7 +1085,7 @@ export const useApiStore = create<ApiState>((set, get) => ({
         // Identity, not `id` alone: anything typed while the write was in flight replaced the
         // draft object, and clearing the flag then would mark those keystrokes saved without
         // them ever having been written.
-        entry.id === tabId && entry.draft === tab.draft ? { ...entry, dirty: false } : entry,
+        entry.id === tabId ? { ...entry, dirty: entityDirty(s, entry, entry.draft) } : entry,
       ),
     }));
     persistTabs(get);
@@ -1113,16 +1115,18 @@ export const useApiStore = create<ApiState>((set, get) => ({
 
   renameTab: (tabId, name) => {
     set((s) => ({
-      openTabs: s.openTabs.map((tab) => (tab.id === tabId ? { ...tab, name, dirty: true } : tab)),
+      openTabs: s.openTabs.map((tab) => (tab.id === tabId ? { ...tab, name, dirty: requestDirty(s.requests, { ...tab, name }) } : tab)),
     }));
     schedulePersistTabs(get);
   },
 
   updateDraft: (tabId, patch) => {
     set((s) => ({
-      openTabs: s.openTabs.map((tab) =>
-        tab.id === tabId ? { ...tab, draft: { ...tab.draft, ...patch }, dirty: true } : tab,
-      ),
+      openTabs: s.openTabs.map((tab) => {
+        if (tab.id !== tabId) return tab;
+        const next = { ...tab, draft: { ...tab.draft, ...patch } };
+        return { ...next, dirty: requestDirty(s.requests, next) };
+      }),
     }));
     schedulePersistTabs(get);
   },
@@ -1172,7 +1176,9 @@ export const useApiStore = create<ApiState>((set, get) => ({
           requests: s.requests.map((r) => (r.id === saved.id ? saved : r)),
           openTabs: s.openTabs.map((t) =>
             t.id === tabId
-              ? { ...t, dirty: false, rowUpdatedAt: stampedAt, staleAgainst: undefined }
+              ? // Against the row just written: whatever was typed while the write was in flight
+                // is still unsaved, and says so.
+                { ...t, dirty: requestDirty([saved], t), rowUpdatedAt: stampedAt, staleAgainst: undefined }
               : t,
           ),
         }));
@@ -1927,6 +1933,56 @@ export function ancestorAuthIn(
 // ---------------------------------------------------------------------------
 // JSON blobs
 // ---------------------------------------------------------------------------
+
+/**
+ * Whether a request tab holds anything its row does not — its draft or its name compared with what
+ * is saved, not a flag set by the first keystroke. A flag stayed up after an edit was undone, and
+ * the tab kept asking to be saved with nothing to save (user report, 2026-11-18). A scratch tab has
+ * no row to agree with: anything in it is unsaved, which is what being edited at all means here.
+ */
+export function requestDirty(requests: ApiRequestRow[], tab: Pick<ApiTab, "requestId" | "name" | "draft">): boolean {
+  if (!tab.requestId) return true;
+  const row = requests.find((r) => r.id === tab.requestId);
+  if (!row) return true;
+  return (tab.name || row.name) !== row.name || !sameValue(tab.draft, savedSpec(row));
+}
+
+/** [`requestDirty`] for a collection or folder tab, against its row as `readEntity` reads it. */
+function entityDirty(state: ApiState, tab: ApiEntityTab, draft: EntityDraft): boolean {
+  const saved = readEntity(state, tab.kind, tab.entityId);
+  return saved === null || !sameValue(draft, saved.draft);
+}
+
+/** The parsed spec of a row, once per row object: the dirty check runs on every keystroke, and a
+ *  row is replaced, never mutated, when it changes. */
+const SAVED_SPECS = new WeakMap<ApiRequestRow, ApiRequestSpec>();
+function savedSpec(row: ApiRequestRow): ApiRequestSpec {
+  let spec = SAVED_SPECS.get(row);
+  if (!spec) {
+    spec = parseSpec(row);
+    SAVED_SPECS.set(row, spec);
+  }
+  return spec;
+}
+
+/** Structural equality for JSON-shaped values. A key holding `undefined` counts as absent, the way
+ *  it does once the draft is written as JSON. */
+export function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) {
+    const other = b as unknown[];
+    return a.length === other.length && a.every((item, i) => sameValue(item, other[i]));
+  }
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+  for (const key of keys) {
+    if (!sameValue(left[key], right[key])) return false;
+  }
+  return true;
+}
 
 /** A row whose `spec` is corrupt still opens, as an empty request of its protocol. */
 export function parseSpec(row: ApiRequestRow): ApiRequestSpec {

@@ -1,5 +1,5 @@
 import { Fragment, Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { AlertCircle, ArrowDown, ArrowUp, Download, Eraser, FolderGit2, History, Link2, ListChecks, ListPlus, Loader2, Paperclip, Pencil, Play, RotateCcw, Search, SquarePen, Square, Trash2, UsersRound } from "lucide-react";
+import { AlertCircle, ArrowDown, ArrowUp, Download, Eraser, FolderGit2, History, Link2, ListChecks, ListPlus, Loader2, Pencil, Play, RotateCcw, Search, SquarePen, Square, Trash2, UsersRound } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AiRunLog } from "./AiRunLog";
 import { ContextSources } from "./ContextSources";
@@ -15,6 +15,9 @@ import { ContextMeter, type ContextReading } from "../chat/ContextMeter";
 import { SkillChip } from "../chat/ChatComposer";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
 import { exportChatConversation, exportMenuItems } from "../chat/exportChat";
+import { ComposerPlusMenu } from "../chat/ComposerPlusMenu";
+import { SelectionActions } from "../chat/SelectionActions";
+import { appendQuote, passageForNewChat } from "../../lib/quoteSelection";
 import { McpMenu } from "../chat/McpMenu";
 import { MentionMenu, useMentions } from "../chat/MentionMenu";
 import { GhostOverlay, useComposerGhost } from "../chat/useComposerGhost";
@@ -27,7 +30,7 @@ import { QueuedMessages, type ComposerQueue } from "../chat/QueuedMessages";
 import { popoverClass } from "../common/recipes";
 import { useTextMenu } from "../common/TextMenu";
 import { DictationBar, DictationMic, useDictatingHere } from "../dictation/DictationControls";
-import { FOCUS_CHAT_EVENT, SEND_CHAT_EVENT, openWorkspaceChat, takePendingSend } from "../../lib/aiPanelNav";
+import { FOCUS_CHAT_EVENT, SEND_CHAT_EVENT, openWorkspaceChat, startPanelChatWith, takePendingSend } from "../../lib/aiPanelNav";
 import { resolveAccount } from "../../lib/aiAccounts";
 import { providerCapabilities, providerDisplayLabel } from "../../lib/aiProviders";
 import { estimateTokens } from "../../lib/contextWindow";
@@ -97,6 +100,14 @@ export function WorkspaceChat({
   const session = useWorkspaceChatStore((s) => s.byConversation[conversationId]) ?? EMPTY_WS_CHAT;
   const draft = useAiPanelStore((s) => s.drafts[tabKey] ?? "");
   const setDraft = (text: string) => useAiPanelStore.getState().setDraft(tabKey, text);
+  /** The composer focused with the caret at the end, once the draft just set has rendered. */
+  const focusComposerSoon = () =>
+    requestAnimationFrame(() => {
+      const box = boxRef.current;
+      if (!box) return;
+      box.focus();
+      box.setSelectionRange(box.value.length, box.value.length);
+    });
   const cancelling = useAiRunStore((s) => (session.runId ? (s.cancelling[session.runId] ?? false) : false));
   const projects = useWorkspaceStore((s) => s.projectsByWorkspace[workspaceId] ?? NO_PROJECTS);
   const repoCount = projects.length;
@@ -700,6 +711,21 @@ export function WorkspaceChat({
       <SharedChatBar workspaceId={workspaceId} chatId={conversationId} title={session.title} persisted={session.persisted && session.messages.length > 0} />
       <SubchatRow scope={lineage} />
       <ChatArtifactsStrip workspaceId={workspaceId} conversationId={conversationId} />
+      {/* Select a passage of an answer: quote it here, take it to a new chat, or ask to explain,
+          improve or shorten it — the chat workspace's bar, the same rules (user request, 2026-11-18).
+          The quote goes into the composer; nothing is sent. */}
+      <SelectionActions
+        scope={scrollRef}
+        onQuoteReply={(passage) => {
+          setDraft(appendQuote(draft, passage));
+          focusComposerSoon();
+        }}
+        onTransform={(kind, passage) => {
+          setDraft(`${appendQuote(draft, passage)}\n\n${t(`chat.selection.${kind}Ask` as const)}`);
+          focusComposerSoon();
+        }}
+        onQuoteNewChat={(passage) => startPanelChatWith({ workspaceId }, passageForNewChat(passage))}
+      />
       <div ref={scrollRef} onScroll={onScroll} tabIndex={-1} onContextMenu={textMenu.onText} className="cf-paper-scroll relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none">
         {exportMenu && (
           <ContextMenu
@@ -935,69 +961,27 @@ export function WorkspaceChat({
               className="relative max-h-[180px] w-full resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed outline-none placeholder:text-[var(--cf-text-muted)]"
             />
           </div>
+          {/* Inside the box: what acts on this message — add to it, dictate it, send it. */}
           {dictating ? (
             <div className="flex items-center gap-1.5 px-0.5">
               <DictationBar />
             </div>
           ) : (
-            <div className="@container flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 px-0.5">
-              <ChatModelPicker
-                liveModel={session.model || null}
-                chatActive={session.messages.length > 0}
-                bound={{ provider, model, account }}
-                onPick={pickEngine}
+            <div className="flex min-w-0 items-center gap-1.5 px-0.5">
+              {/* Files and the CLI's MCP servers (for this conversation once it exists), behind one «+». */}
+              <ComposerPlusMenu
+                onAttach={() => void attachFiles()}
+                attachTitle={readsImages ? t("chat.attach") : t("chat.attachTextOnly", { provider: providerDisplayLabel(provider, t) })}
+                renderMcp={(visible, onActive) => (
+                  <McpMenu
+                    embedded
+                    visible={visible}
+                    onActive={onActive}
+                    provider={provider}
+                    scope={{ accountId: account ?? "system", workspaceId, conversationId: session.persisted ? conversationId : null }}
+                  />
+                )}
               />
-              <EffortPicker
-                compact
-                value={session.effort}
-                supported={effortSupported}
-                onPick={(level) => void useWorkspaceChatStore.getState().setEffort(conversationId, level)}
-              />
-              <AnswerLengthPicker compact />
-              <CavemanChip
-                level={session.cavemanLevel}
-                levels={cavemanLevels}
-                onPick={(level) => void useWorkspaceChatStore.getState().setCaveman(conversationId, level)}
-              />
-              {contextReading && <ContextMeter reading={contextReading} />}
-              {/* Plan mode: read-only turns that answer with a plan, then «Ejecutar el plan». */}
-              <button
-                type="button"
-                onClick={() => useWorkspaceChatStore.getState().setPlan(conversationId, !session.plan)}
-                aria-pressed={session.plan}
-                aria-label={t("assistant.planMode")}
-                title={t("assistant.planModeHint")}
-                className={`flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] ${
-                  session.plan
-                    ? "bg-[color-mix(in_oklab,var(--cf-accent)_14%,transparent)] text-[var(--cf-accent)]"
-                    : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-                }`}
-              >
-                <ListChecks size={13} />
-                {/* The label gives way when the panel is narrow: the icon, title and name stay. */}
-                <span className="hidden @[26rem]:inline">{t("assistant.planMode")}</span>
-              </button>
-              {/* Restringido (destructive things ask) or Completo (nothing asks) — `lib/chatPermissions`. */}
-              <PermissionsPicker
-                value={session.permissions}
-                planMode={session.plan}
-                onPick={(next) => useWorkspaceChatStore.getState().setPermissions(conversationId, next)}
-              />
-              {/* The CLI's own MCP servers, switched for this conversation once it exists. */}
-              <McpMenu
-                provider={provider}
-                scope={{ accountId: account ?? "system", workspaceId, conversationId: session.persisted ? conversationId : null }}
-              />
-              {/* Always offered: a file is something every engine can read, whatever it can see. */}
-              <button
-                type="button"
-                onClick={() => void attachFiles()}
-                title={readsImages ? t("chat.attach") : t("chat.attachTextOnly", { provider: providerDisplayLabel(provider, t) })}
-                aria-label={t("chat.attach")}
-                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-              >
-                <Paperclip size={13} />
-              </button>
               <span className="flex-1" />
               {session.sending ? (
                 <>
@@ -1036,6 +1020,54 @@ export function WorkspaceChat({
                 </>
               )}
             </div>
+          )}
+        </div>
+        {/* Under the box: how the turn will run, and at the far right what the conversation costs. */}
+        <div className="@container mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 px-1">
+          <ChatModelPicker
+            liveModel={session.model || null}
+            chatActive={session.messages.length > 0}
+            bound={{ provider, model, account }}
+            onPick={pickEngine}
+          />
+          <EffortPicker
+            compact
+            value={session.effort}
+            supported={effortSupported}
+            onPick={(level) => void useWorkspaceChatStore.getState().setEffort(conversationId, level)}
+          />
+          <AnswerLengthPicker compact />
+          <CavemanChip
+            level={session.cavemanLevel}
+            levels={cavemanLevels}
+            onPick={(level) => void useWorkspaceChatStore.getState().setCaveman(conversationId, level)}
+          />
+          {/* Plan mode: read-only turns that answer with a plan, then «Ejecutar el plan». */}
+          <button
+            type="button"
+            onClick={() => useWorkspaceChatStore.getState().setPlan(conversationId, !session.plan)}
+            aria-pressed={session.plan}
+            aria-label={t("assistant.planMode")}
+            title={t("assistant.planModeHint")}
+            className={`flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] ${
+              session.plan
+                ? "bg-[color-mix(in_oklab,var(--cf-accent)_14%,transparent)] text-[var(--cf-accent)]"
+                : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            }`}
+          >
+            <ListChecks size={13} />
+            <span className="hidden @[26rem]:inline">{t("assistant.planMode")}</span>
+          </button>
+          {/* Restringido (destructive things ask) or Completo (nothing asks) — `lib/chatPermissions`. */}
+          <PermissionsPicker
+            value={session.permissions}
+            planMode={session.plan}
+            onPick={(next) => useWorkspaceChatStore.getState().setPermissions(conversationId, next)}
+          />
+          {contextReading && (
+            <span className="ml-auto flex shrink-0 items-center">
+              <ContextMeter reading={contextReading} />
+            </span>
           )}
         </div>
       </div>

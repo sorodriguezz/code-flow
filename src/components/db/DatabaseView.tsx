@@ -8,7 +8,6 @@ import {
   Loader2,
   Network,
   Plus,
-  Rows3,
   Settings2,
   Table2,
   X,
@@ -23,6 +22,7 @@ import { DbExplorer } from "./DbExplorer";
 import { SqlConsolePanel } from "./SqlConsolePanel";
 import { useDbModelSweep } from "./DocumentsView";
 import { DataTabPanel } from "./DataTabPanel";
+import { RecordsModal } from "./RecordsModal";
 import { DdlPanel } from "./DdlPanel";
 import { DocumentEditorModal } from "./DocumentEditorModal";
 import { DiagramPanel } from "./DiagramPanel";
@@ -40,7 +40,7 @@ import { SchemaCompareModal } from "./SchemaCompareModal";
 import { ObjectFilterModal } from "./TableFilterModal";
 import { DriverMenu, menuAnchor } from "./DriverMenu";
 import { DriverDownloadDialog } from "./DriverDownloadDialog";
-import { CARD, IdentityBadge, ToolbarButton, nodeIcon } from "./dbChrome";
+import { CARD, ToolbarButton, nodeIcon } from "./dbChrome";
 import { EngineBadge } from "./DbLogo";
 import {
   ensureDbStoreLoaded,
@@ -56,12 +56,11 @@ import { preventMiddleClickAutoscroll } from "../../lib/pointerDrag";
 import { useShortcutChord } from "../../lib/useShortcutHint";
 import { confirmAction } from "../../state/confirmStore";
 import { translate, useT } from "../../state/languageStore";
-import { referenceLabel } from "./ResultGrid";
 import { decodeBinary, extensionFor, hexDump, imageType, toBase64 } from "../../lib/db/binaryValue";
 import { apiSaveBinaryFile } from "../../lib/tauri/apiCommands";
 import { useToastStore } from "../../state/toastStore";
-import { fieldFacts, recordModel } from "../../lib/db/engineModel";
-import { ENVIRONMENT_COLOR, type DbColumn, type DbForeignKey, type DbKind } from "../../types/database";
+import { recordModel } from "../../lib/db/engineModel";
+import { ENVIRONMENT_COLOR, type DbKind } from "../../types/database";
 import { driverEngineInfo, effectiveDriver, rowDriverId } from "../../lib/db/drivers";
 import { useDriverStore } from "../../state/driverStore";
 
@@ -645,147 +644,6 @@ function prettyJson(value: string | null): string | null {
   }
 }
 
-/**
- * Rows read down the page instead of across it.
- *
- * The grid is the right shape for scanning many rows of a few columns and the wrong one for reading
- * a single row of forty — which is the case this exists for. Each record is a block of
- * `column: value` lines, and several selected rows are stacked in the order they appear in the
- * grid, so comparing two of them is scrolling rather than dragging a horizontal scrollbar twice.
- *
- * The row's own number is kept on each block: a record read here is worth much less if you can't
- * find the row it came from back in the grid.
- *
- * What is drawn beside a field name comes from the engine's own model rather than from a shared
- * idea of what a field is — see `lib/db/engineModel`. The same block therefore marks a primary key
- * on Postgres, a RowID on IRIS and `_id` on MongoDB, and offers to follow a reference only where
- * the engine has references to follow.
- */
-function RecordsModal({
-  modal,
-  onClose,
-}: {
-  modal: {
-    title: string;
-    engine: DbKind;
-    columns: DbColumn[];
-    records: { index: number; values: (string | null)[] }[];
-    primaryKeys?: Set<string>;
-    foreignKeys?: Map<string, DbForeignKey>;
-  };
-  onClose: () => void;
-}) {
-  const t = useT();
-  const model = recordModel(modal.engine);
-  const copy = () => {
-    const text = modal.records
-      .map((record) =>
-        modal.columns
-          .map((column, index) => `${column.name}: ${record.values[index] ?? "NULL"}`)
-          .join("\n"),
-      )
-      .join("\n\n");
-    void navigator.clipboard.writeText(text);
-  };
-
-  return (
-    <ApiModal
-      icon={Rows3}
-      title={modal.title}
-      subtitle={t(model.countLabel, { n: String(modal.records.length) })}
-      width="max-w-2xl"
-      height="h-[78vh]"
-      onClose={onClose}
-      footer={
-        <div className="flex w-full items-center justify-end gap-2">
-          <GhostButton onClick={copy}>{t("db.copy")}</GhostButton>
-          <GhostButton onClick={onClose}>{t("common.close")}</GhostButton>
-        </div>
-      }
-    >
-      <div className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
-        {modal.records.map((record) => (
-          <div
-            key={record.index}
-            className="overflow-hidden rounded-lg border border-[var(--cf-border)]"
-          >
-            <p className="border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-sunken)_70%,var(--cf-surface))] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
-              {t(model.itemLabel, { n: String(record.index + 1) })}
-            </p>
-            <dl className="divide-y divide-[var(--cf-border)]">
-              {modal.columns.map((column, index) => {
-                const value = record.values[index] ?? null;
-                const facts = fieldFacts(model, column, {
-                  primaryKeys: modal.primaryKeys,
-                  foreignKeys: modal.foreignKeys,
-                });
-                return (
-                  <div key={column.name} className="grid grid-cols-[minmax(0,160px)_1fr] gap-3 px-3 py-1.5">
-                    {/* The type under the name, as in the grid's own headers. It used to live only
-                        in the `title`, which meant the one view built for reading a record whole
-                        was the one view that made you hover to find out what a field is. */}
-                    <dt
-                      title={facts.type ? `${column.name} · ${facts.type}` : column.name}
-                      className="min-w-0 text-[12px] text-[var(--cf-text-muted)]"
-                    >
-                      <span className="flex min-w-0 items-center gap-1.5">
-                        <span className="min-w-0 truncate">{column.name}</span>
-                        {/* The engine's own word, not "PK" everywhere: on a document `PK` would be
-                            naming a concept MongoDB does not have. */}
-                        {facts.identity && model.identity && (
-                          <IdentityBadge
-                            badge={model.identity.badge}
-                            title={t(model.identity.label)}
-                          />
-                        )}
-                      </span>
-                      {facts.type && (
-                        <span
-                          // Italic when the type came off a value: it describes the document that
-                          // answered for this field, and the next one may well be a string where
-                          // this one was an int.
-                          title={facts.typeFromRecord ? t("db.typeFromRecord") : undefined}
-                          className={`mt-0.5 block truncate font-mono text-[11px] leading-tight text-[var(--cf-text-faint)] ${
-                            facts.typeFromRecord ? "italic" : ""
-                          }`}
-                        >
-                          {facts.type}
-                        </span>
-                      )}
-                      {/* Named, not followed. Opening the referenced table needs a tab to open it
-                          in, and this modal is opened from two panels that disagree about which —
-                          so it says where the field points and leaves the jump to the grid, which
-                          has the arrow for it. */}
-                      {facts.reference && (
-                        <span
-                          title={t("db.referencesField", { target: referenceLabel(facts.reference) })}
-                          className="mt-0.5 block truncate text-[11px] leading-tight text-[var(--cf-accent)]"
-                        >
-                          → {referenceLabel(facts.reference)}
-                        </span>
-                      )}
-                    </dt>
-                    {/* Wrapped, not truncated: the whole reason to be here is to read the value
-                        the grid could only show the first line of. */}
-                    <dd
-                      className={`min-w-0 whitespace-pre-wrap break-words font-mono text-[12px] ${
-                        value === null
-                          ? "italic text-[var(--cf-text-faint)]"
-                          : "text-[var(--cf-text)]"
-                      }`}
-                    >
-                      {value === null ? "NULL" : value}
-                    </dd>
-                  </div>
-                );
-              })}
-            </dl>
-          </div>
-        ))}
-      </div>
-    </ApiModal>
-  );
-}
 
 /**
  * The statements the workspace ran, hidden until asked for.

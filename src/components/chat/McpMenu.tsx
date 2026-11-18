@@ -55,6 +55,9 @@ export function McpMenu({
   scope,
   unavailableReason,
   held,
+  embedded = false,
+  visible = true,
+  onActive,
 }: {
   provider: string;
   scope: {
@@ -67,6 +70,15 @@ export function McpMenu({
   unavailableReason?: string;
   /** Switches for a conversation that does not exist yet, kept by the caller until it does. */
   held?: { switches: Record<string, boolean>; onSet: (server: string, enabled: boolean) => void };
+  /**
+   * Drawn as a section of someone else's menu — the composer's «+» — rather than as its own button
+   * and popover: just the heading and the switches. Nothing at all when there is nothing to switch.
+   */
+  embedded?: boolean;
+  /** With `embedded`: the host menu is open — the list is read again, as an open of its own is. */
+  visible?: boolean;
+  /** How many servers are on, for the host's button to show while its menu is shut. */
+  onActive?: (active: number) => void;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
@@ -111,6 +123,20 @@ export function McpMenu({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
+  useEffect(() => {
+    if (embedded && visible) reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [embedded, visible]);
+
+  const shownServers = holding
+    ? servers.map((server) => (server.key in holding.switches ? { ...server, enabled: holding.switches[server.key] } : server))
+    : servers;
+  const activeCount = shownServers.filter((server) => server.enabled).length;
+  const reachable = servers.length > 0 && Boolean(conversationId || projectId || holding);
+  useEffect(() => {
+    onActive?.(reachable ? activeCount : 0);
+  }, [onActive, reachable, activeCount]);
+
   useLayoutEffect(() => {
     if (!open || !box.current) {
       setPlace(null);
@@ -125,11 +151,9 @@ export function McpMenu({
 
   // Nothing to show, or nowhere yet to keep a switch (a chat before its first message, unless the
   // caller holds them).
-  if (servers.length === 0 || (!conversationId && !projectId && !holding)) return null;
-  const shown = holding
-    ? servers.map((server) => (server.key in holding.switches ? { ...server, enabled: holding.switches[server.key] } : server))
-    : servers;
-  const active = shown.filter((server) => server.enabled).length;
+  if (!reachable) return null;
+  const shown = shownServers;
+  const active = activeCount;
 
   const toggle = (server: McpServerView, enabled: boolean) => {
     if (holding) {
@@ -139,6 +163,39 @@ export function McpMenu({
     setServers((current) => current.map((s) => (s.key === server.key ? { ...s, enabled } : s)));
     void chatMcpSet({ projectId, conversationId }, server.key, enabled).catch(() => reload());
   };
+
+  const list = (
+    <>
+      <p className="px-1 pb-1.5 text-[11px] font-semibold text-[var(--cf-text)]" title={t("chat.mcpHint")}>
+        {t("chat.mcpHeading")}
+      </p>
+      {unavailableReason && <p className="px-1 pb-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">{unavailableReason}</p>}
+      <div className="max-h-[260px] space-y-0.5 overflow-y-auto">
+        {shown.map((server) => {
+          const status = STATUS[server.status];
+          return (
+            <label
+              key={server.key}
+              className={`flex items-center gap-2 rounded-md px-1 py-1 ${canSwitch && server.togglable ? "cursor-pointer hover:bg-[var(--cf-hover)]" : ""}`}
+              title={status ? t(status.key) : undefined}
+            >
+              <span aria-hidden className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: status?.color ?? "var(--cf-border)" }} />
+              <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{server.name}</span>
+              {server.source === "app" && (
+                <span className="shrink-0 rounded-full border border-[var(--cf-border)] px-1.5 text-[10px] leading-[14px] text-[var(--cf-text-muted)]">CodeFlow</span>
+              )}
+              {server.togglable ? (
+                <Checkbox checked={server.enabled} disabled={!canSwitch} onChange={(checked) => toggle(server, checked)} />
+              ) : (
+                <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">{t("chat.mcpAlwaysOn")}</span>
+              )}
+            </label>
+          );
+        })}
+      </div>
+    </>
+  );
+  if (embedded) return list;
 
   return (
     <div ref={box} className="relative">
@@ -160,47 +217,7 @@ export function McpMenu({
         <div
           style={{ left: place?.shift ?? 0, width: place?.width ?? WIDTH, visibility: place ? "visible" : "hidden" }}
           className="absolute bottom-9 z-30 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2 text-[12px] shadow-[var(--cf-shadow)]">
-          <p className="px-1 pb-1.5 text-[11px] font-semibold text-[var(--cf-text)]" title={t("chat.mcpHint")}>
-            {t("chat.mcpHeading")}
-          </p>
-          {unavailableReason && (
-            <p className="px-1 pb-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">{unavailableReason}</p>
-          )}
-          <div className="max-h-[260px] space-y-0.5 overflow-y-auto">
-            {shown.map((server) => {
-              const status = STATUS[server.status];
-              return (
-                <label
-                  key={server.key}
-                  className={`flex items-center gap-2 rounded-md px-1 py-1 ${
-                    canSwitch && server.togglable ? "cursor-pointer hover:bg-[var(--cf-hover)]" : ""
-                  }`}
-                  title={status ? t(status.key) : undefined}
-                >
-                  <span
-                    aria-hidden
-                    className="h-1.5 w-1.5 shrink-0 rounded-full"
-                    style={{ background: status?.color ?? "var(--cf-border)" }}
-                  />
-                  <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">{server.name}</span>
-                  {server.source === "app" && (
-                    <span className="shrink-0 rounded-full border border-[var(--cf-border)] px-1.5 text-[10px] leading-[14px] text-[var(--cf-text-muted)]">
-                      CodeFlow
-                    </span>
-                  )}
-                  {server.togglable ? (
-                    <Checkbox
-                      checked={server.enabled}
-                      disabled={!canSwitch}
-                      onChange={(checked) => toggle(server, checked)}
-                    />
-                  ) : (
-                    <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">{t("chat.mcpAlwaysOn")}</span>
-                  )}
-                </label>
-              );
-            })}
-          </div>
+          {list}
         </div>
       )}
     </div>

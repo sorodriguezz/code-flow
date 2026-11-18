@@ -2359,6 +2359,7 @@ sharded_invoke_handler! {
         commands::debug_cmd::debug_start,
         commands::debug_cmd::debug_start_adapter,
         commands::debug_cmd::debug_attach,
+        commands::debug_cmd::debug_inspector_target,
     ]
     shard_24 => [
         commands::debug_cmd::debug_stop,
@@ -2687,6 +2688,7 @@ sharded_invoke_handler! {
         commands::db_cmd::db_driver_save_settings,
         commands::db_cmd::db_driver_delete_settings,
         commands::db_cmd::db_ai_assist,
+        commands::db_cmd::db_ai_filter,
         commands::db_cmd::db_transaction_state,
         commands::db_cmd::db_export_rows,
         commands::db_cmd::db_csv_inspect,

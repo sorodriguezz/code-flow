@@ -415,6 +415,30 @@ export const dbAiAssist = (
     workspaceId: workspaceId ?? null,
   });
 
+/**
+ * Writes the data grid's filter from a description — a WHERE condition, a Mongo filter or a Redis
+ * MATCH pattern, whichever the connection speaks. Only the columns' names and types travel; the
+ * backend adds the engine and its version. `currentFilter` lets a request refine what is applied.
+ */
+export const dbAiFilter = (
+  connectionId: string,
+  node: DbNodeRef,
+  columns: { name: string; type_name: string }[],
+  currentFilter: string,
+  request: string,
+  runId: string,
+  workspaceId?: string | null,
+) =>
+  invoke<string>("db_ai_filter", {
+    connectionId,
+    node,
+    columns,
+    currentFilter,
+    request,
+    runId,
+    workspaceId: workspaceId ?? null,
+  });
+
 // ---------- drivers ----------
 
 /** Every JVM driver's files and whether they are on disk, and the Java runtime's. A `stat` per

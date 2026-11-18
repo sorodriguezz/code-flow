@@ -32,6 +32,9 @@ import type { ContainerRow } from "../../types/containers";
  */
 
 /** Reads the lists while the panel is on screen; nothing while it is not. */
+/** How long after the containers panel comes up its first refresh waits — past its entrance. */
+const FIRST_PULSE_DELAY_MS = 250;
+
 export function useContainersPulse(visible: boolean) {
   const loadPrefs = useContainersStore((s) => s.loadPrefs);
   const detect = useContainersStore((s) => s.detect);
@@ -40,12 +43,18 @@ export function useContainersPulse(visible: boolean) {
   const detected = useContainersStore((s) => s.detected);
   useEffect(() => {
     if (!visible) return;
-    void (async () => {
-      await loadPrefs();
-      if (!useContainersStore.getState().detected) await detect();
-      await pulse();
-      void loadForwards();
-    })();
+    // A moment after the panel comes up, not in its first frame: what the store already holds is on
+    // screen at once, and the refresh — an engine round trip and a re-render — would otherwise land
+    // in the middle of the panel's own entrance.
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        await loadPrefs();
+        if (!useContainersStore.getState().detected) await detect();
+        await pulse();
+        void loadForwards();
+      })();
+    }, FIRST_PULSE_DELAY_MS);
+    return () => window.clearTimeout(timer);
   }, [visible, loadPrefs, detect, pulse, loadForwards]);
   // The lists every few seconds; the runtimes themselves (one started, one stopped) less often.
   useInterval(() => void pulse(), 4000, visible && detected);

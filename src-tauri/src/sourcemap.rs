@@ -63,6 +63,19 @@ impl SourceMap {
         Some((self.sources.get(segment.source as usize)?.as_str(), segment.line))
     }
 
+    /// [`original`](Self::original), or — on a generated line with no mapping of its own, the
+    /// wrapper and export lines a dev server injects — the nearest mapped line above it, within a
+    /// few. Falling back to the script's url there showed the `.ts` file at the *compiled* line
+    /// number, a wrong line in the right file.
+    pub fn original_near(&self, line: u32, column: u32) -> Option<(&str, u32)> {
+        self.original(line, column).or_else(|| {
+            (line.saturating_sub(NEAR_LINES)..line).rev().find_map(|above| {
+                let segment = self.lines.get(above as usize)?.last()?;
+                Some((self.sources.get(segment.source as usize)?.as_str(), segment.line))
+            })
+        })
+    }
+
     /// Where V8 should stop for a breakpoint on `line` (0-based) of `source`: the first generated
     /// position mapped to that line. A line with no code of its own (a blank one, a lone brace) maps
     /// nowhere, so the next few lines are tried, as an editor's breakpoint on it would slide.
@@ -85,6 +98,9 @@ impl SourceMap {
 
 /// The map a script names: `data:` inline (base64 or percent-encoded), else a file beside the
 /// script. `script_path` is the script's own file path, when it has one.
+/// How far above an unmapped generated line [`SourceMap::original_near`] looks for a mapped one.
+const NEAR_LINES: u32 = 5;
+
 pub fn load(source_map_url: &str, script_path: Option<&Path>) -> Option<SourceMap> {
     let folder = script_path.and_then(Path::parent);
     if let Some(data) = source_map_url.strip_prefix("data:") {

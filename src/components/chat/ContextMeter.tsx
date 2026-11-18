@@ -105,12 +105,37 @@ function Ring({ fraction, tone }: { fraction: number; tone: string }) {
  * the wrong scale is worse than no gauge, and this is the exact setup where a wrong one would be
  * most confident.
  */
+/** The card's width when there is room for it, and how far it keeps from the edge that clips it. */
+const CARD_WIDTH = 320;
+const EDGE = 8;
+
 export function ContextMeter({ reading }: { reading: ContextReading }) {
   const t = useT();
   const locale = useLocale();
   const [open, setOpen] = useState(false);
   const [showSummary, setShowSummary] = useState(false);
   const box = useRef<HTMLDivElement>(null);
+  /**
+   * Where the card opens against its button: from the left edge by default, from the right when
+   * that would run past the edge of what holds it — the meter sits at the far right of the panel's
+   * composer now, and opening rightward hid most of the card (user report, 2026-11-18). Narrowed to
+   * fit when even that is too wide.
+   */
+  const [place, setPlace] = useState<{ side: "left" | "right"; width: number }>({ side: "left", width: CARD_WIDTH });
+  const toggle = () => {
+    if (!open && box.current) {
+      const anchor = box.current.getBoundingClientRect();
+      // The sheet it sits in clips it (the AI panel is `overflow: hidden`); the window otherwise.
+      const sheet = box.current.closest(".cf-sheet")?.getBoundingClientRect();
+      const left = (sheet?.left ?? 0) + EDGE;
+      const right = (sheet?.right ?? window.innerWidth) - EDGE;
+      const fitsRight = anchor.left + CARD_WIDTH <= right;
+      const side = fitsRight ? "left" : "right";
+      const room = side === "left" ? right - anchor.left : anchor.right - left;
+      setPlace({ side, width: Math.max(220, Math.min(CARD_WIDTH, room)) });
+    }
+    setOpen((v) => !v);
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -146,7 +171,7 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
     <div ref={box} className="relative">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggle}
         title={t("chat.contextTitle")}
         aria-expanded={open}
         className={`flex h-[26px] items-center gap-1 rounded-md px-2 text-[11px] tabular-nums transition-colors hover:bg-[var(--cf-hover)] ${
@@ -166,7 +191,10 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
       </button>
 
       {open && (
-        <div className="absolute bottom-9 left-0 z-30 w-[320px] rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 text-[12px] shadow-[var(--cf-shadow)]">
+        <div
+          style={{ width: place.width }}
+          className={`absolute bottom-9 ${place.side === "left" ? "left-0" : "right-0"} z-30 rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 text-[12px] shadow-[var(--cf-shadow)]`}
+        >
           <p className="mb-2 text-[11px] font-semibold text-[var(--cf-text)]">
             {t("chat.contextTitle")}
           </p>

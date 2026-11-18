@@ -1020,6 +1020,10 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
             <span className="inline-flex">
               <button
                 type="button"
+                // The caret stays where it was. Focus taken by the button went nowhere once the save
+                // disabled it, and ⌘Z then reached no editor: the edit just saved could not be undone
+                // (user report, 2026-11-18).
+                onMouseDown={(e) => e.preventDefault()}
                 onClick={() => void save()}
                 disabled={!tab.dirty}
                 className={buttonClass({ variant: "secondary", size: "md" })}

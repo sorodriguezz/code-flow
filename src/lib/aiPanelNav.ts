@@ -146,6 +146,18 @@ export function askInRepoChat(projectId: string, text: string, opts: { send?: bo
 }
 
 /**
+ * «Enviar a otro chat» from a panel chat: `text` in the composer of a new (blank) chat beside it — a
+ * repository's, or the workspace's — with the caret after it. Nothing is sent: the passage is the
+ * start of a question the user finishes.
+ */
+export function startPanelChatWith(target: { projectId: string } | { workspaceId: string }, text: string): void {
+  const key = "projectId" in target ? openNewChat(target.projectId) : openWorkspaceChat(target.workspaceId);
+  useAiPanelStore.getState().setDraft(key, text);
+  // Two frames: one for the panel to open, one for the tab to be shown.
+  requestAnimationFrame(() => requestAnimationFrame(() => window.dispatchEvent(new CustomEvent(FOCUS_CHAT_EVENT, { detail: key }))));
+}
+
+/**
  * A chat with every repository of `workspaceId` — a blank one (the one it already has, if any), or
  * `conversationId` from its history. `focusChainId` opens a new one to carry that chain on.
  */

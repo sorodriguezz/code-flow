@@ -398,6 +398,88 @@ pub fn sandboxed(command: &str, root: &str) -> String {
     format!("/usr/bin/sandbox-exec -f {} /bin/bash -c {}", quote(&profile.to_string_lossy()), quote(command))
 }
 
+/// `command` run unable to write outside `roots` — a turn in one repository that may act
+/// (`codemap::mcp::Access::confined_to`) — or `command` itself where there is no sandbox to run it in.
+///
+/// Unlike the plan turn's profile, everything else stays writable — the caches, the toolchains, the
+/// home folder — so a build or an install works as it would in a terminal. What is closed is where
+/// another repository lives: the folders next to the repository (the usual `~/code/*` layout) and
+/// every repository CodeFlow knows (`others`), wherever it is. A `cd ../core && pnpm lint --fix`
+/// fails there instead of rewriting a repository the chat was never pointed at.
+pub fn confined(command: &str, roots: &[PathBuf], others: &[PathBuf]) -> String {
+    if !crate::tool_gateway::sandbox_available() || roots.is_empty() {
+        return command.to_string();
+    }
+    let profile = confined_profile(roots, others, dirs::home_dir().as_deref());
+    let name = format!("codeflow-confined-{:016x}.sb", {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        profile.hash(&mut hasher);
+        hasher.finish()
+    });
+    let path = std::env::temp_dir().join(name);
+    if !path.is_file() && std::fs::write(&path, &profile).is_err() {
+        return command.to_string();
+    }
+    format!("/usr/bin/sandbox-exec -f {} /bin/bash -c {}", quote(&path.to_string_lossy()), quote(command))
+}
+
+/// The working trees of every repository CodeFlow knows, canonical — what a confined command may
+/// not write in unless it is one of its own.
+pub fn known_repositories() -> Vec<PathBuf> {
+    crate::ai_usage::with_conn(|conn| {
+        let mut stmt = conn.prepare("SELECT local_path FROM projects").ok()?;
+        let paths = stmt.query_map([], |row| row.get::<_, String>(0)).ok()?.flatten().collect::<Vec<_>>();
+        Some(paths)
+    })
+    .flatten()
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(|path| Path::new(&path).canonicalize().ok())
+    .collect()
+}
+
+/// The Seatbelt profile behind [`confined`]. Later rules win, so the closed folders come first and
+/// the run's own trees — with the git folder a worktree keeps elsewhere — are opened after them.
+fn confined_profile(roots: &[PathBuf], others: &[PathBuf], home: Option<&Path>) -> String {
+    fn esc(p: &Path) -> String {
+        p.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"")
+    }
+    let mut closed: Vec<PathBuf> = Vec::new();
+    for root in roots {
+        // The folder the repository sits in, unless that is the home folder or higher: closing it
+        // would close the caches with it.
+        if let Some(parent) = root.parent() {
+            let too_wide = parent.parent().is_none() || home.is_some_and(|home| home.starts_with(parent)) || parent == Path::new("/Users");
+            if !too_wide {
+                closed.push(parent.to_path_buf());
+            }
+        }
+    }
+    closed.extend(others.iter().filter(|other| !roots.iter().any(|root| root.starts_with(other) || other.starts_with(root))).cloned());
+    let mut open: Vec<PathBuf> = roots.to_vec();
+    for root in roots {
+        // A worktree's git folder is `<main>/.git/worktrees/<name>`; its commits land in `<main>/.git`.
+        if let Ok(repo) = git2::Repository::open(root) {
+            let common = if repo.is_worktree() { repo.path().parent().and_then(Path::parent) } else { Some(repo.path()) };
+            if let Some(common) = common.and_then(|dir| dir.canonicalize().ok()) {
+                if !common.starts_with(root) {
+                    open.push(common);
+                }
+            }
+        }
+    }
+    open.extend([PathBuf::from("/private/tmp"), PathBuf::from("/private/var/folders"), std::env::temp_dir()]);
+    let mut text = String::from("(version 1)\n(allow default)\n");
+    if !closed.is_empty() {
+        let rules: Vec<String> = closed.iter().map(|p| format!("(subpath \"{}\")", esc(p))).collect();
+        text.push_str(&format!("(deny file-write*\n    {})\n", rules.join("\n    ")));
+        let rules: Vec<String> = open.iter().map(|p| format!("(subpath \"{}\")", esc(p))).collect();
+        text.push_str(&format!("(allow file-write*\n    {})\n", rules.join("\n    ")));
+    }
+    text
+}
+
 /// A single-quoted shell word.
 fn quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
@@ -506,6 +588,28 @@ fn plan_profile(root: &Path, ignored: &[PathBuf], home: Option<&Path>) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The confined profile closes the repository's neighbours and every other known repository,
+    /// then opens the repository itself — and never closes the home folder, where the caches live.
+    #[test]
+    fn a_confined_profile_closes_the_neighbours_and_opens_the_repository() {
+        let home = Path::new("/Users/me");
+        let repo = PathBuf::from("/Users/me/code/clinical");
+        let elsewhere = PathBuf::from("/Volumes/work/core");
+        let text = confined_profile(&[repo.clone()], &[elsewhere.clone(), repo.clone()], Some(home));
+        let deny = text.find("(deny file-write*").expect("a deny block");
+        let allow = text.find("(allow file-write*").expect("an allow block");
+        assert!(deny < allow, "later rules win, so the repository opens after the closing");
+        let denied = &text[deny..allow];
+        assert!(denied.contains("(subpath \"/Users/me/code\")"), "{text}");
+        assert!(denied.contains("(subpath \"/Volumes/work/core\")"), "{text}");
+        assert!(!denied.contains("/Users/me/code/clinical"), "its own repository is not closed: {text}");
+        assert!(text[allow..].contains("(subpath \"/Users/me/code/clinical\")"), "{text}");
+
+        // A repository straight in the home folder closes nothing wider than the other repositories.
+        let text = confined_profile(&[PathBuf::from("/Users/me/clinical")], &[], Some(home));
+        assert!(!text.contains("deny"), "{text}");
+    }
 
     fn refused(line: &str) -> bool {
         plan_refusal(line).is_some()

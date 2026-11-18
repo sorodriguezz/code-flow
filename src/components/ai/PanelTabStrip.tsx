@@ -101,22 +101,38 @@ export function PanelTabStrip({
   const nested = useMemo(() => nestTabs(tabs, links), [tabs, links]);
   const markId = `cf-assistant-tab-mark-${instance}`;
 
-  // Names first, every time what the strip holds or its width changes; icons only if the names do
-  // not fit. Both passes land before the browser paints, so neither is ever seen.
-  useLayoutEffect(() => setCompact(false), [holds, stripWidth]);
+  // Names first, icons only if the names do not fit. Both passes land before the browser paints, so
+  // neither is ever seen. `namesNeed` is how wide the names were when they did not fit: the strip
+  // goes back to names when it grows to that, not on every width it passes through. Resetting on any
+  // change meant two renders and two forced layouts per frame while the panel was dragged narrower
+  // — names, measure, icons, again — which is a good part of why the drag lagged (user report,
+  // 2026-11-18).
+  const namesNeed = useRef(0);
+  useLayoutEffect(() => {
+    namesNeed.current = 0;
+    setCompact(false);
+  }, [holds]);
+  useLayoutEffect(() => {
+    const strip = stripRef.current;
+    if (compact && strip && strip.clientWidth >= namesNeed.current) setCompact(false);
+  }, [compact, stripWidth]);
   useLayoutEffect(() => {
     const strip = stripRef.current;
     if (!strip || compact) return;
     const overflows = () => strip.scrollWidth > strip.clientWidth + 1;
-    if (overflows()) {
+    const toIcons = () => {
+      namesNeed.current = strip.scrollWidth;
       setCompact(true);
+    };
+    if (overflows()) {
+      toIcons();
       return;
     }
     // A name can also grow on its own — a conversation's title arriving from disk. The tabs
     // themselves, not the strip's children: each sits inside its tooltip's `display: contents`
     // wrapper, which has no box to observe.
     const observer = new ResizeObserver(() => {
-      if (overflows()) setCompact(true);
+      if (overflows()) toIcons();
     });
     for (const tab of Array.from(strip.querySelectorAll('[role="tab"]'))) observer.observe(tab);
     return () => observer.disconnect();
@@ -671,20 +687,82 @@ function ChatScopeOptions({
     if (!project) return projects;
     return [project, ...projects.filter((p) => p.id !== project.id)];
   }, [project, projects]);
+  /**
+   * A search over the repositories, once there are enough of them to scroll: a workspace of a dozen
+   * `Dev.Agenda.Node.*` names was a list to read top to bottom, all starting with the same words
+   * (user report, 2026-11-18). Focused as the menu opens; ↑ ↓ walk the matches, Enter opens the one
+   * marked, Escape clears the search before it closes the menu.
+   */
+  const searchable = repos.length > SEARCH_FROM;
+  const [query, setQuery] = useState("");
+  const [at, setAt] = useState(0);
+  const listRef = useRef<HTMLDivElement>(null);
+  const matches = useMemo(() => {
+    const needle = fold(query.trim());
+    if (!needle) return repos;
+    // Any word of the name starting with it first, then anywhere in it: "core" finds `….Core` before
+    // `AgendaCoreLegacy`.
+    const hits = repos.filter((repo) => fold(repo.name).includes(needle));
+    const starts = (name: string) => fold(name).split(/[^a-z0-9]+/).some((word) => word.startsWith(needle));
+    return [...hits.filter((repo) => starts(repo.name)), ...hits.filter((repo) => !starts(repo.name))];
+  }, [repos, query]);
+  useEffect(() => setAt(0), [query]);
+  useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>(`[data-index="${at}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [at]);
+
+  const pick = (repo: Project) => {
+    onPicked();
+    openNewChat(repo.id);
+  };
+
   return (
     <>
-      <div className="max-h-60 overflow-y-auto">
-        {repos.map((repo) => (
-          <MenuItem
-            key={repo.id}
-            icon={FolderGit2}
-            label={repo.name}
-            onClick={() => {
-              onPicked();
-              openNewChat(repo.id);
+      {searchable && (
+        <div className="px-1.5 pb-1 pt-0.5">
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setAt((i) => Math.min(matches.length - 1, i + 1));
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setAt((i) => Math.max(0, i - 1));
+              } else if (e.key === "Enter") {
+                e.preventDefault();
+                const repo = matches[at];
+                if (repo) pick(repo);
+              } else if (e.key === "Escape" && query) {
+                // The menu closes on the next Escape, not this one.
+                e.stopPropagation();
+                setQuery("");
+              }
             }}
+            placeholder={t("assistant.searchRepos")}
+            aria-label={t("assistant.searchRepos")}
+            spellCheck={false}
+            className="h-7 w-full rounded-md bg-[var(--cf-field)] px-2 text-[12.5px] text-[var(--cf-text)] outline-none shadow-[inset_0_0_0_1px_var(--cf-border)] placeholder:text-[var(--cf-text-faint)] focus:shadow-[inset_0_0_0_1px_var(--cf-accent)]"
           />
-        ))}
+        </div>
+      )}
+      <div ref={listRef} className="max-h-60 overflow-y-auto">
+        {matches.length === 0 ? (
+          <p className="px-3 py-2 text-[12px] text-[var(--cf-text-muted)]">{t("assistant.noRepoMatch")}</p>
+        ) : (
+          matches.map((repo, index) => (
+            <div
+              key={repo.id}
+              data-index={index}
+              onMouseEnter={() => searchable && setAt(index)}
+              className={searchable && index === at ? "rounded-md bg-[var(--cf-hover)]" : undefined}
+            >
+              <MenuItem icon={FolderGit2} label={repo.name} onClick={() => pick(repo)} />
+            </div>
+          ))
+        )}
       </div>
       <MenuItem
         icon={Layers}
@@ -698,6 +776,14 @@ function ChatScopeOptions({
       />
     </>
   );
+}
+
+/** Past this many repositories the new-chat list gets a search box — see `ChatScopeOptions`. */
+const SEARCH_FROM = 5;
+
+/** Lowercase, without accents — what the repository search compares. */
+function fold(text: string): string {
+  return text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
 /** "Chat" as a button with its own menu — the Inbox's door to both chats, asking which one. */

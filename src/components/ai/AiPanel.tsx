@@ -16,6 +16,10 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 
 const PANEL_MIN = 300;
 
+/** The panel while shut — see the root of `AiPanel`. `visibility` takes it out of painting, hit
+ *  testing and the tab order without touching its layout. */
+const COLLAPSED = { width: 0, paddingRight: 0, visibility: "hidden" } as const;
+
 /**
  * How many tab bodies stay mounted (hidden) besides the one on screen.
  *
@@ -60,7 +64,7 @@ function useMaxPanelWidth(): number {
  *
  * Rendered by App.tsx inside an `AnimatePresence`, so mount/unmount slides the panel in and out.
  */
-export function AiPanel() {
+export function AiPanel({ hidden = false }: { hidden?: boolean } = {}) {
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId) ?? NO_WORKSPACE;
   const allTabs = useAiPanelStore((s) => s.tabsByWorkspace[workspaceId] ?? EMPTY_TABS);
   const storedActive = useAiPanelStore((s) => s.activeByWorkspace[workspaceId] ?? INBOX_KEY);
@@ -122,8 +126,18 @@ export function AiPanel() {
     // (`pl-1.5`) is gone too: the rail already keeps its own room either side, and the extra 6px
     // left more space between the rail and the chat than between the view and the rail (user
     // report, 2026-10-08: "deja en común el más pequeño").
-    <div className="flex shrink-0 overflow-hidden pr-1.5 pb-1.5 pt-px">
-      <SizedSheet>
+    // Shut, it is collapsed rather than removed or `display: none`: no width, nothing painted, nothing
+    // focusable — but the sheet inside keeps its own width, so its contents stay laid out as they will
+    // be seen. `display: none` made the first frame of every open lay the whole transcript out again
+    // and fire every size observer in it (the tab strip, the chat's follow-the-bottom), which is what
+    // still caught the slide (user report, 2026-11-18). Now opening is the width animation alone —
+    // see `AiEdge` in `App.tsx`.
+    <div
+      aria-hidden={hidden || undefined}
+      style={hidden ? COLLAPSED : undefined}
+      className="flex shrink-0 overflow-hidden pr-1.5 pb-1.5 pt-px"
+    >
+      <SizedSheet anchored={!hidden}>
         <PanelTabStrip
           workspaceId={workspaceId}
           tabs={tabs}
@@ -161,7 +175,7 @@ export function AiPanel() {
  * contents arrive as `children`, elements `AiPanel` built, so re-rendering here hands React the very
  * same elements and it skips them.
  */
-function SizedSheet({ children }: { children: ReactNode }) {
+function SizedSheet({ children, anchored }: { children: ReactNode; anchored: boolean }) {
   const wide = useAiPanelStore((s) => s.wide);
   const storedWidth = useLayoutStore((s) => s.sizes.aiPanelWidth);
   const maxWidth = useMaxPanelWidth();
@@ -188,7 +202,9 @@ function SizedSheet({ children }: { children: ReactNode }) {
       />
       <aside
         style={{ width }}
-        data-tour="ai-panel"
+        // Only while open: collapsed, the sheet still has its size, and the tour and the settings
+        // frame would take a shut panel for an open one.
+        data-tour={anchored ? "ai-panel" : undefined}
         // No `border-l`, and no margin: the handle to its left sits on this sheet's own hairline.
         className="cf-sheet flex shrink-0 flex-col"
       >

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /** How far the glow reaches along the seam before it has faded to nothing, in pixels. */
 const GLOW_REACH = 60;
@@ -61,39 +61,76 @@ export function ResizeHandle({
 }: ResizeHandleProps) {
   const valueRef = useRef(value);
   valueRef.current = value;
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
   const dragStart = useRef<{ pos: number; value: number } | null>(null);
   /** Where the pointer is *along* the seam, in pixels from its start. `null` when it isn't on it. */
   const [glow, setGlow] = useState<number | null>(null);
+  /**
+   * The newest pointer reading, applied once per frame.
+   *
+   * A trackpad or a 120 Hz display delivers pointer events faster than frames, and each one used to
+   * set a width — a store write, a render and a relayout of both panels — of which the screen showed
+   * one in two at best. The rest was main-thread work the next frame had to wait behind, which is
+   * what made a drag trail the pointer (user report, 2026-11-18).
+   */
+  const pending = useRef<{ glow: number; value: number | null } | null>(null);
+  const frame = useRef(0);
+  useEffect(() => () => {
+    cancelAnimationFrame(frame.current);
+    delete document.documentElement.dataset.cfResizing;
+  }, []);
 
   const posOf = (e: React.PointerEvent) => (axis === "x" ? e.clientX : e.clientY);
 
-  const trackGlow = (e: React.PointerEvent<HTMLDivElement>) => {
+  const glowOf = (e: React.PointerEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    setGlow(axis === "x" ? e.clientY - rect.top : e.clientX - rect.left);
+    return axis === "x" ? e.clientY - rect.top : e.clientX - rect.left;
+  };
+  const trackGlow = (e: React.PointerEvent<HTMLDivElement>) => setGlow(glowOf(e));
+
+  const flush = () => {
+    frame.current = 0;
+    const next = pending.current;
+    pending.current = null;
+    if (!next) return;
+    setGlow(next.glow);
+    if (next.value !== null && next.value !== valueRef.current) onChangeRef.current(next.value);
   };
 
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     dragStart.current = { pos: posOf(e), value: valueRef.current };
+    // The whole window drags with the seam: its cursor everywhere, no transitions easing what is
+    // being relaid out every frame, no text selected along the way (`index.css`).
+    document.documentElement.dataset.cfResizing = axis;
     onDragChange?.(true);
   };
 
   const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     // Tracked whether or not a drag is under way: the pointer is captured while dragging, so this
     // stays the only source of truth for where the glow belongs even once the pointer has left.
-    trackGlow(e);
-    if (!dragStart.current) return;
-    let delta = posOf(e) - dragStart.current.pos;
-    if (invert) delta = -delta;
-    onChange(Math.min(max, Math.max(min, dragStart.current.value + delta)));
+    let value: number | null = null;
+    if (dragStart.current) {
+      let delta = posOf(e) - dragStart.current.pos;
+      if (invert) delta = -delta;
+      value = Math.min(max, Math.max(min, dragStart.current.value + delta));
+    }
+    pending.current = { glow: glowOf(e), value };
+    if (!frame.current) frame.current = requestAnimationFrame(flush);
   };
 
   const handlePointerUp = () => {
     if (!dragStart.current) return;
+    // The last reading lands now rather than a frame after the commit.
+    const last = pending.current?.value ?? null;
+    cancelAnimationFrame(frame.current);
+    flush();
     dragStart.current = null;
+    delete document.documentElement.dataset.cfResizing;
     onDragChange?.(false);
-    onCommit(valueRef.current);
+    onCommit(last ?? valueRef.current);
   };
 
   return (
@@ -128,10 +165,19 @@ export function ResizeHandle({
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
+        // A drag the system took away (a gesture, the window losing focus) ends like one let go.
+        onPointerCancel={handlePointerUp}
         onPointerEnter={trackGlow}
         // Not while dragging: the pointer leaves the handle the moment the drag outruns it, and the
         // glow going out mid-drag would read as having lost the seam.
-        onPointerLeave={() => dragStart.current === null && setGlow(null)}
+        onPointerLeave={() => {
+          if (dragStart.current !== null) return;
+          // A reading still waiting for its frame would light the seam again after this.
+          cancelAnimationFrame(frame.current);
+          frame.current = 0;
+          pending.current = null;
+          setGlow(null);
+        }}
         className={`absolute ${
           axis === "x"
             ? "inset-y-0 -left-1 -right-1 cursor-col-resize"

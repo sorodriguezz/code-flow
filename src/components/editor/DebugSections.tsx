@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from "react";
-import { ChevronDown, ChevronRight, ListX, Pencil, ScrollText, X } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Check, ChevronDown, ChevronRight, Copy, Eye, ListX, Pencil, ScrollText, X } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { Tooltip } from "../common/Tooltip";
 import { iconButtonClass } from "../common/Button";
@@ -7,6 +7,8 @@ import { useDebugStore, type Breakpoint } from "../../state/debugStore";
 import { useT, type Translate } from "../../state/languageStore";
 import type { DebugVariable, ExceptionFilter } from "../../lib/tauri/commands";
 import { breakpointGlyphClass, promptBreakpoint } from "./useBreakpointGutter";
+import { DebugValue, useFoldedSection, valueKind } from "./debugValue";
+import { previewOf } from "./useDebugEditorValues";
 
 /** The section heading every part of the debug panel wears, with room for its own buttons. */
 export function SectionHead({ title, children }: { title: string; children?: ReactNode }) {
@@ -20,20 +22,126 @@ export function SectionHead({ title, children }: { title: string; children?: Rea
   );
 }
 
+/**
+ * A section of the debug panel that folds: its heading is the toggle, with a count of what it holds
+ * and room for its own buttons. Folded, only the heading stays — eighty locals no longer push the
+ * watches and the breakpoints off the bottom (user report, 2026-11-18). Remembered per section.
+ */
+export function FoldSection({
+  id,
+  title,
+  count,
+  actions,
+  children,
+}: {
+  id: string;
+  title: string;
+  count?: number;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
+  const [folded, toggle] = useFoldedSection(id);
+  return (
+    <section>
+      <div className="group/sec flex h-7 items-center gap-0.5 pt-1.5 pr-1">
+        <button
+          type="button"
+          onClick={toggle}
+          aria-expanded={!folded}
+          className="mr-auto flex min-w-0 items-center gap-1 rounded px-1 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)] hover:text-[var(--cf-text-muted)]"
+        >
+          {folded ? <ChevronRight size={12} className="shrink-0" /> : <ChevronDown size={12} className="shrink-0" />}
+          <span className="truncate">{title}</span>
+          {count !== undefined && count > 0 && (
+            <span className="ml-0.5 rounded-full bg-[var(--cf-press)] px-1.5 text-[10px] font-medium normal-case tracking-normal tabular-nums">
+              {count}
+            </span>
+          )}
+        </button>
+        {actions && <span className="flex shrink-0 items-center">{actions}</span>}
+      </div>
+      {!folded && <div className="pb-1">{children}</div>}
+    </section>
+  );
+}
+
+/** A slice row of a long array, as the backend names it: `[100 … 199]`. */
+export function isRangeRow(variable: DebugVariable): boolean {
+  return variable.value === "" && /^\[\d+ … \d+\]$/.test(variable.name);
+}
+
+/** Copies `value` and says so for a moment — the button every value row offers on hover. */
+function CopyValueButton({ value }: { value: string }) {
+  const t = useT();
+  const [copied, setCopied] = useState(false);
+  return (
+    <Tooltip side="left" label={t("debug.copyValue")}>
+      <span
+        role="button"
+        tabIndex={0}
+        aria-label={t("debug.copyValue")}
+        onClick={(event) => {
+          event.stopPropagation();
+          void navigator.clipboard.writeText(value);
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1200);
+        }}
+        className={iconButtonClass({ size: "xs", className: "opacity-0 group-hover:opacity-100 focus-visible:opacity-100" })}
+      >
+        {copied ? <Check size={11} className="text-[var(--cf-success)]" /> : <Copy size={11} />}
+      </span>
+    </Tooltip>
+  );
+}
+
 /** One variable row. Objects expand one level at a time, on click — a deep graph fetched eagerly
  * is slow to produce and almost entirely unread. A scope (`Local`, `Global`) is a row like any
  * other, with no value of its own. */
-export function VariableRow({ variable, depth }: { variable: DebugVariable; depth: number }) {
+export function VariableRow({
+  variable,
+  depth,
+  inScope = false,
+  parentPath = "",
+}: {
+  variable: DebugVariable;
+  depth: number;
+  /** The names from the scope down to this row's parent — with its own name, the path that keeps
+   *  the row open across stops. Empty for rows outside the variables tree (watches, the console). */
+  parentPath?: string;
+  /** A scope's own variable (`Local` › `documento`): its name alone is an expression that means the
+   *  same thing at the next stop, so it can become a watch. A property under a watch or a console
+   *  result is not — `email` under `this.user` would watch the wrong thing. */
+  inScope?: boolean;
+}) {
+  const t = useT();
   const expanded = useDebugStore((s) => (variable.object_id ? s.expanded[variable.object_id] : undefined));
   const expand = useDebugStore((s) => s.expand);
+  const addWatch = useDebugStore((s) => s.addWatch);
   const expandable = Boolean(variable.object_id);
+  // A slice of a long array (`[0 … 99]`) has no value of its own either, but it is no scope: its
+  // children are indexes, not names to watch.
+  const isRange = isRangeRow(variable);
+  const isScope = variable.value === "" && !isRange;
+  // Only rows of the variables tree are remembered: a scope starts one, its children extend it.
+  const treePath = depth === 0 ? (isScope ? variable.name : undefined) : parentPath ? `${parentPath}/${variable.name}` : undefined;
+  // An object row shows its first fields, not the bare "Object" the backend calls it — the shallow
+  // rows only, each a round trip; what is opened shows its children anyway.
+  const [preview, setPreview] = useState<string | null>(null);
+  useEffect(() => {
+    if (isScope || depth > 2 || !variable.object_id || valueKind(variable.value) !== "object") return;
+    let live = true;
+    void previewOf(variable.value, variable.object_id).then((text) => live && setPreview(text));
+    return () => {
+      live = false;
+    };
+  }, [isScope, depth, variable.object_id, variable.value]);
 
   return (
     <>
       <button
-        onClick={() => variable.object_id && void expand(variable.object_id)}
+        onClick={() => variable.object_id && void expand(variable.object_id, treePath)}
         style={{ paddingLeft: depth * 12 + 6 }}
-        className="flex h-6 w-full items-center gap-1.5 rounded-md pr-2 text-left hover:bg-[var(--cf-hover)]"
+        className="group flex h-6 w-full items-center gap-1.5 rounded-md pr-1 text-left hover:bg-[var(--cf-hover)]"
       >
         {expandable ? (
           expanded ? (
@@ -44,13 +152,39 @@ export function VariableRow({ variable, depth }: { variable: DebugVariable; dept
         ) : (
           <span className="w-3 shrink-0" />
         )}
-        <span className={`shrink-0 font-mono text-[12px] ${variable.value === "" ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-text)]"}`}>
+        <span className={`shrink-0 font-mono text-[12px] ${isScope ? "font-medium text-[var(--cf-text-muted)]" : "text-[var(--cf-text)]"}`}>
           {variable.name}
         </span>
-        <span className="truncate font-mono text-[12px] text-[var(--cf-text-muted)]">{variable.value}</span>
+        {!isScope && <DebugValue value={expanded ? variable.value : (preview ?? variable.value)} className="min-w-0 flex-1" />}
+        {(isScope || isRange) && <span className="flex-1" />}
+        {/* A local's own row (a scope's direct child) can become a watch: the name is an expression
+            that means the same thing at the next stop. Deeper rows have no path to evaluate by. */}
+        {!isScope && inScope && (
+          <Tooltip side="left" label={t("debug.addToWatch")}>
+            <span
+              role="button"
+              tabIndex={0}
+              aria-label={t("debug.addToWatch")}
+              onClick={(event) => {
+                event.stopPropagation();
+                addWatch(variable.name);
+              }}
+              className={iconButtonClass({ size: "xs", className: "opacity-0 group-hover:opacity-100 focus-visible:opacity-100" })}
+            >
+              <Eye size={11} />
+            </span>
+          </Tooltip>
+        )}
+        {!isScope && <CopyValueButton value={variable.value} />}
       </button>
       {expanded?.map((child) => (
-        <VariableRow key={`${variable.object_id}-${child.name}`} variable={child} depth={depth + 1} />
+        <VariableRow
+          key={`${variable.object_id}-${child.name}`}
+          variable={child}
+          depth={depth + 1}
+          inScope={isScope}
+          parentPath={treePath ?? ""}
+        />
       ))}
     </>
   );
@@ -68,8 +202,7 @@ export function WatchSection({ paused }: { paused: boolean }) {
   const [draft, setDraft] = useState("");
 
   return (
-    <>
-      <SectionHead title={t("debug.watch")} />
+    <FoldSection id="watch" title={t("debug.watch")} count={watches.length}>
       {watches.map((expression) => {
         const result = paused ? values[expression] : undefined;
         const objectId = result?.objectId ?? null;
@@ -92,14 +225,15 @@ export function WatchSection({ paused }: { paused: boolean }) {
                   <span className="w-3 shrink-0" />
                 )}
                 <span className="shrink-0 font-mono text-[12px] text-[var(--cf-text)]">{expression}</span>
-                <span
-                  className={`truncate font-mono text-[12px] ${
-                    result?.error ? "text-[var(--cf-danger)]" : "text-[var(--cf-text-muted)]"
-                  }`}
-                  title={result?.value}
-                >
-                  {result ? result.value : "—"}
-                </span>
+                {result?.error ? (
+                  <span className="truncate font-mono text-[12px] text-[var(--cf-danger)]" title={result.value}>
+                    {result.value}
+                  </span>
+                ) : result ? (
+                  <DebugValue value={result.value} className="min-w-0" />
+                ) : (
+                  <span className="font-mono text-[12px] text-[var(--cf-text-faint)]">—</span>
+                )}
               </button>
               <Tooltip side="left" label={t("debug.watchRemove")}>
                 <button
@@ -133,7 +267,7 @@ export function WatchSection({ paused }: { paused: boolean }) {
         spellCheck={false}
         className="h-6 w-full rounded-md bg-transparent px-[22px] font-mono text-[12px] text-[var(--cf-text)] outline-none placeholder:text-[var(--cf-text-faint)] focus:bg-[var(--cf-hover)]"
       />
-    </>
+    </FoldSection>
   );
 }
 
@@ -177,16 +311,20 @@ export function BreakpointsSection({
     .sort((a, b) => fileLabel(a.file, repoPath).localeCompare(fileLabel(b.file, repoPath)) || a.bp.line - b.bp.line);
 
   return (
-    <>
-      <SectionHead title={t("debug.breakpoints")}>
-        {rows.length > 0 && (
+    <FoldSection
+      id="breakpoints"
+      title={t("debug.breakpoints")}
+      count={rows.length}
+      actions={
+        rows.length > 0 && (
           <Tooltip side="left" label={t("debug.removeAllBreakpoints")}>
             <button onClick={removeAll} aria-label={t("debug.removeAllBreakpoints")} className={iconButtonClass({ size: "xs" })}>
               <ListX size={13} />
             </button>
           </Tooltip>
-        )}
-      </SectionHead>
+        )
+      }
+    >
       {options.map((option) => (
         <label key={option.filter} className="flex h-6 cursor-pointer items-center gap-2 rounded-md px-1.5 hover:bg-[var(--cf-hover)]">
           <Checkbox
@@ -253,6 +391,6 @@ export function BreakpointsSection({
           </div>
         ))
       )}
-    </>
+    </FoldSection>
   );
 }

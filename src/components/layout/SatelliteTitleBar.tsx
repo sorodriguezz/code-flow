@@ -297,7 +297,10 @@ export function SatelliteTitleBar() {
 
       <div className="flex-1" data-tauri-drag-region />
 
-      {floating && <KeepOnTop />}
+      {/* Every island, not only a file's or a chat's: an app kept in sight — the API client beside
+          the editor, the database beside the code — is the same reason to tear one off (user
+          request, 2026-11-18). */}
+      <KeepOnTop />
 
       <Tooltip
         side="bottom"
@@ -459,6 +462,18 @@ function ChatCrumb({ refId }: { refId: string }) {
 function KeepOnTop() {
   const [onTop, setOnTop] = useState(false);
   const t = useT();
+  // What the window really is, read once: a reload of the page must not show an unpinned pin on a
+  // window that is still above everything.
+  useEffect(() => {
+    let live = true;
+    void win
+      .isAlwaysOnTop()
+      .then((value) => live && setOnTop(value))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, []);
   const label = onTop ? t("windows.unpinOnTop") : t("windows.pinOnTop");
   const toggle = () => {
     const next = !onTop;

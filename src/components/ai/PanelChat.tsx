@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ListChecks, ListPlus, MessageSquareShare, Paperclip, Pencil, Play, Search, Square, Users, UsersRound } from "lucide-react";
+import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ListChecks, ListPlus, Pencil, Play, Search, Square, Users, UsersRound } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
 import { SkillChip } from "../chat/ChatComposer";
@@ -13,11 +13,14 @@ import { useModelReadsImages } from "../../lib/useModelReadsImages";
 import { isImagePath, useImageDrop } from "../../lib/useImageDrop";
 import { useAutosizeTextarea } from "../../lib/useAutosizeTextarea";
 import type { ChatAttachment } from "../../lib/tauri/chatCommands";
+import { ComposerPlusMenu } from "../chat/ComposerPlusMenu";
+import { SelectionActions } from "../chat/SelectionActions";
+import { appendQuote, passageForNewChat } from "../../lib/quoteSelection";
 import { McpMenu } from "../chat/McpMenu";
 import { QueuedMessages, type ComposerQueue } from "../chat/QueuedMessages";
 import { chatQueueKey, useChatQueue, useChatQueueHold } from "../../state/chatQueueStore";
 import { cancelQuotaResume, resumeQuotaNow, useQuotaResumeAt } from "../../state/quotaResumeStore";
-import { FOCUS_CHAT_EVENT, SEND_CHAT_EVENT, openChat, openNewChat, takePendingSend } from "../../lib/aiPanelNav";
+import { FOCUS_CHAT_EVENT, SEND_CHAT_EVENT, openChat, openNewChat, startPanelChatWith, takePendingSend } from "../../lib/aiPanelNav";
 import { moveChatToApp } from "../../lib/moveChatToApp";
 import { openTerminal } from "../../lib/tauri/commands";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
@@ -127,6 +130,14 @@ export function PanelChat({
   const workspaceId = useWorkspaceStore((s) => s.workspaceOfProject(projectId));
   const draft = useAiPanelStore((s) => s.drafts[tabKey] ?? "");
   const setDraft = (text: string) => useAiPanelStore.getState().setDraft(tabKey, text);
+  /** The composer focused with the caret at the end, once the draft just set has rendered. */
+  const focusComposerSoon = () =>
+    requestAnimationFrame(() => {
+      const box = boxRef.current;
+      if (!box) return;
+      box.focus();
+      box.setSelectionRange(box.value.length, box.value.length);
+    });
   const queued = useIsQueued(session.sending ? session.runId : null);
   const [exportMenu, setExportMenu] = useState<{ x: number; y: number } | null>(null);
   const cancelling = useAiRunStore((s) => (session.runId ? (s.cancelling[session.runId] ?? false) : false));
@@ -724,20 +735,8 @@ export function PanelChat({
             <Download size={12} />
           </button>
         )}
-        {/* To the chat workspace, for good — with everything it holds, still on this repository.
-            Not while a turn runs or messages wait: they belong to the session it is in. */}
-        {session.persisted && session.messages.length > 0 && (
-          <button
-            type="button"
-            onClick={() => void moveChatToApp(projectId, conversationId)}
-            disabled={session.sending || queuedMessages.length > 0}
-            title={session.sending || queuedMessages.length > 0 ? t("assistant.moveBusy") : t("assistant.moveToChat")}
-            aria-label={t("assistant.moveToChat")}
-            className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40 disabled:hover:bg-transparent"
-          >
-            <MessageSquareShare size={12} />
-          </button>
-        )}
+        {/* No «Mover al Chat» here: taken off the chat's own header at the user's request
+            (2026-11-18). `moveChatToApp` stays — the Inbox row still offers it. */}
         <ChatLineageButtons
           scope={lineage}
           title={session.title}
@@ -747,6 +746,21 @@ export function PanelChat({
       </div>
       <SubchatRow scope={lineage} />
       <ChatArtifactsStrip workspaceId={workspaceId ?? null} conversationId={conversationId} projectId={projectId} />
+      {/* Select a passage of an answer: quote it here, take it to a new chat, or ask to explain,
+          improve or shorten it — the chat workspace's bar, the same rules (user request, 2026-11-18).
+          The quote goes into the composer; nothing is sent. */}
+      <SelectionActions
+        scope={scrollRef}
+        onQuoteReply={(passage) => {
+          setDraft(appendQuote(draft, passage));
+          focusComposerSoon();
+        }}
+        onTransform={(kind, passage) => {
+          setDraft(`${appendQuote(draft, passage)}\n\n${t(`chat.selection.${kind}Ask` as const)}`);
+          focusComposerSoon();
+        }}
+        onQuoteNewChat={(passage) => startPanelChatWith({ projectId }, passageForNewChat(passage))}
+      />
       <div
         ref={scrollRef}
         onScroll={onScroll}
@@ -1019,106 +1033,113 @@ export function PanelChat({
               className="relative max-h-[180px] w-full resize-none bg-transparent px-1.5 py-1 text-[13px] leading-relaxed outline-none placeholder:text-[var(--cf-text-muted)]"
             />
           </div>
+          {/* Inside the box: what acts on this message — add to it, dictate it, send it. */}
           {dictating ? (
             <div className="flex items-center gap-1.5 px-0.5">
               <DictationBar />
             </div>
           ) : (
-          // Wraps rather than overflows, as the workspace chat's does: on a 14" screen with the panel
-          // narrow, the send button was pushed past the box's edge (user report, 2026-11-09). The
-          // `@container` lets the chips drop their words first; only then does a row wrap.
-          <div className="@container flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 px-0.5">
-            <ChatModelPicker
-              liveModel={session.model}
-              chatActive={session.messages.length > 0}
-              bound={{ provider, model, account }}
-              onPick={pickEngine}
-            />
-            {/* How hard it thinks, per conversation — the chat workspace's dial. */}
-            <EffortPicker
-              compact
-              value={effort}
-              supported={effortSupported}
-              onPick={(level) => useChatStore.getState().setEffort(conversationId, level)}
-            />
-            <AnswerLengthPicker compact />
-            {contextReading && <ContextMeter reading={contextReading} />}
-            {/* Plan mode: read-only turns that answer with a plan, then «Ejecutar el plan». */}
-            <button
-              type="button"
-              onClick={() => useChatStore.getState().setPlan(conversationId, !planMode)}
-              aria-pressed={planMode}
-              aria-label={t("assistant.planMode")}
-              title={t("assistant.planModeHint")}
-              className={`flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] ${
-                planMode
-                  ? "bg-[color-mix(in_oklab,var(--cf-accent)_14%,transparent)] text-[var(--cf-accent)]"
-                  : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-              }`}
-            >
-              <ListChecks size={13} />
-              {/* The label gives way when the panel is narrow: the icon, title and name stay. */}
-              <span className="hidden @[26rem]:inline">{t("assistant.planMode")}</span>
-            </button>
-            {/* Restringido (destructive things ask) or Completo (nothing asks) — `lib/chatPermissions`. */}
-            <PermissionsPicker
-              value={permissions}
-              planMode={planMode}
-              onPick={(next) => useChatStore.getState().setPermissions(conversationId, next)}
-            />
-            {/* The CLI's own MCP servers, switched for this repository. */}
-            <McpMenu provider={provider} scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId }} />
-            {/* Always here now: every engine can read a file it is given the path to, so the button
-                has something to do whatever the model is. The title is what changes — on a model
-                that cannot look at an image, it says files are read rather than seen. */}
-            <button
-              type="button"
-              onClick={() => void attachFiles()}
-              title={readsImages ? t("chat.attach") : t("chat.attachTextOnly", { provider: providerDisplayLabel(provider, t) })}
-              aria-label={t("chat.attach")}
-              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-            >
-              <Paperclip size={13} />
-            </button>
-            <span className="flex-1" />
-            {session.sending ? (
-              <>
-                {/* Only while there is something to queue — Enter does the same — and beside Stop,
-                    never instead of it: both stay live for the whole turn. */}
-                {draft.trim() && (
+            <div className="flex min-w-0 items-center gap-1.5 px-0.5">
+              {/* Files and the CLI's MCP servers, behind one «+». Always offered: every engine can
+                  read a file it is given the path to; the title says when it reads rather than sees. */}
+              <ComposerPlusMenu
+                onAttach={() => void attachFiles()}
+                attachTitle={readsImages ? t("chat.attach") : t("chat.attachTextOnly", { provider: providerDisplayLabel(provider, t) })}
+                renderMcp={(visible, onActive) => (
+                  <McpMenu
+                    embedded
+                    visible={visible}
+                    onActive={onActive}
+                    provider={provider}
+                    scope={{ accountId: account ?? "system", workspaceId: workspaceId ?? null, projectId }}
+                  />
+                )}
+              />
+              <span className="flex-1" />
+              {session.sending ? (
+                <>
+                  {/* Only while there is something to queue — Enter does the same — and beside Stop,
+                      never instead of it: both stay live for the whole turn. */}
+                  {draft.trim() && (
+                    <button
+                      onClick={submit}
+                      title={t("chat.queueAdd")}
+                      aria-label={t("chat.queueAdd")}
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                    >
+                      <ListPlus size={13} />
+                    </button>
+                  )}
+                  <button
+                    onClick={stop}
+                    disabled={cancelling}
+                    className="flex shrink-0 items-center gap-1 rounded-lg border border-[var(--cf-border)] px-2 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)] disabled:opacity-50"
+                  >
+                    <Square size={9} className="fill-current" />
+                    {cancelling ? t("ai.stopping") : t("chat.stop")}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <DictationMic field={boxRef} className="h-6 w-6" iconSize={13} />
                   <button
                     onClick={submit}
-                    title={t("chat.queueAdd")}
-                    aria-label={t("chat.queueAdd")}
-                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg border border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                    disabled={!draft.trim()}
+                    title={t("chat.send")}
+                    aria-label={t("chat.send")}
+                    className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:opacity-40"
                   >
-                    <ListPlus size={13} />
+                    <ArrowUp size={13} />
                   </button>
-                )}
-                <button
-                  onClick={stop}
-                  disabled={cancelling}
-                  className="flex shrink-0 items-center gap-1 rounded-lg border border-[var(--cf-border)] px-2 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:border-[var(--cf-danger)] hover:text-[var(--cf-danger)] disabled:opacity-50"
-                >
-                  <Square size={9} className="fill-current" />
-                  {cancelling ? t("ai.stopping") : t("chat.stop")}
-                </button>
-              </>
-            ) : (
-              <>
-                <DictationMic field={boxRef} className="h-6 w-6" iconSize={13} />
-                <button
-                  onClick={submit}
-                  disabled={!draft.trim()}
-                  title={t("chat.send")}
-                  aria-label={t("chat.send")}
-                  className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-[var(--cf-accent-fill)] text-[var(--cf-on-accent)] hover:bg-[color-mix(in_oklab,var(--cf-accent-fill)_86%,var(--cf-text))] disabled:opacity-40"
-                >
-                  <ArrowUp size={13} />
-                </button>
-              </>
-            )}
-          </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+        {/* Under the box: how the turn will run — the engine, its reasoning, the answer's length, plan
+            mode and permissions — and, at the far right, what the conversation already costs. Wraps
+            on a narrow panel; the `@container` lets the chips drop their words before a row wraps. */}
+        <div className="@container mt-1 flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 px-1">
+          <ChatModelPicker
+            liveModel={session.model}
+            chatActive={session.messages.length > 0}
+            bound={{ provider, model, account }}
+            onPick={pickEngine}
+          />
+          {/* How hard it thinks, per conversation — the chat workspace's dial. */}
+          <EffortPicker
+            compact
+            value={effort}
+            supported={effortSupported}
+            onPick={(level) => useChatStore.getState().setEffort(conversationId, level)}
+          />
+          <AnswerLengthPicker compact />
+          {/* Plan mode: read-only turns that answer with a plan, then «Ejecutar el plan». */}
+          <button
+            type="button"
+            onClick={() => useChatStore.getState().setPlan(conversationId, !planMode)}
+            aria-pressed={planMode}
+            aria-label={t("assistant.planMode")}
+            title={t("assistant.planModeHint")}
+            className={`flex h-6 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] ${
+              planMode
+                ? "bg-[color-mix(in_oklab,var(--cf-accent)_14%,transparent)] text-[var(--cf-accent)]"
+                : "text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            }`}
+          >
+            <ListChecks size={13} />
+            <span className="hidden @[26rem]:inline">{t("assistant.planMode")}</span>
+          </button>
+          {/* Restringido (destructive things ask) or Completo (nothing asks) — `lib/chatPermissions`. */}
+          <PermissionsPicker
+            value={permissions}
+            planMode={planMode}
+            onPick={(next) => useChatStore.getState().setPermissions(conversationId, next)}
+          />
+          {contextReading && (
+            <span className="ml-auto flex shrink-0 items-center">
+              <ContextMeter reading={contextReading} />
+            </span>
           )}
         </div>
       </div>

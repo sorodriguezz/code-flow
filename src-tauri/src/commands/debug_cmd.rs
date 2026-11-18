@@ -40,6 +40,9 @@ pub async fn debug_start(
 ) -> Result<(), String> {
     let binary = node_binary.filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "node".to_string());
     let filters = exception_filters.unwrap_or_default();
+    // One session at a time across both backends: a DAP session left running would take every
+    // command (`using_adapter`) and leave this one paused with nothing able to resume it.
+    dap::stop().await;
     debugger::start(app, &cwd, &binary, &program, &args, &specs(breakpoints), &filters).await
 }
 
@@ -58,6 +61,9 @@ pub async fn debug_start_adapter(
     breakpoints: HashMap<String, Vec<BreakpointInput>>,
     exception_filters: Option<Vec<String>>,
 ) -> Result<Vec<ExceptionFilter>, String> {
+    // And the other way round: a Node session — an attached service — left alive here would keep
+    // stopping at its breakpoints while Continue and Step went to the adapter.
+    debugger::stop().await;
     dap::start(app, &cwd, &command, &args, launch_config, &specs(breakpoints), exception_filters.as_deref()).await
 }
 
@@ -71,14 +77,25 @@ pub async fn debug_attach(
     cwd: String,
     breakpoints: HashMap<String, Vec<BreakpointInput>>,
     exception_filters: Option<Vec<String>>,
-) -> Result<bool, String> {
-    if debugger::inspector_target(&ws_url).await.is_some_and(|url| debugger::is_launcher(&url)) {
-        return Ok(false);
+) -> Result<Option<String>, String> {
+    let target = debugger::inspector_target(&ws_url).await;
+    if target.as_deref().is_some_and(debugger::is_launcher) {
+        return Ok(None);
     }
     dap::stop().await;
     let filters = exception_filters.unwrap_or_default();
     debugger::attach(app, &ws_url, &cwd, &specs(breakpoints), &filters).await?;
-    Ok(true)
+    // The script the inspector belongs to, for the console to say which process is being debugged.
+    Ok(Some(target.unwrap_or_default()))
+}
+
+/// The script a Node inspector belongs to — asked before attaching, so a service's second Node
+/// process (a worker, a type checker, the overlap of a restart) can be told from its program.
+/// `Some("")` for a launcher's (`pnpm`, a CLI), `None` when the inspector does not answer.
+#[tauri::command]
+pub async fn debug_inspector_target(ws_url: String) -> Option<String> {
+    let target = debugger::inspector_target(&ws_url).await.filter(|url| !url.is_empty())?;
+    (!debugger::is_launcher(&target)).then_some(target).or(Some(String::new()))
 }
 
 #[tauri::command]

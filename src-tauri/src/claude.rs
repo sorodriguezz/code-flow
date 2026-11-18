@@ -254,12 +254,15 @@ impl AiEngine for ClaudeEngine {
                 None => cmd.arg("--settings").arg(&settings),
             };
         }
-        // «Completo» (`AiInvocation::full_access`): nothing is asked — not the shell, not a tool, not
-        // a file outside the folder. The permission prompt above is then never consulted, which is
-        // the point: the user chose a turn that does not stop for them.
-        if inv.full_access && !inv.read_only && !inv.text_only {
+        // «Completo» (`AiInvocation::full_access`): nothing is asked — not the shell, not a tool.
+        // Where CodeFlow answers the permission prompt, the turn keeps `acceptEdits` and the prompt
+        // says yes to everything (`codemap::mcp::Access::full`) — except a write outside the
+        // repository the turn works in, which `bypassPermissions` would never have shown it: a chat
+        // in one repository rewrote a sibling one that way (user report, 2026-11-18). Without the
+        // prompt there is nothing to answer, so the CLI is told to ask nothing.
+        if inv.full_access && !inv.read_only && !inv.text_only && !host_answers_permissions {
             cmd.arg("--permission-mode").arg("bypassPermissions");
-        } else if inv.auto_approve_edits && !inv.read_only {
+        } else if (inv.auto_approve_edits && !inv.read_only) || (inv.full_access && !inv.read_only && !inv.text_only) {
             cmd.arg("--permission-mode").arg("acceptEdits");
         }
         if let Some(id) = inv.resume_session_id {
