@@ -322,13 +322,18 @@ impl Bridge {
     /// Closes one session, and the whole JVM with it when it was the last one.
     pub async fn close_session(&self, session: &str) {
         let _ = self.call("close", session, Map::new()).await;
-        // `fetch_update` rather than `fetch_sub`: a double close must not wrap the counter around
-        // and leave the process running forever.
-        let was_last = self
-            .sessions
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .map(|previous| previous == 1)
-            .unwrap_or(false);
+        // A checked decrement rather than `fetch_sub`: a double close must not wrap the counter
+        // around and leave the process running forever. Spelled as a compare-exchange loop because
+        // `fetch_update` is deprecated on newer compilers and its replacement, `try_update`, is not
+        // on the one the release pins.
+        let mut current = self.sessions.load(Ordering::SeqCst);
+        let was_last = loop {
+            let Some(next) = current.checked_sub(1) else { break false };
+            match self.sessions.compare_exchange_weak(current, next, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(previous) => break previous == 1,
+                Err(actual) => current = actual,
+            }
+        };
         if was_last {
             // The JVM halts itself on this, so the reply may never arrive — which is why the result
             // is discarded and the process is reaped rather than waited on.

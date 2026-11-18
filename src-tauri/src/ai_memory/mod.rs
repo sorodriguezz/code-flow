@@ -141,6 +141,9 @@ pub struct Memory {
     pub body: String,
     pub status: String,
     pub source: String,
+    /// Written by a model (`source` "agent") because the user asked it to: the user's rule, in a
+    /// model's words — approved, and weighed like the user's own.
+    pub on_request: bool,
     pub evidence: Vec<String>,
     pub supersedes: Option<String>,
     pub local_only: bool,
@@ -188,6 +191,10 @@ pub struct NewMemory {
     #[serde(default)]
     pub approved: bool,
     pub source: Option<String>,
+    /// A model writes it because the user asked (`manage_memory` with `user_requested`). Never read
+    /// from the window: only the memory tools set it.
+    #[serde(default, skip_deserializing)]
+    pub on_request: bool,
     #[serde(default)]
     pub evidence: Vec<String>,
     pub supersedes: Option<String>,
@@ -197,15 +204,15 @@ pub struct NewMemory {
 }
 
 /// The table's own columns, in the order [`row_to_memory`] reads them and the INSERT writes them.
-const COLUMNS: &str = "id, scope, workspace_id, project_id, task_ref, kind, title, body, status, source, evidence, supersedes, local_only, expires_at, created_at, updated_at, used_at, use_count, anchors, anchored_at, anchor_head, review, conflicts_with, confirmed_at";
+const COLUMNS: &str = "id, scope, workspace_id, project_id, task_ref, kind, title, body, status, source, evidence, supersedes, local_only, expires_at, created_at, updated_at, used_at, use_count, anchors, anchored_at, anchor_head, review, conflicts_with, confirmed_at, on_request";
 
 /// The latest moment the user vouched for a memory's text: an approval, or an edit they made. A
 /// memory created approved has neither, and falls back to its creation (see [`select_sql`]).
-const VOUCHED_AT: &str = "(SELECT MAX(r.at) FROM ai_memory_revisions r WHERE r.memory_id = m.id AND (r.action = 'approved' OR (r.action = 'edited' AND r.actor = 'user')))";
+const VOUCHED_AT: &str = "(SELECT MAX(r.at) FROM ai_memory_revisions r WHERE r.memory_id = m.id AND (r.action = 'approved' OR (r.action = 'edited' AND (r.actor = 'user' OR r.on_request = 1))))";
 
 /// `SELECT` of every column plus the three derived ones (the approval date, the replaced memory's
 /// title, the clashing memory's title), from `ai_memories m` — every reader goes through it, so the
-/// alias is always `m` and the derived columns are always the 25th to the 27th.
+/// alias is always `m` and the derived columns are always the 26th to the 28th.
 fn select_sql() -> String {
     let columns = COLUMNS.split(", ").map(|c| format!("m.{c}")).collect::<Vec<_>>().join(", ");
     format!(
@@ -235,8 +242,9 @@ fn row_to_memory(r: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
     let review: Option<review::Review> = review.and_then(|text| serde_json::from_str(&text).ok());
     let conflicts_with: Option<String> = r.get(22)?;
     let confirmed_at: Option<i64> = r.get(23)?;
-    let approved_at: Option<i64> = r.get(24)?;
-    let conflicts_with_title: Option<String> = r.get(26)?;
+    let on_request: bool = r.get(24)?;
+    let approved_at: Option<i64> = r.get(25)?;
+    let conflicts_with_title: Option<String> = r.get(27)?;
     let stale = is_stale(&status, &kind, approved_at, confirmed_at, created_at, now());
     // A clash with a memory since revoked is no clash: the title only comes back while it is live.
     let conflicts_with = conflicts_with.filter(|_| conflicts_with_title.is_some());
@@ -253,6 +261,7 @@ fn row_to_memory(r: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
         stale,
         status,
         source: r.get(9)?,
+        on_request,
         evidence: serde_json::from_str(&evidence).unwrap_or_default(),
         supersedes: r.get(11)?,
         local_only: r.get(12)?,
@@ -262,7 +271,7 @@ fn row_to_memory(r: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
         used_at,
         use_count: r.get(17)?,
         approved_at,
-        supersedes_title: r.get(25)?,
+        supersedes_title: r.get(26)?,
         anchors: serde_json::from_str(&anchors).unwrap_or_default(),
         anchored_at: r.get(19)?,
         anchor_head: r.get(20)?,
@@ -285,10 +294,28 @@ fn now() -> i64 {
     chrono::Utc::now().timestamp_millis()
 }
 
+/// Who changes a memory, for its history: the user — in the pane, or a chat's «recuerda que…» — or
+/// a model the user asked to (`on_request`). Before 2026-11-17 a model's change on request was
+/// recorded as the user's own («origen: tú» on memories the AI wrote).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct By {
+    pub actor: &'static str,
+    pub on_request: bool,
+}
+
+impl By {
+    pub const USER: By = By { actor: "user", on_request: false };
+    pub const AGENT_ON_REQUEST: By = By { actor: "agent", on_request: true };
+}
+
 fn revise(conn: &Connection, memory_id: &str, action: &str, title: &str, body: &str, actor: &str) -> rusqlite::Result<()> {
+    revise_as(conn, memory_id, action, title, body, actor, false)
+}
+
+fn revise_as(conn: &Connection, memory_id: &str, action: &str, title: &str, body: &str, actor: &str, on_request: bool) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO ai_memory_revisions (id, memory_id, at, action, title, body, actor) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![uuid::Uuid::new_v4().to_string(), memory_id, now(), action, title, body, actor],
+        "INSERT INTO ai_memory_revisions (id, memory_id, at, action, title, body, actor, on_request) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![uuid::Uuid::new_v4().to_string(), memory_id, now(), action, title, body, actor, on_request],
     )?;
     Ok(())
 }
@@ -417,11 +444,11 @@ fn insert(conn: &Connection, input: &NewMemory, place: &Place, title: &str, body
     let id = uuid::Uuid::new_v4().to_string();
     let status = if input.approved { "approved" } else { "candidate" };
     let source = input.source.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "user".to_string());
-    let kind = input.kind.unwrap_or(if source == "user" { Kind::Preference } else { Kind::Fact });
+    let kind = input.kind.unwrap_or(if source == "user" || input.on_request { Kind::Preference } else { Kind::Fact });
     let supersedes = input.supersedes.clone().filter(|s| !s.is_empty());
     let at = now();
     conn.execute(
-        &format!("INSERT INTO ai_memories ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, NULL, 0, '[]', NULL, NULL, NULL, NULL, NULL)"),
+        &format!("INSERT INTO ai_memories ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, NULL, 0, '[]', NULL, NULL, NULL, NULL, NULL, ?16)"),
         params![
             id,
             place.scope.as_str(),
@@ -438,10 +465,11 @@ fn insert(conn: &Connection, input: &NewMemory, place: &Place, title: &str, body
             input.local_only,
             input.expires_at,
             at,
+            input.on_request,
         ],
     )
     .map_err(|e| e.to_string())?;
-    revise(conn, &id, "created", title, body, &source).map_err(|e| e.to_string())?;
+    revise_as(conn, &id, "created", title, body, &source, input.on_request).map_err(|e| e.to_string())?;
     if input.approved {
         supersede_older(conn, &id).map_err(|e| e.to_string())?;
     }
@@ -474,6 +502,7 @@ pub fn create(conn: &Connection, input: NewMemory) -> Result<Memory, String> {
 pub fn remember(conn: &Connection, input: NewMemory) -> Result<(Memory, Remembered), String> {
     let mut input = input;
     input.approved = true;
+    let by = if input.on_request { By::AGENT_ON_REQUEST } else { By::USER };
     let (title, body, evidence) = cleaned(&input)?;
     let place = place_of(&input);
     let key = normalized(&title);
@@ -521,11 +550,11 @@ pub fn remember(conn: &Connection, input: NewMemory) -> Result<(Memory, Remember
     )
     .map_err(|e| e.to_string())?;
     if new_body {
-        revise(conn, &existing.id, "edited", &existing.title, &body, "user").map_err(|e| e.to_string())?;
+        revise_as(conn, &existing.id, "edited", &existing.title, &body, by.actor, by.on_request).map_err(|e| e.to_string())?;
         vouched(conn, &existing.id).map_err(|e| e.to_string())?;
     }
     if outcome == Remembered::Approved {
-        revise(conn, &existing.id, "approved", &existing.title, &body, "user").map_err(|e| e.to_string())?;
+        revise_as(conn, &existing.id, "approved", &existing.title, &body, by.actor, by.on_request).map_err(|e| e.to_string())?;
     }
     supersede_older(conn, &existing.id).map_err(|e| e.to_string())?;
     let memory = get(conn, &existing.id).map_err(|e| e.to_string())?.ok_or("memory vanished")?;
@@ -760,7 +789,7 @@ pub struct Patch {
     pub clear_supersedes: bool,
 }
 
-pub fn edit(conn: &Connection, id: &str, patch: Patch) -> Result<Memory, String> {
+pub fn edit(conn: &Connection, id: &str, patch: Patch, by: By) -> Result<Memory, String> {
     let current = get(conn, id).map_err(|e| e.to_string())?.ok_or("memory not found")?;
     let title = patch.title.map(|t| crate::secret_scan::redact(t.trim()).0).unwrap_or(current.title.clone());
     let body = patch.body.map(|b| crate::secret_scan::redact(b.trim()).0).unwrap_or(current.body.clone());
@@ -787,7 +816,7 @@ pub fn edit(conn: &Connection, id: &str, patch: Patch) -> Result<Memory, String>
     )
     .map_err(|e| e.to_string())?;
     if title != current.title || body != current.body {
-        revise(conn, id, "edited", &title, &body, "user").map_err(|e| e.to_string())?;
+        revise_as(conn, id, "edited", &title, &body, by.actor, by.on_request).map_err(|e| e.to_string())?;
         vouched(conn, id).map_err(|e| e.to_string())?;
     }
     // Approval is when a replacement takes effect; on a memory already approved, that is now.
@@ -798,14 +827,14 @@ pub fn edit(conn: &Connection, id: &str, patch: Patch) -> Result<Memory, String>
 }
 
 /// `approved` | `revoked` | `candidate`.
-pub fn set_status(conn: &Connection, id: &str, status: &str) -> Result<(), String> {
+pub fn set_status(conn: &Connection, id: &str, status: &str, by: By) -> Result<(), String> {
     let status = match status {
         "approved" | "revoked" | "candidate" => status,
         other => return Err(format!("unknown status {other}")),
     };
     let current = get(conn, id).map_err(|e| e.to_string())?.ok_or("memory not found")?;
     conn.execute("UPDATE ai_memories SET status = ?1, updated_at = ?2 WHERE id = ?3", params![status, now(), id]).map_err(|e| e.to_string())?;
-    revise(conn, id, status, &current.title, &current.body, "user").map_err(|e| e.to_string())?;
+    revise_as(conn, id, status, &current.title, &current.body, by.actor, by.on_request).map_err(|e| e.to_string())?;
     if status == "approved" {
         supersede_older(conn, id).map_err(|e| e.to_string())?;
     }
@@ -814,11 +843,11 @@ pub fn set_status(conn: &Connection, id: &str, status: &str) -> Result<(), Strin
 
 /// Approves a memory as `kind` (or as it is): an agent's proposal arrives as a `fact`, and the user
 /// is the one who decides it is a convention or a preference that should ride every turn.
-pub fn approve(conn: &Connection, id: &str, kind: Option<Kind>) -> Result<(), String> {
+pub fn approve(conn: &Connection, id: &str, kind: Option<Kind>, by: By) -> Result<(), String> {
     if let Some(kind) = kind {
         conn.execute("UPDATE ai_memories SET kind = ?1 WHERE id = ?2", params![kind.as_str(), id]).map_err(|e| e.to_string())?;
     }
-    set_status(conn, id, "approved")
+    set_status(conn, id, "approved", by)
 }
 
 /// «Mantener»: the user read a memory waiting for review and keeps it as it is. Whatever it waited
@@ -844,7 +873,7 @@ pub fn settle_clash(conn: &Connection, id: &str, replaces: bool) -> Result<Memor
     let other = current.conflicts_with.clone();
     conn.execute("UPDATE ai_memories SET conflicts_with = NULL WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
     match other {
-        Some(other) if replaces => edit(conn, id, Patch { supersedes: Some(other), ..Default::default() }),
+        Some(other) if replaces => edit(conn, id, Patch { supersedes: Some(other), ..Default::default() }, By::USER),
         _ => {
             revise(conn, id, "distinct", &current.title, &current.body, "user").map_err(|e| e.to_string())?;
             get(conn, id).map_err(|e| e.to_string())?.ok_or_else(|| "memory vanished".to_string())
@@ -915,12 +944,14 @@ pub struct Revision {
     pub title: String,
     pub body: String,
     pub actor: String,
+    /// A model's change the user asked for ([`By::AGENT_ON_REQUEST`]).
+    pub on_request: bool,
 }
 
 pub fn revisions(conn: &Connection, id: &str) -> rusqlite::Result<Vec<Revision>> {
-    let mut stmt = conn.prepare("SELECT at, action, title, body, actor FROM ai_memory_revisions WHERE memory_id = ?1 ORDER BY at DESC, rowid DESC")?;
+    let mut stmt = conn.prepare("SELECT at, action, title, body, actor, on_request FROM ai_memory_revisions WHERE memory_id = ?1 ORDER BY at DESC, rowid DESC")?;
     let rows = stmt
-        .query_map(params![id], |r| Ok(Revision { at: r.get(0)?, action: r.get(1)?, title: r.get(2)?, body: r.get(3)?, actor: r.get(4)? }))?
+        .query_map(params![id], |r| Ok(Revision { at: r.get(0)?, action: r.get(1)?, title: r.get(2)?, body: r.get(3)?, actor: r.get(4)?, on_request: r.get(5)? }))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
 }
@@ -1079,7 +1110,8 @@ fn note_line(m: &Memory) -> String {
     if let Some(date) = m.approved_at.and_then(day) {
         tag.push_str(&format!(" · aprobada {date}"));
     }
-    if m.source != "user" {
+    // A model's memory the user asked for is the user's rule: no origin that would discount it.
+    if m.source != "user" && !m.on_request {
         tag.push_str(&format!(" · origen: {}", source_label(&m.source)));
     }
     // Still the user's rule until they say otherwise — but the model should weigh it knowing why it

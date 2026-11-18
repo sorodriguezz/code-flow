@@ -49,6 +49,9 @@ pub struct MeetingRow {
     /// When the audio is deleted, `""` = kept.
     pub audio_expires_at: String,
     pub speakers_hint: i64,
+    /// The saved voices the user said were in the meeting (ids), in the order they were ticked —
+    /// `pipeline::Job::roster`. Empty: they did not say.
+    pub roster: Vec<String>,
     /// Whether the live text covered the whole meeting.
     pub live_complete: bool,
     pub created_at: String,
@@ -57,7 +60,7 @@ pub struct MeetingRow {
 
 const MEETING_COLUMNS: &str = "id, workspace_id, note_id, kind, mode, transcriber, language, status, stage, error, \
      started_at, ended_at, duration_ms, channels, audio_file, audio_bytes, audio_expires_at, speakers_hint, \
-     live_complete, created_at, updated_at";
+     live_complete, created_at, updated_at, roster";
 
 fn meeting_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<MeetingRow> {
     Ok(MeetingRow {
@@ -82,6 +85,7 @@ fn meeting_from(row: &rusqlite::Row<'_>) -> rusqlite::Result<MeetingRow> {
         live_complete: row.get::<_, i64>(18)? != 0,
         created_at: row.get(19)?,
         updated_at: row.get(20)?,
+        roster: serde_json::from_str(&row.get::<_, String>(21)?).unwrap_or_default(),
     })
 }
 
@@ -221,6 +225,17 @@ pub fn set_processing_choices(conn: &Connection, id: &str, transcriber: &str, sp
     conn.execute(
         "UPDATE meetings SET transcriber = ?2, speakers_hint = ?3, updated_at = ?4 WHERE id = ?1",
         params![id, transcriber, speakers_hint, now()],
+    )?;
+    Ok(())
+}
+
+/// Who the user said was in the meeting: how many people in the separated channel, and which saved
+/// voices among them.
+pub fn set_roster(conn: &Connection, id: &str, speakers_hint: i64, roster: &[String]) -> rusqlite::Result<()> {
+    let roster = serde_json::to_string(roster).unwrap_or_else(|_| "[]".into());
+    conn.execute(
+        "UPDATE meetings SET speakers_hint = ?2, roster = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, speakers_hint.max(0), roster, now()],
     )?;
     Ok(())
 }

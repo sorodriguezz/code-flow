@@ -486,6 +486,28 @@ mod tests {
         }
     }
 
+    /// Every retrieval task the way the bench runs it — the vectors included, so the Spanish
+    /// question over the English record too — without the chat model the whole bench connects to
+    /// first (`bench::bench`). What a change to the knowledge search is checked against for notes
+    /// and documents; the code is `knowledge::code_bench`'s. Ignored: it starts the default local
+    /// embedding model, which must be downloaded.
+    ///
+    /// `cargo test --lib retrieval_tasks_with_the_vectors -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn retrieval_tasks_with_the_vectors() {
+        let mut failed = Vec::new();
+        for task in TASKS.iter().filter(|t| t.suite == Suite::Retrieval) {
+            let outcome = run_retrieval(task).await;
+            eprintln!("{:<26} {}", task.id, match &outcome.verdict { Ok(()) => "ok".to_string(), Err(error) => format!("FAILED: {error}") });
+            if outcome.verdict.is_err() {
+                failed.push(task.id);
+            }
+        }
+        crate::localai::embedder::shutdown().await;
+        assert!(failed.is_empty(), "{failed:?}");
+    }
+
     #[test]
     fn planned_steps_count_runs_and_the_two_probes() {
         let all = Options { runs: 2, ..Options::default() };

@@ -1960,10 +1960,23 @@ mod tests {
 
         let (status, reply) = post(&headers, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
         assert_eq!(status, StatusCode::OK);
-        // The seven map, knowledge and note queries, the app's six read tools (pipelines and the API
-        // client's requests among them) and the four chat reads — no actions for this token.
-        let counted = reply["result"]["tools"].as_array().unwrap().iter().filter(|t| !INFRA_TOOLS.contains(&t["name"].as_str().unwrap_or_default())).count();
-        assert_eq!(counted, 17);
+        // The map, knowledge, note and memory queries and the app's read tools (pipelines and the API
+        // client's requests among them) — no actions for this token. Kubernetes, Azure and the engines
+        // are there where their CLIs are, and the other chats (`chat_refs`), the whole app
+        // (`app_gateway`) and the permission prompt ride every token but a grounding one: not counted,
+        // as in the workspace chat's test. This counted them as they were added and went stale.
+        let own: Vec<String> = tool_names(&reply)
+            .into_iter()
+            .filter(|n| !INFRA_TOOLS.contains(&n.as_str()) && !crate::chat_refs::is_tool(n) && !crate::app_gateway::is_tool(n) && n != PERMISSION_PROMPT_TOOL)
+            .collect();
+        let expected: Vec<&str> = MAP_TOOLS
+            .iter()
+            .copied()
+            .chain(["recall", "search_knowledge", "read_note", "memory_list", "read_memory"])
+            .chain(["service_logs", "service_wait", "terminal_output", "pipelines", "api_requests", "api_request_curl", "azure_devops", "local_llm"])
+            .collect();
+        assert_eq!(own, expected);
+        assert!(!own.iter().any(|n| WORKSPACE_APP_ACTION_TOOLS.contains(&n.as_str())), "no actions for this token");
 
         let (_, reply) = post(
             &headers,

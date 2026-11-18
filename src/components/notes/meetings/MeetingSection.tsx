@@ -29,6 +29,8 @@ import { DictationWave } from "../../dictation/DictationControls";
 import { ICON_BUTTON } from "../notesChrome";
 import { MeetingPlayer, type PlayerHandle } from "./MeetingPlayer";
 import { MeetingAi } from "./MeetingAi";
+import { MeetingRoster, type RosterPurpose } from "./MeetingRoster";
+import { currentTurn, missingVoices, speakerTurn } from "./roster";
 import { MicCheck } from "./MicCheck";
 import { transcriptFile, type TranscriptFormat } from "./transcriptExport";
 import { writeFileBytes } from "../../../lib/tauri/commands";
@@ -48,6 +50,7 @@ import {
   type MeetingDetail,
   type MeetingLine,
   type MeetingMode,
+  type MeetingRosterArgs,
   type MeetingSpeaker,
   type Voice,
 } from "../../../lib/tauri/meetingsCommands";
@@ -55,7 +58,6 @@ import { ensureMeetingEvents, useMeetingsStore } from "../../../state/meetingsSt
 import { useLanguageStore, useT } from "../../../state/languageStore";
 import { useConfirmStore } from "../../../state/confirmStore";
 import { pushErrorToast, useToastStore } from "../../../state/toastStore";
-import { promptAction } from "../../../state/promptStore";
 
 /**
  * «Reuniones» in a note: the options to start one, the bar while it records, and — once it is done
@@ -162,11 +164,6 @@ function MeetingList({
     </div>
   );
 }
-
-/** The largest meeting the "how many people" prompt accepts. Not a limit of the clustering, which
- *  takes any count — a ceiling on typos, since the number entered is what the voices are split
- *  into and "200" is a slip, not a meeting. */
-const MAX_SPEAKERS = 99;
 
 const LANGUAGES = [
   { value: "es", label: "Español" },
@@ -553,6 +550,11 @@ function MeetingPanel({
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[]; searchable?: boolean } | null>(null);
   const [position, setPosition] = useState(0);
   const [renaming, setRenaming] = useState<string | null>(null);
+  /** The roster dialog, open for what it will start. */
+  const [rosterFor, setRosterFor] = useState<RosterPurpose | null>(null);
+  /** The playhead was put somewhere by the user (a chip, a line): a line at 00:00 can be the active one. */
+  const [placed, setPlaced] = useState(false);
+  const [savedVoices, setSavedVoices] = useState<Voice[]>([]);
   const player = useRef<PlayerHandle>(null);
   const lines = detail?.lines ?? [];
   const speakers = detail?.speakers ?? [];
@@ -561,6 +563,21 @@ function MeetingPanel({
   useEffect(() => {
     if (!detail) void useMeetingsStore.getState().loadDetail(meeting.id);
   }, [detail, meeting.id]);
+
+  // The saved voices, for the people the user named that were not heard — only when they named any.
+  const rosterKey = (meeting.roster ?? []).join(",");
+  useEffect(() => {
+    if (!rosterKey) return;
+    let alive = true;
+    void meetingsVoices()
+      .then((list) => {
+        if (alive) setSavedVoices(list);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [rosterKey, detail]);
 
   // Landed here from a search hit in this transcript: the line comes into view, and the player (if
   // the audio is still kept) is put on it, paused — reading the line is the point, not hearing it.
@@ -586,6 +603,43 @@ function MeetingPanel({
     }
     return found;
   }, [lines, position]);
+
+  const turn = useMemo(() => (position > 0 || placed ? currentTurn(lines, position) : null), [lines, position, placed]);
+  const missing = useMemo(() => (rosterKey ? missingVoices(meeting, speakers, lines, savedVoices) : []), [rosterKey, meeting, speakers, lines, savedVoices]);
+
+  /**
+   * A chip pressed: the playhead to that person's next turn (`back`: the one before), the line
+   * centred in the transcript. Playing goes on playing from there; paused stays paused, the mark
+   * moved — so the user can step through one person's turns and fix them as they go.
+   */
+  const jumpToSpeaker = (key: string, back: boolean) => {
+    const target = speakerTurn(lines, key, position, back ? -1 : 1);
+    if (!target) return;
+    setTab("transcript");
+    setPlaced(true);
+    setPosition(target.startMs);
+    if (meeting.audioFile) player.current?.seek(target.startMs, false);
+    requestAnimationFrame(() => {
+      listRef.current?.querySelector(`[data-start-ms="${target.startMs}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  };
+
+  /** The roster dialog's answer, for what it was opened for. `null`: "No lo sé". */
+  const startWith = (purpose: RosterPurpose, who: MeetingRosterArgs | null) => {
+    setRosterFor(null);
+    const store = useMeetingsStore.getState();
+    const count = who?.speakers ?? 0;
+    const roster = who?.roster ?? [];
+    if (purpose === "transcribe") void store.transcribe(meeting.id, { speakers: count, roster });
+    else void store.reprocess(meeting.id, purpose === "retranscribe", count, undefined, roster);
+  };
+
+  /** Asks who was there first when the voices can be separated; straight on when they cannot. */
+  const askWho = (purpose: RosterPurpose) => {
+    if (voicesInstalled) setRosterFor(purpose);
+    else if (purpose === "transcribe") void useMeetingsStore.getState().transcribe(meeting.id);
+    else void useMeetingsStore.getState().reprocess(meeting.id, purpose === "retranscribe", meeting.speakersHint);
+  };
 
   const speakerMenu = async (key: string, x: number, y: number) => {
     const voices: Voice[] = await meetingsVoices().catch(() => []);
@@ -689,50 +743,21 @@ function MeetingPanel({
     }
   };
 
-  /**
-   * "How many were there?" for a meeting the short list cannot name.
-   *
-   * The list used to stop at eight, which quietly made eight the largest meeting the app believed
-   * in: a twelve-person call could only be told "eight" or "I don't know", and the clustering was
-   * then asked for the wrong answer. The list now covers the sizes a fixed list is actually good
-   * for and hands the rest to this.
-   */
-  const askSpeakerCount = async () => {
-    const answer = await promptAction(t("meetings.peopleOtherPrompt"), {
-      initial: String(meeting.speakersHint > 0 ? meeting.speakersHint : 8),
-      confirmLabel: t("meetings.reseparate"),
-      validate: (value) => {
-        const n = Number(value.trim());
-        return Number.isInteger(n) && n >= 1 && n <= MAX_SPEAKERS ? null : t("meetings.peopleOtherInvalid", { max: MAX_SPEAKERS });
-      },
-    });
-    if (answer === null) return;
-    void useMeetingsStore.getState().reprocess(meeting.id, false, Number(answer.trim()));
-  };
-
   const actions = (x: number, y: number) => {
-    // One to five, then "I don't know", then everything else through the prompt: past five, a
-    // fixed list is a guess at which sizes exist rather than a choice the user is making.
-    const counts = [1, 2, 3, 4, 5, 0];
+    // Both ask who was there first (`MeetingRoster`): the count of the old submenu ("1…5, No sé,
+    // Otro número") left out who, and "8" meant eight groups of the call's side, not eight people.
     const items: MenuItem[] = [
       {
         label: t("meetings.retranscribe"),
         icon: RotateCcw,
         disabled: busy || !meeting.audioFile,
-        onClick: () => void useMeetingsStore.getState().reprocess(meeting.id, true, meeting.speakersHint),
+        onClick: () => askWho("retranscribe"),
       },
       {
         label: t("meetings.reseparate"),
         icon: Users,
         disabled: busy || !meeting.audioFile || !voicesInstalled,
-        onClick: () => {},
-        children: [
-          ...counts.map((n) => ({
-            label: n === 0 ? t("meetings.peopleUnknown") : t("meetings.people", { n }),
-            onClick: () => void useMeetingsStore.getState().reprocess(meeting.id, false, n),
-          })),
-          { label: t("meetings.peopleOther"), separated: true, onClick: () => void askSpeakerCount() },
-        ],
+        onClick: () => setRosterFor("separate"),
       },
       {
         label: t("meetings.exportAudio"),
@@ -835,7 +860,7 @@ function MeetingPanel({
           </button>
         )}
         {meeting.status === "recorded" && (
-          <button type="button" className={buttonClass({ variant: "primary", size: "sm" })} onClick={() => void useMeetingsStore.getState().transcribe(meeting.id)}>
+          <button type="button" className={buttonClass({ variant: "primary", size: "sm" })} onClick={() => askWho("transcribe")}>
             {t("meetings.transcribeNow")}
           </button>
         )}
@@ -861,8 +886,10 @@ function MeetingPanel({
             <div className="flex flex-wrap items-center gap-1.5">
               {speakers
                 .filter((s) => lines.some((l) => l.speaker === s.key))
-                .map((s) =>
-                  renaming === s.key ? (
+                .map((s) => {
+                  const name = speakerName(s.key, speakers, meeting.kind);
+                  const speaking = turn?.speaker === s.key ? turn : null;
+                  return renaming === s.key ? (
                     <RenameField
                       key={s.key}
                       initial={s.name || speakerName(s.key, speakers, meeting.kind)}
@@ -872,20 +899,62 @@ function MeetingPanel({
                       }}
                     />
                   ) : (
-                    <button
+                    // Pressing the chip walks that person's turns (Shift: back); the options (rename,
+                    // save the voice, merge) are behind the chevron and the right click.
+                    <div
                       key={s.key}
-                      type="button"
-                      onClick={(e) => void speakerMenu(s.key, e.clientX, e.clientY)}
-                      className="flex items-center gap-1.5 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-2 py-[2px] text-[12px] hover:border-[var(--cf-border-strong)]"
-                      title={s.voiceId ? t("meetings.knownVoice") : undefined}
+                      className={`flex items-center rounded-md border bg-[var(--cf-surface)] text-[12px] transition-colors ${
+                        speaking ? "border-[var(--cf-accent)] shadow-[0_0_0_1px_var(--cf-accent-soft)]" : "border-[var(--cf-border)] hover:border-[var(--cf-border-strong)]"
+                      }`}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        void speakerMenu(s.key, e.clientX, e.clientY);
+                      }}
                     >
-                      <span className="h-2 w-2 rounded-[3px]" style={{ background: speakerColor(s.key, speakers) }} aria-hidden />
-                      {speakerName(s.key, speakers, meeting.kind)}
-                      {s.voiceId && <Mic size={9} className="text-[var(--cf-text-faint)]" />}
-                      <span className="font-mono text-[10.5px] text-[var(--cf-text-faint)]">{duration(s.talkMs)}</span>
-                    </button>
-                  ),
-                )}
+                      <button
+                        type="button"
+                        onClick={(e) => jumpToSpeaker(s.key, e.shiftKey)}
+                        className="flex items-center gap-1.5 rounded-l-md py-[2px] pl-2 pr-1.5"
+                        title={t("meetings.chip.jump", { name })}
+                        aria-label={t("meetings.chip.jump", { name })}
+                      >
+                        <span className="h-2 w-2 rounded-[3px]" style={{ background: speakerColor(s.key, speakers) }} aria-hidden />
+                        {name}
+                        {s.voiceId && (
+                          <span title={t("meetings.knownVoice")} className="flex">
+                            <Mic size={9} className="text-[var(--cf-text-faint)]" />
+                          </span>
+                        )}
+                        {speaking ? (
+                          <span className="font-mono text-[10.5px] tabular-nums text-[var(--cf-accent)]" title={t("meetings.chip.turn", { i: speaking.index, n: speaking.total })}>
+                            {speaking.index}/{speaking.total}
+                          </span>
+                        ) : (
+                          <span className="font-mono text-[10.5px] text-[var(--cf-text-faint)]">{duration(s.talkMs)}</span>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => void speakerMenu(s.key, e.clientX, e.clientY)}
+                        className="flex items-center self-stretch rounded-r-md border-l border-[var(--cf-border)] px-1 text-[var(--cf-text-faint)] hover:text-[var(--cf-text)]"
+                        aria-label={t("meetings.chip.options", { name })}
+                        title={t("meetings.chip.options", { name })}
+                      >
+                        <ChevronDown size={11} />
+                      </button>
+                    </div>
+                  );
+                })}
+              {missing.map((v) => (
+                <span
+                  key={v.id}
+                  className="flex items-center gap-1.5 rounded-md border border-dashed border-[var(--cf-border-strong)] px-2 py-[2px] text-[12px] text-[var(--cf-text-faint)]"
+                  title={t("meetings.roster.missingHint", { name: v.name })}
+                >
+                  <Mic size={9} aria-hidden />
+                  {t("meetings.roster.missing", { name: v.name })}
+                </span>
+              ))}
             </div>
           )}
           {lines.length > 0 && (
@@ -911,7 +980,7 @@ function MeetingPanel({
                       line={line}
                       speakers={speakers}
                       kind={meeting.kind}
-                      active={line.seq === activeSeq && position > 0}
+                      active={line.seq === activeSeq && (position > 0 || placed)}
                       onSeek={meeting.audioFile ? (ms) => player.current?.seek(ms, true) : undefined}
                       onSpeaker={lineSpeakerMenu}
                       onEdit={(l, text) => void meetingsUpdateLine(meeting.id, l.seq, text).then(reload).catch((e) => pushErrorToast(String(e)))}
@@ -924,6 +993,9 @@ function MeetingPanel({
             </>
           )}
         </div>
+      )}
+      {rosterFor && (
+        <MeetingRoster meeting={meeting} speakers={speakers} purpose={rosterFor} onCancel={() => setRosterFor(null)} onConfirm={(who) => startWith(rosterFor, who)} />
       )}
       {menu && (
         <ContextMenu

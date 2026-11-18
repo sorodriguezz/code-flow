@@ -4,10 +4,11 @@
 //! and citations.
 //!
 //! Three retrievers, fused by reciprocal rank (RRF): the FTS5 index over chunks of every source
-//! ([`index`]), the vectors of prose chunks when a local embedding model is there ([`embed`]), and
-//! the code map's declarations for words that look like identifiers (`crate::codemap`). Code gets no
-//! vectors yet: the map and exact search already find code, and the bench has to show embeddings help
-//! it before they cost the time. Notes live in the same index as everything else ([`sources`]), so
+//! ([`index`]), the vectors of prose and code chunks when a local embedding model is there
+//! ([`embed`]), and the code map's declarations for words that look like identifiers
+//! (`crate::codemap`). Code got vectors once the bench showed they find what the words and the map
+//! miss — a question that describes code without naming it ([`KEY_CODE_VECTORS`]). Each code result
+//! carries its place in the import graph ([`Found::links`]) for the model to follow. Notes live in the same index as everything else ([`sources`]), so
 //! they are chunked, ranked against the files, cited by the passage that matched and embedded like
 //! any prose — they used to be searched apart and returned as their first 700 characters.
 //!
@@ -57,6 +58,25 @@ const SYNC_EMBED: usize = 256;
 const RELATIVE_FLOOR: f64 = 0.2;
 /// The least cosine a semantic hit needs.
 const COSINE_FLOOR: f32 = 0.25;
+
+/// The setting that gives code chunks vectors: on unless `"0"`. The bench (`code_bench`,
+/// 2026-11-17) found a question that describes code without naming it in the first five 22% of the
+/// time in Spanish (67% in English) by the words and the map, 83% (89%) by vectors. Off drops the
+/// code's vectors ([`index::drop_code_vectors`]); embedding a large repository takes a while.
+pub const KEY_CODE_VECTORS: &str = "knowledge_code_vectors";
+
+/// Whether code chunks get vectors ([`KEY_CODE_VECTORS`]). On where there is no app database (tests,
+/// the bench).
+pub fn code_vectors_on() -> bool {
+    crate::ai_usage::with_conn(|conn| crate::db::queries::get_setting(conn, KEY_CODE_VECTORS).ok().flatten())
+        .flatten()
+        .is_none_or(|value| code_vectors_value(&value))
+}
+
+/// A stored [`KEY_CODE_VECTORS`] value read as on or off.
+pub fn code_vectors_value(value: &str) -> bool {
+    value != "0" && value != "false"
+}
 
 /// The workspace switch: may cloud engines (Claude, Codex, Gemini, Grok, Cline…) search this
 /// workspace's knowledge? On unless turned off — the user's decision, 2026-10-19.
@@ -239,6 +259,7 @@ pub fn clear(index: &Connection, scope: &Scope, alive: &HashSet<String>) -> rusq
         index::remove_collection(index, key)?;
     }
     let pruned = prune(index, alive)?;
+    index::clear_vector_cache(index)?;
     index::compact(index)?;
     Ok(keys.len() + pruned.collections)
 }
@@ -792,7 +813,7 @@ pub fn vectorize_asked(scope: Scope, space: embed::Space) {
     vectorize_in_background(scope, space);
 }
 
-/// Embeds the scope's prose chunks that have no vector yet, in the background, one pass at a time.
+/// Embeds the scope's chunks that have no vector yet ([`index::embeddable`]), in the background, one pass at a time.
 /// Without a local embedding model it does nothing: search stays lexical.
 pub fn vectorize_in_background(scope: Scope, space: embed::Space) {
     let mut next = NEXT.lock().unwrap_or_else(|e| e.into_inner());
@@ -838,15 +859,35 @@ const GIVE_UP_AFTER: usize = 3;
 
 async fn vectorize_pass(scope: &Scope, space: &embed::Space) {
     let keys = scope.keys();
+    if code_vectors_on() {
+        // Code goes most-imported first ([`index::pending_vectors`]): the ranks, from the code map.
+        let ranking = scope.clone();
+        let _ = tokio::task::spawn_blocking(move || rank_code(&ranking)).await;
+    }
+    if let Ok(index) = index::global() {
+        let _ = index::prune_vector_cache(&index, chrono::Utc::now().timestamp_millis());
+    }
     let started = std::time::Instant::now();
     let mut done = 0usize;
     let mut skipped: std::collections::HashSet<i64> = std::collections::HashSet::new();
     let mut dead_batches = 0usize;
+    let mut released = false;
     loop {
         let switched = NEXT.lock().ok().is_some_and(|next| next.as_ref().is_some_and(|(_, wanted)| wanted.name != space.name));
         if switched {
             return;
         }
+        // Paused by the user: nothing runs, and the embedder's CPU and memory go back at once rather
+        // than after its idle timer — between batches, so no request of this pass is cut.
+        if PAUSED.load(Ordering::SeqCst) {
+            if !released {
+                released = true;
+                crate::localai::embedder::shutdown().await;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            continue;
+        }
+        released = false;
         // Battery saving from Fuerte holds a pass nobody asked for between batches, and lets it go on
         // by itself once the level drops — on the charger, under «Automático». Its progress stays
         // on screen meanwhile; the embedder, unused, is let go by its idle timer.
@@ -854,11 +895,13 @@ async fn vectorize_pass(scope: &Scope, space: &embed::Space) {
             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
             continue;
         }
+        // Read every batch: code vectors switched off mid-pass stop being made at once.
+        let code = code_vectors_on();
         let (pending, left) = match index::global() {
             Ok(index) => (
                 // Asked for past the ones set aside, which are still "pending" to the index.
-                index::pending_vectors(&index, &space.name, &keys, 64 + skipped.len()).unwrap_or_default(),
-                index::count_pending_vectors(&index, &space.name, &keys).unwrap_or(0),
+                index::pending_vectors(&index, &space.name, &keys, 64 + skipped.len(), code).unwrap_or_default(),
+                index::count_pending_vectors(&index, &space.name, &keys, code).unwrap_or(0),
             ),
             Err(error) => {
                 crate::applog::warn(&format!("knowledge: vectorizing stopped, the index could not be read ({error})"));
@@ -873,6 +916,14 @@ async fn vectorize_pass(scope: &Scope, space: &embed::Space) {
             return;
         }
         set_progress(Some(Vectorizing::now(scope.workspace_id.as_deref(), &space.name, done, done + left.saturating_sub(skipped.len()), started.elapsed())));
+        // Text the index had vectors for before (a branch switched back to): its vectors come back
+        // from the cache, and only the rest goes to the embedder.
+        let reused = index::global().and_then(|mut index| index::reuse_vectors(&mut index, &space.name, &pending).map_err(|e| e.to_string())).unwrap_or_default();
+        done += reused.len();
+        let pending: Vec<(i64, String)> = pending.into_iter().filter(|(id, _)| !reused.contains(id)).collect();
+        if pending.is_empty() {
+            continue;
+        }
         let texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
         let items: Vec<(i64, Vec<f32>)> = match space.embed_documents(&texts).await {
             Ok(vectors) => {
@@ -925,6 +976,23 @@ async fn vectorize_pass(scope: &Scope, space: &embed::Space) {
     }
 }
 
+/// Writes each repository file's importer count into the index ([`index::set_ranks`]), from the
+/// code map — built or brought up to date here, in the background pass that needs it; searches build
+/// it anyway. A repository whose map cannot be read keeps the ranks it had.
+fn rank_code(scope: &Scope) {
+    for (id, _, root) in &scope.repos {
+        if !on_disk(root) {
+            continue;
+        }
+        let Ok((map, _)) = crate::codemap::snapshot(&root.to_string_lossy()) else { continue };
+        let ranks: Vec<(String, i64)> = (0..map.file_count() as u32).map(|file| (map.path(file).to_string(), map.imported_by(file).len() as i64)).collect();
+        let Ok(mut index) = index::global() else { return };
+        if let Err(error) = index::set_ranks(&mut index, &repo_key(id), &ranks) {
+            crate::applog::warn(&format!("knowledge: the code's ranks could not be written ({error})"));
+        }
+    }
+}
+
 /// A vectorizing pass under way: what the knowledge pane and the status bar show (the user,
 /// 2026-10-22: Reindexar «termina tan rápido» while the vectors go on unseen for minutes).
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -937,12 +1005,14 @@ pub struct Vectorizing {
     pub total: usize,
     /// Seconds left at the pace so far; `None` before the first batch is in.
     pub eta_secs: Option<u64>,
+    /// Held by the user ([`pause_vectorizing`]): no batch runs and the embedder is let go.
+    pub paused: bool,
 }
 
 impl Vectorizing {
     fn now(workspace_id: Option<&str>, space: &str, done: usize, total: usize, elapsed: Duration) -> Self {
         let eta_secs = (done > 0).then(|| (elapsed.as_secs_f64() / done as f64 * total.saturating_sub(done) as f64).round() as u64);
-        Vectorizing { workspace_id: workspace_id.map(str::to_string), space: space.to_string(), done, total, eta_secs }
+        Vectorizing { workspace_id: workspace_id.map(str::to_string), space: space.to_string(), done, total, eta_secs, paused: PAUSED.load(Ordering::SeqCst) }
     }
 }
 
@@ -953,6 +1023,20 @@ fn set_progress(progress: Option<Vectorizing>) {
         *held = progress;
     }
     crate::background::changed();
+}
+
+/// Held by the user from the engines panel (2026-11-17: «si quiero ocupar urgentemente el pc pero el
+/// embedding me tiene tomada toda la cpu/ram»). For this session: the next launch vectorizes again.
+static PAUSED: AtomicBool = AtomicBool::new(false);
+
+/// Holds the vectorizing passes between batches, or lets them go on. The pass under way shows it at
+/// once; it lets the embedder go itself, after the batch in flight.
+pub fn pause_vectorizing(paused: bool) {
+    PAUSED.store(paused, Ordering::SeqCst);
+    if let Some(mut progress) = vectorizing() {
+        progress.paused = paused;
+        set_progress(Some(progress));
+    }
 }
 
 /// The vectorizing pass under way, if any.
@@ -984,6 +1068,12 @@ pub struct Found {
     /// The index collection, which is what tells two `README.md` apart.
     #[serde(skip)]
     pub collection: String,
+    /// A code result's place in its repository's import graph, in words — `imported by 4:
+    /// a.rs, b.rs, c.rs +1 · imports index.rs` — for the model to follow with `file_outline` or
+    /// `find_usages`. Shown, never ranked by: the graph as a voter moved whatever hung from a file
+    /// that imports everything (`code_bench`, 2026-11-17). Empty when the map is not built.
+    #[serde(skip)]
+    pub links: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
@@ -1151,6 +1241,7 @@ fn found_of(scope: &Scope, metas: &HashMap<String, (i64, String)>, hit: index::H
         indexed_at,
         matched_by: MatchMethod::TextAndCode,
         collection: hit.collection,
+        links: String::new(),
     }
 }
 
@@ -1170,12 +1261,31 @@ fn same_place(a: &Found, b: &Found) -> bool {
 /// Reciprocal rank fusion: each list votes `1 / (k + rank)` for its results; the same place found by
 /// several retrievers ([`same_place`]) adds up.
 pub fn fuse(lists: Vec<Vec<Found>>, limit: usize) -> Vec<Found> {
+    fuse_by(lists.into_iter().map(|list| (list, RRF_K)).collect(), limit)
+}
+
+/// The semantic list's `k` for a question that names no identifier ([`identifiers`]). At k = 60 a
+/// list's first place and its thirtieth are nearly the same vote, so a file the lexical list held
+/// anywhere outvoted the one the vectors put first: on questions that describe code, fusing the two
+/// found the file in the first five less often than the vectors alone. At 10 the vectors' first
+/// places count; measured on 43 such questions in two languages and two models (`code_bench`,
+/// 2026-11-17), hit@5 in Spanish rose from 81% to 86% (qwen3) and from 67% to 72% (harrier),
+/// English held, and a question that names code — fused as before — stayed at 100%.
+const DESCRIBED_SEMANTIC_K: f32 = 10.0;
+
+/// [`fuse`] with each list's own `k` for the order. `score` stays the sum at [`RRF_K`], so a score
+/// above one list's first vote still means two retrievers agreed ([`strong`]).
+pub fn fuse_by(lists: Vec<(Vec<Found>, f32)>, limit: usize) -> Vec<Found> {
     let mut merged: Vec<Found> = Vec::new();
-    for list in lists {
+    let mut order: Vec<f32> = Vec::new();
+    for (list, k) in lists {
         for (rank, found) in list.into_iter().enumerate() {
             let vote = 1.0 / (RRF_K + rank as f32 + 1.0);
-            match merged.iter_mut().find(|m| same_place(m, &found)) {
-                Some(existing) => {
+            let pull = 1.0 / (k + rank as f32 + 1.0);
+            match merged.iter().position(|m| same_place(m, &found)) {
+                Some(at) => {
+                    order[at] += pull;
+                    let existing = &mut merged[at];
                     existing.score += vote;
                     if existing.matched_by != found.matched_by {
                         existing.matched_by = MatchMethod::Hybrid;
@@ -1189,13 +1299,17 @@ pub fn fuse(lists: Vec<Vec<Found>>, limit: usize) -> Vec<Found> {
                         *existing = Found { score, matched_by: existing.matched_by, ..found };
                     }
                 }
-                None => merged.push(Found { score: vote, ..found }),
+                None => {
+                    merged.push(Found { score: vote, ..found });
+                    order.push(pull);
+                }
             }
         }
     }
-    merged.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-    merged.truncate(limit);
-    merged
+    let mut ranked: Vec<(f32, Found)> = order.into_iter().zip(merged).collect();
+    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(limit);
+    ranked.into_iter().map(|(_, found)| found).collect()
 }
 
 /// The note a result is (`note:<id>`) or was recorded into (`meeting:<id>`).
@@ -1283,13 +1397,14 @@ pub async fn search_answer(scope: &Scope, question: &str, limit: usize) -> Resul
 /// app's database. For a caller that refreshed the scope itself from a database of its own (the
 /// bench's retrieval tasks, `crate::evals`); everything else goes through [`search_answer`].
 pub async fn search_indexed(scope: &Scope, question: &str, limit: usize) -> Result<Answer, String> {
-    let (setting, ollama_url) = crate::ai_usage::with_conn(|conn| {
+    let (setting, ollama_url, code) = crate::ai_usage::with_conn(|conn| {
         (
             crate::db::queries::get_setting(conn, embed::KEY_EMBED_MODEL).ok().flatten(),
             crate::db::queries::get_setting(conn, crate::hybrid::config::KEY_URL_OLLAMA).ok().flatten(),
+            crate::db::queries::get_setting(conn, KEY_CODE_VECTORS).ok().flatten().is_none_or(|v| code_vectors_value(&v)),
         )
     })
-    .unwrap_or((None, None));
+    .unwrap_or((None, None, true));
     let space = embed::Space::resolve(setting.as_deref(), ollama_url.as_deref().unwrap_or("http://127.0.0.1:11434")).await;
     let lexical_hits = {
         let scope = scope.clone();
@@ -1297,7 +1412,7 @@ pub async fn search_indexed(scope: &Scope, question: &str, limit: usize) -> Resu
         tokio::task::spawn_blocking(move || lexical(&scope, &question, limit * 3, MapUse::Build)).await.map_err(|e| e.to_string())?
     };
     let (semantic_hits, embedding_model, embedding_fallback, embedding_indexing) = match &space {
-        Some(space) => match semantic(scope, question, space).await {
+        Some(space) => match semantic(scope, question, space, code).await {
             Ok((hits, indexing)) => (hits, Some(space.model_label()), None, indexing),
             Err(reason) => (Vec::new(), None, Some(reason), false),
         },
@@ -1310,7 +1425,9 @@ pub async fn search_indexed(scope: &Scope, question: &str, limit: usize) -> Resu
             (Vec::new(), None, Some(reason), false)
         }
     };
-    let found = fuse(vec![lexical_hits, semantic_hits], limit);
+    let semantic_k = if identifiers(question).is_empty() { DESCRIBED_SEMANTIC_K } else { RRF_K };
+    let mut found = fuse_by(vec![(lexical_hits, RRF_K), (semantic_hits, semantic_k)], limit);
+    link_code(scope, &mut found);
     Ok(Answer {
         found,
         embedding_model,
@@ -1323,22 +1440,29 @@ pub async fn search_indexed(scope: &Scope, question: &str, limit: usize) -> Resu
     })
 }
 
-/// The semantic retriever: a few pending prose chunks embedded first, then the question's nearest
+/// The semantic retriever: a few pending chunks embedded first, then the question's nearest
 /// chunks above [`COSINE_FLOOR`] — private ones only for a local model.
 /// An empty list means the vector search ran without relevant matches.
-async fn semantic(scope: &Scope, question: &str, space: &embed::Space) -> Result<(Vec<Found>, bool), EmbeddingFallback> {
+async fn semantic(scope: &Scope, question: &str, space: &embed::Space, code: bool) -> Result<(Vec<Found>, bool), EmbeddingFallback> {
     use EmbeddingFallback::{Failed, Indexing, NoVectors};
 
     let keys = scope.keys();
     // A handful of prose chunks without vectors (a new folder, a small project) are embedded now,
     // before searching: a few seconds, and the question is the one that needed them — a Spanish
     // question about an English decision record finds nothing lexically. More than that goes to
-    // the background, and this search stays lexical until it is done.
-    let pending = index::global().and_then(|index| index::pending_vectors(&index, &space.name, &keys, SYNC_EMBED + 1).map_err(|e| e.to_string()));
+    // the background, and this search stays lexical until it is done. Code never waits here: a
+    // branch switch leaves hundreds of its chunks pending, and at ~0.2 s each (`code_bench`) a
+    // question would wait a minute — it is always the background's.
+    let pending = index::global().and_then(|index| index::pending_vectors(&index, &space.name, &keys, SYNC_EMBED + 1, false).map_err(|e| e.to_string()));
     let mut indexing_failed = pending.is_err();
     let pending = pending.unwrap_or_default();
-    let indexing = pending.len() > SYNC_EMBED;
+    let code_left = code
+        && index::global().ok().and_then(|index| index::count_pending_vectors(&index, &space.name, &keys, true).ok()).is_some_and(|left| left > pending.len());
+    let indexing = pending.len() > SYNC_EMBED || code_left;
     if !pending.is_empty() && pending.len() <= SYNC_EMBED {
+        if code_left {
+            vectorize_in_background(scope.clone(), space.clone());
+        }
         let texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
         indexing_failed = match space.embed_documents(&texts).await {
             Ok(vectors) => {
@@ -1370,6 +1494,46 @@ async fn semantic(scope: &Scope, question: &str, space: &embed::Space) -> Result
         ..found_of(scope, &metas, hit)
     }).collect();
     Ok((found, indexing))
+}
+
+/// Fills [`Found::links`] for the code results of `scope`'s repositories, from each one's code map
+/// when it is built — never building one for this.
+fn link_code(scope: &Scope, found: &mut [Found]) {
+    let roots: HashMap<String, &Path> = scope.repos.iter().map(|(id, _, root)| (repo_key(id), root.as_path())).collect();
+    let mut maps: HashMap<String, Option<std::sync::Arc<crate::codemap::Snapshot>>> = HashMap::new();
+    for f in found.iter_mut() {
+        if !matches!(f.source.as_str(), "repo" | "symbol") || chunker::kind_of(&f.path) != chunker::Kind::Code {
+            continue;
+        }
+        let Some(root) = roots.get(&f.collection) else { continue };
+        let map = maps.entry(f.collection.clone()).or_insert_with(|| crate::codemap::snapshot_if_built(&root.to_string_lossy()));
+        let Some(map) = map else { continue };
+        let Some(file) = map.index_of(&f.path) else { continue };
+        let names = |files: &[u32]| files.iter().map(|n| map.path(*n).to_string()).collect::<Vec<_>>();
+        f.links = links_text(&names(map.imported_by(file)), &names(map.edges(file)));
+    }
+}
+
+/// How many neighbours [`links_text`] names on each side.
+const LINKS_NAMED: usize = 3;
+
+/// A file's importers and imports in one line: `imported by 4: a, b, c +1 · imports x, y`.
+fn links_text(imported_by: &[String], imports: &[String]) -> String {
+    let named = |paths: &[String]| {
+        let mut out = paths.iter().take(LINKS_NAMED).cloned().collect::<Vec<_>>().join(", ");
+        if paths.len() > LINKS_NAMED {
+            out.push_str(&format!(" +{}", paths.len() - LINKS_NAMED));
+        }
+        out
+    };
+    let mut parts = Vec::new();
+    if !imported_by.is_empty() {
+        parts.push(format!("imported by {}: {}", imported_by.len(), named(imported_by)));
+    }
+    if !imports.is_empty() {
+        parts.push(format!("imports {}", named(imports)));
+    }
+    parts.join(" · ")
 }
 
 /// The repositories and folders of `scope` an index is still being built for, or that have never
@@ -1439,7 +1603,8 @@ fn nothing_found(searched: &[String]) -> String {
 }
 
 /// Results as the text a model reads: numbered, cited `path:start-end` (a document by its id),
-/// with where each came from, the passage below.
+/// with where each came from, a code file's importers and imports ([`Found::links`]), the passage
+/// below.
 pub fn as_text(found: &[Found]) -> String {
     if found.is_empty() {
         return nothing_found(&[]);
@@ -1451,7 +1616,8 @@ pub fn as_text(found: &[Found]) -> String {
             let file = matches!(f.source.as_str(), "repo" | "folder" | "symbol");
             let place = if file && f.start_line > 0 { format!("{}:{}-{}", f.path, f.start_line, f.end_line) } else { f.path.clone() };
             let title = if f.heading.is_empty() { String::new() } else { format!(" — {}", f.heading) };
-            format!("{}. {place}{title}{}\n{}", i + 1, provenance(f), f.snippet)
+            let links = if f.links.is_empty() { String::new() } else { format!("\n↳ {}", f.links) };
+            format!("{}. {place}{title}{}{links}\n{}", i + 1, provenance(f), f.snippet)
         })
         .collect::<Vec<_>>()
         .join("\n\n")
@@ -1727,6 +1893,55 @@ mod tests {
     }
 
     #[test]
+    fn a_code_results_neighbours_are_named_in_one_line() {
+        let paths = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(links_text(&paths(&["a.rs", "b.rs", "c.rs", "d.rs"]), &paths(&["x.rs"])), "imported by 4: a.rs, b.rs, c.rs +1 · imports x.rs");
+        assert_eq!(links_text(&[], &paths(&["x.rs", "y.rs"])), "imports x.rs, y.rs");
+        assert_eq!(links_text(&[], &[]), "");
+        let linked = Found { links: "imports x.rs".into(), ..found("src/a.rs", 1, 9, "repo") };
+        let text = as_text(&[linked, found("src/b.rs", 1, 9, "repo")]);
+        assert!(text.contains("1. src/a.rs:1-9\n↳ imports x.rs\nx"), "{text}");
+        assert!(text.contains("2. src/b.rs:1-9\nx"), "no line without links: {text}");
+    }
+
+    #[test]
+    fn link_code_reads_the_built_map_of_the_results_repository() {
+        let dir = std::env::temp_dir().join(format!("codeflow-links-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/cart.ts"), "import { total } from \"./total\";\nexport const cart = () => total([]);\n").unwrap();
+        std::fs::write(dir.join("src/total.ts"), "export function total(items: number[]) { return items.length; }\n").unwrap();
+        std::fs::write(dir.join("README.md"), "# Cart\n").unwrap();
+        let root = dir.to_string_lossy().to_string();
+        let scope = Scope { repos: vec![("p".into(), "shop".into(), dir.clone())], ..Default::default() };
+        let in_repo = |path: &str| Found { collection: repo_key("p"), ..found(path, 1, 2, "repo") };
+        let mut results = vec![in_repo("src/total.ts"), in_repo("README.md")];
+        link_code(&scope, &mut results);
+        assert!(results[0].links.is_empty(), "no map built yet, and none is built for this");
+        crate::codemap::snapshot(&root).unwrap();
+        link_code(&scope, &mut results);
+        assert_eq!(results[0].links, "imported by 1: src/cart.ts");
+        assert!(results[1].links.is_empty(), "a document gets no links");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_described_question_lets_the_vectors_first_place_lead_and_keeps_agreement_readable() {
+        // The words found noise first and the answer's neighbour far down; the vectors put the
+        // answer first.
+        let words: Vec<Found> = (0..8).map(|i| found(&format!("w{i}.rs"), 1, 5, "repo")).collect();
+        let mut meaning: Vec<Found> = vec![Found { matched_by: MatchMethod::Semantic, ..found("answer.rs", 1, 5, "repo") }];
+        meaning.extend((0..6).map(|i| Found { matched_by: MatchMethod::Semantic, ..found(&format!("v{i}.rs"), 1, 5, "repo") }));
+        meaning.push(Found { matched_by: MatchMethod::Semantic, ..found("w0.rs", 1, 5, "repo") });
+        let even = fuse(vec![words.clone(), meaning.clone()], 5);
+        assert_eq!(even[0].path, "w0.rs", "at k = 60 a file both hold anywhere wins");
+        let led = fuse_by(vec![(words, RRF_K), (meaning, DESCRIBED_SEMANTIC_K)], 5);
+        assert_eq!(led[0].path, "answer.rs", "at k = 10 the vectors' first place leads");
+        let agreed = led.iter().find(|f| f.path == "w0.rs").unwrap();
+        assert!(agreed.score > ONE_VOTE && agreed.matched_by == MatchMethod::Hybrid, "the score still reads as agreement");
+        assert!(led[0].score <= ONE_VOTE, "one list's first place is still one vote");
+    }
+
+    #[test]
     fn rrf_rewards_agreement() {
         let fts = vec![found("a.md", 1, 10, "repo"), found("b.md", 1, 5, "repo")];
         let semantic = vec![
@@ -1745,7 +1960,7 @@ mod tests {
     async fn a_model_without_vectors_reports_why_the_query_stayed_lexical() {
         let model = crate::localai::embedder::find(crate::localai::embedder::DEFAULT_EMBED_MODEL_ID).unwrap();
         let space = embed::Space::bundled(model);
-        assert_eq!(semantic(&Scope::default(), "search", &space).await, Err(EmbeddingFallback::NoVectors));
+        assert_eq!(semantic(&Scope::default(), "search", &space, true).await, Err(EmbeddingFallback::NoVectors));
     }
 
     /// Fusion merged by path and lines alone, so the `README.md` of two repositories — found by the

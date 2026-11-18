@@ -34,6 +34,11 @@ const INVITATION = /^collab_(?:share|invite|join|join_preview|take_join_link|liv
  *  the window's replies to the app's questions, the interface it already drives through `ui_act`. */
 const SELF = /^(?:agentcli_|flows_bridge_|codi_act_result|codi_register|codi_ui_|mcp_trust|log_frontend_error)/;
 
+/** The memory pane's own writes: they record the user as the author, so a model calling them would
+ *  write or approve memories in the user's name (2026-11-17). A model has `manage_memory`, which
+ *  records it as the agent and approves only what the user asked for. */
+const MEMORY_PANE = /^ai_memory_(?:create|edit|set_status|confirm|settle_clash|delete)$/;
+
 /** Changes to what a model is allowed to do, or to the app itself: run only after the user's yes. */
 const GUARDED = new Set(["setting", "settings", "config", "configure", "trust", "permission", "permissions", "access", "policy", "allow", "automation", "mcp", "autostart", "updater", "update_app", "quit", "relaunch", "restart_app"]);
 
@@ -88,7 +93,7 @@ const NOUNS = [
 
 /** How risky a command is, from the words of its name — the area prefix (`ado_`, `db_`) says nothing. */
 export function riskOf(name) {
-  if (SECRET.test(name) || SELF.test(name) || INVITATION.test(name)) return "blocked";
+  if (SECRET.test(name) || SELF.test(name) || INVITATION.test(name) || MEMORY_PANE.test(name)) return "blocked";
   let plain = name;
   for (const [noun, word] of NOUNS) plain = plain.replace(noun, word);
   const words = plain.split("_").filter(Boolean);

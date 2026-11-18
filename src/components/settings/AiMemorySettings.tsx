@@ -53,6 +53,32 @@ const SOURCE_KEY: Record<string, TranslationKey> = {
   experience: "memory.sourceExperience",
 };
 
+/** Who changed a memory, in its history. */
+const ACTOR_KEY: Record<string, TranslationKey> = {
+  user: "memory.sourceUser",
+  agent: "memory.sourceAgent",
+  flow: "memory.sourceFlow",
+  experience: "memory.sourceExperience",
+  system: "memory.actorSystem",
+};
+
+/** What happened to a memory, in its history. Anything else shows as it is stored. */
+const ACTION_KEY: Record<string, TranslationKey> = {
+  created: "memory.actionCreated",
+  edited: "memory.actionEdited",
+  approved: "memory.actionApproved",
+  revoked: "memory.actionRevoked",
+  candidate: "memory.actionCandidate",
+  confirmed: "memory.actionConfirmed",
+  distinct: "memory.actionDistinct",
+  proposed: "memory.actionProposed",
+  flagged: "memory.actionFlagged",
+  superseded: "memory.actionSuperseded",
+  expired: "memory.actionExpired",
+  code_changed: "memory.actionCodeChanged",
+  code_restored: "memory.actionCodeRestored",
+};
+
 /** Rows per page — the pane pages in SQL instead of loading every memory of every workspace. */
 const PAGE = 50;
 
@@ -457,6 +483,10 @@ export function AiMemorySettings() {
   };
 
   const sourceLabel = (source: string) => (SOURCE_KEY[source] ? t(SOURCE_KEY[source]) : source);
+  /** Who wrote a memory: a model the user asked shows as such, not as the user. */
+  const originLabel = (memory: Memory) => (memory.onRequest ? t("memory.sourceAgentOnRequest") : sourceLabel(memory.source));
+  const actorLabel = (revision: MemoryRevision) =>
+    revision.onRequest ? t("memory.sourceAgentOnRequest") : ACTOR_KEY[revision.actor] ? t(ACTOR_KEY[revision.actor]) : revision.actor;
   const kindOptions = (Object.keys(KIND_KEY) as MemoryKind[]).map((k) => ({ value: k, label: t(KIND_KEY[k]) }));
   const filtering = where !== "all" || status !== "" || debounced.trim() !== "";
 
@@ -590,7 +620,11 @@ export function AiMemorySettings() {
                       <span className="text-[11px] text-[var(--cf-text-muted)]">{t(KIND_KEY[memory.kind])}</span>
                     )}
                     <span className="text-[11px] text-[var(--cf-text-muted)]">· {placeLabel(memory)}</span>
-                    {memory.source !== "user" && <span className="text-[11px] text-[var(--cf-text-muted)]">· {t("memory.from", { source: sourceLabel(memory.source) })}</span>}
+                    {memory.onRequest ? (
+                      <span className="text-[11px] text-[var(--cf-text-muted)]">· {t("memory.writtenOnRequest")}</span>
+                    ) : (
+                      memory.source !== "user" && <span className="text-[11px] text-[var(--cf-text-muted)]">· {t("memory.from", { source: sourceLabel(memory.source) })}</span>
+                    )}
                     {memory.localOnly && <span className={chipClass("warn")}>{t("memory.localOnlyChip")}</span>}
                     {memory.status === "approved" && memory.review?.reason === "code_changed" && <span className={chipClass("warn")}>{t("memory.codeChanged")}</span>}
                     {memory.status === "approved" && memory.review?.reason === "contradicted" && <span className={chipClass("bad")}>{t("memory.contradicted")}</span>}
@@ -697,7 +731,7 @@ export function AiMemorySettings() {
                       memory.approvedAt != null ? t("memory.approvedOn", { date: shortDate(memory.approvedAt) }) : null,
                       memory.confirmedAt != null ? t("memory.confirmedOn", { date: shortDate(memory.confirmedAt) }) : null,
                       memory.usedAt != null ? t("memory.lastUsed", { date: shortDate(memory.usedAt) }) : t("memory.neverUsed"),
-                      t("memory.origin", { source: sourceLabel(memory.source) }),
+                      t("memory.origin", { source: originLabel(memory) }),
                     ]
                       .filter(Boolean)
                       .join(" · ")}
@@ -723,7 +757,7 @@ export function AiMemorySettings() {
                     <span key={index} className="flex min-w-0 items-center gap-1">
                       <ChevronRight size={11} className="shrink-0" />
                       <span className="shrink-0">
-                        {new Date(revision.at).toLocaleString()} · {revision.action} · {revision.actor}
+                        {new Date(revision.at).toLocaleString()} · {ACTION_KEY[revision.action] ? t(ACTION_KEY[revision.action]) : revision.action} · {actorLabel(revision)}
                       </span>
                       {revision.body && (revision.action === "edited" || revision.action === "proposed") && <span className="truncate text-[var(--cf-text-faint)]">— {revision.body}</span>}
                     </span>

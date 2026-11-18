@@ -9,6 +9,7 @@ import {
   knowledgeReindex,
   knowledgeRemoveFolder,
   knowledgeSetCloud,
+  knowledgeSetCodeVectors,
   knowledgeSetEmbedModel,
   knowledgeUpdateFolder,
   type KnowledgeOverview,
@@ -38,6 +39,8 @@ interface KnowledgeStore {
   /** Empties the workspace's part of the index; the next search rebuilds it. */
   clear: () => Promise<void>;
   setCloud: (allowed: boolean) => Promise<void>;
+  /** Code files get vectors too (on) or lose theirs (off). */
+  setCodeVectors: (enabled: boolean) => Promise<void>;
   addFolder: (path: string, localOnly: boolean) => Promise<void>;
   updateFolder: (id: string, patch: { localOnly?: boolean; enabled?: boolean }) => Promise<void>;
   removeFolder: (id: string) => Promise<void>;
@@ -127,6 +130,13 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => {
       if (!ws) return;
       set((s) => (s.overview ? { overview: { ...s.overview, cloudAllowed: allowed } } : {}));
       await guard(() => knowledgeSetCloud(ws, allowed));
+    },
+
+    setCodeVectors: async (enabled) => {
+      const ws = get().workspaceId;
+      if (!ws) return;
+      set((s) => (s.overview ? { overview: { ...s.overview, codeVectors: enabled } } : {}));
+      await guard(() => knowledgeSetCodeVectors(enabled, ws));
     },
 
     addFolder: async (path, localOnly) => {

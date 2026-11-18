@@ -42,6 +42,8 @@ export interface KnowledgeOverview {
   embedSetting: string | null;
   space: string | null;
   embeddingModel: string | null;
+  /** Whether code files get vectors too, beside the prose (`knowledge::KEY_CODE_VECTORS`). */
+  codeVectors: boolean;
   pendingVectors: number;
   repos: { projectId: string; name: string; status: KnowledgeStatus }[];
   folders: { collection: KnowledgeCollection; status: KnowledgeStatus }[];
@@ -91,6 +93,9 @@ export const knowledgeUpdateFolder = (id: string, patch: { localOnly?: boolean; 
   invoke<void>("knowledge_update_folder", { id, localOnly: patch.localOnly ?? null, enabled: patch.enabled ?? null });
 export const knowledgeRemoveFolder = (id: string) => invoke<void>("knowledge_remove_folder", { id });
 export const knowledgeSetCloud = (workspaceId: string, allowed: boolean) => invoke<void>("knowledge_set_cloud", { workspaceId, allowed });
+/** Code vectors on (the workspace's code starts embedding) or off (every code vector is dropped). */
+export const knowledgeSetCodeVectors = (enabled: boolean, workspaceId: string | null) =>
+  invoke<void>("knowledge_set_code_vectors", { enabled, workspaceId });
 /** Chooses the embedding model; with a workspace, its vectors start at once (in the background). */
 export const knowledgeSetEmbedModel = (model: string | null, workspaceId: string | null) =>
   invoke<void>("knowledge_set_embed_model", { model, workspaceId });
@@ -111,8 +116,12 @@ export interface KnowledgeVectorizing {
   total: number;
   /** Seconds left at the pace so far; null before the first batch. */
   etaSecs: number | null;
+  /** Held by the user: no batch runs and the embedder is let go. */
+  paused: boolean;
 }
 export const knowledgeVectorizing = () => invoke<KnowledgeVectorizing | null>("knowledge_vectorizing");
+/** Pauses or resumes vectorizing, for this session. */
+export const knowledgePauseVectorizing = (paused: boolean) => invoke<void>("knowledge_pause_vectorizing", { paused });
 /** Embeds the workspace's backlog in the background (paused by battery saving). */
 export const knowledgeVectorizeBacklog = (workspaceId: string) => invoke<void>("knowledge_vectorize_backlog", { workspaceId });
 

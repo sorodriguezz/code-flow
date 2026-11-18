@@ -911,16 +911,21 @@ pub fn meetings_cancel_job(app: AppHandle, state: State<MeetingsState>, meeting_
 }
 
 /// Finishes `meeting_id` again: `retranscribe` transcribes it anew (another model, the cloud);
-/// `speakers` is how many people there were (0 = unknown).
+/// `speakers` is how many people there were in the separated channel (0 = unknown) and `roster`,
+/// when given, which saved voices among them (`pipeline::Job::roster`) — an empty list clears it.
 #[tauri::command]
-pub fn meetings_reprocess(app: AppHandle, meeting_id: String, retranscribe: bool, speakers: i64, cloud: Option<bool>) -> Result<(), String> {
+pub fn meetings_reprocess(app: AppHandle, meeting_id: String, retranscribe: bool, speakers: i64, cloud: Option<bool>, roster: Option<Vec<String>>) -> Result<(), String> {
     with_db(&app, |conn| {
         let transcriber = match cloud {
             Some(true) => "cloud".to_string(),
             Some(false) => "local".to_string(),
             None => q::get_meeting(conn, &meeting_id)?.map(|m| m.transcriber).unwrap_or_else(|| "local".into()),
         };
-        q::set_processing_choices(conn, &meeting_id, &transcriber, speakers.max(0))
+        q::set_processing_choices(conn, &meeting_id, &transcriber, speakers.max(0))?;
+        match &roster {
+            Some(roster) => q::set_roster(conn, &meeting_id, speakers, roster),
+            None => Ok(()),
+        }
     })?;
     set_status(&app, &meeting_id, "queued", "", "");
     enqueue(&app, JobRequest { meeting_id, retranscribe, import: None, transcribe: true, start_retention: false });
@@ -928,12 +933,16 @@ pub fn meetings_reprocess(app: AppHandle, meeting_id: String, retranscribe: bool
 }
 
 /// Transcribes a recording that was kept for later (`recorded`): the whole pass, from the stored
-/// audio, and the audio's retention counted from now.
+/// audio, and the audio's retention counted from now. `speakers` and `roster`, when given, are who
+/// the user said was there — as in [`meetings_reprocess`].
 #[tauri::command]
-pub fn meetings_transcribe(app: AppHandle, meeting_id: String) -> Result<(), String> {
+pub fn meetings_transcribe(app: AppHandle, meeting_id: String, speakers: Option<i64>, roster: Option<Vec<String>>) -> Result<(), String> {
     let meeting = with_db(&app, |conn| q::get_meeting(conn, &meeting_id))?.ok_or("The meeting no longer exists")?;
     if meeting.status != "recorded" {
         return Err("This meeting is not waiting to be transcribed".into());
+    }
+    if speakers.is_some() || roster.is_some() {
+        with_db(&app, |conn| q::set_roster(conn, &meeting_id, speakers.unwrap_or(meeting.speakers_hint), &roster.clone().unwrap_or_else(|| meeting.roster.clone())))?;
     }
     set_status(&app, &meeting_id, "queued", "", "");
     enqueue(&app, JobRequest { meeting_id, retranscribe: true, import: None, transcribe: true, start_retention: true });
@@ -1074,6 +1083,7 @@ async fn process(app: &AppHandle, request: JobRequest, control: Arc<JobControl>)
         threads: meetings::threads(settings.threads),
         vocabulary: settings.vocabulary.clone(),
         speakers_hint: meeting.speakers_hint.max(0) as usize,
+        roster: meeting.roster.clone(),
         voices: voices
             .into_iter()
             .map(|(row, blob)| pipeline::Voice { id: row.id, name: row.name, is_me: row.is_me, embedding: speaker::from_blob(&blob) })

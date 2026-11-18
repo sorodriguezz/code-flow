@@ -41,7 +41,7 @@ pub fn ai_memory_create(db: State<'_, Db>, input: NewMemory) -> Result<Created, 
 #[tauri::command]
 pub fn ai_memory_edit(db: State<'_, Db>, id: String, patch: Patch) -> Result<Memory, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    changed(ai_memory::edit(&conn, &id, patch))
+    changed(ai_memory::edit(&conn, &id, patch, ai_memory::By::USER))
 }
 
 /// `approved` | `revoked` | `candidate`. `kind`, with `approved`: what the user approves it as — an
@@ -50,9 +50,9 @@ pub fn ai_memory_edit(db: State<'_, Db>, id: String, patch: Patch) -> Result<Mem
 pub fn ai_memory_set_status(db: State<'_, Db>, id: String, status: String, kind: Option<Kind>) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     changed(if status == "approved" {
-        ai_memory::approve(&conn, &id, kind)
+        ai_memory::approve(&conn, &id, kind, ai_memory::By::USER)
     } else {
-        ai_memory::set_status(&conn, &id, &status)
+        ai_memory::set_status(&conn, &id, &status, ai_memory::By::USER)
     })
 }
 

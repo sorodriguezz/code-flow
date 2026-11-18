@@ -2072,6 +2072,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_question_files_to_activity_log(conn)?;
     add_effort_to_agents(conn)?;
     add_identity_to_agents(conn)?;
+    add_roster_to_meetings(conn)?;
     // «Equipo»: teams, their runs, items and channel (`team`).
     crate::team::migrate(conn)?;
     // The agent library, the local backlog and the decision log of the Agents view (`crew`).
@@ -2118,6 +2119,15 @@ pub(crate) fn add_usage_to_activity_log(conn: &Connection) -> rusqlite::Result<(
 pub(crate) fn add_question_files_to_activity_log(conn: &Connection) -> rusqlite::Result<()> {
     if !has_column(conn, "activity_log", "question_files")? {
         conn.execute_batch("ALTER TABLE activity_log ADD COLUMN question_files TEXT;")?;
+    }
+    Ok(())
+}
+
+/// Who the user said was in a meeting: the saved voices ticked before transcribing, as a JSON array
+/// of voice ids (`meeting_queries::MeetingRow::roster`). `'[]'` for every meeting before.
+pub(crate) fn add_roster_to_meetings(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "meetings")? && !has_column(conn, "meetings", "roster")? {
+        conn.execute_batch("ALTER TABLE meetings ADD COLUMN roster TEXT NOT NULL DEFAULT '[]';")?;
     }
     Ok(())
 }
@@ -5568,10 +5578,15 @@ pub(crate) fn add_ai_platform_tables(conn: &Connection) -> rusqlite::Result<()> 
         ("review", "ALTER TABLE ai_memories ADD COLUMN review TEXT;"),
         ("conflicts_with", "ALTER TABLE ai_memories ADD COLUMN conflicts_with TEXT;"),
         ("confirmed_at", "ALTER TABLE ai_memories ADD COLUMN confirmed_at INTEGER;"),
+        // Written by a model because the user asked it to (`ai_memory::By::AGENT_ON_REQUEST`).
+        ("on_request", "ALTER TABLE ai_memories ADD COLUMN on_request INTEGER NOT NULL DEFAULT 0;"),
     ] {
         if !has_column(conn, "ai_memories", column)? {
             conn.execute_batch(ddl)?;
         }
+    }
+    if !has_column(conn, "ai_memory_revisions", "on_request")? {
+        conn.execute_batch("ALTER TABLE ai_memory_revisions ADD COLUMN on_request INTEGER NOT NULL DEFAULT 0;")?;
     }
     Ok(())
 }

@@ -124,7 +124,8 @@ pub fn run(conn: &Connection, workspace: Option<&str>, project: Option<&str>, cl
         }
         let input = NewMemory { scope: Some(scope), workspace_id: workspace.map(str::to_string), project_id: project.map(str::to_string),
             kind: Some(kind.unwrap_or(Kind::Fact)), title: text("title"), body: text("body"),
-            source: Some(if requested { "user" } else { "agent" }.into()), approved: requested, ..Default::default() };
+            // The model wrote it either way; asked by the user, it is approved and theirs to own.
+            source: Some("agent".into()), on_request: requested, approved: requested, ..Default::default() };
         // Creation can deduplicate into an existing row. It must not become a way for a cloud
         // caller to edit a private memory it could neither list nor read by id.
         if cloud {
@@ -152,9 +153,9 @@ pub fn run(conn: &Connection, workspace: Option<&str>, project: Option<&str>, cl
     }
     match action.as_str() {
         "edit" => { edit(conn, &id, Patch { title: args.get("title").and_then(Value::as_str).map(str::to_string),
-            body: args.get("body").and_then(Value::as_str).map(str::to_string), kind, ..Default::default() })?; }
-        "approve" => approve(conn, &id, kind)?,
-        "revoke" => set_status(conn, &id, "revoked")?,
+            body: args.get("body").and_then(Value::as_str).map(str::to_string), kind, ..Default::default() }, By::AGENT_ON_REQUEST)?; }
+        "approve" => approve(conn, &id, kind, By::AGENT_ON_REQUEST)?,
+        "revoke" => set_status(conn, &id, "revoked", By::AGENT_ON_REQUEST)?,
         "delete" => delete(conn, &id).map_err(|e| e.to_string())?,
         _ => return Err("unknown memory action".into()),
     }

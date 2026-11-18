@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Server, Square } from "lucide-react";
+import { Pause, Play, Server, Square } from "lucide-react";
 import { Tooltip } from "../common/Tooltip";
 import { iconButtonClass } from "../common/Button";
 import { useBackgroundStore } from "../../state/backgroundStore";
 import { formatBytes } from "../../state/systemLoadStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import { knowledgePauseVectorizing } from "../../lib/tauri/knowledgeCommands";
+import { pushErrorToast } from "../../state/toastStore";
 
 const PANEL_WIDTH = 340;
 
@@ -163,8 +165,20 @@ export function EnginesActivity() {
 
             {vectorizing && (
               <>
-                <p className="mt-2 border-t border-[var(--cf-border)] pt-2 text-[12px] font-semibold">{t("engines.vectorizing")}</p>
-                <VectorizingLine done={vectorizing.done} total={vectorizing.total} etaSecs={vectorizing.etaSecs} />
+                <div className="mt-2 flex items-center gap-2 border-t border-[var(--cf-border)] pt-2">
+                  <p className="min-w-0 flex-1 text-[12px] font-semibold">{t("engines.vectorizing")}</p>
+                  <Tooltip label={t(vectorizing.paused ? "engines.vectorizingResume" : "engines.vectorizingPause")}>
+                    <button
+                      type="button"
+                      className={iconButtonClass({ size: "sm" })}
+                      aria-label={t(vectorizing.paused ? "engines.vectorizingResume" : "engines.vectorizingPause")}
+                      onClick={() => void knowledgePauseVectorizing(!vectorizing.paused).catch((e) => pushErrorToast(String(e)))}
+                    >
+                      {vectorizing.paused ? <Play size={11} /> : <Pause size={11} />}
+                    </button>
+                  </Tooltip>
+                </div>
+                <VectorizingLine done={vectorizing.done} total={vectorizing.total} etaSecs={vectorizing.etaSecs} paused={vectorizing.paused} />
               </>
             )}
 
@@ -194,7 +208,7 @@ export function EnginesActivity() {
 }
 
 /** A vectorizing pass: a bar, «1.240 / 8.709», and the time left. Shared with the knowledge pane. */
-export function VectorizingLine({ done, total, etaSecs }: { done: number; total: number; etaSecs: number | null }) {
+export function VectorizingLine({ done, total, etaSecs, paused = false }: { done: number; total: number; etaSecs: number | null; paused?: boolean }) {
   const t = useT();
   const locale = useLanguageStore((s) => s.language) === "es" ? "es-CL" : "en-US";
   const share = total > 0 ? done / total : 0;
@@ -207,7 +221,7 @@ export function VectorizingLine({ done, total, etaSecs }: { done: number; total:
         {done.toLocaleString(locale)} / {total.toLocaleString(locale)}
       </span>
       <span className="shrink-0 text-[10.5px] text-[var(--cf-text-muted)]">
-        {etaSecs === null ? t("engines.etaStarting") : t("engines.eta", { time: elapsed(etaSecs) })}
+        {paused ? t("engines.vectorizingPaused") : etaSecs === null ? t("engines.etaStarting") : t("engines.eta", { time: elapsed(etaSecs) })}
       </span>
     </div>
   );

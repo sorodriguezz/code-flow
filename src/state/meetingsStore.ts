@@ -33,6 +33,7 @@ import {
   type MeetingBench,
   type MeetingDetail,
   type MeetingMode,
+  type MeetingRosterArgs,
   type MeetingsStatus,
   type ProgressEvent,
   meetingsSetMicMuted,
@@ -172,10 +173,11 @@ interface MeetingsState {
   /** `transcribe` overrides the «Al detener» setting for this one recording. */
   stop: (meetingId: string, transcribe?: boolean) => Promise<void>;
   /** Transcribes a recording that was kept for later. */
-  transcribe: (meetingId: string) => Promise<void>;
+  /** With `who`, who the user said was there (the roster dialog). */
+  transcribe: (meetingId: string, who?: MeetingRosterArgs) => Promise<void>;
   discard: (meetingId: string) => Promise<void>;
   remove: (meetingId: string) => Promise<void>;
-  reprocess: (meetingId: string, retranscribe: boolean, speakers: number, cloud?: boolean) => Promise<void>;
+  reprocess: (meetingId: string, retranscribe: boolean, speakers: number, cloud?: boolean, roster?: string[]) => Promise<void>;
   importFile: (noteId: string, workspaceId: string, path: string, language: string) => Promise<void>;
   install: (item: "vad" | "voices") => Promise<void>;
   cancelInstall: () => Promise<void>;
@@ -414,18 +416,18 @@ export const useMeetingsStore = create<MeetingsState>((set, get) => ({
     }
   },
 
-  transcribe: async (meetingId) => {
+  transcribe: async (meetingId, who) => {
     try {
-      await meetingsTranscribe(meetingId);
+      await meetingsTranscribe(meetingId, who);
       await get().refreshStatus();
     } catch (error) {
       pushErrorToast(String(error));
     }
   },
 
-  reprocess: async (meetingId, retranscribe, speakers, cloud) => {
+  reprocess: async (meetingId, retranscribe, speakers, cloud, roster) => {
     try {
-      await meetingsReprocess(meetingId, retranscribe, speakers, cloud);
+      await meetingsReprocess(meetingId, retranscribe, speakers, cloud, roster);
       await get().refreshStatus();
     } catch (error) {
       pushErrorToast(String(error));

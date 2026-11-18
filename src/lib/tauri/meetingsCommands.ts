@@ -23,7 +23,11 @@ export interface Meeting {
   audioFile: string;
   audioBytes: number;
   audioExpiresAt: string;
+  /** People in the separated channel the user said there were (0 = unknown): the call's side in a
+   *  call, everyone in a room. */
   speakersHint: number;
+  /** The saved voices the user said were there (`Voice.id`); empty when they did not say. */
+  roster: string[];
   liveComplete: boolean;
   createdAt: string;
   updatedAt: string;
@@ -147,12 +151,19 @@ export const meetingsPause = (meetingId: string, paused: boolean) => invoke<void
 /** `transcribe` overrides the «Al detener» setting for this recording; omitted, the setting decides. */
 export const meetingsStop = (meetingId: string, transcribe?: boolean) => invoke<Meeting>("meetings_stop", { meetingId, transcribe });
 /** Transcribes a recording that was kept for later. */
-export const meetingsTranscribe = (meetingId: string) => invoke<void>("meetings_transcribe", { meetingId });
+/** Who was there, as told before the voices are separated: `speakers` in the separated channel, and
+ *  which saved voices among them. */
+export interface MeetingRosterArgs {
+  speakers: number;
+  roster: string[];
+}
+export const meetingsTranscribe = (meetingId: string, who?: MeetingRosterArgs) =>
+  invoke<void>("meetings_transcribe", { meetingId, speakers: who?.speakers ?? null, roster: who?.roster ?? null });
 export const meetingsDiscard = (meetingId: string) => invoke<void>("meetings_discard", { meetingId });
 export const meetingsDelete = (meetingId: string) => invoke<void>("meetings_delete", { meetingId });
 export const meetingsCancelJob = (meetingId: string) => invoke<void>("meetings_cancel_job", { meetingId });
-export const meetingsReprocess = (meetingId: string, retranscribe: boolean, speakers: number, cloud?: boolean) =>
-  invoke<void>("meetings_reprocess", { meetingId, retranscribe, speakers, cloud });
+export const meetingsReprocess = (meetingId: string, retranscribe: boolean, speakers: number, cloud?: boolean, roster?: string[]) =>
+  invoke<void>("meetings_reprocess", { meetingId, retranscribe, speakers, cloud, roster: roster ?? null });
 export const meetingsImport = (noteId: string, workspaceId: string, path: string, language: string) =>
   invoke<Meeting>("meetings_import", { noteId, workspaceId, path, language });
 

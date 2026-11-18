@@ -100,7 +100,7 @@ export function AiKnowledgeSettings() {
   const t = useT();
   const ask = useConfirmStore((s) => s.ask);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const { workspaceId: loadedWorkspaceId, overview, reindexing, progress, load, reindex, clear, setCloud, addFolder, updateFolder, removeFolder, useModel, download, cancelDownload, removeModel } =
+  const { workspaceId: loadedWorkspaceId, overview, reindexing, progress, load, reindex, clear, setCloud, setCodeVectors, addFolder, updateFolder, removeFolder, useModel, download, cancelDownload, removeModel } =
     useKnowledgeStore();
 
   useEffect(() => {
@@ -138,6 +138,13 @@ export function AiKnowledgeSettings() {
       <div className="flex flex-col gap-1.5">
         <span className="text-[12px] text-[var(--cf-text-muted)]">{t("knowledge.semantic")}</span>
         <EmbeddingStatus key={workspaceId} workspaceId={workspaceId} overview={overview} />
+        <label className="flex items-start gap-2 text-[12px] text-[var(--cf-text)]">
+          <Checkbox checked={overview.codeVectors} onChange={(value) => void setCodeVectors(value)} className="mt-[1px]" />
+          <span>
+            {t("knowledge.codeVectors")}
+            <span className="block text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("knowledge.codeVectorsHint")}</span>
+          </span>
+        </label>
         <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
           {overview.embedModels.map((model) => (
             <ModelDownloadRow
@@ -163,7 +170,7 @@ export function AiKnowledgeSettings() {
             />
           ))}
         </div>
-        <VectorSpaces key={`${workspaceId}:${overview.space ?? ""}`} />
+        <VectorSpaces key={`${workspaceId}:${overview.space ?? ""}`} overview={overview} />
       </div>
 
       <div className="flex flex-col gap-1.5">
@@ -395,7 +402,7 @@ function EmbeddingStatus({ workspaceId, overview }: { workspaceId: string; overv
         {embeddingModel && <span className={chipClass(running ? "accent" : indexed > 0 ? "ok" : "neutral")}>{t(state)}</span>}
       </div>
       {vectorizing ? (
-        <VectorizingLine done={vectorizing.done} total={vectorizing.total} etaSecs={vectorizing.etaSecs} />
+        <VectorizingLine done={vectorizing.done} total={vectorizing.total} etaSecs={vectorizing.etaSecs} paused={vectorizing.paused} />
       ) : embeddingModel ? (
         <span className="text-[11px] text-[var(--cf-text-muted)]">
           {t("knowledge.embeddingIndexed", { n: indexed })}
@@ -440,17 +447,18 @@ function formatBytes(bytes: number): string {
 
 /**
  * The vectors each embedding model left in the index. A model switched away from keeps them (going
- * back reuses them); this says what they cost and lets them go — never the model in use. Absent
- * while only the model in use has vectors.
+ * back reuses them); this says what they cost and lets them go — never the model in use. Shown
+ * with only the model in use too (user, 2026-11-17: hidden, the way to free space looked missing);
+ * absent while no model has vectors. Reloaded with the overview, so a pass's new vectors show.
  */
-function VectorSpaces() {
+function VectorSpaces({ overview }: { overview: KnowledgeOverview }) {
   const t = useT();
   const ask = useConfirmStore((s) => s.ask);
   const [spaces, setSpaces] = useState<KnowledgeVectorSpace[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const reload = () => void knowledgeVectorSpaces().then(setSpaces, () => setSpaces([]));
-  useEffect(reload, []);
-  if (!spaces || !spaces.some((s) => !s.current)) return null;
+  useEffect(reload, [overview]);
+  if (!spaces || spaces.length === 0) return null;
   const drop = async (space: KnowledgeVectorSpace) => {
     const ok = await ask({ message: t("knowledge.dropSpaceConfirm", { model: space.label }), confirmLabel: t("knowledge.dropSpace"), danger: true });
     if (!ok) return;
@@ -466,6 +474,7 @@ function VectorSpaces() {
   return (
     <div className="flex flex-col gap-1">
       <span className="text-[11px] text-[var(--cf-text-muted)]">{t("knowledge.vectorSpaces")}</span>
+      <span className="text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("knowledge.vectorSpacesHint")}</span>
       <div className="overflow-hidden rounded-lg border border-[var(--cf-border)]">
         {spaces.map((space) => (
           <div key={space.space} className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1.5 text-[12px] last:border-b-0">

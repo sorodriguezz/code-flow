@@ -71,6 +71,34 @@ fn long_memory_bodies_are_read_completely_in_unicode_safe_pages() {
     assert_eq!(read, m.body);
 }
 
+/// What a model writes is recorded as the agent's, even when the user asked for it — then approved,
+/// and marked as asked for. Only the pane's and the chat's own «recuerda que…» are the user's.
+#[test]
+fn a_model_writing_on_request_is_recorded_as_the_agent_not_the_user() {
+    use serde_json::json;
+    let conn = db();
+    let saved = memory_tool(&conn, tools::WRITE, json!({"action": "create", "user_requested": true, "title": "Usar pnpm", "body": "Siempre pnpm"}));
+    let id = saved["id"].as_str().unwrap();
+    let m = get(&conn, id).unwrap().unwrap();
+    assert_eq!((m.source.as_str(), m.on_request, m.status.as_str()), ("agent", true, "approved"));
+    assert!(!note_line(&m).contains("origen"), "the user's rule, not discounted as a model's");
+    memory_tool(&conn, tools::WRITE, json!({"action": "edit", "user_requested": true, "id": id, "body": "Siempre pnpm, nunca npm"}));
+    let history = revisions(&conn, id).unwrap();
+    assert!(history.iter().all(|r| r.actor == "agent" && r.on_request), "{history:?}");
+    assert!(get(&conn, id).unwrap().unwrap().approved_at.is_some());
+
+    let proposal = memory_tool(&conn, tools::WRITE, json!({"action": "create", "user_requested": false, "title": "Usar colas", "body": "Evaluar"}));
+    let proposal = get(&conn, proposal["id"].as_str().unwrap()).unwrap().unwrap();
+    assert_eq!((proposal.source.as_str(), proposal.on_request), ("agent", false));
+
+    // The pane's edit is the user's.
+    edit(&conn, id, Patch { body: Some("pnpm".into()), ..Default::default() }, By::USER).unwrap();
+    assert_eq!(revisions(&conn, id).unwrap()[0].actor, "user");
+    // The window cannot claim a model's request.
+    let input: NewMemory = serde_json::from_value(json!({"title": "x", "body": "", "onRequest": true})).unwrap();
+    assert!(!input.on_request);
+}
+
 #[test]
 fn live_memory_catalog_changes_after_edits_revocations_and_the_last_deletion() {
     use serde_json::json;
@@ -242,7 +270,7 @@ fn approving_a_replacement_revokes_the_old_one_and_expiry_revokes_too() {
     let mut newer = new(Scope::Project, Kind::Decision, "Node 22", "Migramos a Node 22.", false);
     newer.supersedes = Some(old.id.clone());
     let newer = create(&conn, newer).unwrap();
-    set_status(&conn, &newer.id, "approved").unwrap();
+    set_status(&conn, &newer.id, "approved", By::USER).unwrap();
     assert_eq!(get(&conn, &old.id).unwrap().unwrap().status, "revoked");
     assert_eq!(revisions(&conn, &old.id).unwrap()[0].action, "superseded");
     let mut short = new(Scope::Project, Kind::Fact, "Sprint", "Congelado hasta el viernes", true);
@@ -265,7 +293,7 @@ fn a_memory_past_its_expiry_never_reaches_a_model() {
 fn edits_are_kept_as_revisions() {
     let conn = db();
     let m = create(&conn, new(Scope::Workspace, Kind::Convention, "Commits", "En inglés", true)).unwrap();
-    edit(&conn, &m.id, Patch { body: Some("En español, imperativo".into()), ..Default::default() }).unwrap();
+    edit(&conn, &m.id, Patch { body: Some("En español, imperativo".into()), ..Default::default() }, By::USER).unwrap();
     let history = revisions(&conn, &m.id).unwrap();
     assert_eq!(history[0].action, "edited");
     assert_eq!(history[0].body, "En español, imperativo");
@@ -390,11 +418,11 @@ fn proposals_without_a_kind_are_facts_and_the_users_are_preferences() {
 fn approving_lets_the_user_change_the_kind() {
     let conn = db();
     let candidate = propose(&conn, agent("Los endpoints van en kebab-case", "")).unwrap().0;
-    approve(&conn, &candidate.id, Some(Kind::Convention)).unwrap();
+    approve(&conn, &candidate.id, Some(Kind::Convention), By::USER).unwrap();
     let memory = get(&conn, &candidate.id).unwrap().unwrap();
     assert_eq!((memory.status.as_str(), memory.kind.as_str()), ("approved", "convention"));
     let other = propose(&conn, agent("El staging se borra los lunes", "")).unwrap().0;
-    approve(&conn, &other.id, None).unwrap();
+    approve(&conn, &other.id, None, By::USER).unwrap();
     assert_eq!(get(&conn, &other.id).unwrap().unwrap().kind, "fact", "no kind given: as it was");
 }
 
@@ -431,7 +459,7 @@ fn ties_go_to_the_memory_used_more() {
 fn the_note_names_kind_approval_date_and_origin() {
     let conn = db();
     let proposal = propose(&conn, agent("Las ramas se llaman feature/<ticket>", "")).unwrap().0;
-    approve(&conn, &proposal.id, Some(Kind::Convention)).unwrap();
+    approve(&conn, &proposal.id, Some(Kind::Convention), By::USER).unwrap();
     create(&conn, new(Scope::Project, Kind::Preference, "Responde en español", "", true)).unwrap();
     let found = relevant(&conn, Some("w1"), Some("p1"), "", false, 2_000).unwrap();
     let (note, sources) = note(&found).unwrap();
@@ -489,7 +517,7 @@ fn a_model_flags_a_contradicted_memory_for_review_without_changing_it() {
     let shown = relevant(&conn, Some("w1"), Some("p1"), "tests jest", false, 2_000).unwrap();
     assert!(note(&shown).unwrap().0.contains("en revisión: un modelo la vio contradicha"));
     // The user corrects it: the doubt is settled with the edit.
-    let edited = edit(&conn, &memory.id, Patch { title: Some("Los tests usan Vitest".into()), ..Default::default() }).unwrap();
+    let edited = edit(&conn, &memory.id, Patch { title: Some("Los tests usan Vitest".into()), ..Default::default() }, By::USER).unwrap();
     assert!(edited.review.is_none() && !edited.needs_review);
 }
 
@@ -503,7 +531,7 @@ fn a_new_memory_that_seems_to_say_otherwise_asks_whether_it_replaces_the_old_one
     assert_eq!(newer.conflicts_with.as_deref(), Some(old.id.as_str()));
     assert_eq!(newer.conflicts_with_title.as_deref(), Some("Los tests usan Jest con cobertura"));
     // Approved by the user, it waits in the queue until the clash is settled.
-    approve(&conn, &newer.id, None).unwrap();
+    approve(&conn, &newer.id, None, By::USER).unwrap();
     assert!(get(&conn, &newer.id).unwrap().unwrap().needs_review);
     let settled = settle_clash(&conn, &newer.id, true).unwrap();
     assert!(settled.conflicts_with.is_none() && !settled.needs_review);
@@ -592,14 +620,14 @@ fn replacing_an_approved_memory_from_the_pane_revokes_the_old_one_at_once() {
     let conn = db();
     let old = create(&conn, new(Scope::Project, Kind::Decision, "Node 18", "", true)).unwrap();
     let newer = create(&conn, new(Scope::Project, Kind::Decision, "Node 22", "", true)).unwrap();
-    assert!(edit(&conn, &newer.id, Patch { supersedes: Some(newer.id.clone()), ..Default::default() }).is_err(), "not itself");
-    assert!(edit(&conn, &newer.id, Patch { supersedes: Some("nope".into()), ..Default::default() }).is_err(), "not a memory that does not exist");
-    let edited = edit(&conn, &newer.id, Patch { supersedes: Some(old.id.clone()), expires_at: Some(now() + DAY_MS), local_only: Some(true), kind: Some(Kind::Fact), ..Default::default() }).unwrap();
+    assert!(edit(&conn, &newer.id, Patch { supersedes: Some(newer.id.clone()), ..Default::default() }, By::USER).is_err(), "not itself");
+    assert!(edit(&conn, &newer.id, Patch { supersedes: Some("nope".into()), ..Default::default() }, By::USER).is_err(), "not a memory that does not exist");
+    let edited = edit(&conn, &newer.id, Patch { supersedes: Some(old.id.clone()), expires_at: Some(now() + DAY_MS), local_only: Some(true), kind: Some(Kind::Fact), ..Default::default() }, By::USER).unwrap();
     assert_eq!(edited.supersedes.as_deref(), Some(old.id.as_str()));
     assert_eq!(edited.supersedes_title.as_deref(), Some("Node 18"), "the pane names what it replaces");
     assert!(edited.local_only && edited.expires_at.is_some() && edited.kind == "fact");
     assert_eq!(get(&conn, &old.id).unwrap().unwrap().status, "revoked");
-    let cleared = edit(&conn, &newer.id, Patch { clear_supersedes: true, clear_expiry: true, ..Default::default() }).unwrap();
+    let cleared = edit(&conn, &newer.id, Patch { clear_supersedes: true, clear_expiry: true, ..Default::default() }, By::USER).unwrap();
     assert!(cleared.supersedes.is_none() && cleared.expires_at.is_none());
 }
 

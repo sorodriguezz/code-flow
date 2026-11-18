@@ -329,7 +329,7 @@ mod tests {
             }
             let vectors: Vec<Vec<f32>> = windows.iter().map(|w| w.2.clone()).collect();
             let mut labels = speaker::cluster(&vectors, 0);
-            speaker::smooth(&mut labels);
+            speaker::smooth(&mut labels, &[]);
             // Each 100 ms of speech: the window covering its middle gives the label; a cluster is
             // read as the truth's speaker it overlaps most (purity), and the frames agreeing count.
             let mut votes = std::collections::HashMap::<(usize, usize), usize>::new();

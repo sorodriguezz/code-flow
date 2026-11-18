@@ -12,8 +12,17 @@
 //! **Clustering** is agglomerative with average linkage on cosine similarity: every window starts
 //! alone, the two most similar clusters merge, until the best pair is less similar than
 //! [`MERGE_THRESHOLD`] — or, when the user said how many people there were, until that many are
-//! left. A long meeting is clustered on an even sample of windows and the rest assigned to the
-//! nearest centroid, which keeps the work quadratic in [`MAX_CLUSTERED`], not in the meeting.
+//! left ([`cluster_guided`]). A long meeting is clustered on an even sample of windows and the rest
+//! assigned to the nearest centroid, which keeps the work quadratic in [`MAX_CLUSTERED`], not in the
+//! meeting.
+//!
+//! **Who the user said was there.** A count is honoured as people, not as groups: a group needs
+//! [`MIN_PERSON_WINDOWS`] of speech to count as one. Stopping at "eight groups" used to leave a
+//! cough or a burst of noise as one of the eight while two real voices were merged to make room —
+//! and the cough's group then vanished in [`smooth`], so eight came out as six. The voices the user
+//! named as present are anchors: each joins the clustering as one more member, two anchors never
+//! merge, and the group an anchor ends in is that person — named however far below
+//! [`MATCH_THRESHOLD`] the match is, because the user said they were there.
 
 use std::ffi::{c_char, c_void, CString};
 use std::path::Path;
@@ -34,6 +43,14 @@ pub const MERGE_THRESHOLD: f32 = 0.45;
 pub const MATCH_THRESHOLD: f32 = 0.55;
 /// The most windows clustered directly.
 const MAX_CLUSTERED: usize = 1_500;
+/// The fewest windows (about five seconds of speech, a window every second) a group needs to count
+/// as one of the people the user said there were. A group a named voice anchors needs one.
+pub const MIN_PERSON_WINDOWS: usize = 4;
+/// The least similarity a named voice needs with a group's speech to join it. Below it the voice
+/// stays alone and comes back as not heard — a voice the user ticked by mistake must not put its
+/// name on a stranger. Well under [`MATCH_THRESHOLD`]: the user said this person was there, and the
+/// same voice across meetings (another microphone, another room) drifts.
+pub const ANCHOR_JOIN: f32 = 0.30;
 
 #[repr(C)]
 struct ExtractorConfig {
@@ -249,12 +266,34 @@ pub fn windows_of(start_ms: i64, end_ms: i64) -> Vec<(i64, i64)> {
     out
 }
 
-/// A label per vector. `expected` > 0 stops at that many clusters; otherwise merging stops below
+/// A label per vector. `expected` > 0 stops at that many people; otherwise merging stops below
 /// [`MERGE_THRESHOLD`]. Labels are numbered by first appearance, so "Persona 1" is whoever spoke
-/// first.
+/// first. Only the tests call it now — the pipeline always goes through [`cluster_guided`].
+#[cfg(test)]
 pub fn cluster(vectors: &[Vec<f32>], expected: usize) -> Vec<usize> {
+    cluster_guided(vectors, expected, &[]).labels
+}
+
+/// What [`cluster_guided`] found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Guided {
+    /// A label per vector, numbered by first appearance.
+    pub labels: Vec<usize>,
+    /// Per anchor, the label of the person it is — `None` when no speech was found for that voice.
+    pub anchors: Vec<Option<usize>>,
+}
+
+/// [`cluster`] with the voices the user said were there as `anchors` (saved embeddings): each is one
+/// more member of the clustering, never merged with another anchor, and comes back with the label
+/// of the person it ended in.
+///
+/// With `expected` > 0, a group counts as a person once it holds [`MIN_PERSON_WINDOWS`] windows (one,
+/// for an anchored group). Two people merge only while there are more than `expected`; a group too
+/// small to be a person always may merge, into whoever it is closest to — so it ends inside a person
+/// instead of standing in for one.
+pub fn cluster_guided(vectors: &[Vec<f32>], expected: usize, anchors: &[Vec<f32>]) -> Guided {
     if vectors.is_empty() {
-        return Vec::new();
+        return Guided { labels: Vec::new(), anchors: vec![None; anchors.len()] };
     }
     // An even sample when there are too many to cluster directly; the rest join the nearest.
     let sampled: Vec<usize> = if vectors.len() > MAX_CLUSTERED {
@@ -263,33 +302,45 @@ pub fn cluster(vectors: &[Vec<f32>], expected: usize) -> Vec<usize> {
     } else {
         (0..vectors.len()).collect()
     };
-    let n = sampled.len();
+    let windows = sampled.len();
+    let items: Vec<&[f32]> = sampled.iter().map(|&i| vectors[i].as_slice()).chain(anchors.iter().map(Vec::as_slice)).collect();
+    let n = items.len();
     // Similarity sums between clusters (average linkage = sum / (|a|·|b|)).
     let mut sums = vec![0f32; n * n];
     for i in 0..n {
         for j in (i + 1)..n {
-            let s = cosine(&vectors[sampled[i]], &vectors[sampled[j]]);
+            let s = cosine(items[i], items[j]);
             sums[i * n + j] = s;
             sums[j * n + i] = s;
         }
     }
     let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
     let mut alive: Vec<bool> = vec![true; n];
-    let mut count = n;
+    // Windows of speech in each cluster (an anchor is not speech), and the anchor it holds.
+    let mut speech: Vec<usize> = (0..n).map(|i| usize::from(i < windows)).collect();
+    let mut anchor_of: Vec<Option<usize>> = (0..n).map(|i| (i >= windows).then(|| i - windows)).collect();
+    let person = |speech: usize, anchor: Option<usize>| speech >= MIN_PERSON_WINDOWS || (anchor.is_some() && speech >= 1);
     loop {
-        if count <= 1 || (expected > 0 && count <= expected) {
-            break;
-        }
+        let people = (0..n).filter(|&i| alive[i] && person(speech[i], anchor_of[i])).count();
+        // Enough people: only a group too small to be one may still merge.
+        let settled = expected > 0 && people <= expected;
         let mut best: Option<(usize, usize, f32)> = None;
         for i in 0..n {
             if !alive[i] {
                 continue;
             }
             for j in (i + 1)..n {
-                if !alive[j] {
+                if !alive[j] || (anchor_of[i].is_some() && anchor_of[j].is_some()) {
+                    continue;
+                }
+                if settled && person(speech[i], anchor_of[i]) && person(speech[j], anchor_of[j]) {
                     continue;
                 }
                 let average = sums[i * n + j] / (members[i].len() * members[j].len()) as f32;
+                // A named voice with no speech yet joins only speech that sounds like it.
+                if (speech[i] == 0 || speech[j] == 0) && average < ANCHOR_JOIN {
+                    continue;
+                }
                 if best.is_none_or(|(_, _, b)| average > b) {
                     best = Some((i, j, average));
                 }
@@ -309,48 +360,60 @@ pub fn cluster(vectors: &[Vec<f32>], expected: usize) -> Vec<usize> {
         }
         let moved = std::mem::take(&mut members[j]);
         members[i].extend(moved);
+        speech[i] += speech[j];
+        anchor_of[i] = anchor_of[i].or(anchor_of[j]);
         alive[j] = false;
-        count -= 1;
     }
-    // Centroids of the surviving clusters, then every vector to its nearest.
-    let clusters: Vec<Vec<f32>> = (0..n)
-        .filter(|&i| alive[i])
-        .filter_map(|i| centroid(members[i].iter().map(|&m| vectors[sampled[m]].as_slice())))
-        .collect();
-    let raw: Vec<usize> = vectors
+    // Centroids of the surviving clusters that hold speech — of the speech alone — then every
+    // vector to its nearest.
+    let kept: Vec<usize> = (0..n).filter(|&i| alive[i] && speech[i] > 0).collect();
+    let clusters: Vec<Vec<f32>> = kept
         .iter()
-        .map(|vector| {
-            clusters
-                .iter()
-                .enumerate()
-                .map(|(index, c)| (index, cosine(vector, c)))
-                .fold((0, f32::MIN), |best, (index, s)| if s > best.1 { (index, s) } else { best })
-                .0
-        })
+        .map(|&i| centroid(members[i].iter().filter(|&&m| m < windows).map(|&m| items[m])).unwrap_or_default())
         .collect();
-    renumber(&raw)
+    let raw: Vec<usize> = vectors.iter().map(|vector| nearest(vector, &clusters)).collect();
+    let mut anchor_raw: Vec<Option<usize>> = vec![None; anchors.len()];
+    for (index, &cluster) in kept.iter().enumerate() {
+        if let Some(anchor) = anchor_of[cluster] {
+            anchor_raw[anchor] = Some(index);
+        }
+    }
+    let (labels, map) = renumbered(&raw);
+    Guided { labels, anchors: anchor_raw.into_iter().map(|a| a.and_then(|a| map.get(&a).copied())).collect() }
 }
 
-/// Labels renumbered by first appearance.
-pub fn renumber(labels: &[usize]) -> Vec<usize> {
+/// The index of the centroid closest to `vector`.
+fn nearest(vector: &[f32], centroids: &[Vec<f32>]) -> usize {
+    centroids
+        .iter()
+        .enumerate()
+        .map(|(index, c)| (index, cosine(vector, c)))
+        .fold((0, f32::MIN), |best, (index, s)| if s > best.1 { (index, s) } else { best })
+        .0
+}
+
+/// Labels renumbered by first appearance, and the old label → new label map.
+pub fn renumbered(labels: &[usize]) -> (Vec<usize>, std::collections::HashMap<usize, usize>) {
     let mut map = std::collections::HashMap::new();
-    labels
+    let out = labels
         .iter()
         .map(|label| {
             let next = map.len();
             *map.entry(*label).or_insert(next)
         })
-        .collect()
+        .collect();
+    (out, map)
 }
 
 /// Smooths a run of labels in time: a window whose neighbours on both sides agree with each other
-/// and not with it is an outlier — one cough in another voice's cluster — and takes theirs.
-pub fn smooth(labels: &mut [usize]) {
+/// and not with it is an outlier — one cough in another voice's cluster — and takes theirs. A window
+/// of a label in `keep` stays: a person the user named may have said one short thing.
+pub fn smooth(labels: &mut [usize], keep: &[usize]) {
     if labels.len() < 3 {
         return;
     }
     for index in 1..labels.len() - 1 {
-        if labels[index - 1] == labels[index + 1] && labels[index] != labels[index - 1] {
+        if labels[index - 1] == labels[index + 1] && labels[index] != labels[index - 1] && !keep.contains(&labels[index]) {
             labels[index] = labels[index - 1];
         }
     }
@@ -464,8 +527,70 @@ mod tests {
     #[test]
     fn an_outlier_between_agreeing_neighbours_takes_their_label() {
         let mut labels = vec![0, 0, 1, 0, 2, 2, 0];
-        smooth(&mut labels);
+        smooth(&mut labels, &[]);
         assert_eq!(labels, vec![0, 0, 0, 0, 2, 2, 0]);
+        let mut labels = vec![0, 0, 1, 0, 2, 2, 0];
+        smooth(&mut labels, &[1]);
+        assert_eq!(labels, vec![0, 0, 1, 0, 2, 2, 0], "a named person's one window stays theirs");
+    }
+
+    /// Three voices that speak at length and a cough of a fourth: told "three", the cough is not one
+    /// of the three — it joins the nearest, and the three voices stay apart.
+    #[test]
+    fn a_count_is_of_people_not_of_coughs() {
+        let mut vectors = Vec::new();
+        for turn in [2.0f32, 5.0, 9.0] {
+            for k in 0..8 {
+                vectors.push(voice(turn, 0.04 * k as f32));
+            }
+        }
+        vectors.push(voice(13.0, 0.0));
+        let labels = cluster(&vectors, 3);
+        assert_eq!(*labels.iter().max().unwrap(), 2, "three people: {labels:?}");
+        assert_ne!(labels[0], labels[8]);
+        assert_ne!(labels[8], labels[16]);
+        assert_ne!(labels[0], labels[16]);
+    }
+
+    /// Two named voices close to each other stay two people, and each comes back with its group —
+    /// even a voice that matches its speech below the naming threshold.
+    #[test]
+    fn named_voices_anchor_their_people_and_never_merge() {
+        let mut vectors = Vec::new();
+        for turn in [2.0f32, 2.3, 9.0] {
+            for k in 0..6 {
+                vectors.push(voice(turn, 0.03 * k as f32));
+            }
+        }
+        let juan = voice(2.0, 0.0);
+        let pedro = voice(2.3, 0.0);
+        let guided = cluster_guided(&vectors, 3, &[juan, pedro]);
+        assert_eq!(*guided.labels.iter().max().unwrap(), 2, "{:?}", guided.labels);
+        assert_eq!(guided.anchors[0], Some(guided.labels[0]), "Juan is the first voice");
+        assert_eq!(guided.anchors[1], Some(guided.labels[6]), "Pedro is the second");
+        assert_ne!(guided.anchors[0], guided.anchors[1]);
+    }
+
+    /// A named voice nobody in the meeting has comes back as not heard, and the count still holds
+    /// for the others.
+    #[test]
+    fn a_named_voice_not_heard_is_said_so() {
+        let mut vectors = Vec::new();
+        for turn in [2.0f32, 9.0] {
+            for k in 0..6 {
+                vectors.push(voice(turn, 0.03 * k as f32));
+            }
+        }
+        // A voice unlike both: what is left of a third once its likeness to the two is taken out.
+        let mut absent = voice(31.0, 0.0);
+        for known in [voice(2.0, 0.0), voice(9.0, 0.0)] {
+            let along = cosine(&absent, &known);
+            absent.iter_mut().zip(&known).for_each(|(a, k)| *a -= along * k);
+            normalise(&mut absent);
+        }
+        let guided = cluster_guided(&vectors, 3, &[absent]);
+        assert_eq!(guided.anchors, vec![None]);
+        assert_eq!(*guided.labels.iter().max().unwrap(), 1, "two voices heard: {:?}", guided.labels);
     }
 
     #[test]

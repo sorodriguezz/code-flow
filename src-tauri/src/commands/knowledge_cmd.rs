@@ -59,6 +59,8 @@ pub struct KnowledgeOverview {
     /// The space vectors are made in now; `None` when no local embedding model is available.
     pub space: Option<String>,
     pub embedding_model: Option<String>,
+    /// Whether code files get vectors too ([`knowledge::KEY_CODE_VECTORS`]).
+    pub code_vectors: bool,
     pub pending_vectors: usize,
     pub repos: Vec<RepoKnowledge>,
     pub folders: Vec<FolderKnowledge>,
@@ -108,7 +110,7 @@ fn summed(kind: &str, statuses: Vec<index::CollectionStatus>) -> index::Collecti
 
 #[tauri::command]
 pub async fn knowledge_overview(db: State<'_, Db>, workspace_id: String) -> Result<KnowledgeOverview, String> {
-    let (scope, (embed_setting, ollama_url), cloud_allowed, all_folders) = {
+    let (scope, (embed_setting, ollama_url), cloud_allowed, all_folders, code_vectors) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let cloud_allowed = !crate::db::queries::get_setting(&conn, &knowledge::cloud_key(&workspace_id))
             .ok()
@@ -119,6 +121,7 @@ pub async fn knowledge_overview(db: State<'_, Db>, workspace_id: String) -> Resu
             embed_settings(&conn),
             cloud_allowed,
             knowledge::collections(&conn, Some(&workspace_id)).map_err(|e| e.to_string())?,
+            code_vectors_setting(&conn),
         )
     };
     let space = embed::Space::resolve(embed_setting.as_deref(), &ollama_url).await;
@@ -137,7 +140,7 @@ pub async fn knowledge_overview(db: State<'_, Db>, workspace_id: String) -> Resu
             .collect();
         let keys = scope.keys();
         let pending_vectors = match space_name.as_deref() {
-            Some(name) => index::count_pending_vectors(&index, name, &keys).map_err(|e| e.to_string())?,
+            Some(name) => index::count_pending_vectors(&index, name, &keys, code_vectors).map_err(|e| e.to_string())?,
             None => 0,
         };
         let sources: Vec<SourceKnowledge> = [("note", "notes:"), ("meeting", "meetings:"), ("doc", "docs:"), ("story", "stories:"), ("review", "reviews:"), ("commit", "commits:")]
@@ -166,7 +169,35 @@ pub async fn knowledge_overview(db: State<'_, Db>, workspace_id: String) -> Resu
         })
         .collect();
     let embedding_model = space.as_ref().map(embed::Space::model_label);
-    Ok(KnowledgeOverview { cloud_allowed, embed_models, embed_setting, space: space.map(|s| s.name), embedding_model, pending_vectors, repos, folders, sources })
+    Ok(KnowledgeOverview { cloud_allowed, embed_models, embed_setting, space: space.map(|s| s.name), embedding_model, code_vectors, pending_vectors, repos, folders, sources })
+}
+
+fn code_vectors_setting(conn: &rusqlite::Connection) -> bool {
+    crate::db::queries::get_setting(conn, knowledge::KEY_CODE_VECTORS).ok().flatten().is_none_or(|v| knowledge::code_vectors_value(&v))
+}
+
+/// Turns code vectors on or off. On: the workspace's code starts embedding in the background, as a
+/// pass the user asked for. Off: every code vector is dropped (the prose keeps its own) — search
+/// finds code by its words and the map again.
+#[tauri::command]
+pub async fn knowledge_set_code_vectors(db: State<'_, Db>, enabled: bool, workspace_id: Option<String>) -> Result<(), String> {
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        crate::db::queries::set_setting(&conn, knowledge::KEY_CODE_VECTORS, if enabled { "1" } else { "0" }).map_err(|e| e.to_string())?;
+    }
+    if enabled {
+        if let Some(workspace_id) = workspace_id {
+            vectorize_workspace(&db, &workspace_id).await?;
+        }
+        return Ok(());
+    }
+    tokio::task::spawn_blocking(|| -> Result<usize, String> {
+        let index = index::global()?;
+        index::drop_code_vectors(&index).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(())
 }
 
 #[tauri::command]
@@ -255,6 +286,12 @@ async fn vectorize_workspace(db: &State<'_, Db>, workspace_id: &str) -> Result<(
 #[tauri::command]
 pub fn knowledge_vectorizing() -> Option<knowledge::Vectorizing> {
     knowledge::vectorizing()
+}
+
+/// Pauses or resumes the vectorizing passes (the engines panel's button).
+#[tauri::command]
+pub fn knowledge_pause_vectorizing(paused: bool) {
+    knowledge::pause_vectorizing(paused);
 }
 
 /// Embeds the workspace's backlog in the background — asked by the main window when the app opens

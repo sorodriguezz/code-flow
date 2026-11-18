@@ -60,6 +60,11 @@ pub struct Job {
     pub vocabulary: String,
     /// How many people the user said there were in the separated channel; 0 = unknown.
     pub speakers_hint: usize,
+    /// The saved voices the user said were in the meeting (ids of [`Job::voices`]). Each anchors its
+    /// person in the clustering and names them ([`speaker::cluster_guided`]); with any named, a
+    /// person no anchor claimed stays unnamed rather than matched against the other saved voices —
+    /// the user said who was there.
+    pub roster: Vec<String>,
     pub voices: Vec<Voice>,
     pub diarize: bool,
 }
@@ -173,6 +178,8 @@ pub fn run(job: &Job, host: &dyn Host) -> Result<Outcome, String> {
     let detector = if job.diarize && segmentation.is_file() { super::turns::Turns::load(&segmentation, &job.embedding_model, job.threads).ok() } else { None };
     let mut turns: HashMap<Channel, Vec<Turn>> = HashMap::new();
     let mut centroids: Vec<Vec<f32>> = Vec::new();
+    // Per centroid, the named voice that anchored it.
+    let mut anchored: Vec<Option<String>> = Vec::new();
     if let Some(extractor) = &extractor {
         for channel in &job.separate {
             let stretches = match &detector {
@@ -187,13 +194,30 @@ pub fn run(job: &Job, host: &dyn Host) -> Result<Outcome, String> {
                 continue;
             }
             let vectors: Vec<Vec<f32>> = windows.iter().map(|w| w.embedding.clone()).collect();
-            let mut labels = speaker::cluster(&vectors, job.speakers_hint);
-            speaker::smooth(&mut labels);
-            let labels = speaker::renumber(&labels);
+            // The named voices this channel can hold: "Tú" is the microphone's in a call, never one
+            // of the people separated out of the call's side.
+            let named: Vec<&Voice> = job
+                .voices
+                .iter()
+                .filter(|v| job.roster.contains(&v.id) && !(v.is_me && *channel == Channel::System))
+                .collect();
+            let anchors: Vec<Vec<f32>> = named.iter().map(|v| v.embedding.clone()).collect();
+            let guided = speaker::cluster_guided(&vectors, job.speakers_hint, &anchors);
+            let mut labels = guided.labels;
+            let keep: Vec<usize> = guided.anchors.iter().flatten().copied().collect();
+            speaker::smooth(&mut labels, &keep);
+            let (labels, map) = speaker::renumbered(&labels);
             let count = labels.iter().max().map_or(0, |m| m + 1);
+            let first = centroids.len();
             for label in 0..count {
                 let members = windows.iter().zip(&labels).filter(|(_, l)| **l == label).map(|(w, _)| w.embedding.as_slice());
                 centroids.push(speaker::centroid(members).unwrap_or_default());
+                anchored.push(None);
+            }
+            for (voice, label) in named.iter().zip(&guided.anchors) {
+                if let Some(label) = label.and_then(|l| map.get(&l).copied()) {
+                    anchored[first + label] = Some(voice.id.clone());
+                }
             }
             turns.insert(*channel, windows.iter().zip(&labels).map(|(w, l)| Turn { start_ms: w.start_ms, end_ms: w.end_ms, label: *l }).collect());
         }
@@ -255,8 +279,12 @@ pub fn run(job: &Job, host: &dyn Host) -> Result<Outcome, String> {
     let lines = transcript::merge(mic.into_iter().chain(system).collect());
 
     // 5. Speakers: who is in the lines, with a voice for each separated one.
-    let saved: Vec<(String, Vec<f32>)> = job.voices.iter().map(|v| (v.id.clone(), v.embedding.clone())).collect();
-    let matched = speaker::match_voices(&centroids, &saved);
+    let matched = if job.roster.is_empty() {
+        let saved: Vec<(String, Vec<f32>)> = job.voices.iter().map(|v| (v.id.clone(), v.embedding.clone())).collect();
+        speaker::match_voices(&centroids, &saved)
+    } else {
+        anchored
+    };
     let mut talk: HashMap<String, i64> = HashMap::new();
     for line in &lines {
         *talk.entry(line.speaker.clone()).or_default() += line.end_ms - line.start_ms;
@@ -536,6 +564,7 @@ mod tests {
             threads: 4,
             vocabulary: String::new(),
             speakers_hint: 0,
+            roster: Vec::new(),
             voices: Vec::new(),
             diarize: false,
         };
@@ -583,6 +612,7 @@ mod tests {
             threads: 4,
             vocabulary: "CQRS".into(),
             speakers_hint: hint,
+            roster: Vec::new(),
             voices: Vec::new(),
             diarize: true,
         };
@@ -630,6 +660,7 @@ mod tests {
             threads: 4,
             vocabulary: "CQRS".into(),
             speakers_hint: std::env::var("CODEFLOW_TEST_SPEAKERS").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            roster: Vec::new(),
             voices: Vec::new(),
             diarize: true,
         };

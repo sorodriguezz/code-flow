@@ -49,6 +49,8 @@ export interface Memory {
   status: MemoryStatus;
   /** `user`, `agent`, `flow`, `experience`… */
   source: string;
+  /** Written by a model (`source` "agent") because the user asked it to. */
+  onRequest: boolean;
   evidence: string[];
   supersedes: string | null;
   localOnly: boolean;
@@ -131,7 +133,10 @@ export interface MemoryRevision {
   action: string;
   title: string;
   body: string;
+  /** `user`, `agent`, `system`, `flow`, `experience`… */
   actor: string;
+  /** A model's change the user asked for. */
+  onRequest: boolean;
 }
 
 export const aiMemoryList = (filter?: MemoryFilter) => invoke<MemoryPage>("ai_memory_list", { filter: filter ?? null });

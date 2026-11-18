@@ -435,13 +435,20 @@ mod tests {
             // bash 3.2 (/bin/bash on macOS) has no PS0, so no C, E or D — only the prompt marks.
             if out.contains("\x1b]133;C") {
                 let tail = &marks[first_a + 1..];
-                let e = tail.iter().position(|m| m.starts_with("633;E;")).expect("no E");
-                assert_eq!(tail[e + 1], "133;C", "{shell}: {marks:?}");
-                assert_eq!(tail[e + 2], "133;D;3", "{shell}: {marks:?}");
-                assert!(tail[e + 3].starts_with("7;file://"), "{shell}: {marks:?}");
-                assert_eq!(tail[e + 4], "133;A", "{shell}: {marks:?}");
+                // The order is checked on the command marks alone: the user's own startup files may
+                // report the cwd too (macOS's `update_terminal_cwd` in `precmd` prints an OSC 7
+                // between C and D), and a cwd report anywhere is harmless. Ours must still come
+                // between D and the next prompt.
+                let command: Vec<&str> = tail.iter().copied().filter(|m| !m.starts_with("7;")).collect();
+                let e = command.iter().position(|m| m.starts_with("633;E;")).expect("no E");
+                assert_eq!(command[e + 1], "133;C", "{shell}: {marks:?}");
+                assert_eq!(command[e + 2], "133;D;3", "{shell}: {marks:?}");
+                assert_eq!(command[e + 3], "133;A", "{shell}: {marks:?}");
+                let d = tail.iter().position(|m| *m == "133;D;3").unwrap();
+                let next_a = d + tail[d..].iter().position(|m| *m == "133;A").unwrap();
+                assert!(tail[d..next_a].iter().any(|m| m.starts_with("7;file://")), "{shell}: no cwd between D and A: {marks:?}");
                 use base64::Engine;
-                let line = base64::engine::general_purpose::STANDARD.decode(&tail[e]["633;E;".len()..]).unwrap();
+                let line = base64::engine::general_purpose::STANDARD.decode(&command[e]["633;E;".len()..]).unwrap();
                 assert_eq!(String::from_utf8(line).unwrap(), "echo hi; (exit 3)");
             } else {
                 assert_eq!(shell, "/bin/bash", "{shell} printed no C mark: {marks:?}");

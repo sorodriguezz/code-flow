@@ -21,7 +21,8 @@ pub struct Chunk {
     pub text: String,
 }
 
-/// What a file is, for chunking and for whether it gets vectors (prose does, code does not yet).
+/// What a file is, for chunking and for whether it gets vectors (prose always, code when
+/// `super::KEY_CODE_VECTORS` allows it — see `super::index::embeddable`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Markdown,
