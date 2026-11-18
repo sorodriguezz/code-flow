@@ -87,7 +87,7 @@ export interface AiProviderOption {
 export const AI_PROVIDERS: AiProviderOption[] = [
   {
     id: "claude",
-    label: "Claude Code",
+    label: "Claude",
     icon: Bot,
     available: true,
     defaultBinary: "claude",

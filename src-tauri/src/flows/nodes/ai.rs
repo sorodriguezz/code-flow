@@ -155,7 +155,7 @@ pub fn engines(params: &Value) -> Vec<EngineChoice> {
 fn engine_label(engine: &EngineChoice) -> String {
     let name = match engine.provider.as_str() {
         "" => "The Flows engine",
-        "claude" => "Claude Code",
+        "claude" => "Claude",
         "codex" => "Codex",
         "gemini" => "Gemini",
         "grok" => "Grok",

@@ -313,7 +313,7 @@ export function McpSettings({ bare = false }: { bare?: boolean } = {}) {
                     {candidate.summary}
                   </span>
                   <span className="shrink-0 rounded-full border border-[var(--cf-border)] px-1.5 text-[10.5px] text-[var(--cf-text-muted)]">
-                    {candidate.source === "claude" ? "Claude Code" : "Codex"}
+                    {candidate.source === "claude" ? "Claude" : "Codex"}
                   </span>
                 </label>
               );

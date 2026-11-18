@@ -119,7 +119,7 @@ impl AiEngine for ClaudeEngine {
     }
 
     fn label(&self) -> &'static str {
-        "Claude Code"
+        "Claude"
     }
 
     fn default_binary(&self) -> &'static str {

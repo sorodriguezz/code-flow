@@ -149,10 +149,10 @@ describe("TaskReviewPanel", () => {
       <TaskReviewPanel
         taskId="t1"
         repoPath="/tmp/wt/login"
-        sendTo={{ kind: "terminal", agents: [{ sessionId: "pty-1", label: "Claude Code" }] }}
+        sendTo={{ kind: "terminal", agents: [{ sessionId: "pty-1", label: "Claude" }] }}
       />,
     );
-    expect(html).toContain("Send to Claude Code");
+    expect(html).toContain("Send to Claude");
   });
 
   // A `//` line placed between JSX tags is not a comment — React renders it as text.
