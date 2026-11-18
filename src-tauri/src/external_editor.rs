@@ -66,6 +66,9 @@ pub static EDITORS: &[Editor] = &[
         &["codium"],
     ),
     editor("sublime", "Sublime Text", &["Sublime Text.app"], &[r"%ProgramFiles%\Sublime Text\sublime_text.exe", r"%ProgramFiles%\Sublime Text 3\sublime_text.exe"], &["subl"]),
+    // AICode: `open -a` on macOS hands it the folder as a Finder "Open With" would; the NSIS
+    // installer (per user) puts it under %LOCALAPPDATA%; Linux packages put `aicode` on the PATH.
+    editor("aicode", "AICode", &["AICode.app"], &[r"%LOCALAPPDATA%\AICode\aicode.exe", r"%LOCALAPPDATA%\Programs\AICode\aicode.exe"], &["aicode"]),
     jetbrains("idea", "IntelliJ IDEA", &["IntelliJ IDEA.app", "IntelliJ IDEA Ultimate.app", "IntelliJ IDEA CE.app", "IntelliJ IDEA Community Edition.app"], "IntelliJ IDEA", "idea64.exe", &["idea"]),
     jetbrains("webstorm", "WebStorm", &["WebStorm.app"], "WebStorm", "webstorm64.exe", &["webstorm"]),
     jetbrains("pycharm", "PyCharm", &["PyCharm.app", "PyCharm Professional Edition.app", "PyCharm CE.app", "PyCharm Community Edition.app"], "PyCharm", "pycharm64.exe", &["pycharm"]),
@@ -221,6 +224,7 @@ mod tests {
         ids.dedup();
         assert_eq!(ids.len(), EDITORS.len());
         assert_eq!(find("cursor").map(|e| e.label), Some("Cursor"));
+        assert_eq!(find("aicode").map(|e| e.label), Some("AICode"));
         assert!(find("notepad").is_none());
     }
 

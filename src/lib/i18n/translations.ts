@@ -13855,7 +13855,7 @@ const en = {
   "settings.tabThisWorkspace": "This workspace",
   "externalEditor.title": "External editor",
   "externalEditor.hint": "Where «Open in …» opens a repository: for the app, for the workspace and for each repository.",
-  "externalEditor.searchTerms": "external editor open in vscode visual studio code cursor windsurf antigravity zed kiro trae sublime jetbrains intellij webstorm pycharm android studio",
+  "externalEditor.searchTerms": "external editor open in vscode visual studio code cursor windsurf antigravity zed kiro trae sublime aicode jetbrains intellij webstorm pycharm android studio",
   "externalEditor.defaultTitle": "Default",
   "externalEditor.defaultHint": "What «Open in …» opens when neither the workspace nor the repository picks another.",
   "externalEditor.editor": "Editor",
