@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AlertTriangle,
   ChevronDown,
@@ -414,22 +414,29 @@ const rises = (at: number) => at < RISE_ROWS;
  *
  * The scroller is the panel's, shared with the other section and whatever sits above this one, so
  * the visible range is worked out from where this box is inside it on each scroll and resize.
+ *
+ * It arrives as an element, not a ref. A ref to it was read in this component's layout effect, and
+ * when the panel and the list mount in the same commit — opening Cambios with 300 or more files
+ * already there, staged or not — React has not attached the parent's ref yet when a child's layout
+ * effect runs: the effect found `null`, returned without listening, and nothing ever ran it again.
+ * The list stayed on its first 80 rows, and scrolling past them showed one row and then nothing
+ * (user report, 2026-11-19: «abajo dice 380 pero visualmente solo muestra un archivo»). As state,
+ * the element's arrival is itself a render, and the effect runs again with it.
  */
 function WindowedRows({
   count,
-  scrollRef,
+  scroller,
   keyOf,
   render,
 }: {
   count: number;
-  scrollRef: RefObject<HTMLDivElement | null>;
+  scroller: HTMLDivElement | null;
   keyOf: (index: number) => string;
   render: (index: number) => ReactNode;
 }) {
   const box = useRef<HTMLDivElement>(null);
   const [range, setRange] = useState<[number, number]>([0, Math.min(count, 80)]);
   useLayoutEffect(() => {
-    const scroller = scrollRef.current;
     const element = box.current;
     if (!scroller || !element) return;
     const measure = () => {
@@ -440,13 +447,16 @@ function WindowedRows({
     };
     measure();
     scroller.addEventListener("scroll", measure, { passive: true });
+    // The box too: what sits above it in the shared scroller (the other section, the unpushed
+    // commits) can grow or shrink with no scroll or resize of the scroller to say so.
     const observer = new ResizeObserver(measure);
     observer.observe(scroller);
+    for (const child of scroller.children) observer.observe(child);
     return () => {
       scroller.removeEventListener("scroll", measure);
       observer.disconnect();
     };
-  }, [count, scrollRef]);
+  }, [count, scroller]);
   const rows: ReactNode[] = [];
   for (let index = range[0]; index < Math.min(range[1], count); index++) {
     rows.push(
@@ -481,9 +491,9 @@ function FileTreeSection({
   buildActions,
   onContextMenu,
   submoduleOf,
-  scrollRef,
+  scroller,
 }: {
-  scrollRef: RefObject<HTMLDivElement | null>;
+  scroller: HTMLDivElement | null;
   entries: FileStatusEntry[];
   isSelected: (entry: FileStatusEntry) => boolean;
   onSelectEntry: (entry: FileStatusEntry) => void;
@@ -542,7 +552,7 @@ function FileTreeSection({
     return (
       <WindowedRows
         count={flat.length}
-        scrollRef={scrollRef}
+        scroller={scroller}
         keyOf={(index) => {
           const { node } = flat[index];
           return node.type === "file" ? `f:${node.entry.path}` : `d:${node.path}`;
@@ -651,8 +661,9 @@ export function ChangesPanel({
   );
   /** The list's filter (VS Code's Source Control filter): rows whose path contains it, either list. */
   const [filter, setFilter] = useState("");
-  /** The lists' scroller — what a windowed list measures its visible rows against. */
-  const listScrollRef = useRef<HTMLDivElement>(null);
+  /** The lists' scroller — what a windowed list measures its visible rows against. State, not a
+   *  ref: see `WindowedRows`. */
+  const [listScroller, setListScroller] = useState<HTMLDivElement | null>(null);
   /** «Enmendar el último commit»: the button replaces HEAD with the index and the message. */
   const [amend, setAmend] = useState(false);
   /** `git diff -w` in the pane beside the list — read only: nothing is staged by line from it. */
@@ -1452,7 +1463,7 @@ export function ChangesPanel({
             </div>
           </div>
         )}
-        <div ref={listScrollRef} className="flex-1 overflow-auto p-2">
+        <div ref={setListScroller} className="flex-1 overflow-auto p-2">
           <UnpushedCommitsSection />
 
           <div className="mb-3">
@@ -1485,12 +1496,12 @@ export function ChangesPanel({
                 buildActions={(entry) => buildStagedActions(entry)}
                 onContextMenu={(event, entry) => openFileMenu(event, entry, true)}
                 submoduleOf={submoduleOf}
-                scrollRef={listScrollRef}
+                scroller={listScroller}
               />
             ) : stagedShown.length >= WINDOW_FROM ? (
               <WindowedRows
                 count={stagedShown.length}
-                scrollRef={listScrollRef}
+                scroller={listScroller}
                 keyOf={(index) => stagedShown[index].path}
                 render={(index) => {
                   const entry = stagedShown[index];
@@ -1609,12 +1620,12 @@ export function ChangesPanel({
                 buildActions={(entry) => buildUnstagedActions(entry)}
                 onContextMenu={(event, entry) => openFileMenu(event, entry, false)}
                 submoduleOf={submoduleOf}
-                scrollRef={listScrollRef}
+                scroller={listScroller}
               />
             ) : workingShown.length >= WINDOW_FROM ? (
               <WindowedRows
                 count={workingShown.length}
-                scrollRef={listScrollRef}
+                scroller={listScroller}
                 keyOf={(index) => workingShown[index].path}
                 render={(index) => {
                   const entry = workingShown[index];

@@ -75,6 +75,8 @@ interface Prefs {
   open: string[];
   /** The page on screen, kept across launches. */
   nav: ContainersNav;
+  /** The last section opened per provider (a runtime, or `azure`): where its tab goes back to. */
+  sections?: Record<string, string>;
   /** The context (Docker), connection (Podman), namespace (containerd) or cluster (Kubernetes) per runtime. */
   context: Record<string, string>;
   /** Kubernetes: the namespace per context; `""` = all. */
@@ -258,7 +260,7 @@ export const useContainersStore = create<ContainersState>((set, get) => ({
   setNav: (nav) => {
     const prefs = get().prefs;
     if (prefs.nav.runtime === nav.runtime && prefs.nav.section === nav.section && !get().selection) return;
-    const next = { ...prefs, nav };
+    const next = { ...prefs, nav, sections: nav.runtime ? { ...prefs.sections, [nav.runtime]: nav.section } : prefs.sections };
     set({ prefs: next, selection: null });
     savePrefs(next);
     void get().pulse();
@@ -289,6 +291,7 @@ export const useContainersStore = create<ContainersState>((set, get) => ({
                 : DEFAULT_PREFS.nav,
             context: parsed.context && typeof parsed.context === "object" ? parsed.context : {},
             namespace: parsed.namespace && typeof parsed.namespace === "object" ? parsed.namespace : {},
+            sections: parsed.sections && typeof parsed.sections === "object" ? parsed.sections : {},
             kubeDisconnected: parsed.kubeDisconnected === true,
           },
         });

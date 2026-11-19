@@ -628,6 +628,7 @@ const en = {
   "azure.query.preset.diagnostics": "Diagnostics errors",
   "containers.m.addEngine": "Connect a remote Docker engine (SSH or TCP)",
   "containers.m.addCluster": "Add a cluster",
+  "containers.m.providers": "Providers",
   "containers.m.cluster": "Cluster",
   "containers.m.noClusters": "No clusters yet",
   "containers.toggle": "Show or hide the containers — Docker, Podman, containerd and Kubernetes",

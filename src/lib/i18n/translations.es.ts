@@ -620,6 +620,7 @@ export const es = {
   "azure.query.preset.diagnostics": "Errores de diagn\u00f3stico",
   "containers.m.addEngine": "Conectar un motor Docker remoto (SSH o TCP)",
   "containers.m.addCluster": "Agregar clúster",
+  "containers.m.providers": "Proveedores",
   "containers.m.cluster": "Clúster",
   "containers.m.noClusters": "Aún no hay clústeres",
   "containers.toggle": "Mostrar/ocultar los contenedores — Docker, Podman, containerd y Kubernetes",

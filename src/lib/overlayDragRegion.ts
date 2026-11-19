@@ -181,6 +181,13 @@ export function startOverlayDragRegion() {
     }
 
     if (isMac() && event.detail === 2) {
+      // A double-click straight on the bar is Tauri's to zoom, on its own `mouseup` — which, unlike
+      // its `mousedown`, it does not stop, so this module used to see it too and zoom a second
+      // time. Growing survived that (the second maximize found the window already zoomed), but
+      // restoring did not: the second toggle caught the window mid-animation, still reading as
+      // zoomed, and zoomed it straight back (user, 2026-11-19: «intenta pero se agranda de
+      // nuevo»). Only a press under a backdrop, which Tauri cannot see, is zoomed here.
+      if (event.target instanceof HTMLElement && resolve(pathOf(event.target)) === "drag") return;
       zoomAnchor = { x: event.clientX, y: event.clientY };
       return;
     }

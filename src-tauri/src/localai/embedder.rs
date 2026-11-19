@@ -172,6 +172,8 @@ const REAP_INTERVAL: Duration = Duration::from_secs(30);
 pub struct Embedder {
     pub model_id: String,
     port: u16,
+    /// The context the server was started with (`-c`): the most tokens one text may take.
+    ctx: u32,
     client: reqwest::Client,
     child: Mutex<tokio::process::Child>,
     alive: Arc<AtomicBool>,
@@ -201,19 +203,101 @@ impl Embedder {
         let _done = Done { count: self.in_flight.clone(), last_used: self.last_used.clone() };
         let mut out = Vec::with_capacity(texts.len());
         for batch in texts.chunks(BATCH) {
-            let (url, body) = crate::knowledge::embed::embed_request("openai", &format!("{}/v1", self.base_url()), &self.model_id, batch);
-            let response = self.client.post(&url).json(&body).timeout(Duration::from_secs(120)).send().await.map_err(|e| e.to_string())?;
-            if !response.status().is_success() {
-                return Err(format!("the embedding server answered {}", response.status()));
-            }
-            let value: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-            let vectors = crate::knowledge::embed::read_vectors("openai", &value);
-            if vectors.len() != batch.len() {
-                return Err(format!("the embedding server gave {} vectors for {} texts", vectors.len(), batch.len()));
-            }
+            let vectors = match self.post(batch).await {
+                // A text longer than the context: the server refuses the whole batch. Chunks are cut
+                // by characters, and a line of base64 or escaped JSON (an SVG, a diagram embedded in
+                // an HTML page) is close to a token per character — 3,300 characters, 2,450 tokens
+                // against a context of 2,048. Those passages sat at the head of the backlog and
+                // every pass gave up on them, so nothing behind them got a vector (user, 2026-11-19:
+                // 59,479 «por procesar» that never moved). Cut to the context, by tokens, and again.
+                Err(refused) if refused.too_long => {
+                    let fitted = self.fit(batch).await?;
+                    self.post(&fitted).await.map_err(|refused| refused.message)?
+                }
+                Err(refused) => return Err(refused.message),
+                Ok(vectors) => vectors,
+            };
             out.extend(vectors);
         }
         Ok(out)
+    }
+
+    async fn post(&self, batch: &[String]) -> Result<Vec<Vec<f32>>, Refused> {
+        let (url, body) = crate::knowledge::embed::embed_request("openai", &format!("{}/v1", self.base_url()), &self.model_id, batch);
+        let response = self.client.post(&url).json(&body).timeout(Duration::from_secs(120)).send().await.map_err(|e| Refused::other(e.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(Refused::from_answer(status, &body));
+        }
+        let value: serde_json::Value = response.json().await.map_err(|e| Refused::other(e.to_string()))?;
+        let vectors = crate::knowledge::embed::read_vectors("openai", &value);
+        if vectors.len() != batch.len() {
+            return Err(Refused::other(format!("the embedding server gave {} vectors for {} texts", vectors.len(), batch.len())));
+        }
+        Ok(vectors)
+    }
+
+    /// `batch` with every text that takes more tokens than the context cut to fit — by the server's
+    /// own tokenizer (`/tokenize`, then `/detokenize` of what fits), since characters say little
+    /// about tokens. A margin is left for the special tokens the server adds and for a cut text
+    /// that tokenizes a little differently the second time.
+    async fn fit(&self, batch: &[String]) -> Result<Vec<String>, String> {
+        let budget = self.ctx.saturating_sub(FIT_MARGIN) as usize;
+        let mut out = Vec::with_capacity(batch.len());
+        let mut cut = 0usize;
+        for text in batch {
+            let tokens = self.call("tokenize", serde_json::json!({ "content": text })).await?;
+            let tokens = tokens.get("tokens").and_then(|t| t.as_array()).cloned().unwrap_or_default();
+            if tokens.len() <= budget {
+                out.push(text.clone());
+                continue;
+            }
+            let kept = self.call("detokenize", serde_json::json!({ "tokens": &tokens[..budget] })).await?;
+            out.push(kept.get("content").and_then(|c| c.as_str()).unwrap_or_default().to_string());
+            cut += 1;
+        }
+        crate::applog::info(&format!("knowledge: {cut} of {} passages were longer than the embedder's context ({} tokens) and were cut to fit", batch.len(), self.ctx));
+        Ok(out)
+    }
+
+    async fn call(&self, endpoint: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
+        let response = self.client.post(format!("{}/{endpoint}", self.base_url())).json(&body).timeout(Duration::from_secs(30)).send().await.map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("the embedding server answered {} to /{endpoint}", response.status()));
+        }
+        response.json().await.map_err(|e| e.to_string())
+    }
+}
+
+/// Tokens of the context kept free when a text is cut to fit ([`Embedder::fit`]).
+const FIT_MARGIN: u32 = 16;
+
+/// Why the server did not embed a batch.
+#[derive(Debug, PartialEq)]
+struct Refused {
+    /// For the log: the status and the server's own words — "400 Bad Request" alone said nothing of
+    /// which input or why.
+    message: String,
+    /// A text was longer than the context (`exceed_context_size_error`, or an older server's "too
+    /// large to process"): cutting it to fit is the answer.
+    too_long: bool,
+}
+
+impl Refused {
+    fn other(message: String) -> Self {
+        Refused { message, too_long: false }
+    }
+
+    fn from_answer(status: reqwest::StatusCode, body: &str) -> Self {
+        let value: Option<serde_json::Value> = serde_json::from_str(body).ok();
+        let error = value.as_ref().and_then(|v| v.get("error"));
+        let kind = error.and_then(|e| e.get("type")).and_then(|t| t.as_str()).unwrap_or_default();
+        let said = error.and_then(|e| e.get("message")).and_then(|m| m.as_str()).unwrap_or_default();
+        let too_long = kind == "exceed_context_size_error" || said.contains("exceeds the available context size") || said.contains("too large to process");
+        let said: String = said.chars().take(200).collect();
+        let message = if said.is_empty() { format!("the embedding server answered {status}") } else { format!("the embedding server answered {status}: {said}") };
+        Refused { message, too_long }
     }
 }
 
@@ -301,6 +385,7 @@ async fn spawn(entry: &EmbedModelSpec, model_path: PathBuf) -> Result<Embedder, 
     let embedder = Embedder {
         model_id: entry.spec.id.to_string(),
         port,
+        ctx: entry.ctx,
         client,
         child: Mutex::new(child),
         alive: Arc::new(AtomicBool::new(true)),
@@ -409,6 +494,22 @@ pub fn sweep_stale() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_text_past_the_context_is_told_apart_from_other_refusals() {
+        // What llama-server b10587 answered for a 3,300-character line of base64 (2026-11-19).
+        let body = r#"{"error":{"code":400,"message":"request (2449 tokens) exceeds the available context size (2048 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":2449,"n_ctx":2048}}"#;
+        let refused = Refused::from_answer(reqwest::StatusCode::BAD_REQUEST, body);
+        assert!(refused.too_long);
+        assert!(refused.message.starts_with("the embedding server answered 400 Bad Request: request (2449 tokens)"));
+
+        let older = r#"{"error":{"code":500,"message":"input is too large to process. increase the physical batch size","type":"server_error"}}"#;
+        assert!(Refused::from_answer(reqwest::StatusCode::INTERNAL_SERVER_ERROR, older).too_long);
+
+        let other = Refused::from_answer(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "Compute error");
+        assert!(!other.too_long);
+        assert_eq!(other.message, "the embedding server answered 500 Internal Server Error");
+    }
 
     #[test]
     fn the_catalogue_is_offerable_and_unique() {
