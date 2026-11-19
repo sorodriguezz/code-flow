@@ -9,6 +9,7 @@ import { chipClass, fieldClass } from "../common/recipes";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { formatBytes, ModelDownloadRow, type DownloadableModel } from "./localModelRow";
 import { PaneBlock } from "./settingsNav";
+import { isMac } from "../../lib/platform";
 import { MeasureButton, ramGb, SpeakDetails } from "./voiceFit";
 import { useVoiceFitStore } from "../../state/voiceFitStore";
 import { previewNotificationSound } from "../../lib/notificationSound";
@@ -63,6 +64,9 @@ const NATURAL_NOTE_KEY = {
   male: "speech.naturalNote.male",
   nonbinary: "speech.naturalNote.nonbinary",
 } as const satisfies Record<VoiceGender, string>;
+
+/** A macOS voice that says words well — downloadable in System Settings (`speech::system::quality`). */
+const BETTER_VOICE = /premium|enhanced|mejorad/i;
 
 /** The app's language first, then the other. */
 const languagesFrom = (first: Language): Language[] => (first === "es" ? ["es", "en"] : ["en", "es"]);
@@ -124,6 +128,9 @@ export function SpeechSettings() {
               <LanguageVoiceRow key={lang} lang={lang} engine={store.engine === "local" ? "local" : "system"} />
             ))}
             <p className="pb-1 pl-[162px] text-[11.5px] text-[var(--cf-text-muted)]">{t("speech.byLanguageHint")}</p>
+            {store.engine === "system" && isMac() && status && !status.systemVoices.some((voice) => BETTER_VOICE.test(voice.name)) && (
+              <p className="pb-1 pl-[162px] text-[11.5px] text-[var(--cf-text-muted)]">{t("speech.betterVoicesMac")}</p>
+            )}
           </>
         )}
         {store.engine === "cloud" && <CloudRows />}
@@ -152,6 +159,12 @@ export function SpeechSettings() {
             className="w-[200px] accent-[var(--cf-accent)]"
           />
           <span className="w-12 text-[12px] tabular-nums text-[var(--cf-text-muted)]">{store.volume} %</span>
+        </Row>
+        <Row label={t("speech.pronounceTab")} hint={t("speech.pronounceRowHint")}>
+          <span className="text-[12.5px] text-[var(--cf-text)]">{t("speech.pronounceSummary", { n: store.pronunciations.length })}</span>
+          <span className="text-[12.5px]">
+            <Link onClick={() => go("voice", "pronunciation")}>{t("speech.pronounceEdit")}</Link>
+          </span>
         </Row>
         <Row label="">
           <Button size="sm" variant="primary" onClick={() => store.say(VOICE_SAMPLE[language], "test", { interrupt: true })}>

@@ -53,17 +53,30 @@ const NOVELTY: &[&str] = &[
     "Ralph", "Superstar", "Trinoids", "Whisper", "Wobble", "Zarvox",
 ];
 
-/// [`default_for`] over a given listing: a preferred voice in `lang`, else the first one in it that
-/// is not a novelty. Without one, the caller passes no voice and the system's default speaks.
+/// How good a voice sounds, by what its name says: macOS's downloadable «Premium» and «Mejorada» /
+/// «Enhanced» voices say words far better than the compact ones every Mac has. 0 is best.
+pub fn quality(name: &str) -> u8 {
+    let lower = name.to_lowercase();
+    if lower.contains("premium") {
+        0
+    } else if ["enhanced", "mejorada", "mejorado", "améliorée", "verbessert"].iter().any(|mark| lower.contains(mark)) {
+        1
+    } else {
+        2
+    }
+}
+
+/// [`default_for`] over a given listing: the best-sounding voice in `lang` ([`quality`]), a preferred
+/// one among equals, else the first that is not a novelty. Without one, the caller passes no voice
+/// and the system's default speaks.
 pub fn pick(voices: &[SystemVoice], lang: &str) -> Option<String> {
-    let speaks = |voice: &&SystemVoice| voice.lang.to_ascii_lowercase().starts_with(lang);
     // «Paulina (Español (México))» is Paulina; «Microsoft Zira Desktop» is Microsoft Zira.
     let named = |voice: &SystemVoice, name: &str| voice.name == name || voice.name.starts_with(&format!("{name} "));
-    PREFERRED
-        .iter()
-        .find_map(|name| voices.iter().filter(speaks).find(|voice| named(voice, name)))
-        .or_else(|| voices.iter().filter(speaks).find(|voice| !NOVELTY.iter().any(|name| named(voice, name))))
-        .map(|voice| voice.id.clone())
+    let candidates = voices.iter().filter(|voice| voice.lang.to_ascii_lowercase().starts_with(lang) && !NOVELTY.iter().any(|name| named(voice, name)));
+    candidates
+        .enumerate()
+        .min_by_key(|(order, voice)| (quality(&voice.name), PREFERRED.iter().position(|name| named(voice, name)).unwrap_or(PREFERRED.len()), *order))
+        .map(|(_, voice)| voice.id.clone())
 }
 
 #[cfg(target_os = "macos")]
@@ -174,7 +187,26 @@ fn run(text: &str, voice: &str, rate: f32, path: &std::path::Path) -> Result<(),
         .args(["-r", &words_per_minute.to_string(), "--file-format=WAVE", "--data-format=LEI16@22050", "-o"])
         .arg(path)
         .args(["-f", "-"]);
-    feed(command, text, "say")
+    feed(command, &with_pauses(text), "say")
+}
+
+/// `text` with `say`'s own silence after each comma, semicolon, colon and sentence end inside it,
+/// so every one of them has a pause for [`super::level::fit_pauses`] to set to its length — `say`
+/// runs over a comma when it speaks fast. A `[[` in the text itself is broken up: `say` would read
+/// it as a command of its own.
+#[cfg(any(target_os = "macos", test))]
+pub fn with_pauses(text: &str) -> String {
+    let safe = text.replace("[[", "[ [");
+    let chars: Vec<char> = safe.chars().collect();
+    let mut out = String::with_capacity(safe.len() + 32);
+    for (i, &c) in chars.iter().enumerate() {
+        out.push(c);
+        let followed = chars.get(i + 1).is_some_and(|next| next.is_whitespace()) && chars[i + 1..].iter().any(|c| c.is_alphanumeric());
+        if followed && matches!(c, ',' | ';' | ':' | '.' | '!' | '?' | '…') {
+            out.push_str(" [[slnc 120]]");
+        }
+    }
+    out
 }
 
 #[cfg(windows)]
@@ -207,6 +239,29 @@ fn run(text: &str, voice: &str, rate: f32, path: &std::path::Path) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_premium_or_enhanced_voice_is_picked_first() {
+        let voice = |name: &str, lang: &str| SystemVoice { id: name.into(), name: name.into(), lang: lang.into() };
+        let listing = vec![
+            voice("Eddy (Español (México))", "es-MX"),
+            voice("Paulina (Español (México))", "es-MX"),
+            voice("Mónica (Mejorada)", "es-ES"),
+            voice("Samantha", "en-US"),
+            voice("Ava (Premium)", "en-US"),
+        ];
+        assert_eq!(pick(&listing, "es").as_deref(), Some("Mónica (Mejorada)"));
+        assert_eq!(pick(&listing, "en").as_deref(), Some("Ava (Premium)"));
+        // Among equals, the preferred one.
+        assert_eq!(pick(&listing[..2], "es").as_deref(), Some("Paulina (Español (México))"));
+    }
+
+    #[test]
+    fn say_gets_a_silence_at_each_mark_inside_and_no_commands_from_the_text() {
+        assert_eq!(with_pauses("Sí, claro. Listo."), "Sí, [[slnc 120]] claro. [[slnc 120]] Listo.");
+        assert_eq!(with_pauses("Sube el [[volm 0.1]] volumen"), "Sube el [ [volm 0.1]] volumen");
+        assert_eq!(with_pauses("Versión 3.5"), "Versión 3.5");
+    }
 
     #[test]
     fn reads_say_voice_names_that_hold_spaces() {

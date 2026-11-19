@@ -20,8 +20,21 @@ pub fn key_name(service: &str) -> Option<&'static str> {
     }
 }
 
-/// Says `text` through `service` with `voice` at `speed`: mono samples and their rate.
-pub async fn synthesize(service: &str, voice: &str, text: &str, speed: f32) -> Result<(Vec<f32>, u32), String> {
+/// How OpenAI's voice is asked to read a text in `lang`: its model takes a direction, and an app
+/// that writes Spanish full of English terms needs those said the English way, not spelled out.
+pub fn openai_instructions(lang: &str) -> &'static str {
+    if lang == "es" {
+        "Habla en español latinoamericano neutro, con tono cálido, claro y conversacional, a un ritmo parejo y sin apuro. \
+         Los nombres de productos y los términos técnicos en inglés (CodeFlow, GitHub, pull request, commit, pipeline) \
+         pronúncialos en inglés, con naturalidad, como lo haría un desarrollador hispanohablante. Respeta las pausas de la puntuación."
+    } else {
+        "Speak in a warm, clear, conversational tone at an even, unhurried pace. Respect the pauses the punctuation marks."
+    }
+}
+
+/// Says `text`, written in `lang`, through `service` with `voice` at `speed`: mono samples and their
+/// rate.
+pub async fn synthesize(service: &str, voice: &str, text: &str, lang: &str, speed: f32) -> Result<(Vec<f32>, u32), String> {
     let name = key_name(service).ok_or_else(|| format!("Unknown voice service {service}"))?;
     let key = crate::secrets::get_secret(name)?.filter(|k| !k.trim().is_empty()).ok_or("SPEECH_NO_KEY")?;
     let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().map_err(|e| e.to_string())?;
@@ -32,6 +45,7 @@ pub async fn synthesize(service: &str, voice: &str, text: &str, speed: f32) -> R
                 "input": text,
                 "voice": if voice.trim().is_empty() { OPENAI_DEFAULT_VOICE } else { voice.trim() },
                 "response_format": "pcm",
+                "instructions": openai_instructions(lang),
                 "speed": speed.clamp(0.5, 2.0),
             })),
             24_000,

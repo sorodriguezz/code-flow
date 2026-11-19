@@ -95,6 +95,18 @@ export const speechRemoveVoice = (id: string) => invoke<void>("speech_remove_voi
 export const speechSummarize = (text: string, workspaceId: string | null) => invoke<string>("speech_summarize", { text, workspaceId });
 export const defaultSpokenSummaryTemplate = () => invoke<string>("default_spoken_summary_template");
 
+/** One word of the pronunciation dictionary: as written, as the voice says it, and for which
+ *  language's voice (`""` both). The user's are stored as JSON in `speech_pronunciations`. */
+export interface Pronunciation {
+  from: string;
+  to: string;
+  lang: "" | "es" | "en";
+}
+/** The dictionary CodeFlow brings; a word of the user's with the same spelling wins. */
+export const speechBuiltinPronunciations = () => invoke<Pronunciation[]>("speech_builtin_pronunciations");
+/** What the voice would be handed for `text` right now, and the language it would read it in. */
+export const speechSpokenForm = (text: string, lang: string) => invoke<{ text: string; lang: "es" | "en" }>("speech_spoken_form", { text, lang });
+
 export const onSpeechState = (f: (e: SpeechStateEvent) => void): Promise<UnlistenFn> => listen<SpeechStateEvent>("speech:state", (e) => f(e.payload));
 export const onSpeechDownload = (f: (e: SpeechDownloadEvent) => void): Promise<UnlistenFn> =>
   listen<SpeechDownloadEvent>("speech:download", (e) => f(e.payload));

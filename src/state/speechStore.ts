@@ -14,6 +14,7 @@ import {
   speechStop,
   speechSummarize,
   type OutputDevice,
+  type Pronunciation,
   type SpeechDownloadEvent,
   type SpeechStatus,
 } from "../lib/tauri/speechCommands";
@@ -57,6 +58,8 @@ const KEY = {
   quietMeeting: "speech_quiet_meeting",
   quietDictation: "speech_quiet_dictation",
   readSelection: "speech_read_selection",
+  // `crate::speech::pronounce::LEXICON_KEY`.
+  pronunciations: "speech_pronunciations",
 } as const;
 
 export type SpeechEngine = "system" | "local" | "cloud";
@@ -99,6 +102,8 @@ interface SpeechStoreState {
   quietMeeting: boolean;
   quietDictation: boolean;
   readSelection: boolean;
+  /** The user's own pronunciations, rows being typed included (the backend skips a blank one). */
+  pronunciations: Pronunciation[];
 
   status: SpeechStatus | null;
   outputs: OutputDevice[] | null;
@@ -121,6 +126,7 @@ interface SpeechStoreState {
   setQuietMeeting: (on: boolean) => Promise<void>;
   setQuietDictation: (on: boolean) => Promise<void>;
   setReadSelection: (on: boolean) => Promise<void>;
+  setPronunciations: (list: Pronunciation[]) => Promise<void>;
   setKey: (service: CloudService, key: string) => Promise<void>;
   install: (id: string) => Promise<void>;
   cancelInstall: () => Promise<void>;
@@ -133,6 +139,24 @@ interface SpeechStoreState {
   /** An AI answer, as the answers setting says to read it. */
   speakAnswer: (markdown: string, workspaceId: string | null) => void;
   stop: () => void;
+}
+
+/** The stored dictionary; anything unreadable is an empty one. */
+export function parsePronunciations(stored: string | undefined): Pronunciation[] {
+  if (!stored) return [];
+  try {
+    const parsed: unknown = JSON.parse(stored);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((row): row is Record<string, unknown> => typeof row === "object" && row !== null)
+      .map((row) => ({
+        from: typeof row.from === "string" ? row.from : "",
+        to: typeof row.to === "string" ? row.to : "",
+        lang: row.lang === "es" || row.lang === "en" ? row.lang : "",
+      }));
+  } catch {
+    return [];
+  }
 }
 
 const flag = (stored: string | undefined, fallback: boolean) => (stored === undefined || stored === "" ? fallback : stored === "true");
@@ -151,6 +175,7 @@ export const useSpeechStore = create<SpeechStoreState>((set, get) => ({
   quietMeeting: true,
   quietDictation: true,
   readSelection: true,
+  pronunciations: [],
   status: null,
   outputs: null,
   progress: {},
@@ -179,6 +204,7 @@ export const useSpeechStore = create<SpeechStoreState>((set, get) => ({
         quietMeeting: flag(stored[KEY.quietMeeting], true),
         quietDictation: flag(stored[KEY.quietDictation], true),
         readSelection: flag(stored[KEY.readSelection], true),
+        pronunciations: parsePronunciations(stored[KEY.pronunciations]),
       });
       setNotificationOutput(stored[KEY.device] ?? "");
     } catch {
@@ -219,6 +245,7 @@ export const useSpeechStore = create<SpeechStoreState>((set, get) => ({
   setQuietMeeting: (on) => write(set, KEY.quietMeeting, { quietMeeting: on }, String(on)),
   setQuietDictation: (on) => write(set, KEY.quietDictation, { quietDictation: on }, String(on)),
   setReadSelection: (on) => write(set, KEY.readSelection, { readSelection: on }, String(on)),
+  setPronunciations: (list) => write(set, KEY.pronunciations, { pronunciations: list }, JSON.stringify(list)),
 
   setKey: async (service, key) => {
     try {

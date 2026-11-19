@@ -19,6 +19,12 @@
 //! written in ([`language_of`]) — an English answer in a Spanish app gets the English voice — and
 //! a text too short to tell, in the app's language.
 //!
+//! **Said, not read.** Before the voice gets a text it is respelled for it ([`pronounce`]: the
+//! English terms in a Spanish sentence, the user's own dictionary, paths, versions, acronyms), cut
+//! into sentences ([`segments`]) and every piece evened out to one loudness, its silence trimmed
+//! and the pause after it the app's own ([`level`]) — so the computer's voice, a downloaded one or
+//! a service's sound the same from the first sentence to the last. What is shown stays as written.
+//!
 //! **One voice at a time, in order.** What is asked to be said waits in a short queue
 //! ([`MAX_WAITING`]); «Callar» empties it and cuts what is playing. What to say, and when to keep
 //! quiet (a meeting being recorded, a dictation), is the window's call — this module only speaks.
@@ -26,8 +32,11 @@
 pub mod clone;
 pub mod cloud;
 pub mod kokoro;
+pub mod level;
 pub mod piper;
 pub mod player;
+pub mod pronounce;
+pub mod segments;
 pub mod sherpa;
 pub mod system;
 pub mod wav;
@@ -153,12 +162,16 @@ pub struct Settings {
     pub device: String,
     /// The user accepted XTTS v2's licence (`clone::XTTS_TERMS_KEY`).
     pub xtts_accepted: bool,
+    /// The user's own pronunciations (`pronounce::LEXICON_KEY`).
+    pub lexicon: Vec<pronounce::Entry>,
 }
 
 pub fn load_settings(conn: &Connection) -> Settings {
     let get = |key: &str| queries::get_setting(conn, key).ok().flatten().unwrap_or_default().trim().to_string();
     let number = |key: &str, default: f32| get(key).parse::<f32>().ok().filter(|v| v.is_finite()).unwrap_or(default);
     let by_language = |base: &str| ByLanguage { es: get(&keys::voice(base, "es")), en: get(&keys::voice(base, "en")) };
+    let lexicon = pronounce::parse_user(&get(pronounce::LEXICON_KEY));
+    pronounce::remember(&lexicon);
     Settings {
         engine: Some(get(keys::ENGINE)).filter(|e| matches!(e.as_str(), "system" | "local" | "cloud")).unwrap_or_else(|| "system".into()),
         system_voices: by_language(keys::SYSTEM_VOICE),
@@ -169,6 +182,7 @@ pub fn load_settings(conn: &Connection) -> Settings {
         volume: (number(keys::VOLUME, 80.0) / 100.0).clamp(0.0, 1.0),
         device: get(player::DEVICE_KEY),
         xtts_accepted: !get(clone::XTTS_TERMS_KEY).is_empty(),
+        lexicon,
     }
 }
 
@@ -191,7 +205,7 @@ pub fn synthesize_into(settings: &Settings, text: &str, lang: &str, on_chunk: &m
             Some(id) => piper::synthesize(&id, text, settings.rate, on_chunk),
             None => whole(system::synthesize(text, &system_voice(settings, lang), settings.rate)),
         },
-        "cloud" => whole(tauri::async_runtime::block_on(cloud::synthesize(&settings.cloud_service, &settings.cloud_voice, text, settings.rate))),
+        "cloud" => whole(tauri::async_runtime::block_on(cloud::synthesize(&settings.cloud_service, &settings.cloud_voice, text, lang, settings.rate))),
         _ => whole(system::synthesize(text, &system_voice(settings, lang), settings.rate)),
     }
 }
@@ -199,21 +213,86 @@ pub fn synthesize_into(settings: &Settings, text: &str, lang: &str, on_chunk: &m
 /// All of `text` said by downloaded voice `id` — Piper's or Kokoro's — as one buffer and its rate,
 /// for a caller that saves it rather than plays it (a flow's «Voz descargada»). Blocking.
 pub fn say_with_voice(id: &str, text: &str, speed: f32) -> Result<(Vec<f32>, u32), String> {
+    let lang = language_of(text).unwrap_or("es");
+    let spoken = pronounce::prepare(&flatten_lines(text), lang, true, &pronounce::remembered());
     let mut samples = Vec::new();
     let mut rate = 0;
     let mut keep = |chunk: &[f32], at: u32| {
-        samples.extend_from_slice(chunk);
-        rate = at;
+        if rate == 0 {
+            rate = at;
+        }
+        if at == rate {
+            samples.extend_from_slice(chunk);
+        } else {
+            samples.extend(player::resample(chunk, at, rate));
+        }
         true
     };
-    if clone::is_cloned(id) {
-        clone::synthesize(id, text, language_of(text).unwrap_or("es"), true, &mut keep)?;
-    } else if kokoro::voice(id).is_some() {
-        kokoro::synthesize(id, text, speed, &mut keep)?;
-    } else {
-        piper::synthesize(id, text, speed, &mut keep)?;
-    }
+    let mut synth = |piece: &str, on_chunk: &mut dyn FnMut(&[f32], u32) -> bool| {
+        if clone::is_cloned(id) {
+            clone::synthesize(id, piece, lang, true, on_chunk)
+        } else if kokoro::voice(id).is_some() {
+            kokoro::synthesize(id, piece, speed, on_chunk)
+        } else {
+            piper::synthesize(id, piece, speed, on_chunk)
+        }
+    };
+    render(&spoken, false, speed, &|| true, &mut synth, &mut keep)?;
     Ok((samples, rate.max(1)))
+}
+
+/// `text` as the voice is handed it with `settings`: respelled for voice `lang` — with the
+/// built-in words unless a service's multilingual voice reads it — and the user's own.
+pub fn spoken_form(settings: &Settings, text: &str, lang: &str) -> String {
+    pronounce::prepare(text, lang, settings.engine != "cloud", &settings.lexicon)
+}
+
+/// Says `text` a piece at a time ([`segments`]; `whole` keeps it in one, for a service that reads a
+/// whole text best): each piece written by `synth`, evened out ([`level::Leveler`]), followed by
+/// its pause at `rate`, and handed to `on_piece` with its sample rate. Stops when `keep_going` or
+/// `on_piece` says so.
+fn render(
+    text: &str,
+    whole: bool,
+    rate: f32,
+    keep_going: &dyn Fn() -> bool,
+    synth: &mut dyn FnMut(&str, &mut dyn FnMut(&[f32], u32) -> bool) -> Result<(), String>,
+    on_piece: &mut dyn FnMut(&[f32], u32) -> bool,
+) -> Result<(), String> {
+    let pieces = if whole { vec![segments::Segment { text: text.to_string(), pause_ms: 0 }] } else { segments::split(text) };
+    let mut leveler = level::Leveler::default();
+    for piece in pieces {
+        if !keep_going() {
+            return Ok(());
+        }
+        let mut samples = Vec::new();
+        let mut at = 0u32;
+        synth(&piece.text, &mut |chunk, chunk_rate| {
+            if at == 0 {
+                at = chunk_rate;
+            }
+            if chunk_rate == at {
+                samples.extend_from_slice(chunk);
+            } else {
+                samples.extend(player::resample(chunk, chunk_rate, at));
+            }
+            keep_going()
+        })?;
+        if !keep_going() {
+            return Ok(());
+        }
+        if samples.is_empty() || at == 0 {
+            continue;
+        }
+        level::fit_pauses(&mut samples, at, &segments::marks(&piece.text), rate);
+        leveler.process(&mut samples, at);
+        let pause_ms = (piece.pause_ms as f32 / rate.clamp(0.6, 1.8)) as u64;
+        samples.resize(samples.len() + (u64::from(at) * pause_ms / 1000) as usize, 0.0);
+        if !on_piece(&samples, at) {
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 /// The first downloaded voice — Piper's or Kokoro's — that reads `lang`.
@@ -259,9 +338,27 @@ pub fn system_voice(settings: &Settings, lang: &str) -> String {
     }
 }
 
-/// `text` as it is said: whitespace collapsed, held to [`MAX_CHARS`] at a sentence end.
+/// `text` on one line: a line that ends without punctuation gets a full stop, so a list or a title
+/// above its paragraph is read as sentences rather than one breathless run.
+pub fn flatten_lines(text: &str) -> String {
+    let lines: Vec<String> = text
+        .lines()
+        // A list's marker is not said.
+        .map(|line| line.trim_start().trim_start_matches(['-', '*', '•', '·']).split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty())
+        .collect();
+    let last = lines.len().saturating_sub(1);
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(i, line)| if i < last && !line.ends_with(['.', '!', '?', '…', ':', ';', ',']) { format!("{line}.") } else { line })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `text` as it is said: on one line ([`flatten_lines`]), held to [`MAX_CHARS`] at a sentence end.
 pub fn speakable(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = flatten_lines(text);
     if flat.chars().count() <= MAX_CHARS {
         return flat;
     }
@@ -520,7 +617,9 @@ fn speak(app: &AppHandle, queue: &Queue, job: &Job) -> Said {
     let mut written = Ok(());
     let playing = std::thread::scope(|scope| {
         let player = scope.spawn(|| player::play_stream(&settings.device, settings.volume, rx, &current));
-        written = synthesize_into(&settings, &job.text, job.lang, &mut |samples, rate| {
+        let spoken = spoken_form(&settings, &job.text, job.lang);
+        let mut synth = |piece: &str, on_chunk: &mut dyn FnMut(&[f32], u32) -> bool| synthesize_into(&settings, piece, job.lang, on_chunk);
+        written = render(&spoken, settings.engine == "cloud", settings.rate, &current, &mut synth, &mut |samples, rate| {
             if !current() || samples.is_empty() {
                 return current();
             }
@@ -574,7 +673,9 @@ mod tests {
         let said = speakable(&long);
         assert!(said.chars().count() <= MAX_CHARS);
         assert!(said.ends_with('.'), "{said}");
-        assert_eq!(speakable("  hola\n\n  mundo  "), "hola mundo");
+        assert_eq!(speakable("  hola\n\n  mundo  "), "hola. mundo");
+        assert_eq!(speakable("Pipelines\n- Abre uno\n• Ejecútalo"), "Pipelines. Abre uno. Ejecútalo");
+        assert_eq!(speakable("Una línea, sin punto final"), "Una línea, sin punto final");
         let one_word = "a".repeat(MAX_CHARS + 10);
         assert_eq!(speakable(&one_word).chars().count(), MAX_CHARS);
     }

@@ -268,6 +268,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "dictation", labelKey: "dictation.title", hintKey: "dictation.hint", icon: Mic, searchKey: "settings.searchTermsDictation" },
       { id: "meetings", labelKey: "meetings.settings.title", hintKey: "meetings.settings.hint", icon: AudioLines, searchKey: "meetings.settings.searchTerms" },
       { id: "reading", labelKey: "speech.title", hintKey: "speech.hint", icon: Volume2, searchKey: "settings.searchTermsReading" },
+      { id: "pronunciation", labelKey: "speech.pronounceTab", hintKey: "speech.pronounceHint", icon: Speech, searchKey: "settings.searchTermsPronunciation" },
     ],
   },
   {

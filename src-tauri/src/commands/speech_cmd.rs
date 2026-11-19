@@ -11,7 +11,7 @@ use crate::commands::claude_cmd::{load_ai_config_in, shared_template, AiTask};
 use crate::db::Db;
 use crate::meetings;
 use crate::reviewer::download::{self, FetchError};
-use crate::speech::{self, cloud, kokoro, piper, player, system};
+use crate::speech::{self, cloud, kokoro, piper, player, pronounce, system};
 
 pub const DOWNLOAD_EVENT: &str = "speech:download";
 
@@ -116,6 +116,36 @@ pub fn speech_say_voice(app: AppHandle, text: String, voice: String, lang: Optio
         None => app.state::<Db>().0.lock().map(|conn| speech::app_language(&conn)).unwrap_or("en"),
     };
     let _ = speech::say_as(&app, &text, "test", None, fallback, Some(voice));
+}
+
+/// The pronunciations CodeFlow brings, for Settings › Voz y sonido › Pronunciación to list (the
+/// user's own, stored in `pronounce::LEXICON_KEY`, win over them).
+#[tauri::command]
+pub fn speech_builtin_pronunciations() -> Vec<pronounce::Entry> {
+    ["es", "en"]
+        .into_iter()
+        .flat_map(|lang| pronounce::builtin(lang).iter().map(move |(from, to)| pronounce::Entry { from: (*from).into(), to: (*to).into(), lang: lang.into() }))
+        .collect()
+}
+
+/// What the voice would be handed for `text` with the settings as they are now — the language it
+/// is read in and the respelled words — so the pane can show it next to «Probar».
+#[tauri::command]
+pub fn speech_spoken_form(app: AppHandle, text: String, lang: Option<String>) -> Result<SpokenForm, String> {
+    let db = app.state::<Db>();
+    let conn = db.0.lock().map_err(|_| "The settings could not be read".to_string())?;
+    let fallback = lang.as_deref().map(speech::language).unwrap_or_else(|| speech::app_language(&conn));
+    let settings = speech::load_settings(&conn);
+    drop(conn);
+    let said = speech::speakable(&text);
+    let lang = speech::language_of(&said).unwrap_or(fallback);
+    Ok(SpokenForm { text: speech::spoken_form(&settings, &said, lang), lang })
+}
+
+#[derive(Serialize)]
+pub struct SpokenForm {
+    pub text: String,
+    pub lang: &'static str,
 }
 
 /// «Callar».

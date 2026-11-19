@@ -2435,6 +2435,8 @@ sharded_invoke_handler! {
         commands::speech_cmd::speech_say,
         commands::speech_cmd::speech_stop,
         commands::speech_cmd::speech_say_voice,
+        commands::speech_cmd::speech_builtin_pronunciations,
+        commands::speech_cmd::speech_spoken_form,
         commands::speech_cmd::audio_outputs,
         commands::speech_cmd::audio_play,
         commands::speech_cmd::speech_set_key,
