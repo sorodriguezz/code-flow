@@ -33,6 +33,34 @@ pub struct Chat {
     pub error: String,
     pub revision: i64,
     pub created_at: String,
+    /// The repository each member works in, by member id. A team chat belongs to the workspace,
+    /// not to one repository: each member is placed in one it may work in (see [`open`]), and
+    /// `project_id` above is only the lead's — the row's anchor. Chats saved before this have none,
+    /// and everyone there works in `project_id`.
+    #[serde(default)]
+    pub member_repos: HashMap<String, RepoRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoRef {
+    pub id: String,
+    pub name: String,
+    /// The repositories the member is meant for, by name; empty is all of them. Told to the member
+    /// rather than enforced: it answers for what it may touch. See [`place`].
+    #[serde(default)]
+    pub scope: String,
+}
+
+impl Chat {
+    /// Where `member_id` works in this chat.
+    fn repo_of(&self, member_id: &str) -> RepoRef {
+        self.member_repos.get(member_id).cloned().unwrap_or_else(|| RepoRef {
+            id: self.project_id.clone(),
+            name: self.project_name.clone(),
+            scope: String::new(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,10 +214,11 @@ fn prompt(chat: &Chat, member: &MemberSnap) -> String {
         .iter()
         .map(|m| {
             format!(
-                "- {} | {} | {} | {} | reporta a: {}",
+                "- {} | {} | {} | repositorio: {} | {} | reporta a: {}",
                 m.member.id,
                 m.member.name,
                 m.member.role,
+                chat.repo_of(&m.member.id).name,
                 if may_edit(chat, m) {
                     "puede escribir y editar"
                 } else {
@@ -223,17 +252,28 @@ Si no puedes editar, delega la implementación a quien sí puede. Nunca digas qu
 Si te encargan escribir o editar y está permitido, hazlo: no te limites a describir qué harías. Informa archivos y verificaciones reales.
 Una consulta answer es solo lectura. No uses protocolos de corridas ni crees planes de equipo: responde al encargo y el líder coordina."
     };
-    format!("{}\n\n# Chat del equipo «{}»\nTu nombre: {}\nTu rol: {}\nPermisos en este chat: {}.\n{}\n\n## Equipo disponible\n{}",
-        member.prompt, chat.team_name, member.member.name, member.member.role,
+    format!("{}\n\n# Chat del equipo «{}»\nTu nombre: {}\nTu rol: {}\nTrabajas en el repositorio: {}.{}\nCada miembro trabaja en el repositorio que indica el listado; delega a quien trabaja en el repositorio que corresponde.\nPermisos en este chat: {}.\n{}\n\n## Equipo disponible\n{}",
+        member.prompt, chat.team_name, member.member.name, member.member.role, chat.repo_of(&member.member.id).name, scope_line(&chat.repo_of(&member.member.id)),
         if may_edit(chat, member) { "puedes escribir y editar cuando el pedido lo requiera" } else { "solo lectura; no escribas archivos" }, mode, members)
+}
+
+/// What a member is told about the repositories it is meant for. Not a lock: it decides, and says
+/// so, when a request falls outside them.
+fn scope_line(repo: &RepoRef) -> String {
+    if repo.scope.is_empty() {
+        String::new()
+    } else {
+        format!(" Tus repositorios asignados son: {}. Si te piden algo fuera de ellos, dilo y sugiere a quién corresponde, o pide confirmación antes de tocarlo.", repo.scope)
+    }
 }
 
 fn task_for(conn: &Connection, chat: &Chat, member: &MemberSnap) -> Result<AgentTask, String> {
     let batch = format!("{BATCH_PREFIX}{}:{}", chat.id, member.member.id);
+    let repo = chat.repo_of(&member.member.id);
     let existing: Option<String> = conn
         .query_row(
             "SELECT id FROM agent_tasks WHERE batch_id = ?1 AND project_id = ?2 LIMIT 1",
-            params![batch, chat.project_id],
+            params![batch, repo.id],
             |row| row.get(0),
         )
         .optional()
@@ -247,7 +287,7 @@ fn task_for(conn: &Connection, chat: &Chat, member: &MemberSnap) -> Result<Agent
         conn,
         &uid(),
         &chat.workspace_id,
-        &chat.project_id,
+        &repo.id,
         &member.member.agent_id,
         &member.member.name,
         &member.provider,
@@ -266,30 +306,39 @@ fn task_for(conn: &Connection, chat: &Chat, member: &MemberSnap) -> Result<Agent
     Ok(task)
 }
 
+/// Opens the team's conversation — the team's, in its workspace, not a repository's (user,
+/// 2026-11-19: «el equipo debe responder al workspace, no al repositorio seleccionado»).
+///
+/// Each member is placed in a repository it may work in: `preferred` (the one open in the app) when
+/// it may, otherwise the first of the workspace it may. Only a member that may work in none is left
+/// out, and only the lead's absence stops the chat.
 pub fn open(
     conn: &Connection,
     team: Team,
-    project_id: &str,
+    preferred: &str,
     fresh: bool,
 ) -> Result<ChatState, String> {
-    let project = queries::get_project(conn, project_id)
-        .map_err(e2s)?
-        .ok_or("Abre un repositorio para conversar con el equipo.")?;
-    if team.workspace_id != project.workspace_id {
-        return Err("El equipo y el repositorio pertenecen a espacios distintos.".into());
-    }
     if team.lead.is_empty() {
         return Err("Elige un líder del equipo para usar su chat.".into());
     }
     if !fresh {
-        let id: Option<String> = conn.query_row("SELECT id FROM agent_team_chats WHERE team_id = ?1 AND project_id = ?2 AND team_updated_at = ?3 ORDER BY created_at DESC LIMIT 1",
-            params![team.id, project_id, team.updated_at], |row| row.get(0)).optional().map_err(e2s)?;
+        let id: Option<String> = conn.query_row("SELECT id FROM agent_team_chats WHERE team_id = ?1 AND team_updated_at = ?2 ORDER BY created_at DESC LIMIT 1",
+            params![team.id, team.updated_at], |row| row.get(0)).optional().map_err(e2s)?;
         if let Some(id) = id {
             return state(conn, &id);
         }
     }
+    let projects: Vec<RepoRef> = queries::list_projects(conn, &team.workspace_id)
+        .map_err(e2s)?
+        .into_iter()
+        .map(|p| RepoRef { id: p.id, name: p.name, scope: String::new() })
+        .collect();
+    if projects.is_empty() {
+        return Err("Agrega un repositorio al workspace para conversar con el equipo.".into());
+    }
     let agents = queries::list_workspace_agents(conn, &team.workspace_id).map_err(e2s)?;
     let mut members = Vec::new();
+    let mut member_repos = HashMap::new();
     for member in &team.members {
         let Some(agent) = agents.iter().find(|a| a.id == member.agent_id && a.enabled) else {
             if member.id == team.lead {
@@ -297,14 +346,12 @@ pub fn open(
             }
             continue;
         };
-        if (!member.repos.is_empty() && !member.repos.iter().any(|id| id == project_id))
-            || (!agent.repos.is_empty() && !agent.repos.iter().any(|id| id == project_id))
-        {
-            continue;
-        }
-        if agent.provider.trim().is_empty() || agent.model.trim().is_empty() {
-            continue;
-        }
+        // Only a member that cannot answer at all is left out; the lead can't be.
+        let repo = match place(member, agent, &projects, preferred) {
+            Ok(repo) => repo,
+            Err(reason) if member.id == team.lead => return Err(reason),
+            Err(_) => continue,
+        };
         let mut member = member.clone();
         if member.name.trim().is_empty() {
             member.name = agent.name.clone();
@@ -313,6 +360,7 @@ pub fn open(
             member.role = agent.role.clone();
         }
         member.edits &= agent.edits;
+        member_repos.insert(member.id.clone(), repo);
         members.push(MemberSnap {
             member,
             provider: agent.provider.clone(),
@@ -325,13 +373,14 @@ pub fn open(
     let lead = members
         .iter()
         .find(|m| m.member.id == team.lead)
-        .ok_or("El líder no tiene modelo o acceso a este repositorio.")?
+        .ok_or("El líder no está en el equipo: elige otro líder.")?
         .clone();
+    let anchor = member_repos[&lead.member.id].clone();
     let mut chat = Chat {
         id: uid(),
         workspace_id: team.workspace_id,
-        project_id: project_id.into(),
-        project_name: project.name,
+        project_id: anchor.id,
+        project_name: anchor.name,
         team_id: team.id,
         team_name: team.name,
         team_updated_at: team.updated_at,
@@ -345,6 +394,7 @@ pub fn open(
         error: String::new(),
         revision: 0,
         created_at: queries::now(),
+        member_repos,
     };
     let tx = conn.unchecked_transaction().map_err(e2s)?;
     chat.task_id = task_for(&tx, &chat, &lead)?.id;
@@ -352,6 +402,47 @@ pub fn open(
         params![chat.id, chat.workspace_id, chat.project_id, chat.task_id, chat.team_id, chat.team_updated_at, serde_json::to_string(&chat).map_err(e2s)?, chat.created_at]).map_err(e2s)?;
     tx.commit().map_err(e2s)?;
     state(conn, &chat.id)
+}
+
+/// The repository `member` works in during a team chat, and the ones it is meant for — or why it
+/// cannot answer at all, worded for the lead (the only case shown).
+///
+/// Repository lists never keep a member out of the chat (user, 2026-11-19: «es el chat o agente
+/// quien debería decir si tiene acceso a qué cosa o no, y dejar de dar tantas trabas»). They choose
+/// where it starts — a repository both its seat and its agent allow, else one either allows, else
+/// any — and they are handed to the member in its prompt ([`RepoRef::scope`]), so asked about
+/// something outside them it says so itself. Only a missing model stops it: with none, nothing can
+/// answer.
+fn place(
+    member: &super::Member,
+    agent: &crate::db::models::WorkspaceAgent,
+    projects: &[RepoRef],
+    preferred: &str,
+) -> Result<RepoRef, String> {
+    if agent.provider.trim().is_empty() || agent.model.trim().is_empty() {
+        return Err(format!(
+            "El agente «{}» del líder no tiene modelo: elige uno en la configuración del agente.",
+            agent.name
+        ));
+    }
+    let allows = |repos: &[String], id: &str| repos.is_empty() || repos.iter().any(|r| r == id);
+    let names = |keep: &dyn Fn(&RepoRef) -> bool| -> Vec<&RepoRef> { projects.iter().filter(|p| keep(p)).collect() };
+    let both = names(&|p| allows(&member.repos, &p.id) && allows(&agent.repos, &p.id));
+    // Either side naming a repository is a sign it is meant for it, even when the two disagree.
+    let either = names(&|p| member.repos.contains(&p.id) || agent.repos.contains(&p.id));
+    let limited = !member.repos.is_empty() || !agent.repos.is_empty();
+    // `scope` stays empty when nothing real limits it: no list at all, or lists that name only
+    // repositories that no longer exist — "assigned to all of them" would be guidance made up.
+    let (candidates, guided) = if !both.is_empty() {
+        (both, limited)
+    } else if !either.is_empty() {
+        (either, true)
+    } else {
+        (projects.iter().collect(), false)
+    };
+    let scope = if guided { candidates.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ") } else { String::new() };
+    let start = candidates.iter().find(|p| p.id == preferred).or(candidates.first()).ok_or("Agrega un repositorio al workspace para conversar con el equipo.")?;
+    Ok(RepoRef { id: start.id.clone(), name: start.name.clone(), scope })
 }
 
 /// Enforced by the same CLI analysis mode as solo read-only agents, not just by a prompt.
@@ -771,14 +862,10 @@ pub struct ChatSummary {
     created_at: String,
 }
 
-pub fn history(
-    conn: &Connection,
-    team_id: &str,
-    project_id: &str,
-) -> Result<Vec<ChatSummary>, String> {
-    let mut statement = conn.prepare("SELECT id, created_at FROM agent_team_chats WHERE team_id = ?1 AND project_id = ?2 ORDER BY created_at DESC LIMIT 64").map_err(e2s)?;
+pub fn history(conn: &Connection, team_id: &str) -> Result<Vec<ChatSummary>, String> {
+    let mut statement = conn.prepare("SELECT id, created_at FROM agent_team_chats WHERE team_id = ?1 ORDER BY created_at DESC LIMIT 64").map_err(e2s)?;
     let rows = statement
-        .query_map(params![team_id, project_id], |row| {
+        .query_map(params![team_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
         .map_err(e2s)?
@@ -795,24 +882,24 @@ pub fn history(
 pub fn team_chat_history(
     db: State<'_, Db>,
     team_id: String,
-    project_id: String,
 ) -> Result<Vec<ChatSummary>, String> {
     let conn = db.0.lock().map_err(e2s)?;
-    history(&conn, &team_id, &project_id)
+    history(&conn, &team_id)
 }
 
 #[tauri::command]
 pub fn team_chat_open(
     db: State<'_, Db>,
     team_id: String,
-    project_id: String,
+    // The repository open in the app, if any: only a preference for where members work.
+    project_id: Option<String>,
     fresh: Option<bool>,
 ) -> Result<ChatState, String> {
     let conn = db.0.lock().map_err(e2s)?;
     let team = super::get_team(&conn, &team_id)
         .map_err(e2s)?
         .ok_or("El equipo ya no existe.")?;
-    open(&conn, team, &project_id, fresh.unwrap_or(false))
+    open(&conn, team, project_id.as_deref().unwrap_or(""), fresh.unwrap_or(false))
 }
 
 #[tauri::command]

@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Listener, Manager, Wry};
 
@@ -69,6 +69,7 @@ pub fn show_main_window(app: &AppHandle) {
 /// relabelled in place ([`relabel`]), which is what `settings:changed` triggers.
 struct TrayLabels {
     show: &'static str,
+    apps: &'static str,
     quick_ask: &'static str,
     check_updates: &'static str,
     restart: &'static str,
@@ -83,6 +84,7 @@ fn tray_labels(spanish: bool) -> TrayLabels {
     if spanish {
         TrayLabels {
             show: "Mostrar CodeFlow",
+            apps: "Apps",
             quick_ask: "Nueva consulta rápida",
             check_updates: "Buscar actualizaciones…",
             restart: "Reiniciar CodeFlow",
@@ -91,6 +93,7 @@ fn tray_labels(spanish: bool) -> TrayLabels {
     } else {
         TrayLabels {
             show: "Show CodeFlow",
+            apps: "Apps",
             quick_ask: "New quick ask",
             check_updates: "Check for updates…",
             restart: "Restart CodeFlow",
@@ -141,6 +144,96 @@ pub(crate) fn changed_setting_key(payload: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+// ---------- the rail's apps, for the «Apps» submenu ----------
+
+/// The rail's apps — `APPS` in `src/lib/railApps.ts`, by the same keys (`appKey`), in its declared
+/// order, with its labels (`tabbar.*`) in both languages. The keys are what an island is named by
+/// (`open_satellite`'s `ref_id`), so they must match the frontend's exactly; a key the frontend does
+/// not know opens nothing there.
+const RAIL_APPS: [(&str, &str, &str); 12] = [
+    ("api:requests", "API Client", "Cliente API"),
+    ("api:database", "Databases", "Bases de datos"),
+    ("agents", "Agents", "Agentes"),
+    ("stories", "Specs", "Especificación"),
+    ("remote", "Remote", "Remoto"),
+    ("notes", "Notes", "Notas"),
+    ("diagrams", "Diagrams", "Diagramas"),
+    ("vault", "Keyring", "Llavero"),
+    ("chat", "Chat", "Chat"),
+    ("flows", "Flows", "Flujos"),
+    ("architecture", "Architecture", "Arquitectura"),
+    ("toolbox", "Tools", "Herramientas"),
+];
+
+/// `layoutStore`'s `RAIL_ORDER_KEY`: the order the user dragged the rail into, which the submenu
+/// follows so the two read the same.
+const RAIL_ORDER_KEY: &str = "layout_app_rail_order";
+
+/// What the frontend's main window hears to open a rail app's island.
+pub const OPEN_APP_EVENT: &str = "tray:open-app";
+
+const APP_PREFIX: &str = "tray:app:";
+
+fn app_label(key: &str, spanish: bool) -> &'static str {
+    RAIL_APPS
+        .iter()
+        .find(|(k, _, _)| *k == key)
+        .map(|(_, en, es)| if spanish { *es } else { *en })
+        .unwrap_or("")
+}
+
+/// The rail's keys in the user's order — `ordered` in `AppRail.tsx`, over plain values: keys the
+/// stored order names come first, in its order; the rest keep their declared order after them; a
+/// stored key that names no app is ignored.
+fn rail_order(stored: Option<&str>) -> Vec<&'static str> {
+    let order: Vec<String> = stored
+        .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(raw).ok())
+        .map(|keys| keys.into_iter().filter_map(|k| k.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let rank = |key: &str| order.iter().position(|k| k == key).unwrap_or(order.len());
+    let mut keys: Vec<&'static str> = RAIL_APPS.iter().map(|(k, _, _)| *k).collect();
+    keys.sort_by_key(|key| rank(key));
+    keys
+}
+
+fn stored_rail_order(app: &AppHandle) -> Vec<&'static str> {
+    let stored = app.try_state::<crate::db::Db>().and_then(|db| {
+        db.0.lock().ok().and_then(|conn| crate::db::queries::get_setting(&conn, RAIL_ORDER_KEY).ok().flatten())
+    });
+    rail_order(stored.as_deref())
+}
+
+/// Opens rail app `key` in an island of its own, leaving the main window where it is — hidden in
+/// the tray, usually (user, 2026-11-19: «se puedan abrir las islas desde ahí sin abrir la app»).
+///
+/// Asked of the main window rather than built here, because the main window is what moving an app
+/// out involves: it saves what it holds of that app first (`flushBeforeIsland`), stops showing it,
+/// and keeps the user's island limit. A main window that does not exist can do none of that, and
+/// then the island is simply built from here.
+fn open_app_island(app: &AppHandle, key: &'static str) {
+    if app.get_webview_window("main").is_some() {
+        let _ = app.emit_to("main", OPEN_APP_EVENT, key);
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let title = app_label(key, spanish(&app)).to_string();
+        let opened = crate::windows::open_satellite(
+            app.clone(),
+            crate::windows::SatelliteKind::App,
+            key.to_string(),
+            title,
+            None,
+            None,
+            None,
+        )
+        .await;
+        if let Err(e) = opened {
+            crate::applog::info(&format!("tray: could not open the {key} island — {e}"));
+        }
+    });
+}
+
 // ---------- the tray menu's ids ----------
 
 const SHOW: &str = "tray:show";
@@ -156,6 +249,8 @@ pub(crate) const TRAY_MENU_IDS: [&str; 5] = [SHOW, QUICK_ASK, CHECK_UPDATES, RES
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TrayAction {
     Show,
+    /// A rail app's island, by its key.
+    App(&'static str),
     QuickAsk,
     CheckUpdates,
     Restart,
@@ -179,25 +274,58 @@ fn tray_action(id: &str) -> Option<TrayAction> {
         CHECK_UPDATES => Some(TrayAction::CheckUpdates),
         RESTART => Some(TrayAction::Restart),
         QUIT => Some(TrayAction::Quit),
-        _ => None,
+        _ => {
+            let key = id.strip_prefix(APP_PREFIX)?;
+            RAIL_APPS.iter().find(|(k, _, _)| *k == key).map(|(k, _, _)| TrayAction::App(k))
+        }
     }
 }
 
 /// The tray's items, kept so a language change can relabel them in place.
+struct HeldMenu {
+    items: [MenuItem<Wry>; 5],
+    apps: Submenu<Wry>,
+    /// The submenu's rows by app key, in the order they are shown.
+    app_items: Vec<(&'static str, MenuItem<Wry>)>,
+}
+
 #[derive(Default)]
-pub struct TrayMenu(Mutex<Option<[MenuItem<Wry>; 5]>>);
+pub struct TrayMenu(Mutex<Option<HeldMenu>>);
 
 /// Puts the tray's labels in the current language. See [`TrayLabels`].
 pub fn relabel(app: &AppHandle) {
     let labels = labels(app);
+    let spanish = spanish(app);
     let Some(state) = app.try_state::<TrayMenu>() else { return };
     let Ok(held) = state.0.lock() else { return };
-    if let Some([show, quick_ask, check_updates, restart, quit]) = held.as_ref() {
+    if let Some(HeldMenu { items: [show, quick_ask, check_updates, restart, quit], apps, app_items }) = held.as_ref() {
         let _ = show.set_text(labels.show);
+        let _ = apps.set_text(labels.apps);
+        for (key, item) in app_items {
+            let _ = item.set_text(app_label(key, spanish));
+        }
         let _ = quick_ask.set_text(labels.quick_ask);
         let _ = check_updates.set_text(labels.check_updates);
         let _ = restart.set_text(labels.restart);
         let _ = quit.set_text(labels.quit);
+    }
+}
+
+/// Puts the «Apps» rows in the rail's current order, after the user rearranged the rail.
+fn reorder_apps(app: &AppHandle) {
+    let order = stored_rail_order(app);
+    let Some(state) = app.try_state::<TrayMenu>() else { return };
+    let Ok(mut held) = state.0.lock() else { return };
+    let Some(menu) = held.as_mut() else { return };
+    if menu.app_items.iter().map(|(k, _)| *k).eq(order.iter().copied()) {
+        return;
+    }
+    for (_, item) in &menu.app_items {
+        let _ = menu.apps.remove(item);
+    }
+    menu.app_items.sort_by_key(|(key, _)| order.iter().position(|k| k == key).unwrap_or(order.len()));
+    for (_, item) in &menu.app_items {
+        let _ = menu.apps.append(item);
     }
 }
 
@@ -224,21 +352,49 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     // alternative left is quitting and finding the app again.
     let restart_item = MenuItem::with_id(app, RESTART, labels.restart, true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, QUIT, labels.quit, true, None::<&str>)?;
+    // Each rail app, straight into an island, without the main window coming back — under "show",
+    // because it is the other half of the same question: which screen to put up.
+    let spanish_now = spanish(app);
+    let app_items = stored_rail_order(app)
+        .into_iter()
+        .map(|key| {
+            MenuItem::with_id(app, format!("{APP_PREFIX}{key}"), app_label(key, spanish_now), true, None::<&str>)
+                .map(|item| (key, item))
+        })
+        .collect::<tauri::Result<Vec<_>>>()?;
+    let apps_menu = Submenu::with_id(app, "tray:apps", labels.apps, true)?;
+    for (_, item) in &app_items {
+        apps_menu.append(item)?;
+    }
     let menu = Menu::with_items(
         app,
-        &[&show_item, &quick_ask_item, &check_updates_item, &restart_item, &quit_item],
+        &[
+            &show_item,
+            &apps_menu,
+            &PredefinedMenuItem::separator(app)?,
+            &quick_ask_item,
+            &check_updates_item,
+            &PredefinedMenuItem::separator(app)?,
+            &restart_item,
+            &quit_item,
+        ],
     )?;
     app.manage(TrayMenu::default());
     if let Ok(mut held) = app.state::<TrayMenu>().0.lock() {
-        *held = Some([show_item, quick_ask_item, check_updates_item, restart_item, quit_item]);
+        *held = Some(HeldMenu {
+            items: [show_item, quick_ask_item, check_updates_item, restart_item, quit_item],
+            apps: apps_menu,
+            app_items,
+        });
     }
-    // A language picked in Settings reaches the tray at once. `listen_any` hears the `emit` in
-    // `set_setting` — the same delivery `remotectl::bridge` relies on and tests.
+    // A language picked in Settings reaches the tray at once, and so does a rail rearranged by
+    // dragging. `listen_any` hears the `emit` in `set_setting` — the same delivery
+    // `remotectl::bridge` relies on and tests.
     let handle = app.clone();
-    app.listen_any("settings:changed", move |event| {
-        if changed_setting_key(event.payload()).as_deref() == Some(LANGUAGE_KEY) {
-            relabel(&handle);
-        }
+    app.listen_any("settings:changed", move |event| match changed_setting_key(event.payload()).as_deref() {
+        Some(LANGUAGE_KEY) => relabel(&handle),
+        Some(RAIL_ORDER_KEY) => reorder_apps(&handle),
+        _ => {}
     });
 
     // The menu bar gets the mark alone, as a template: macOS paints a template image itself — black
@@ -263,6 +419,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             // Not the tray's item — the app menu's, delivered here too. See `tray_action`.
             None => {}
             Some(TrayAction::Show) => show_main_window(app),
+            Some(TrayAction::App(key)) => open_app_island(app, key),
             // Deliberately does NOT raise the main window first. The whole proposition of the ask
             // box is that it costs nothing to reach — putting the desk back on screen in order to
             // ask one question is the thing it exists to avoid.
@@ -442,6 +599,29 @@ mod tests {
             }
         }
         assert_eq!(tray_labels(true).check_updates, "Buscar actualizaciones…");
+    }
+
+    /// Every rail app has a row whose id leads back to it, and both languages name it.
+    #[test]
+    fn every_rail_app_has_a_row_of_its_own() {
+        for (key, en, es) in RAIL_APPS {
+            assert_eq!(tray_action(&format!("{APP_PREFIX}{key}")), Some(TrayAction::App(key)));
+            assert!(!en.trim().is_empty() && !es.trim().is_empty(), "{key}");
+        }
+        assert_eq!(tray_action("tray:app:not-an-app"), None);
+        assert_eq!(app_label("api:database", true), "Bases de datos");
+    }
+
+    /// The rail's rule: stored keys first in their order, the rest after in declared order, keys
+    /// that name no app ignored, and anything unreadable read as no preference.
+    #[test]
+    fn the_apps_follow_the_rail_order() {
+        let declared: Vec<&str> = RAIL_APPS.iter().map(|(k, _, _)| *k).collect();
+        assert_eq!(rail_order(None), declared);
+        assert_eq!(rail_order(Some("not json")), declared);
+        let order = rail_order(Some(r#"["notes","gone","api:database"]"#));
+        assert_eq!(&order[..3], &["notes", "api:database", "api:requests"]);
+        assert_eq!(order.len(), RAIL_APPS.len());
     }
 
     #[test]

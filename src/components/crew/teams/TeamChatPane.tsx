@@ -11,15 +11,13 @@ import { Select } from "../../common/Select";
 import { teamChatDraft, teamChatHistory, type TeamChatSummary } from "../../../lib/tauri/teamCommands";
 import { AgentAvatar, TeamAvatar } from "../kit/Avatar";
 import { Btn, Drawer } from "../kit/ui";
-import { lNow, useCrewStore, useL } from "../state";
+import { useCrewStore, useL } from "../state";
 import { scrollBehavior } from "../../../lib/motion";
 import type { ChatAttachment } from "../../../lib/tauri/chatCommands";
 
-export async function chatWithTeam(teamId: string, fresh = false, projectId = useWorkspaceStore.getState().activeProjectId): Promise<void> {
-  if (!projectId) {
-    pushErrorToast(lNow("Abre un repositorio para conversar con el equipo.", "Open a repository to chat with the team."));
-    return;
-  }
+/** The chat is the team's, in its workspace: the open repository only says where members prefer to
+ *  work, and having none open is fine. */
+export async function chatWithTeam(teamId: string, fresh = false, projectId: string | null = useWorkspaceStore.getState().activeProjectId): Promise<void> {
   try {
     const id = await useTeamChatStore.getState().open(teamId, projectId, fresh);
     useCrewStore.getState().open({ kind: "teamChat", id });
@@ -78,20 +76,23 @@ export function TeamChatContent({ chatId, onClose }: { chatId: string; onClose?:
 
   const chat = state?.chat;
   const lead = chat?.members.find((m) => m.id === chat.leadId);
+  // Where the team works: one name when everyone shares a repository, a count otherwise.
+  const repoNames = chat ? [...new Set(Object.values(chat.memberRepos ?? {}).map((r) => r.name))] : [];
+  const where = repoNames.length > 1 ? l(`${repoNames.length} repositorios`, `${repoNames.length} repositories`) : (repoNames[0] ?? chat?.projectName ?? "");
   const active = chat?.members.find((m) => m.id === chat.activeMemberId);
   useEffect(() => {
     if (!chat) return;
     let valid = true;
-    void teamChatHistory(chat.teamId, chat.projectId).then((list) => { if (valid) setHistory(list); }).catch(() => {});
+    void teamChatHistory(chat.teamId).then((list) => { if (valid) setHistory(list); }).catch(() => {});
     return () => { valid = false; };
-  }, [chat?.teamId, chat?.projectId, chatId, state?.messages.length]);
+  }, [chat?.teamId, chatId, state?.messages.length]);
   return (
     <>
       <div className="flex shrink-0 items-center gap-2.5 border-b border-[var(--cf-border)] px-4 py-3">
         <TeamAvatar size={32} />
         <div className="min-w-0 flex-1">
           <b className="block truncate text-[13.5px]">{chat?.teamName ?? l("Chat del equipo", "Team chat")}</b>
-          {chat && <span className="block truncate text-[11.5px] text-[var(--cf-text-muted)]">{chat.projectName} · {l(`Lidera ${lead?.name ?? ""}`, `Led by ${lead?.name ?? ""}`)}</span>}
+          {chat && <span className="block truncate text-[11.5px] text-[var(--cf-text-muted)]">{where} · {l(`Lidera ${lead?.name ?? ""}`, `Led by ${lead?.name ?? ""}`)}</span>}
         </div>
         {history.length > 1 && <Select value={chatId} size="sm" ariaLabel={l("Historial de chats del equipo", "Team chat history")} className="max-w-[120px] sm:max-w-[200px]" onChange={(id) => useCrewStore.getState().open({ kind: "teamChat", id })} options={history.map((item) => ({ value: item.id, label: item.title || new Date(item.createdAt).toLocaleString() }))} />}
         {state?.messages.some((message) => message.role === "user") && (
@@ -99,7 +100,7 @@ export function TeamChatContent({ chatId, onClose }: { chatId: string; onClose?:
             {l("Convertir en tarea", "Convert to task")}
           </Btn>
         )}
-        {chat && <button type="button" disabled={busy} onClick={() => void chatWithTeam(chat.teamId, true, chat.projectId)} title={l("Nueva conversación con el equipo", "New conversation with the team")} className={iconButtonClass({ size: "sm" })}><MessageSquarePlus className="h-4 w-4" /></button>}
+        {chat && <button type="button" disabled={busy} onClick={() => void chatWithTeam(chat.teamId, true)} title={l("Nueva conversación con el equipo", "New conversation with the team")} className={iconButtonClass({ size: "sm" })}><MessageSquarePlus className="h-4 w-4" /></button>}
         {onClose && <button type="button" onClick={onClose} title={l("Cerrar", "Close")} aria-label={l("Cerrar chat del equipo", "Close team chat")} className={iconButtonClass({ size: "sm" })}><X className="h-4 w-4" /></button>}
       </div>
       {!state ? (
@@ -111,7 +112,7 @@ export function TeamChatContent({ chatId, onClose }: { chatId: string; onClose?:
               {state.messages.length === 0 && <div className="rounded-xl border border-dashed border-[var(--cf-border-strong)] p-5 text-[12.5px] leading-relaxed text-[var(--cf-text-muted)]">
                 <MessageSquare className="mb-2 h-5 w-5 text-[var(--cf-accent)]" />
                 <b className="block text-[var(--cf-text)]">{l("Conversa y trabaja con tu equipo", "Chat and work with your team")}</b>
-                {l(`Escríbele a ${lead?.name ?? "tu líder"}: responderá directamente o elegirá al miembro indicado. Puedes hacer preguntas, adjuntar archivos y pedir que escriban o editen en ${chat?.projectName}.`, `Write to ${lead?.name ?? "your lead"}: they will answer directly or choose the right member. Ask questions, attach files, or ask the team to write and edit in ${chat?.projectName}.`)}
+                {l(`Escríbele a ${lead?.name ?? "tu líder"}: responderá directamente o elegirá al miembro indicado. Puedes hacer preguntas, adjuntar archivos y pedir que escriban o editen en ${where}.`, `Write to ${lead?.name ?? "your lead"}: they will answer directly or choose the right member. Ask questions, attach files, or ask the team to write and edit in ${where}.`)}
               </div>}
               {state.messages.map((message, index) => {
                 const member = chat?.members.find((m) => m.id === message.memberId);

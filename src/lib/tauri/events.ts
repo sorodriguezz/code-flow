@@ -197,6 +197,8 @@ export const onSkillsProgress = (handler: (event: { line: string }) => void) =>
  * back" wants both.
  */
 export const onAppForeground = (handler: () => void) => listen("app:foreground", () => handler());
+/** The tray's «Apps» submenu asking for a rail app's island (`tray::OPEN_APP_EVENT`). Main window only. */
+export const onTrayOpenApp = (handler: (key: string) => void) => listen<string>("tray:open-app", (event) => handler(event.payload));
 
 /**
  * A backup starting and finishing, whether it was the button or the scheduler that started it.

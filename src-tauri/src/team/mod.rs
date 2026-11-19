@@ -821,6 +821,46 @@ pub fn forget_repository(conn: &Connection, workspace_id: &str, project_id: &str
     Ok(())
 }
 
+/// Runs [`forget_repository`] for every id an agent or team still names but its workspace no longer
+/// has — repositories removed before that cleanup existed, or removed and added back (which gives
+/// them a new id). Left there, a stale id keeps a list non-empty, so it still reads as "limited to
+/// these" while allowing nothing (user report 2026-11-19: a team lead locked out of every repo).
+pub fn forget_missing_repositories(conn: &Connection) -> rusqlite::Result<()> {
+    let workspaces: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT id FROM workspaces")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for workspace in workspaces {
+        let live: std::collections::HashSet<String> = {
+            let mut stmt = conn.prepare("SELECT id FROM projects WHERE workspace_id = ?1")?;
+            let rows = stmt.query_map(params![workspace], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut named: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        {
+            let mut stmt = conn.prepare("SELECT repos FROM workspace_agents WHERE workspace_id = ?1")?;
+            let rows = stmt.query_map(params![workspace], |r| r.get::<_, String>(0))?;
+            for text in rows {
+                named.extend(parse::<Vec<String>>(&text?));
+            }
+        }
+        for team in list_teams(conn, &workspace)? {
+            for member in &team.members {
+                named.extend(member.repos.iter().cloned());
+            }
+            named.extend(team.plan.iter().map(|s| s.repo.clone()));
+            named.extend(team.policy.checks.iter().map(|c| c.repo.clone()));
+        }
+        // Not ids: blank and `*` are "no repository" and "every repository".
+        named.retain(|id| !id.is_empty() && id != "*");
+        for stale in named.iter().filter(|id| !live.contains(*id)) {
+            forget_repository(conn, &workspace, stale)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn delete_team(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM agent_teams WHERE id = ?1", params![id])?;
     Ok(())

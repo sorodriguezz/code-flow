@@ -160,6 +160,9 @@ export interface TeamChat {
   error: string;
   revision: number;
   createdAt: string;
+  /** The repository each member works in, by member id. `projectId` above is the lead's; chats
+   *  from before team chats belonged to the workspace have none, and everyone works there. */
+  memberRepos?: Record<string, { id: string; name: string }>;
 }
 
 export interface TeamChatMessage {

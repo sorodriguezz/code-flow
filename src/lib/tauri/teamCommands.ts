@@ -5,12 +5,13 @@ import type {
   TeamRunMetrics, Team, TeamCheck, TeamDispatch, TeamPolicy, TeamPrDraft, TeamRecommendation, TeamRun, TeamRunState } from "../../types/team";
 
 export const teamList = (workspaceId: string) => invoke<Team[]>("team_list", { workspaceId });
-export const teamChatOpen = (teamId: string, projectId: string, fresh = false) => invoke<TeamChatState>("team_chat_open", { teamId, projectId, fresh });
+/** `projectId` is only where members prefer to work: the chat is the team's, in its workspace. */
+export const teamChatOpen = (teamId: string, projectId: string | null, fresh = false) => invoke<TeamChatState>("team_chat_open", { teamId, projectId, fresh });
 export const teamChatState = (chatId: string) => invoke<TeamChatState>("team_chat_state", { chatId });
 export const teamChatDraft = (chatId: string) =>
   invoke<{ teamId: string; projectId: string; goal: string; attachments: ChatAttachment[] }>("team_chat_draft", { chatId });
 export interface TeamChatSummary { id: string; title: string; createdAt: string }
-export const teamChatHistory = (teamId: string, projectId: string) => invoke<TeamChatSummary[]>("team_chat_history", { teamId, projectId });
+export const teamChatHistory = (teamId: string) => invoke<TeamChatSummary[]>("team_chat_history", { teamId });
 export const teamChatSend = (chatId: string, message: string, attachments?: string[]) => invoke<TeamChatState>("team_chat_send", { chatId, message, attachments: attachments ?? null });
 export const teamChatCancel = (chatId: string) => invoke<void>("team_chat_cancel", { chatId });
 export const teamSave = (team: Team) => invoke<Team>("team_save", { team });

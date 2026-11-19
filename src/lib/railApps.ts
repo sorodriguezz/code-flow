@@ -17,6 +17,7 @@ import { useUiStore, type ApiWorkspace, type MainView } from "../state/uiStore";
 import { useWindowStore } from "../state/windowStore";
 import { translate } from "../state/languageStore";
 import { flushBeforeIsland } from "./islandSync";
+import { showMainWindow } from "./tauri/windows";
 import type { TranslationKey } from "./i18n/translations";
 
 /**
@@ -241,4 +242,20 @@ export async function sendRailAppOut(app: WorkspaceApp): Promise<boolean> {
     useUiStore.getState().returnToRepo();
   }
   return true;
+}
+
+/**
+ * The tray's «Apps» submenu (`tray.rs`): rail app `key` in an island, with this window left where it
+ * is — usually hidden in the tray. An island already open is brought forward. Refused (the island
+ * limit, the backend), this window comes back, since the toast saying why is drawn in it.
+ */
+export async function openRailAppFromTray(key: string): Promise<void> {
+  const app = appByKey(key);
+  if (!app) return;
+  const label = windowForApp(app);
+  if (label) {
+    await useWindowStore.getState().focus(label);
+    return;
+  }
+  if (!(await sendRailAppOut(app))) await showMainWindow().catch(() => {});
 }

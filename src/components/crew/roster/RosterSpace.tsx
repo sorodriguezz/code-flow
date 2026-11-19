@@ -25,7 +25,7 @@ import { useWorkspaceStore } from "../../../state/workspaceStore";
 import { ConfigurationExportButton, ConfigurationImportButton } from "../ConfigurationSharing";
 import { AGENT_CONFIGURATION } from "../../../lib/agents/shareConfiguration";
 
-const AGENT_CARD_ACTIONS_CLASS = "pointer-events-none absolute inset-x-2 bottom-2 flex translate-y-3 flex-wrap items-center justify-center gap-1 rounded-[12px] border border-[var(--cf-border)] bg-[var(--cf-surface)] p-1 opacity-0 shadow-[var(--cf-shadow)] transition-[opacity,transform] duration-150 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100";
+const AGENT_CARD_ACTIONS_CLASS = "pointer-events-none absolute inset-x-2 bottom-2 flex translate-y-3 flex-col gap-1 rounded-[12px] border border-[var(--cf-border)] bg-[var(--cf-surface)] p-1 opacity-0 shadow-[var(--cf-shadow)] transition-[opacity,transform] duration-150 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100";
 const ROSTER_GRID_CLASS = "grid w-full auto-rows-fr grid-cols-[repeat(auto-fill,minmax(min(100%,230px),1fr))] gap-3";
 const ROSTER_HINT_CLASS = "mt-4 text-[11.5px] text-[var(--cf-text-faint)]";
 
@@ -207,14 +207,22 @@ function AgentCard({ agent, index, onSync }: { agent: WorkspaceAgent; index: num
         )}
       </div>
       {/* The actions slide up on hover or focus: nothing turns, nothing spins. */}
+      {/* Two fixed rows instead of one that wraps: at the grid's narrowest card the seven controls
+          don't fit on a line, and a wrapped row left Borrar alone and off-centre underneath. Using
+          the agent goes on top, managing it underneath, with the destructive one kept apart. */}
       <div className={AGENT_CARD_ACTIONS_CLASS}>
-        <Btn small kind="primary" icon={WandSparkles} title={l("Dale una tarea a este agente", "Hand this agent a task")} onClick={() => crew.open({ kind: "launch", assignee: { kind: "agent", id: agent.id } })}>{l("Tarea", "Task")}</Btn>
-        <IconBtn title={l("Conversa con este agente en el repositorio activo, como en el chat del repositorio: preguntas, imágenes, su modelo y su forma de trabajar", "Chat with this agent in the active repository, like the repository chat: questions, images, its model and its way of working")} onClick={() => void chatWith(agent)} icon={MessageSquare} />
-        <IconBtn title={l("Editar", "Edit")} onClick={() => crew.open({ kind: "wizard", agentId: agent.id })} icon={Pencil} />
-        <IconBtn title={l("Duplicar", "Duplicate")} onClick={() => void useAgentsStore.getState().duplicateAgent(agent.id)} icon={Copy} />
-        <IconBtn title={l("Guardar como plantilla", "Save as template")} onClick={() => void saveAsTemplate()} icon={BookMarked} />
-        <ConfigurationExportButton source={agent} compact />
-        <IconBtn title={l("Borrar", "Delete")} onClick={() => void remove()} icon={Trash2} danger />
+        <div className="flex items-center gap-1">
+          <Btn small kind="primary" icon={WandSparkles} className="flex-1 justify-center" title={l("Dale una tarea a este agente", "Hand this agent a task")} onClick={() => crew.open({ kind: "launch", assignee: { kind: "agent", id: agent.id } })}>{l("Tarea", "Task")}</Btn>
+          <IconBtn title={l("Conversa con este agente en el repositorio activo, como en el chat del repositorio: preguntas, imágenes, su modelo y su forma de trabajar", "Chat with this agent in the active repository, like the repository chat: questions, images, its model and its way of working")} onClick={() => void chatWith(agent)} icon={MessageSquare} />
+        </div>
+        <div className="flex items-center gap-0.5 border-t border-[var(--cf-border)] pt-1">
+          <IconBtn title={l("Editar", "Edit")} onClick={() => crew.open({ kind: "wizard", agentId: agent.id })} icon={Pencil} />
+          <IconBtn title={l("Duplicar", "Duplicate")} onClick={() => void useAgentsStore.getState().duplicateAgent(agent.id)} icon={Copy} />
+          <IconBtn title={l("Guardar como plantilla", "Save as template")} onClick={() => void saveAsTemplate()} icon={BookMarked} />
+          <ConfigurationExportButton source={agent} compact />
+          <span className="flex-1" />
+          <IconBtn title={l("Borrar", "Delete")} onClick={() => void remove()} icon={Trash2} danger />
+        </div>
       </div>
     </motion.div>
   );

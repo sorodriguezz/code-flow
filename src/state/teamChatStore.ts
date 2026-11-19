@@ -14,7 +14,7 @@ export const teamChatBusy = (state: TeamChatState | undefined) => state?.chat.st
 interface TeamChatStore {
   states: Record<string, TeamChatState>;
   accept: (state: TeamChatState) => void;
-  open: (teamId: string, projectId: string, fresh?: boolean) => Promise<string>;
+  open: (teamId: string, projectId: string | null, fresh?: boolean) => Promise<string>;
   refresh: (chatId: string) => Promise<void>;
   send: (chatId: string, text: string, files?: ChatAttachment[]) => boolean;
   cancel: (chatId: string) => Promise<void>;

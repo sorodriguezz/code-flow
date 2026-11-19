@@ -99,7 +99,8 @@ import { modalExitMs } from "./lib/motion";
 import { startWindowBoundsTracking } from "./lib/windowControls";
 import { backgroundFetch } from "./lib/backgroundFetch";
 import { startWatching, stopWatching } from "./lib/tauri/commands";
-import { isOwnOrigin, onAppForeground, onRepoFsChanged, onStateInvalidate } from "./lib/tauri/events";
+import { isOwnOrigin, onAppForeground, onRepoFsChanged, onStateInvalidate, onTrayOpenApp } from "./lib/tauri/events";
+import { openRailAppFromTray } from "./lib/railApps";
 import { buttonClass } from "./components/common/Button";
 import { MultiDiffHost } from "./components/git/MultiDiffHost";
 
@@ -1357,9 +1358,13 @@ export default function App() {
       onReturn();
       void restoreSatellites().catch(() => 0);
     });
+    // The tray's «Apps»: an island opened while this window stays in the tray. Not a return, so
+    // it restores nothing else.
+    const unlistenTray = onTrayOpenApp((key) => void openRailAppFromTray(key));
     return () => {
       window.removeEventListener("focus", onReturn);
       void unlisten.then((f) => f());
+      void unlistenTray.then((f) => f());
     };
   }, []);
 

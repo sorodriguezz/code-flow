@@ -47,6 +47,11 @@ pub fn start(app: &AppHandle) {
 
 pub fn run(conn: &Connection, now: chrono::DateTime<chrono::Utc>) -> rusqlite::Result<()> {
     prune(conn, now)?;
+    // Best effort: a reference that can't be cleaned now is tried again tomorrow, and must not
+    // keep the space from being given back.
+    if let Err(e) = crate::team::forget_missing_repositories(conn) {
+        crate::applog::info(&format!("db: stale repository references not cleaned — {e}"));
+    }
     // The one-time switch. `auto_vacuum` only takes effect through a `VACUUM`, which rewrites the
     // file: seconds on a large database, holding the lock — hence here, and only once.
     let mode: i64 = conn.query_row("PRAGMA auto_vacuum", [], |row| row.get(0))?;

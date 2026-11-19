@@ -87,7 +87,7 @@ fn persists_chats_and_keeps_new_conversations_separate() {
         state(&conn, &first.chat.id).unwrap().messages[0].content,
         "Añade un endpoint"
     );
-    let history = history(&conn, &team.id, &project).unwrap();
+    let history = history(&conn, &team.id).unwrap();
     assert_eq!(history.len(), 2);
     assert!(history
         .iter()
@@ -116,15 +116,15 @@ fn requires_a_lead_and_checks_workspace_and_repository_permissions() {
         .unwrap_err()
         .contains("líder"));
     team.lead = lead;
+    // A repository list that names nothing usable no longer stops the chat: the lead says itself
+    // what it may touch.
     team.members[0].repos = vec!["different-project".into()];
-    assert!(open(&conn, team.clone(), &project, false)
-        .unwrap_err()
-        .contains("acceso"));
+    assert!(open(&conn, team.clone(), &project, false).is_ok());
     team.members[0].repos.clear();
     team.workspace_id = "another-workspace".into();
-    assert!(open(&conn, team, &project, false)
+    assert!(open(&conn, team, &project, true)
         .unwrap_err()
-        .contains("espacios distintos"));
+        .contains("Agrega un repositorio"));
 }
 
 #[test]
@@ -346,4 +346,69 @@ async fn stopping_before_a_handoff_prevents_a_member_from_starting() {
         .unwrap_err()
         .contains(crate::ai_runs::CANCELLED_MARKER));
     assert_eq!(calls, 1);
+}
+
+#[test]
+fn the_chat_belongs_to_the_workspace_and_places_each_member_in_a_repository_it_may_use() {
+    let (conn, mut team, open_in_app) = fixture();
+    let core = uid();
+    conn.execute("INSERT INTO projects (id, workspace_id, name, local_path, sort_order, created_at) VALUES (?1,?2,'Core','/tmp/team-chat-core',1,?3)", params![core, team.workspace_id, queries::now()]).unwrap();
+
+    // The lead may only work in Core, while the app has the other repository open: the chat still
+    // opens, the lead works in Core and the backend member, unrestricted, where the app is.
+    team.members[0].repos = vec![core.clone()];
+    team = super::super::save_team(&conn, team).unwrap();
+    let chat = open(&conn, team.clone(), &open_in_app, false).unwrap().chat;
+    assert_eq!(chat.project_id, core);
+    assert_eq!(chat.repo_of("lead").name, "Core");
+    assert_eq!(chat.repo_of("backend").id, open_in_app);
+    assert!(prompt(&chat, &chat.members[0]).contains("Trabajas en el repositorio: Core"));
+    let backend = chat.members.iter().find(|m| m.member.id == "backend").unwrap();
+    assert_eq!(task_for(&conn, &chat, backend).unwrap().project_id, open_in_app);
+
+    // No repository open at all is fine too.
+    assert!(open(&conn, team.clone(), "", true).is_ok());
+
+    // Reopening from another repository finds the same conversation: it is the team's.
+    assert_eq!(open(&conn, team.clone(), &core, false).unwrap().chat.id, history(&conn, &team.id).unwrap()[0].id);
+}
+
+#[test]
+fn repository_lists_guide_the_lead_instead_of_blocking_it_and_stale_ones_are_forgotten() {
+    let (conn, mut team, project) = fixture();
+    let agent_id = team.members[0].agent_id.clone();
+    let core = uid();
+    conn.execute("INSERT INTO projects (id, workspace_id, name, local_path, sort_order, created_at) VALUES (?1,?2,'Core','/tmp/team-chat-core',1,?3)", params![core, team.workspace_id, queries::now()]).unwrap();
+
+    // The user's case: the seat allows Core, the agent allows API, nothing in common. The chat
+    // opens; the lead starts where the app is (API, which one side names) and is told both.
+    conn.execute("UPDATE workspace_agents SET repos = ?1 WHERE id = ?2", params![format!("[\"{project}\"]"), agent_id]).unwrap();
+    team.members[0].repos = vec![core.clone()];
+    team = super::super::save_team(&conn, team).unwrap();
+    let chat = open(&conn, team.clone(), &project, false).unwrap().chat;
+    assert_eq!(chat.repo_of("lead").id, project);
+    let told = prompt(&chat, &chat.members[0]);
+    assert!(told.contains("Tus repositorios asignados son: API, Core"), "{told}");
+
+    // A model is the one thing it cannot do without.
+    conn.execute("UPDATE workspace_agents SET model = '' WHERE id = ?1", params![agent_id]).unwrap();
+    let err = open(&conn, team.clone(), &project, true).unwrap_err();
+    assert!(err.contains("no tiene modelo"), "{err}");
+    conn.execute("UPDATE workspace_agents SET model = 'sonnet' WHERE id = ?1", params![agent_id]).unwrap();
+
+    // Cleaning stale ids drops them where a live repository is left, and never empties a list
+    // (empty would mean "every repository").
+    conn.execute("UPDATE workspace_agents SET repos = ?1 WHERE id = ?2", params![format!("[\"removed-long-ago\",\"{project}\"]"), agent_id]).unwrap();
+    team.members[0].repos = vec!["removed-long-ago".into(), project.clone()];
+    super::super::save_team(&conn, team.clone()).unwrap();
+    let other_agent = team.members[1].agent_id.clone();
+    conn.execute("UPDATE workspace_agents SET repos = '[\"gone\"]' WHERE id = ?1", params![other_agent]).unwrap();
+    super::super::forget_missing_repositories(&conn).unwrap();
+    let repos_of = |id: &str| -> String { conn.query_row("SELECT repos FROM workspace_agents WHERE id = ?1", params![id], |r| r.get(0)).unwrap() };
+    assert_eq!(repos_of(&agent_id), format!("[\"{project}\"]"));
+    assert_eq!(repos_of(&other_agent), "[\"gone\"]");
+    let saved = super::super::list_teams(&conn, &team.workspace_id).unwrap();
+    assert_eq!(saved[0].members[0].repos, vec![project.clone()]);
+    let fresh = saved.into_iter().next().unwrap();
+    assert!(open(&conn, fresh, &project, true).is_ok());
 }
