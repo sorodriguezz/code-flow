@@ -42,6 +42,8 @@ const COMMIT_MESSAGE_MODEL: &str = "claude-haiku-5-5";
 
 const SHELL_TOOL: &str = "Bash";
 const PERMISSION_PROMPT_TOOL_FLAG: &str = "--permission-prompt-tool";
+/// Claude Code's tool that finds deferred MCP tools — see the read-only branch of `build_command`.
+const TOOL_SEARCH: &str = "ToolSearch";
 
 /// Single-line, ASCII, shim-safe stand-in for an ask this engine can't put on the command line as
 /// given — mirrors `codex.rs`'s `POINTER`. The real ask rides on stdin instead, ahead of the usual
@@ -213,10 +215,20 @@ impl AiEngine for ClaudeEngine {
             if host_answers_permissions {
                 tools.push(SHELL_TOOL.to_string());
             }
+            // With servers loaded, `ToolSearch` keeps their tools deferred: Claude Code loads every
+            // MCP definition up front when it is left out of `--tools` (its MCP docs, "tool
+            // search"), which cost a plan turn the map's and the browser's whole schemas — several
+            // thousand tokens — on every turn (2026-11-18). It only reads definitions.
+            if !app_servers.is_empty() {
+                tools.push(TOOL_SEARCH.to_string());
+            }
             cmd.arg("--tools").arg(tools.join(","));
             cmd.arg("--strict-mcp-config");
         }
         let mut allowed: Vec<String> = inv.allowed_tools.to_vec();
+        if inv.read_only && !inv.text_only && !inv.lean && !app_servers.is_empty() {
+            allowed.push(TOOL_SEARCH.to_string());
+        }
         if map_server_loaded {
             allowed.push(crate::codemap::mcp::allow_rule());
         }
@@ -232,6 +244,11 @@ impl AiEngine for ClaudeEngine {
         if !inv.mcp_block.is_empty() && !inv.read_only && !inv.text_only {
             let rules: Vec<String> = inv.mcp_block.iter().map(|server| mcp_rule(server)).collect();
             cmd.arg("--disallowedTools").arg(rules.join(","));
+        }
+        // A plan turn's browser reads pages and nothing else (`chat_exec::browser_allows`), so the
+        // tools that act are not shown to it at all.
+        if inv.read_only && !inv.text_only && app_servers.iter().any(|server| server.name == crate::chat_exec::BROWSER_SERVER) {
+            cmd.arg("--disallowedTools").arg(crate::chat_exec::browser_plan_denials().join(","));
         }
         // The app's own servers: a private document of `${VAR}`s, deleted with the run, and the
         // values in this process's environment — never on the command line, never in the file.
@@ -1444,7 +1461,7 @@ mod tests {
         inv.read_only = true;
         inv.auto_approve_edits = true;
         let args = command_args(&ClaudeEngine.build_command("claude", &inv));
-        assert!(args.windows(2).any(|pair| pair == ["--tools", "Read,Grep,Glob,WebFetch,WebSearch"]), "{args:?}");
+        assert!(args.windows(2).any(|pair| pair == ["--tools", "Read,Grep,Glob,WebFetch,WebSearch"]), "no server, no tool search: {args:?}");
         assert!(args.iter().any(|a| a == "--strict-mcp-config"), "{args:?}");
         assert!(!args.iter().any(|a| a == "acceptEdits"), "{args:?}");
 
@@ -1492,6 +1509,18 @@ mod tests {
         assert!(config.contains("codeflow_map") && !config.contains("trello"), "{config}");
         assert!(args.windows(2).any(|pair| pair[0] == "--allowedTools" && pair[1].contains("mcp__codeflow_map")), "{args:?}");
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+        // And its tools stay deferred: without `ToolSearch` in `--tools` the CLI loads them all.
+        let at = args.iter().position(|a| a == "--tools").expect("a tool list");
+        assert!(args[at + 1].split(',').any(|tool| tool == "ToolSearch"), "{args:?}");
+        // No browser among the servers, nothing of it to deny.
+        assert!(!args.iter().any(|a| a == "--disallowedTools"), "{args:?}");
+
+        let mut with_browser = AiInvocation::new("mira la página", "");
+        with_browser.read_only = true;
+        with_browser.app_mcp = vec![server(crate::chat_exec::BROWSER_SERVER)];
+        let args = command_args(&ClaudeEngine.build_command("claude", &with_browser));
+        let at = args.iter().position(|a| a == "--disallowedTools").expect("the browser's acting tools");
+        assert!(args[at + 1].contains("mcp__playwright__browser_click") && !args[at + 1].contains("browser_snapshot"), "{args:?}");
     }
 
     /// A text-only run carries nothing of the agent: no tools, no servers (not even the ones the app

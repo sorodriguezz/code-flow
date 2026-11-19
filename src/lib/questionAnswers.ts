@@ -25,8 +25,12 @@ export function questionAnswersReducer(drafts: QuestionAnswerDraft[], action: Qu
       const replaceSelection = !action.multiple && trimmed !== EMPTY_QUESTION_ANSWER;
       return { selected: replaceSelection ? [] : draft.selected, other: action.text };
     }
-    if (!action.multiple) return { selected: [action.option], other: EMPTY_QUESTION_ANSWER };
     const alreadySelected = draft.selected.includes(action.option);
+    // A second click on the chosen option takes it back, single choice included: otherwise an
+    // answer picked by mistake could only be swapped for another, never undone.
+    if (!action.multiple) {
+      return alreadySelected ? { ...draft, selected: [] } : { selected: [action.option], other: EMPTY_QUESTION_ANSWER };
+    }
     const selected = alreadySelected
       ? draft.selected.filter((option) => option !== action.option)
       : [...draft.selected, action.option];

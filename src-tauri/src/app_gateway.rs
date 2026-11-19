@@ -29,8 +29,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-/// The most of one answer a model is handed.
-const MAX_ANSWER: usize = 80_000;
+/// The most of one answer a model is handed — the map server's cap on every tool's text
+/// (`codemap::mcp::text_result`), so the two cannot disagree.
+pub(crate) const MAX_ANSWER: usize = 40_000;
 /// How many commands one listing shows.
 const MAX_LISTED: usize = 40;
 
@@ -169,13 +170,54 @@ fn here(scope: &Scope) -> String {
 /// The keys whose value is a filesystem path.
 fn is_path_key(key: &str) -> bool {
     let key = key.to_ascii_lowercase();
+    // Plurals too, for the lists the nested walk now reaches: `hostPaths`, `extraDirs`, `files`.
+    let key = key.strip_suffix('s').filter(|k| !k.is_empty()).unwrap_or(&key);
     ["path", "dir", "directory", "folder", "cwd", "root", "repopath", "localpath", "file"].iter().any(|k| key == *k || key.ends_with(k))
 }
 
 /// Why `args` reach outside the run's workspace, or `None`.
-fn outside(scope: &Scope, args: &serde_json::Map<String, Value>, roots: &[String]) -> Option<String> {
+///
+/// **Every level, not only the top one.** Plenty of commands take their arguments as one struct —
+/// `reviewer_run(request: RunRequest)`, `containers_run(spec)`, `approve_hybrid_plan(checks)` — and
+/// a check that read only the top-level strings let a nested `request.repoPath` name any folder on
+/// the machine (2026-11-18). Objects and arrays are walked, and each string is judged by the key it
+/// sits under.
+///
+/// `area` is the command's (`remote`, `db`…): it decides what a bare `id` names, and whether a
+/// `path` is this machine's at all — a remote host's `/etc/x` is not.
+fn outside(scope: &Scope, area: &str, args: &serde_json::Map<String, Value>, roots: &[String]) -> Option<String> {
     for (key, value) in args {
-        let Some(text) = value.as_str() else { continue };
+        let text = match value {
+            Value::Object(nested) => {
+                if let Some(why) = outside(scope, area, nested, roots) {
+                    return Some(why);
+                }
+                continue;
+            }
+            Value::Array(items) => {
+                for item in items {
+                    match item {
+                        Value::Object(nested) => {
+                            if let Some(why) = outside(scope, area, nested, roots) {
+                                return Some(why);
+                            }
+                        }
+                        // A list of plain strings is judged by the key that holds it: `paths: [...]`.
+                        Value::String(_) => {
+                            let mut one = serde_json::Map::new();
+                            one.insert(key.clone(), item.clone());
+                            if let Some(why) = outside(scope, area, &one, roots) {
+                                return Some(why);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+            Value::String(text) => text.as_str(),
+            _ => continue,
+        };
         match key.as_str() {
             "workspaceId" | "workspace_id" => {
                 if let Some(ws) = &scope.workspace_id {
@@ -194,7 +236,29 @@ fn outside(scope: &Scope, args: &serde_json::Map<String, Value>, roots: &[String
                     }
                 }
             }
-            _ if is_path_key(key) && std::path::Path::new(text).is_absolute() => {
+            // A remote host, by the name most remote commands give it. In `remote_upload_file` the
+            // `id` is the transfer's and the host is `hostId`, so a bare `id` beside one is not it.
+            "hostId" | "host_id" => {
+                if let Some(why) = foreign_host(scope, text) {
+                    return Some(why);
+                }
+            }
+            "id" if area == "remote" && !args.contains_key("hostId") => {
+                if let Some(why) = foreign_host(scope, text) {
+                    return Some(why);
+                }
+            }
+            "connectionId" | "connection_id" => {
+                if let Some(ws) = &scope.workspace_id {
+                    let row = crate::ai_usage::with_conn(|conn| crate::db::datasource_queries::get_connection(conn, text).ok().flatten()).flatten();
+                    if let Some(row) = row {
+                        if !connection_belongs(&row.workspace_id, &row.scope, ws) {
+                            return Some(format!("{key} {text} is a database connection of another workspace"));
+                        }
+                    }
+                }
+            }
+            _ if area != "remote" && is_path_key(key) && std::path::Path::new(text).is_absolute() => {
                 let temp = std::env::temp_dir();
                 let inside = roots.iter().any(|root| std::path::Path::new(text).starts_with(root)) || std::path::Path::new(text).starts_with(&temp);
                 if !inside {
@@ -205,6 +269,40 @@ fn outside(scope: &Scope, args: &serde_json::Map<String, Value>, roots: &[String
         }
     }
     None
+}
+
+/// Why remote host `id` is not this run's workspace's, or `None` — also when there is no workspace
+/// to hold it to, or the database will not answer (the command then fails on its own).
+fn foreign_host(scope: &Scope, id: &str) -> Option<String> {
+    let ws = scope.workspace_id.as_ref()?;
+    let known = crate::ai_usage::with_conn(|conn| crate::db::remote_queries::host_ids(conn, ws).ok())??;
+    (!belongs(&known, id)).then(|| format!("remote host {id} is not one of this workspace's"))
+}
+
+fn belongs(ids: &[String], id: &str) -> bool {
+    ids.iter().any(|known| known == id)
+}
+
+/// A connection is this workspace's when it sits on its shelf or on every shelf — the same rule
+/// the database tree is loaded by (`datasource_queries::load_tree`).
+fn connection_belongs(row_workspace: &str, row_scope: &str, workspace: &str) -> bool {
+    row_workspace == workspace || row_scope == "global"
+}
+
+/// Whether a database command may run on a connection the user opened to models at `access`.
+///
+/// The connection's own switch (`ai_access` in its spec, «Sin acceso» / read / write) is what the
+/// `db_read` and `db_write` tools answer to; without this the same connection was reachable through
+/// `app_call` whatever it said, `db_execute` included (2026-11-18). What changes data needs write —
+/// and is `destructive` in the catalogue, so the user still sees each one — and everything else
+/// needs at least read.
+fn db_gate(access: crate::agentcli::AiAccess, changes_data: bool) -> Result<(), String> {
+    use crate::agentcli::AiAccess;
+    match (access, changes_data) {
+        (AiAccess::None, _) => Err("this connection is not open to models («Sin acceso»): the user can open it in its settings".into()),
+        (AiAccess::Read, true) => Err("this connection is open to models for reading only".into()),
+        _ => Ok(()),
+    }
 }
 
 /// `app_call`: one command, with everything this module's header says bounds it.
@@ -242,8 +340,16 @@ pub async fn call(app: &AppHandle, scope: &Scope<'_>, args: &Value) -> Result<St
         }
         roots
     };
-    if let Some(why) = outside(scope, &call_args, &roots) {
+    if let Some(why) = outside(scope, &command.area, &call_args, &roots) {
         return Err(format!("Not called: {why}."));
+    }
+    if command.area == "db" {
+        if let Some(id) = call_args.get("connectionId").and_then(Value::as_str) {
+            let spec = crate::ai_usage::with_conn(|conn| crate::db::datasource_queries::get_connection(conn, id).ok().flatten().map(|row| row.spec)).flatten();
+            if let Some(spec) = spec {
+                db_gate(crate::agentcli::AiAccess::of_spec(&spec), command.risk == "destructive").map_err(|why| format!("Not called: {why}."))?;
+            }
+        }
     }
     if command.risk == "destructive" {
         let detail = format!("{}\n{}", signature(command), serde_json::to_string_pretty(&Value::Object(call_args.clone())).unwrap_or_default());
@@ -275,7 +381,10 @@ fn scrub(app: &AppHandle, text: &str) -> String {
     crate::secret_scan::redact(&out).0
 }
 
-fn clip(mut text: String) -> String {
+/// `text` cut to [`MAX_ANSWER`] bytes on a character boundary, saying it was cut and how to ask for
+/// less. Claude Code warns past ~10k tokens and refuses past 25k, so a log tail or a listing that
+/// size would otherwise be dropped whole, or crowd out everything else in the turn.
+pub(crate) fn clip(mut text: String) -> String {
     if text.len() > MAX_ANSWER {
         let mut cut = MAX_ANSWER;
         while !text.is_char_boundary(cut) {
@@ -306,10 +415,47 @@ mod tests {
         let scope = Scope { root: "/Users/me/repo", session: "s", acts: true, workspace_id: Some("w1".into()), project: None };
         let roots = vec!["/Users/me/repo".to_string()];
         let args = |v: Value| v.as_object().unwrap().clone();
-        assert!(outside(&scope, &args(json!({"workspaceId": "w2"})), &roots).is_some());
-        assert!(outside(&scope, &args(json!({"workspaceId": "w1"})), &roots).is_none());
-        assert!(outside(&scope, &args(json!({"path": "/etc/hosts"})), &roots).is_some());
-        assert!(outside(&scope, &args(json!({"repoPath": "/Users/me/repo/src"})), &roots).is_none());
-        assert!(outside(&scope, &args(json!({"path": "src/main.rs"})), &roots).is_none());
+        assert!(outside(&scope, "git", &args(json!({"workspaceId": "w2"})), &roots).is_some());
+        assert!(outside(&scope, "git", &args(json!({"workspaceId": "w1"})), &roots).is_none());
+        assert!(outside(&scope, "git", &args(json!({"path": "/etc/hosts"})), &roots).is_some());
+        assert!(outside(&scope, "git", &args(json!({"repoPath": "/Users/me/repo/src"})), &roots).is_none());
+        assert!(outside(&scope, "git", &args(json!({"path": "src/main.rs"})), &roots).is_none());
+        // Nested, as `reviewer_run(request)` takes it: the folder inside the struct is checked too.
+        assert!(outside(&scope, "git", &args(json!({"request": {"repoPath": "/etc", "build": "id"}})), &roots).is_some());
+        assert!(outside(&scope, "git", &args(json!({"request": {"repoPath": "/Users/me/repo", "projectId": "x"}})), &roots).is_none());
+        assert!(outside(&scope, "git", &args(json!({"spec": {"mounts": [{"hostPath": "/etc"}]}})), &roots).is_some());
+        assert!(outside(&scope, "git", &args(json!({"hostPaths": ["/Users/me/repo/a", "/etc/passwd"]})), &roots).is_some());
+        assert!(outside(&scope, "git", &args(json!({"task": {"workspaceId": "w2"}})), &roots).is_some());
+        // A remote host's own paths are not this machine's.
+        assert!(outside(&scope, "remote", &args(json!({"path": "/etc/hosts"})), &roots).is_none());
+    }
+
+    #[test]
+    fn a_long_answer_is_cut_on_a_character_boundary_and_says_so() {
+        let long = "ñ".repeat(MAX_ANSWER);
+        let cut = clip(long);
+        assert!(cut.len() < MAX_ANSWER + 100, "{}", cut.len());
+        assert!(cut.ends_with("one item]"), "{}", &cut[cut.len() - 40..]);
+        assert_eq!(clip("corto".into()), "corto");
+    }
+
+    #[test]
+    fn a_database_command_answers_to_the_connections_switch() {
+        use crate::agentcli::AiAccess;
+        assert!(db_gate(AiAccess::None, false).is_err());
+        assert!(db_gate(AiAccess::None, true).is_err());
+        assert!(db_gate(AiAccess::Read, false).is_ok());
+        assert!(db_gate(AiAccess::Read, true).is_err());
+        assert!(db_gate(AiAccess::Write, true).is_ok());
+    }
+
+    #[test]
+    fn hosts_and_connections_belong_to_their_workspace() {
+        let ids = vec!["h1".to_string(), "h2".to_string()];
+        assert!(belongs(&ids, "h2"));
+        assert!(!belongs(&ids, "h9"));
+        assert!(connection_belongs("w1", "workspace", "w1"));
+        assert!(connection_belongs("w2", "global", "w1"));
+        assert!(!connection_belongs("w2", "workspace", "w1"));
     }
 }

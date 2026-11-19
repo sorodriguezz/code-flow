@@ -137,6 +137,19 @@ export function contextSplit(measured: number | null, conversationEstimate: numb
   return { conversation: conversationEstimate, overhead };
 }
 
+/**
+ * Whether a finished turn crossed the user's own compaction line (`chatCompactThresholdK`).
+ *
+ * Only a **measured** figure counts — what the engine said it read. An estimate leaves out the
+ * CLI's system prompt and tool schemas, so it would fire late on a guess and, worse, look like it
+ * worked. `0` (the default) is no line at all.
+ */
+export function passesCompactThreshold(measured: number | null | undefined, thresholdK: number): boolean {
+  if (!thresholdK || thresholdK <= 0) return false;
+  if (measured === null || measured === undefined) return false;
+  return measured > thresholdK * 1000;
+}
+
 /** Where the meter stops being decoration and starts being a warning. Two thirds is early enough
  *  that a compaction still has a conversation worth summarising, and late enough that an ordinary
  *  exchange never sees it. */

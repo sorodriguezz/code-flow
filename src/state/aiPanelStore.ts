@@ -530,6 +530,9 @@ export const useAiPanelStore = create<AiPanelState>((set, get) => ({
         // belong to, so reopening the conversation from the Inbox brings its unsent text back.
         view: omit(s.view, key),
         drafts: (closed.kind === "chat" || closed.kind === "wsChat") && closed.fresh ? omit(s.drafts, key) : s.drafts,
+        // Closing a tab is done with it: an answer it held unread stops counting on the Inbox.
+        // Kept, it was a badge no tab could clear any more (user report, 2026-11-18).
+        unread: omit(s.unread, key),
       };
     });
     if (closedFresh) {

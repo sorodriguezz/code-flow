@@ -9,6 +9,7 @@ import {
 } from "../../lib/contextWindow";
 import { useLocale } from "./chatChrome";
 import { useT } from "../../state/languageStore";
+import { usePreferencesStore } from "../../state/preferencesStore";
 
 /** What the meter is drawn from. Assembled by `ChatView`, which is the only place that has both
  *  the conversation row and its transcript. */
@@ -166,6 +167,22 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
   const exact = reading.measured && !reading.stale;
   const shown = exact ? count : `~${count}`;
   const split = reading.stale ? null : contextSplit(reading.measured ? reading.tokens : null, reading.conversationTokens ?? 0);
+  /** The user's own compaction line, in thousands; `0` is none. Global, like the switch it sits
+   *  beside in Settings — a per-conversation line would be one more thing to forget was set. */
+  const thresholdK = usePreferencesStore((s) => s.chatCompactThresholdK);
+  const setThresholdK = usePreferencesStore((s) => s.setChatCompactThresholdK);
+  const [thresholdDraft, setThresholdDraft] = useState<string | null>(null);
+  const commitThreshold = () => {
+    if (thresholdDraft === null) return;
+    void setThresholdK(Number(thresholdDraft));
+    setThresholdDraft(null);
+  };
+  const thresholdTokens = thresholdK * 1000;
+  /** Where the line falls on the bar, when there is a bar and the line is inside it. */
+  const thresholdAt =
+    thresholdK > 0 && reading.window && thresholdTokens < reading.window ? thresholdTokens / reading.window : null;
+  /** A line below what the CLI carries on its own would compact after every single answer. */
+  const thresholdTooLow = thresholdK > 0 && split !== null && thresholdTokens <= split.overhead;
 
   return (
     <div ref={box} className="relative">
@@ -213,13 +230,61 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
             </span>
           </p>
 
-          {fraction !== null && (
-            <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-[var(--cf-press)]">
-              <div
-                className="h-full rounded-full transition-[width]"
-                style={{ width: `${Math.max(2, fraction * 100)}%`, background: tone }}
-              />
+          {/* One bar, in two parts when the measurement can be split: the conversation, and the
+              CLI's own furniture around it — the part compacting can shrink and the part it can't.
+              The tick is the user's threshold, so "how far until it compacts" is read off the bar. */}
+          {fraction !== null && reading.window && (
+            <div className="relative mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-[var(--cf-press)]">
+              {split ? (
+                <div className="flex h-full">
+                  <div
+                    className="h-full transition-[width]"
+                    style={{ width: `${Math.max(1, (split.overhead / reading.window) * 100)}%`, background: tone, opacity: 0.45 }}
+                  />
+                  <div
+                    className="h-full transition-[width]"
+                    style={{ width: `${Math.max(1, (split.conversation / reading.window) * 100)}%`, background: tone }}
+                  />
+                </div>
+              ) : (
+                <div
+                  className="h-full rounded-full transition-[width]"
+                  style={{ width: `${Math.max(2, fraction * 100)}%`, background: tone }}
+                />
+              )}
+              {thresholdAt !== null && (
+                <div
+                  className="absolute top-0 h-full w-[2px] bg-[var(--cf-text)]"
+                  style={{ left: `calc(${thresholdAt * 100}% - 1px)` }}
+                />
+              )}
             </div>
+          )}
+
+          {/* The split, as a legend rather than a sentence; the sentence is its tooltip. */}
+          {split && (
+            <p
+              className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[10px] tabular-nums text-[var(--cf-text-muted)]"
+              title={t("chat.contextSplit", {
+                conversation: formatTokens(split.conversation, locale),
+                overhead: formatTokens(split.overhead, locale),
+              })}
+            >
+              <span className="flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full" style={{ background: tone }} />
+                {t("chat.contextLegendConversation")} ~{formatTokens(split.conversation, locale)}
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full" style={{ background: tone, opacity: 0.45 }} />
+                {t("chat.contextLegendOverhead")} ~{formatTokens(split.overhead, locale)}
+              </span>
+              {reading.window && (
+                <span className="flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[var(--cf-press)]" />
+                  {t("chat.contextLegendFree")} {formatTokens(Math.max(0, reading.window - reading.tokens), locale)}
+                </span>
+              )}
+            </p>
           )}
 
           <p className="mt-2 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
@@ -230,18 +295,6 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
                 : t("chat.contextEstimated")}
             {!reading.window && ` ${t("chat.contextUnknownWindow")}`}
           </p>
-
-          {/* Where the number comes from, which is the question a terminal's `/context` raises: the
-              transcript is usually the smaller half, and the rest is the CLI's system prompt, tool
-              schemas, MCP servers and skills — which this app cannot list but can account for. */}
-          {split && (
-            <p className="mt-1.5 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
-              {t("chat.contextSplit", {
-                conversation: formatTokens(split.conversation, locale),
-                overhead: formatTokens(split.overhead, locale),
-              })}
-            </p>
-          )}
 
           {/* What the *next* question actually carries, which is the thing the number is about and
               is different for the two halves of this app's providers. */}
@@ -254,7 +307,9 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
               assumes it is on when it cannot be (a resuming engine whose window is unknown) is
               relying on a protection that is not there. */}
           <p className="mt-1.5 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
-            {t(reading.autoCompacts ? "chat.contextAutoOn" : "chat.contextAutoOff")}
+            {reading.onCompact && thresholdK > 0
+              ? t("chat.contextThresholdOn", { k: formatTokens(thresholdTokens, locale) })
+              : t(reading.autoCompacts ? "chat.contextAutoOn" : "chat.contextAutoOff")}
           </p>
 
           <div className="my-2.5 h-px bg-[var(--cf-border)]" />
@@ -319,6 +374,39 @@ export function ContextMeter({ reading }: { reading: ContextReading }) {
               <p className="mt-1 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
                 {t("chat.contextCompactHint")}
               </p>
+
+              {/* The user's own line. `0` is none, and is the default: compacting costs a turn and
+                  breaks the prompt cache, so it is never done on the app's say-so below the
+                  backstop — only where somebody decided the size was worth paying to cut. */}
+              <label className="mt-2.5 flex items-center gap-1.5 text-[11px] text-[var(--cf-text)]">
+                <span className="flex-1">{t("chat.contextThresholdLabel")}</span>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min={0}
+                  step={10}
+                  value={thresholdDraft ?? String(thresholdK)}
+                  onChange={(event) => setThresholdDraft(event.target.value)}
+                  onBlur={commitThreshold}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      commitThreshold();
+                    }
+                  }}
+                  aria-label={t("chat.contextThresholdLabel")}
+                  className="h-6 w-16 rounded-md border border-[var(--cf-border)] bg-[var(--cf-surface)] px-1.5 text-right text-[11px] tabular-nums outline-none focus:border-[var(--cf-accent)]"
+                />
+                <span className="text-[var(--cf-text-muted)]">K</span>
+              </label>
+              <p className="mt-1 text-[10.5px] leading-relaxed text-[var(--cf-text-muted)]">
+                {t("chat.contextThresholdHint")}
+              </p>
+              {thresholdTooLow && split && (
+                <p className="mt-1 text-[10.5px] leading-relaxed text-[var(--cf-warning)]">
+                  {t("chat.contextThresholdTooLow", { overhead: formatTokens(split.overhead, locale) })}
+                </p>
+              )}
             </>
           )}
         </div>

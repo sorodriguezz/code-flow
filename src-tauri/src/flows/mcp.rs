@@ -29,11 +29,20 @@ use super::run::Item;
 use super::spec::FlowNode;
 
 const TOKEN_KEY: &str = "flows-mcp-token";
+/// The name this server goes by — in `serverInfo`, and as the entry the Programación pane adds to
+/// CodeFlow's own MCP list (`ScheduleView.tsx`'s `MCP_NAME`), which `mcp_registry` gives a timeout.
+pub const SERVER_NAME: &str = "codeflow-flujos";
 /// The newest protocol revision this server speaks; an older one a client asks for is echoed back.
-const PROTOCOL: &str = "2025-06-18";
-const SUPPORTED: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
-/// How long a tool call may take before the client is told it timed out (the run carries on).
-const CALL_LIMIT: Duration = Duration::from_secs(15 * 60);
+/// `2025-11-25` is the last revision with the `initialize` handshake; the stateless 2026-07-28 era
+/// is not spoken — see [`answer`] for how a client of that era is sent back to `initialize`.
+const PROTOCOL: &str = "2025-11-25";
+const SUPPORTED: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+/// How long a tool call may take before the client is told it timed out (the run carries on). Past
+/// Claude Code's five idle minutes over HTTP, so a client has to be told to wait: CodeFlow's own
+/// entry gets a `timeout` (`mcp_registry::claude_config`), and the pane's Codex snippet one too.
+pub const CALL_LIMIT: Duration = Duration::from_secs(15 * 60);
+/// The most of one answer handed back — the same cap the map server puts on its tools.
+const MAX_ANSWER: usize = crate::app_gateway::MAX_ANSWER;
 
 #[derive(Debug, Clone)]
 struct ToolEntry {
@@ -217,6 +226,7 @@ pub async fn handle(app: &AppHandle, method: &Method, headers: &HeaderMap, body:
                 respond(StatusCode::OK, Some(Value::Array(replies)))
             }
         }
+        one if crate::codemap::mcp::opens_stateless(&one) => respond(StatusCode::BAD_REQUEST, None),
         one => match answer(app, one).await {
             Some(reply) => respond(StatusCode::OK, Some(reply)),
             None => respond(StatusCode::ACCEPTED, None),
@@ -247,21 +257,33 @@ async fn answer(app: &AppHandle, message: Value) -> Option<Value> {
                 json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": false}},
-                    "serverInfo": {"name": "codeflow-flujos", "version": app.package_info().version.to_string()},
+                    "serverInfo": {"name": SERVER_NAME, "version": app.package_info().version.to_string()},
                     "instructions": "Each tool runs one of the user's CodeFlow flows and answers with what its last step produced.",
                 }),
             )
         }
         "ping" => result_reply(id, json!({})),
         "tools/list" => {
-            let listed: Vec<Value> = tools()
-                .into_iter()
-                .map(|tool| json!({"name": tool["name"], "description": tool["description"], "inputSchema": tool["inputSchema"]}))
-                .collect();
+            let listed: Vec<Value> = tools().into_iter().map(|tool| listed(&tool)).collect();
             result_reply(id, json!({"tools": listed}))
         }
         "tools/call" => call(app, id, &params).await,
-        _ => error_reply(id, -32601, &format!("method not found: {method}")),
+        // A 2026-07-28 client opens with `server/discover`; told this server does not know it, a
+        // dual-era one falls back to `initialize` (`crate::codemap::mcp::unknown_method`).
+        _ => crate::codemap::mcp::unknown_method(id, &method),
+    })
+}
+
+/// A tool as `tools/list` shows it: what a client needs, and the annotations it decides by — a flow
+/// can do anything its steps do (send mail, write a table, call an API), so none is claimed
+/// read-only, and Codex, which refuses an unannotated call under `approval_policy="never"`, is told
+/// as much rather than left to guess.
+fn listed(tool: &Value) -> Value {
+    json!({
+        "name": tool["name"],
+        "description": tool["description"],
+        "inputSchema": tool["inputSchema"],
+        "annotations": {"readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true},
     })
 }
 
@@ -291,8 +313,11 @@ async fn call(app: &AppHandle, id: Value, params: &Value) -> Value {
         Ok(Ok(finished)) => {
             let items: Vec<Value> = finished.last_output.iter().map(|item| item.json.clone()).collect();
             if finished.status == "success" {
-                let text = serde_json::to_string_pretty(&items).unwrap_or_default();
-                result_reply(id, json!({"content": [{"type": "text", "text": text}], "structuredContent": {"items": items}}))
+                // Compact, once, and cut: the same items as pretty text *and* as `structuredContent`
+                // were the answer twice over, with no `outputSchema` for a client to use the second.
+                let text = crate::app_gateway::clip(serde_json::to_string(&items).unwrap_or_default());
+                debug_assert!(text.len() <= MAX_ANSWER + 100);
+                result_reply(id, json!({"content": [{"type": "text", "text": text}]}))
             } else {
                 let error = if finished.error.is_empty() { finished.status.clone() } else { finished.error.clone() };
                 result_reply(id, json!({"content": [{"type": "text", "text": format!("The flow {}: {error}", entry.flow_name)}], "isError": true}))
@@ -306,6 +331,21 @@ async fn call(app: &AppHandle, id: Value, params: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_is_listed_with_what_a_client_decides_by() {
+        let tool = listed(&json!({"name": "send_report", "description": "d", "inputSchema": {"type": "object"}, "flowId": "f", "flowName": "n"}));
+        assert_eq!(tool["annotations"]["readOnlyHint"], false);
+        assert_eq!(tool["annotations"]["openWorldHint"], true);
+        assert!(tool.get("flowId").is_none(), "the pane's fields stay the pane's");
+    }
+
+    #[test]
+    fn a_stateless_client_is_sent_back_to_initialize() {
+        assert!(crate::codemap::mcp::opens_stateless(&json!({"jsonrpc": "2.0", "id": 1, "method": "server/discover"})));
+        assert!(!crate::codemap::mcp::opens_stateless(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"})));
+        assert!(SUPPORTED.contains(&PROTOCOL));
+    }
 
     #[test]
     fn form_fields_become_an_input_schema() {

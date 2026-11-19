@@ -193,6 +193,16 @@ describe("unread", () => {
     panel.useAiPanelStore.getState().open({ kind: "chat", projectId: "p-1", conversationId: "conv-x" });
     expect(panel.useAiPanelStore.getState().unread[elsewhere]).toBeUndefined();
   });
+
+  it("clears when its tab is closed unread, so the Inbox badge does not stay behind", async () => {
+    const { panel } = await boot();
+    const store = panel.useAiPanelStore;
+    const key = store.getState().open({ kind: "chat", projectId: "p-1", conversationId: "conv-y" }, { focus: false });
+    store.getState().markUnread(key, { status: "success", workspaceId: "ws-1" });
+    expect(store.getState().unread[key]).toBeDefined();
+    store.getState().close(key, "ws-1");
+    expect(store.getState().unread[key]).toBeUndefined();
+  });
 });
 
 describe("persistence", () => {

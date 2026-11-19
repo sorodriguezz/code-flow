@@ -12,18 +12,21 @@ describe("the app's command catalogue", () => {
   });
 
   it("never offers a secret or the model's own approvals", () => {
-    for (const name of ["get_github_token", "set_ado_pat", "keyvault_get_item", "remote_get_password", "agentcli_answer", "flows_bridge_answer", "db_set_password", "supabase_anon_key", "repo_env_reveal", "api_list_cookies", "speech_set_key"]) {
+    for (const name of ["get_github_token", "set_ado_pat", "keyvault_get_item", "remote_get_password", "agentcli_answer", "flows_bridge_answer", "db_set_password", "supabase_anon_key", "repo_env_reveal", "api_list_cookies", "speech_set_key", "reviewer_save_server", "codi_confirm", "codi_act", "flows_share", "supabase_share", "remote_import_ppk", "remotectl_start_pairing", "remotectl_set_enabled", "db_update_connection", "db_create_connection", "remote_create_host", "remote_open_draft_session"]) {
       expect(riskOf(name), name).toBe("blocked");
     }
   });
 
   it("asks before what destroys or widens what a model may do", () => {
-    for (const name of ["delete_chat_conversation", "reset_app_data", "quit_app", "set_setting", "automation_set_enabled", "containers_kube_remove"]) {
+    for (const name of ["delete_chat_conversation", "reset_app_data", "quit_app", "set_setting", "automation_set_enabled", "containers_kube_remove", "reviewer_run", "codi_run_command", "run_test_command", "scaffold_run", "lsp_start", "debug_start_adapter", "containers_run", "db_execute", "db_apply_edits", "db_restore_run", "git_push", "write_terminal", "remote_open_session", "remote_write_text", "api_send_http", "flows_tunnel_set", "chat_send", "send_chat_message", "create_agent_task"]) {
       expect(riskOf(name), name).toBe("destructive");
     }
   });
 
   it("reads what only looks, whatever its area prefix", () => {
+    for (const name of ["remotectl_status", "remotectl_list_devices"]) {
+      expect(riskOf(name), name).toBe("read");
+    }
     for (const name of ["ado_list_projects", "list_pull_requests", "get_review_run", "list_pr_comment_threads", "deps_check_alerts", "get_setting", "pr_link_checks"]) {
       expect(riskOf(name), name).toBe("read");
     }

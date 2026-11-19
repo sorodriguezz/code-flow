@@ -71,7 +71,8 @@ import { useWorkspaceStore } from "./workspaceStore";
 import { confirmAction } from "./confirmStore";
 import type { EditingTurn } from "./chatStore";
 import { learnedKey } from "../lib/memoryToast";
-import { leavesContextAsIs } from "../lib/contextWindow";
+import { leavesContextAsIs, passesCompactThreshold } from "../lib/contextWindow";
+import { usePreferencesStore } from "./preferencesStore";
 import { useChatLineageStore } from "./chatLineageStore";
 import {
   cancelQuotaResume,
@@ -1441,6 +1442,15 @@ export const useWorkspaceChatStore = create<WsChatState>((set, get) => {
           });
           speakAnswer(reply.text, workspaceId);
           void get().loadList(workspaceId);
+          // Past the user's own line (the threshold in the meter's card), the conversation is
+          // compacted now that the answer is in; `compact` drains the queue when it is done.
+          if (
+            !reply.compacted &&
+            passesCompactThreshold(reply.context_tokens, usePreferencesStore.getState().chatCompactThresholdK)
+          ) {
+            void get().compact(conversationId);
+            return;
+          }
           get().drainQueue(conversationId);
         })
         .catch((e: unknown) => {

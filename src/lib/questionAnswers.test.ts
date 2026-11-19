@@ -74,6 +74,16 @@ describe("question answer drafts", () => {
     expect(drafts[FIRST_QUESTION].other).toBe(EMPTY_QUESTION_ANSWER);
   });
 
+  it("takes a single choice back when its option is clicked again", () => {
+    let drafts = createQuestionAnswers(QUESTIONS);
+    drafts = select(drafts, FIRST_QUESTION, SEARCH_OPTION);
+    expect(collectQuestionAnswers(drafts)[FIRST_QUESTION]).toEqual([SEARCH_OPTION]);
+    drafts = select(drafts, FIRST_QUESTION, SEARCH_OPTION);
+    const answers = collectQuestionAnswers(drafts);
+    expect(answers[FIRST_QUESTION]).toEqual([]);
+    expect(countQuestionAnswers(answers)).toBe(NO_ANSWERS);
+  });
+
   it("counts a multiple choice once, preserves its written text and supports deselecting", () => {
     let drafts = createQuestionAnswers(QUESTIONS);
     drafts = select(drafts, THIRD_QUESTION, SEX_OPTION);

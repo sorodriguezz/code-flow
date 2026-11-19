@@ -32,7 +32,32 @@ const INVITATION = /^collab_(?:share|invite|join|join_preview|take_join_link|liv
 
 /** What a model must never call: the doors it is itself held at — answering its own approval,
  *  the window's replies to the app's questions, the interface it already drives through `ui_act`. */
-const SELF = /^(?:agentcli_|flows_bridge_|codi_act_result|codi_register|codi_ui_|mcp_trust|log_frontend_error)/;
+const SELF = /^(?:agentcli_|flows_bridge_|codi_act_result|codi_register|codi_ui_|mcp_trust|log_frontend_error|codi_confirm$|codi_act$)/;
+
+/** Commands that run a program or a shell line the caller names — `reviewer_run`'s prepare/build/test,
+ *  `codi_run_command`, a debugger, a language server, a container. Through `app_call` they run in the
+ *  app's own process, outside the CLI's sandbox and its permission prompt, so a turn that may act
+ *  still asks first (2026-11-18). */
+const EXECUTES = /^(?:reviewer_run|codi_run_command|scaffold_run|run_test_command|resolve_finding_with_ai|approve_hybrid_plan|debug_start|debug_start_adapter|lsp_start|containers_run|db_execute|db_apply_edits|db_restore_run|db_import_csv|db_backup_run)$/;
+
+/** Commands whose effect leaves this machine or lands where the user did not look: a push, a line
+ *  typed into one of the app's terminals (outside the shell policy the CLI's Bash is held to), a
+ *  session or a file on a remote host, a request sent, a webhook opened to the internet. Named, not
+ *  read off the name — `git_push` reads as an ordinary write (2026-11-18). */
+const OUTWARD = /^(?:git_push|write_terminal|remote_open_session|remote_write_text|api_send_http|flows_tunnel_set)$/;
+
+/** Commands that start another model turn or agent run. Each is a bill and an actor of its own, so
+ *  a turn does not set them off unasked (2026-11-18). */
+const SPAWNS = /^(?:chat_send|send_chat_message|create_agent_task|codi_order|codi_tell|codi_run_routine)$/;
+
+/** What hands a model a credential in all but name — an invitation token, a pairing code, a key's
+ *  passphrase — or lets it widen what it may reach: its own access to a database, the phone remote,
+ *  a host it names (2026-11-18). */
+const HANDS_OVER = /^(?:flows_share|supabase_share|remote_import_ppk|remotectl_(?!status$|list_).*|db_update_connection|db_create_connection|db_set_connection_scope|db_move_connection_to_workspace|remote_open_draft_session|remote_create_host|remote_update_host)$/;
+
+/** Commands that repoint a connection while keeping its stored token: a model that changed a
+ *  server's address could have the app send that token wherever it said (2026-11-18). */
+const REPOINTS = /^(?:reviewer_save_server)$/;
 
 /** The memory pane's own writes: they record the user as the author, so a model calling them would
  *  write or approve memories in the user's name (2026-11-17). A model has `manage_memory`, which
@@ -93,7 +118,8 @@ const NOUNS = [
 
 /** How risky a command is, from the words of its name — the area prefix (`ado_`, `db_`) says nothing. */
 export function riskOf(name) {
-  if (SECRET.test(name) || SELF.test(name) || INVITATION.test(name) || MEMORY_PANE.test(name)) return "blocked";
+  if (SECRET.test(name) || SELF.test(name) || INVITATION.test(name) || MEMORY_PANE.test(name) || REPOINTS.test(name) || HANDS_OVER.test(name)) return "blocked";
+  if (EXECUTES.test(name) || OUTWARD.test(name) || SPAWNS.test(name)) return "destructive";
   let plain = name;
   for (const [noun, word] of NOUNS) plain = plain.replace(noun, word);
   const words = plain.split("_").filter(Boolean);

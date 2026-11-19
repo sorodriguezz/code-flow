@@ -30,7 +30,8 @@ import {
 } from "./aiRunStore";
 import { translate } from "./languageStore";
 import { learnedKey } from "../lib/memoryToast";
-import { leavesContextAsIs } from "../lib/contextWindow";
+import { leavesContextAsIs, passesCompactThreshold } from "../lib/contextWindow";
+import { usePreferencesStore } from "./preferencesStore";
 import { pushErrorToast, pushSuccessToast } from "./toastStore";
 import { confirmAction } from "./confirmStore";
 import { notify } from "./notificationStore";
@@ -1110,6 +1111,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
         // Read aloud when the user asked for answers to be (Settings › Voz y sonido).
         speakAnswer(reply.text, workspaceId ?? null);
+        // Past the user's own line (the threshold in the meter's card), Claude's own `/compact`
+        // goes next, ahead of anything queued — the button's path, run by itself. Never after a
+        // `/compact`: the session it leaves still carries the CLI's own prompt, and a line set
+        // below that would otherwise compact the summary again, forever.
+        if (
+          reply.provider === "claude" &&
+          !trimmed.startsWith("/compact") &&
+          passesCompactThreshold(reply.context_tokens, usePreferencesStore.getState().chatCompactThresholdK)
+        ) {
+          get().send(projectId, conversationId, "/compact", null, []);
+          return;
+        }
         // The conversation is free: what was written while this answer was produced goes next.
         get().drainQueue(conversationId);
       })

@@ -15,6 +15,7 @@ import { pushErrorToast } from "../../state/toastStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
 import { useT } from "../../state/languageStore";
+import type { TranslationKey } from "../../lib/i18n/translations";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
 import { SettingsHeader } from "../api/settingsChrome";
@@ -100,6 +101,9 @@ function pairs(text: string, separator: "=" | ":"): Record<string, string> {
 /** `bare`: inside «Herramientas de IA», whose rail names the pane — the hint stays, the heading goes. */
 /** The setting that keeps the repository map out of every agent's runs; anything but "false" is on. */
 const CODEMAP_MCP_KEY = "codemap_mcp";
+/** The setting that keeps the chats' headless browser (Playwright) out of every Claude turn; anything
+ *  but "false" is on. Read by `chat_exec::browser_server` under the same name. */
+const BROWSER_MCP_KEY = "chat_browser_mcp";
 
 /**
  * Whether the agents get CodeFlow's own server — the repository map (`codemap::mcp`) — on every run
@@ -108,13 +112,28 @@ const CODEMAP_MCP_KEY = "codemap_mcp";
  * the user's server, has no command, and is not per workspace.
  */
 function CodemapServerToggle() {
+  return <AppServerToggle settingKey={CODEMAP_MCP_KEY} labelKey="codemap.mcpLabel" hintKey="codemap.mcpHint" />;
+}
+
+/**
+ * Whether Claude's chat turns get the headless browser CodeFlow adds — Microsoft's Playwright MCP
+ * server (`chat_exec::browser_server`). Like the map, it is the app's server and not the user's, so
+ * it is a switch here rather than a row of the list. Off saves every turn its ~25 tool schemas;
+ * fetching and searching the web are the CLI's own tools and stay.
+ */
+function BrowserServerToggle() {
+  return <AppServerToggle settingKey={BROWSER_MCP_KEY} labelKey="settings.browserMcpLabel" hintKey="settings.browserMcpHint" />;
+}
+
+/** One of the app's own servers, on unless its setting says `"false"`. */
+function AppServerToggle({ settingKey, labelKey, hintKey }: { settingKey: string; labelKey: TranslationKey; hintKey: TranslationKey }) {
   const t = useT();
   const [on, setOn] = useState<boolean | null>(null);
   useEffect(() => {
-    void getSetting(CODEMAP_MCP_KEY)
+    void getSetting(settingKey)
       .then((value) => setOn(value !== "false"))
       .catch(() => setOn(true));
-  }, []);
+  }, [settingKey]);
   if (on === null) return null;
   return (
     <label className="mb-3 flex items-start gap-2.5 py-1.5">
@@ -123,13 +142,13 @@ function CodemapServerToggle() {
           checked={on}
           onChange={(next) => {
             setOn(next);
-            void setSetting(CODEMAP_MCP_KEY, next ? "true" : "false").catch((e: unknown) => pushErrorToast(String(e)));
+            void setSetting(settingKey, next ? "true" : "false").catch((e: unknown) => pushErrorToast(String(e)));
           }}
         />
       </span>
       <span className="text-[12.5px] text-[var(--cf-text)]">
-        {t("codemap.mcpLabel")}
-        <span className="mt-0.5 block text-[11.5px] text-[var(--cf-text-muted)]">{t("codemap.mcpHint")}</span>
+        {t(labelKey)}
+        <span className="mt-0.5 block text-[11.5px] text-[var(--cf-text-muted)]">{t(hintKey)}</span>
       </span>
     </label>
   );
@@ -276,6 +295,7 @@ export function McpSettings({ bare = false }: { bare?: boolean } = {}) {
       )}
 
       <CodemapServerToggle />
+      <BrowserServerToggle />
 
       <div className="mb-3 flex flex-wrap gap-1.5">
         <button type="button" onClick={() => setDraft({ ...EMPTY })} className={buttonClass({ variant: "primary", size: "sm" })}>

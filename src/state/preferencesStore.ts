@@ -39,6 +39,10 @@ const CHAT_FILE_GENERATION_KEY = "chat_file_generation";
  *  Unset means on, and the Rust side defaults the same way; see `CHAT_AUTO_COMPACT_KEY` in
  *  `chat_cmd.rs`. */
 const CHAT_AUTO_COMPACT_KEY = "chat_auto_compact";
+/** Thousands of tokens past which a chat compacts itself once a turn has finished — set from the
+ *  context meter's card. `0` or unset means no threshold. Frontend-only: the decision is taken in
+ *  the chat stores, after the answer is in. */
+const CHAT_COMPACT_THRESHOLD_KEY = "chat_compact_threshold_k";
 const WINDOW_LIMIT_KEY = "satellite_window_limit";
 /** Whether the Revisor tab is shown. On unless explicitly hidden in Settings. */
 const REVIEWER_KEY = "reviewer_enabled";
@@ -177,6 +181,15 @@ interface PreferencesState {
    */
   chatAutoCompactEnabled: boolean;
   /**
+   * The user's own line, in thousands of tokens: once a finished turn measured more than this, the
+   * conversation is compacted right away rather than waiting to be nearly full. `0` is no line.
+   *
+   * Separate from {@link chatAutoCompactEnabled}, which is the backstop near the window's end. This
+   * one is about cost, not about fitting: a conversation re-read at 300k every turn is paying for
+   * 300k every turn, however much room is left.
+   */
+  chatCompactThresholdK: number;
+  /**
    * How many apps and repositories may be open in windows of their own, besides the main one.
    *
    * A setting rather than a constant because the right answer is about the machine, not about the
@@ -229,6 +242,7 @@ interface PreferencesState {
   setBlameAnnotationEnabled: (enabled: boolean) => Promise<void>;
   setChatFileGenerationEnabled: (enabled: boolean) => Promise<void>;
   setChatAutoCompactEnabled: (enabled: boolean) => Promise<void>;
+  setChatCompactThresholdK: (thousands: number) => Promise<void>;
   setSatelliteLimit: (limit: number) => Promise<void>;
   setReviewerEnabled: (enabled: boolean) => Promise<void>;
   setDensity: (density: Density) => Promise<void>;
@@ -253,11 +267,21 @@ function clamp(seconds: number): number {
   return Math.max(MIN_AUTO_FETCH_SECONDS, Math.round(seconds));
 }
 
+/** A whole number of thousands, `0` for anything that is not a positive one — a typo in the box or
+ *  a hand-edited setting reads as "no threshold", never as one the user did not choose. Capped at
+ *  10M tokens, past every window this app knows of. */
+function clampThresholdK(raw: unknown): number {
+  const n = Math.floor(Number(raw));
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(n, 10_000);
+}
+
 export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   autoFetchSeconds: 0,
   secretScanEnabled: true,
   chatFileGenerationEnabled: true,
   chatAutoCompactEnabled: true,
+  chatCompactThresholdK: 0,
   notificationSoundEnabled: false,
   notificationSoundId: DEFAULT_NOTIFICATION_SOUND,
   notificationSoundVolume: DEFAULT_NOTIFICATION_VOLUME,
@@ -296,6 +320,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         WINDOW_LIMIT_KEY,
         CHAT_FILE_GENERATION_KEY,
         CHAT_AUTO_COMPACT_KEY,
+        CHAT_COMPACT_THRESHOLD_KEY,
         REVIEWER_KEY,
         DENSITY_KEY,
       ]).catch(
@@ -346,6 +371,7 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       chatAutoCompactEnabled: (stored[CHAT_AUTO_COMPACT_KEY] ?? null) === null
         ? true
         : stored[CHAT_AUTO_COMPACT_KEY] === "true",
+      chatCompactThresholdK: clampThresholdK(stored[CHAT_COMPACT_THRESHOLD_KEY]),
       // Show the tab by default, preserving an explicit choice to hide it.
       reviewerEnabled: stored[REVIEWER_KEY] !== "false",
       density: normalizeDensity(stored[DENSITY_KEY]),
@@ -371,6 +397,12 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   setChatAutoCompactEnabled: async (enabled) => {
     set({ chatAutoCompactEnabled: enabled });
     await setSetting(CHAT_AUTO_COMPACT_KEY, String(enabled));
+  },
+
+  setChatCompactThresholdK: async (thousands) => {
+    const value = clampThresholdK(thousands);
+    set({ chatCompactThresholdK: value });
+    await setSetting(CHAT_COMPACT_THRESHOLD_KEY, String(value));
   },
 
   setSecretScanEnabled: async (enabled) => {
@@ -502,6 +534,7 @@ watchSettings(
     WINDOW_LIMIT_KEY,
     CHAT_FILE_GENERATION_KEY,
     CHAT_AUTO_COMPACT_KEY,
+    CHAT_COMPACT_THRESHOLD_KEY,
     REVIEWER_KEY,
     DENSITY_KEY,
   ],

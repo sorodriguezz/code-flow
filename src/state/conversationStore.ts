@@ -61,7 +61,8 @@ import { parseTrace, traceIdOf } from "../lib/turnTrace";
 import { repeatsStatus } from "../lib/agentLog";
 import { newLaneReader, readRunLine, type LaneMark } from "../lib/subagentLanes";
 import { providerCapabilities } from "../lib/aiProviders";
-import { leavesContextAsIs } from "../lib/contextWindow";
+import { leavesContextAsIs, passesCompactThreshold } from "../lib/contextWindow";
+import { usePreferencesStore } from "./preferencesStore";
 import { translate } from "./languageStore";
 import { pushErrorToast, pushSuccessToast } from "./toastStore";
 import { notify } from "./notificationStore";
@@ -1617,6 +1618,20 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         // was written while this answer was being produced goes next. Not held back for the
         // typewriter — the text is already whole and on disk, the reveal is only the screen
         // catching up, and the next question can be on its way while it does.
+        //
+        // Unless this turn crossed the user's own line (the threshold in the meter's card): then
+        // the conversation is compacted first, now that the answer is in, and the queue goes on
+        // the summary. `compact` drains it when it lands; a failed or stopped one still lets the
+        // queued questions through — the compaction was this app's idea, not theirs.
+        if (
+          !reply.compacted &&
+          passesCompactThreshold(reply.context_tokens, usePreferencesStore.getState().chatCompactThresholdK)
+        ) {
+          void get().compact(conversationId).then((done) => {
+            if (!done) get().resumeQueue(conversationId);
+          });
+          return;
+        }
         get().drainQueue(conversationId);
       })
       .catch((e) => {

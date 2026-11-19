@@ -4,6 +4,7 @@ import {
   CONTEXT_WARN_AT,
   contextFraction,
   contextSplit,
+  passesCompactThreshold,
   estimateTokens,
   formatTokens,
   leavesContextAsIs,
@@ -119,5 +120,19 @@ describe("leavesContextAsIs", () => {
     expect(leavesContextAsIs("/contexto")).toBe(false);
     expect(leavesContextAsIs("¿qué muestra /context?")).toBe(false);
     expect(leavesContextAsIs("/context\nexplícame la tabla")).toBe(false);
+  });
+});
+
+describe("passesCompactThreshold", () => {
+  it("never fires at 0, the default", () => {
+    expect(passesCompactThreshold(900_000, 0)).toBe(false);
+  });
+  it("fires only past the line, in thousands", () => {
+    expect(passesCompactThreshold(300_000, 300)).toBe(false);
+    expect(passesCompactThreshold(300_001, 300)).toBe(true);
+  });
+  it("ignores a turn that measured nothing", () => {
+    expect(passesCompactThreshold(null, 300)).toBe(false);
+    expect(passesCompactThreshold(undefined, 300)).toBe(false);
   });
 });

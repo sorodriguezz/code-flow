@@ -45,6 +45,7 @@ import {
   openChat,
   openJob,
   openTrackedPr,
+  openWorkspaceChat,
   tabKeyForJob,
   useChangesToAnalyze,
 } from "../../lib/aiPanelNav";
@@ -171,8 +172,7 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
     // workspace's, and the badge on the Inbox tab counts it that way.
     const allJobs = Object.values(jobsByBucket).flat();
     for (const [key, mark] of marks.sort((a, b) => b[1].at - a[1].at)) {
-      const row = unreadRow(key, mark, allJobs, historyByProject, byConversation, projectName, t);
-      if (!row) continue;
+      const row = unreadRow(key, mark, allJobs, historyByProject, byConversation, projectName, t, workspaceId, workspaceChats);
       seen.add(key);
       rows.push(row);
     }
@@ -202,7 +202,7 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
     return rows;
     // `projectName` and `t` read state that the other dependencies already cover.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [unread, tracked, jobsByBucket, historyByProject, byConversation, workspaceId, projects]);
+  }, [unread, tracked, jobsByBucket, historyByProject, byConversation, workspaceId, projects, workspaceChats]);
 
   // Running: the same registry the status bar reads, narrowed to this workspace's assistant work.
   const runs = useAiRunStore((s) => s.active);
@@ -449,10 +449,37 @@ function unreadRow(
   byConversation: Record<string, ChatSession>,
   projectName: (id: string) => string,
   t: ReturnType<typeof useT>,
-): NeedRow | null {
+  workspaceId: string,
+  workspaceChats: ChatConversation[],
+): NeedRow {
   const failed = mark.status === "error";
   const dismiss = () => useAiPanelStore.getState().markSeen(key);
   const base = { key, unread: true, dismiss, action: t("assistant.open") };
+  // A mark this window cannot name still gets a row: the Inbox tab's badge counts every mark, and
+  // one with no row was a number nobody could clear (user report, 2026-11-18). Opening it just
+  // marks it seen — there is nothing left to open.
+  const unnamed: NeedRow = {
+    ...base,
+    icon: failed ? AlertCircle : MessageSquare,
+    tone: failed ? "danger" : "accent",
+    title: t("assistant.newResult"),
+    detail: failed ? t("assistant.failed") : "",
+    open: dismiss,
+  };
+
+  // The workspace chat's answers — `wschat:<conversation>`, filed by `markAssistantUnread`.
+  if (key.startsWith("wschat:")) {
+    const conversationId = key.slice("wschat:".length);
+    const listed = workspaceChats.find((c) => c.id === conversationId);
+    return {
+      ...base,
+      icon: failed ? AlertCircle : MessageSquare,
+      tone: failed ? "danger" : "accent",
+      title: listed?.title || t("assistant.newChat"),
+      detail: failed ? t("assistant.failed") : t("assistant.newReply"),
+      open: () => void openWorkspaceChat(mark.workspaceId ?? workspaceId, { conversationId }),
+    };
+  }
 
   if (key.startsWith("chat:")) {
     const conversationId = key.slice("chat:".length);
@@ -463,7 +490,7 @@ function unreadRow(
       if (stored) break;
     }
     const projectId = stored?.project_id ?? session?.projectId;
-    if (!projectId) return null;
+    if (!projectId) return unnamed;
     return {
       ...base,
       icon: failed ? AlertCircle : MessageSquare,
@@ -517,7 +544,7 @@ function unreadRow(
           .then((found) => found && useAiPanelStore.getState().open({ kind: "pr", projectId, pr: found })),
     };
   }
-  return null;
+  return unnamed;
 }
 
 const TONES = {

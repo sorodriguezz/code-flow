@@ -558,6 +558,10 @@ fn env_var(index: usize, name: &str) -> String {
 
 /// Claude Code's `--mcp-config` document, with every secret as `${VAR}` — and the variables the
 /// process has to be given for them.
+/// How long a client waits on one of the map server's calls: the window's ten minutes to answer an
+/// approval, and a minute of slack. Codex is told the same in seconds (`tool_timeout_sec=660`).
+const MAP_TIMEOUT_MS: u64 = 660_000;
+
 pub fn claude_config(servers: &[LiveServer]) -> (String, Vec<(String, String)>) {
     let mut vars = Vec::new();
     let mut entries = serde_json::Map::new();
@@ -583,6 +587,17 @@ pub fn claude_config(servers: &[LiveServer]) -> (String, Vec<(String, String)>) 
                 vars.push((var, value.clone()));
             }
             entry.insert("headers".into(), headers.into());
+        }
+        // The app's own server can wait on the user — an approval in the window gets ten minutes
+        // (`agentcli::ASK_TIMEOUT`) — and Claude Code ends an HTTP call idle for five. The per-server
+        // `timeout` (ms) raises that floor, as `tool_timeout_sec` does for Codex below.
+        if server.name == crate::codemap::mcp::SERVER_NAME {
+            entry.insert("timeout".into(), MAP_TIMEOUT_MS.into());
+        }
+        // The flows server, once added from the Programación pane: a flow may run up to its call
+        // limit (15 min), three times Claude Code's idle five.
+        if server.name == crate::flows::mcp::SERVER_NAME {
+            entry.insert("timeout".into(), (crate::flows::mcp::CALL_LIMIT.as_millis() as u64 + 60_000).into());
         }
         entries.insert(server.name.clone(), entry.into());
     }
@@ -868,6 +883,12 @@ mod tests {
         assert_eq!(value["mcpServers"]["github"]["env"]["GITHUB_TOKEN"], "${CF_MCP_0_E_GITHUB_TOKEN}");
         assert_eq!(value["mcpServers"]["docs"]["headers"]["Authorization"], "${CF_MCP_1_H_AUTHORIZATION}");
         assert!(vars.contains(&("CF_MCP_0_E_GITHUB_TOKEN".to_string(), "ghp_secret".to_string())));
+        assert!(value["mcpServers"]["docs"].get("timeout").is_none(), "a user's server keeps the CLI's default");
+
+        let map = LiveServer { name: crate::codemap::mcp::SERVER_NAME.into(), transport: "http".into(), url: "http://127.0.0.1:1/mcp/code".into(), headers: vec![], command: String::new(), args: vec![], env: vec![] };
+        let (json, _) = claude_config(&[map]);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["mcpServers"][crate::codemap::mcp::SERVER_NAME]["timeout"], 660_000);
     }
 
     /// Codex's overrides are prefixed, quoted, and carry no secret on the command line.

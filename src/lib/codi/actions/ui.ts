@@ -3,7 +3,7 @@ import { useUiStore } from "../../../state/uiStore";
 import { fillControl, listControls, pressControl } from "../dom";
 import { CodiError, undoNavigation, type CodiAction } from "../registry";
 import { uiStateAction } from "../state";
-import { defineAction, flag, optionalText, params, say, text } from "./shared";
+import { defineAction, optionalText, params, say, text } from "./shared";
 
 /**
  * The generic four every window has: what is on screen (`ui.state`), and the fallback for anything
@@ -68,11 +68,13 @@ export function uiActions(): CodiAction[] {
     defineAction({
       id: "ui.press",
       title: {
-        en: "Press a control by its ref from ui.controls. One whose name sounds destructive (delete, discard, push, send, merge, force…) answers needs-confirmation until resent with confirmed.",
-        es: "Pulsa un control por su ref de ui.controls. Uno cuyo nombre suene destructivo (eliminar, descartar, push, enviar, merge, forzar…) responde needs-confirmation hasta reenviarse con confirmed.",
+        en: "Press a control by its ref from ui.controls. One whose name sounds destructive (delete, discard, push, send, merge, force…) is put to the user first.",
+        es: "Pulsa un control por su ref de ui.controls. Uno cuyo nombre suene destructivo (eliminar, descartar, push, enviar, merge, forzar…) se le pregunta antes al usuario.",
       },
       aliases: { es: ["pulsa", "presiona", "haz clic en", "aprieta", "dale a"], en: ["press", "click", "tap", "hit"] },
-      params: params({ ref: text("The control's ref, e.g. c12."), confirmed: flag("The user said yes to a destructive press.") }, ["ref"]),
+      // No `confirmed` here: it is the backend's to add once the user said yes (`codi::ui::act`),
+      // and offering it to the caller is what let a model confirm its own press (2026-11-18).
+      params: params({ ref: text("The control's ref, e.g. c12.") }, ["ref"]),
       risk: "write",
       where: "any",
       run: async ({ ref, confirmed }) => {

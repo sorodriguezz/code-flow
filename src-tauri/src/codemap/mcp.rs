@@ -33,8 +33,10 @@ use crate::mcp_registry::LiveServer;
 /// The server's name in a run's MCP config — and so the `mcp__codeflow_map__…` prefix of its tools.
 pub const SERVER_NAME: &str = "codeflow_map";
 pub const PATH: &str = "/mcp/code";
-const PROTOCOL: &str = "2025-06-18";
-const SUPPORTED: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+/// The newest revision spoken: `2025-11-25`, the last with the `initialize` handshake. The stateless
+/// 2026-07-28 era is not — a client of it is sent back to `initialize` (see [`opens_stateless`]).
+const PROTOCOL: &str = "2025-11-25";
+const SUPPORTED: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 /// Characters of the project map a client is sent.
 const MAP_CHARS: usize = 12_000;
 
@@ -610,6 +612,16 @@ async fn answer_permission_prompt(access: &Access, args: &Value) -> String {
         }
         return permission_decision(true, wrapped, String::new());
     }
+    // Code the model wrote, run inside the browser server's own (unsandboxed) process: asked about
+    // even on a turn that may act. A plan turn refuses it below, as it refuses every acting tool.
+    if access.acts && crate::chat_exec::browser_asks(&tool_name) {
+        let detail = permission_detail(&input);
+        return match crate::agentcli::approve_tool_use(app, &access.root, &access.session, &tool_name, &detail).await {
+            Ok(()) => permission_decision(true, input, String::new()),
+            Err(reason) if reason.trim().is_empty() => permission_decision(false, input, PERMISSION_DENIED_BY_USER.to_string()),
+            Err(reason) => permission_decision(false, input, format!("{PERMISSION_DENIED_BY_USER} {reason}")),
+        };
+    }
     if let Some(allowed) = crate::chat_exec::browser_allows(&tool_name, access.acts) {
         return if allowed {
             permission_decision(true, input, String::new())
@@ -718,11 +730,25 @@ pub async fn handle(method: &Method, path: &str, headers: &HeaderMap, body: &Byt
                 respond(StatusCode::OK, Some(Value::Array(replies)))
             }
         }
+        one if opens_stateless(&one) => respond(StatusCode::BAD_REQUEST, None),
         one => match answer(&access, one).await {
             Some(reply) => respond(StatusCode::OK, Some(reply)),
             None => respond(StatusCode::ACCEPTED, None),
         },
     }
+}
+
+/// Whether `message` opens a 2026-07-28 (stateless) session — `server/discover` — which neither of
+/// the app's servers speaks. Answered with a bare 400: what a client of both eras reads as "this
+/// server predates it" and falls back to `initialize` on, where a 200 carrying an error does not
+/// reliably make it (the spec's versioning page, 2026-07-28).
+pub(crate) fn opens_stateless(message: &Value) -> bool {
+    message.get("method").and_then(Value::as_str) == Some("server/discover")
+}
+
+/// A method neither server knows, the JSON-RPC way.
+pub(crate) fn unknown_method(id: Value, method: &str) -> Value {
+    error_reply(id, -32601, &format!("method not found: {method}"))
 }
 
 fn error_reply(id: Value, code: i64, message: &str) -> Value {
@@ -733,17 +759,33 @@ fn result_reply(id: Value, result: Value) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "result": result})
 }
 
+/// A tool's answer, cut to `app_gateway::MAX_ANSWER` — one cap for every tool here, whatever it
+/// read (a log tail, a listing, a page).
 fn text_result(id: Value, text: String, error: bool) -> Value {
+    raw_text_result(id, crate::app_gateway::clip(text), error)
+}
+
+/// The same, uncut: for the permission prompt's decision, a JSON document Claude Code parses, which a
+/// cut would break — and which carries the tool input back, a file's whole content included.
+fn raw_text_result(id: Value, text: String, error: bool) -> Value {
     result_reply(id, json!({"content": [{"type": "text", "text": text}], "isError": error}))
 }
 
 /// Every tool here is a query over the map: no side effects, nothing outside the repository. Said in
 /// the protocol's own terms, because a client decides on them — Codex refuses an unannotated MCP
 /// call under `approval_policy="never"` ("requires approval"), and a read-only one it runs.
+///
+/// `openWorldHint` is true for the few that read a system outside this machine — a CI provider,
+/// Azure DevOps, a cluster, Azure — which is what the hint is for: still read-only, but answering
+/// about something the app does not own.
 fn read_only(mut tool: Value) -> Value {
-    tool["annotations"] = json!({ "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false });
+    let open_world = tool["name"].as_str().is_some_and(|name| OPEN_WORLD_READS.contains(&name));
+    tool["annotations"] = json!({ "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": open_world });
     tool
 }
+
+/// The read-only tools that reach past this machine — see [`read_only`].
+const OPEN_WORLD_READS: &[&str] = &["pipelines", "azure_devops", "kubernetes", "azure"];
 
 pub fn tools() -> Vec<Value> {
     [
@@ -1394,6 +1436,42 @@ pub(crate) fn db_tools(acts: bool) -> Vec<Value> {
 /// Whether a run at `root` has a database connection **open to AI** — its project's workspace, or the
 /// workspace chat's — so the database tools are worth their definitions. A connection closed to AI
 /// («Sin acceso») does not count: the model is not to see it at all (`agentcli::vault`).
+/// The app tools with nothing behind them for the workspace `root` belongs to. Empty when the
+/// database cannot be read — a tool listed in vain costs tokens, one hidden in error costs the call.
+///
+/// `local_llm` is not judged here: the bundled model answers without any setting, and telling that
+/// apart means asking the runtime, which is too slow for a listing.
+fn unused_app_tools(root: &str, workspace_run: bool) -> Vec<&'static str> {
+    crate::ai_usage::with_conn(|conn| {
+        let project = crate::knowledge::owning_project(conn, root);
+        let workspace = project
+            .as_ref()
+            .map(|project| project.workspace_id.clone())
+            .or_else(|| crate::workspace_chat::workspace_of_dir(conn, root))
+            .unwrap_or_default();
+        let mut unused = Vec::new();
+        if crate::db::service_queries::list_services(conn, &workspace).is_ok_and(|services| services.is_empty()) {
+            unused.extend(["service_logs", "service_wait", "service_restart"]);
+        }
+        if crate::db::api_queries::load_tree(conn, &workspace).is_ok_and(|tree| tree.requests.is_empty()) {
+            unused.extend(["api_requests", "api_request_curl"]);
+        }
+        let ado = if workspace_run {
+            crate::db::queries::list_projects(conn, &workspace).map(|all| all.iter().any(|p| p.ado_org.is_some())).unwrap_or(true)
+        } else {
+            project.as_ref().is_none_or(|p| p.ado_org.is_some())
+        };
+        if !ado {
+            unused.push("azure_devops");
+        }
+        if !workspace_run && project.as_ref().is_some_and(|p| crate::commands::ado_cmd::linked_repo(p).is_err()) {
+            unused.push("pipelines");
+        }
+        unused
+    })
+    .unwrap_or_default()
+}
+
 fn db_saved_here(root: &str) -> bool {
     crate::ai_usage::with_conn(|conn| {
         let owning_workspace = crate::knowledge::owning_project(conn, root).map(|project| project.workspace_id);
@@ -1724,6 +1802,11 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
             } else {
                 tools_for(access.acts)
             };
+            // The app's tools for things this workspace does not have — no services, no saved
+            // requests, no Azure DevOps, no CI — are left off: a definition no call can use is
+            // context every turn pays for (2026-11-18).
+            let unused = unused_app_tools(&access.root, access.workspace);
+            own.retain(|tool| !tool["name"].as_str().is_some_and(|name| unused.contains(&name)));
             let db_saved = db_saved_here(&access.root);
             if !access.grounding && db_saved {
                 own.extend(db_tools(access.acts));
@@ -1751,7 +1834,7 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
             }
             if name == PERMISSION_PROMPT_TOOL {
                 let decision = answer_permission_prompt(access, &args).await;
-                return Some(text_result(id, decision, false));
+                return Some(raw_text_result(id, decision, false));
             }
             if crate::chat_refs::is_tool(name) {
                 if access.grounding {
@@ -1806,7 +1889,7 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
                 Err(error) => text_result(id, error, true),
             }
         }
-        _ => error_reply(id, -32601, &format!("method not found: {method}")),
+        _ => unknown_method(id, &method),
     })
 }
 
@@ -2110,6 +2193,14 @@ mod tests {
         assert_eq!(args("azure", json!({"action": "query", "workspace": "logs-ws", "query": "AppExceptions | take 5", "hours": 2})), vec!["query", "logs-ws", "AppExceptions | take 5", "--hours", "2"]);
         assert_eq!(args("azure", json!({"action": "show", "resource": "web", "group": "rg-app"})), vec!["show", "web", "-g", "rg-app"]);
         assert_eq!(args("containers", json!({"action": "logs", "name": "api", "engine": "podman", "tail": 20})), vec!["logs", "api", "--engine", "podman", "--tail", "20"]);
+    }
+
+    #[test]
+    fn a_tool_that_reads_another_system_says_so() {
+        let ci = read_only(json!({"name": "pipelines"}));
+        assert_eq!(ci["annotations"]["openWorldHint"], true);
+        assert_eq!(ci["annotations"]["readOnlyHint"], true);
+        assert_eq!(read_only(json!({"name": "find_symbol"}))["annotations"]["openWorldHint"], false);
     }
 
     #[test]

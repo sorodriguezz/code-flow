@@ -304,7 +304,7 @@ function McpSection() {
   const copy = (text: string) => void navigator.clipboard?.writeText(text).then(() => pushSuccessToast(t("flows.schedule.copied")));
   const claude = `claude mcp add --transport http ${MCP_NAME} ${info.url} --header "Authorization: Bearer ${info.token}"`;
   // Codex reads the token from an environment variable rather than from its config file.
-  const codex = `# export CODEFLOW_FLUJOS_TOKEN=${info.token}\n[mcp_servers.${MCP_NAME.replace(/-/g, "_")}]\nurl = "${info.url}"\nbearer_token_env_var = "CODEFLOW_FLUJOS_TOKEN"`;
+  const codex = `# export CODEFLOW_FLUJOS_TOKEN=${info.token}\n[mcp_servers.${MCP_NAME.replace(/-/g, "_")}]\nurl = "${info.url}"\nbearer_token_env_var = "CODEFLOW_FLUJOS_TOKEN"\n# A flow may run up to 15 minutes.\ntool_timeout_sec = 960`;
   const addToCodeFlow = async () => {
     if (!workspaceId) return;
     try {

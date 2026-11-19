@@ -356,26 +356,69 @@ fn changes(words: &[String]) -> Option<String> {
 pub const BROWSER_SERVER: &str = "playwright";
 
 /// The browser's tools that only look: a plan turn may open and read pages, never act on one.
+/// Checked against the pinned release's README ([`BROWSER_PACKAGE`]); re-check when the pin moves.
 const BROWSER_READS: &[&str] = &[
-    "browser_navigate", "browser_navigate_back", "browser_navigate_forward", "browser_snapshot", "browser_take_screenshot",
-    "browser_console_messages", "browser_network_requests", "browser_wait_for", "browser_tabs", "browser_close",
-    "browser_resize", "browser_pdf_save", "browser_hover", "browser_scroll",
+    "browser_navigate", "browser_navigate_back", "browser_snapshot", "browser_take_screenshot", "browser_find",
+    "browser_console_messages", "browser_network_requests", "browser_network_request", "browser_wait_for",
+    "browser_tabs", "browser_close", "browser_resize", "browser_hover",
 ];
+
+/// The pinned release's tools that act on a page — every core tool not in [`BROWSER_READS`]. A plan
+/// turn never runs them, so it is not shown them either (`--disallowedTools`, see
+/// [`browser_plan_denials`]): their schemas were context every plan turn paid for.
+const BROWSER_ACTS: &[&str] = &[
+    "browser_click", "browser_drag", "browser_drop", "browser_emulate_media", "browser_evaluate", "browser_file_upload",
+    "browser_fill_form", "browser_handle_dialog", "browser_press_key", "browser_run_code_unsafe", "browser_select_option",
+    "browser_type",
+];
+
+/// The browser's tools that run code the model wrote inside the browser server's own process —
+/// `browser_run_code_unsafe` is, in its README's words, RCE-equivalent, and that process is not
+/// sandboxed like the shell. Even a turn that may act asks the user first (2026-11-18).
+const BROWSER_ASKS: &[&str] = &["browser_run_code_unsafe", "browser_evaluate"];
+
+/// Whether `tool` is one of the browser's that a turn asks the user about before running.
+pub fn browser_asks(tool: &str) -> bool {
+    tool.strip_prefix(&format!("mcp__{BROWSER_SERVER}__")).is_some_and(|name| BROWSER_ASKS.contains(&name))
+}
+
+/// The permission rules that take the browser's acting tools out of a plan turn.
+pub fn browser_plan_denials() -> Vec<String> {
+    BROWSER_ACTS.iter().map(|name| format!("mcp__{BROWSER_SERVER}__{name}")).collect()
+}
 
 /// The pinned release of Microsoft's Playwright MCP server the chats browse with.
 const BROWSER_PACKAGE: &str = "@playwright/mcp@0.0.83";
 
+/// The setting that keeps the headless browser out of every chat turn; anything but `"false"` is on.
+/// Switched in Settings › MCP, beside the repository map's — `McpSettings.tsx` names the same key.
+pub const BROWSER_SETTING_KEY: &str = "chat_browser_mcp";
+
+/// Whether the user left the headless browser on. Unset is on, as it always was; a database that
+/// will not answer reads as on too — the browser's calls are prompted either way, so the cost of
+/// guessing wrong is context, not access.
+fn browser_enabled() -> bool {
+    crate::ai_usage::setting(BROWSER_SETTING_KEY).as_deref() != Some("false")
+}
+
 /// A headless browser for a Claude chat turn — Playwright's MCP server through `npx`, a profile of
 /// its own each run (`--isolated`), so nothing of the user's browser is read — or `None` without
-/// `npx`. Its tools are not pre-approved: every call reaches the permission prompt, where
+/// `npx`, or when the user switched it off in Settings › MCP (its tool schemas cost every turn
+/// several thousand tokens of context, whether the model browses or not). Its tools are not pre-approved: every call reaches the permission prompt, where
 /// [`browser_allows`] lets a plan turn read pages and not act on them.
 pub fn browser_server() -> Option<crate::mcp_registry::LiveServer> {
+    if !browser_enabled() {
+        return None;
+    }
     let npx = crate::containers::cli::find("npx")?;
     Some(crate::mcp_registry::LiveServer {
         name: BROWSER_SERVER.to_string(),
         transport: "stdio".to_string(),
         command: npx.to_string_lossy().into_owned(),
-        args: ["-y", BROWSER_PACKAGE, "--headless", "--isolated"].iter().map(|a| a.to_string()).collect(),
+        // `--codegen none`: no generated Playwright script after every action, which the model never
+        // uses and every reply carried. `--no-webmcp`: a page cannot register tools of its own,
+        // which a turn that may act would otherwise run like the browser's.
+        args: ["-y", BROWSER_PACKAGE, "--headless", "--isolated", "--codegen", "none", "--no-webmcp"].iter().map(|a| a.to_string()).collect(),
         env: Vec::new(),
         url: String::new(),
         headers: Vec::new(),
@@ -696,6 +739,19 @@ mod tests {
         assert_eq!(browser_allows("mcp__playwright__browser_click", false), Some(false));
         assert_eq!(browser_allows("mcp__playwright__browser_click", true), Some(true));
         assert_eq!(browser_allows("Bash", false), None);
+        assert_eq!(browser_allows("mcp__playwright__browser_find", false), Some(true));
+        // Every acting tool is hidden from a plan turn, and none of the reading ones is.
+        let denied = browser_plan_denials();
+        assert!(denied.contains(&"mcp__playwright__browser_click".to_string()));
+        assert!(!denied.iter().any(|rule| BROWSER_READS.iter().any(|read| rule.ends_with(&format!("__{read}")))));
+    }
+
+    #[test]
+    fn code_run_in_the_browser_is_asked_about() {
+        assert!(browser_asks("mcp__playwright__browser_run_code_unsafe"));
+        assert!(browser_asks("mcp__playwright__browser_evaluate"));
+        assert!(!browser_asks("mcp__playwright__browser_click"));
+        assert!(!browser_asks("browser_evaluate"));
     }
 
     #[test]

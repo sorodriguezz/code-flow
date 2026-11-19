@@ -247,6 +247,11 @@ pub fn describe(spec: &ActionSpec, params: &Value, lang: &str) -> String {
 pub async fn act(app: &AppHandle, action: &str, params: Value, asker: Asker, confirmed: bool) -> Result<ActResult, String> {
     let spec = spec(action).ok_or_else(|| format!("Unknown action «{action}» — ui_actions lists them"))?;
     let lang = super::lang(app);
+    // `confirmed` is this function's to give, never the caller's: whoever built `params` — a model
+    // through `ui_act`, Codi's brain, a flow — could otherwise send `{"confirmed": true}` and press a
+    // destructive-looking button with nobody asked (2026-11-18). It is put back below only where a
+    // person said yes, or where `confirmed` (full access) says nobody has to.
+    let mut params = without_confirmation(params);
     if spec.risk == Risk::Destructive && !confirmed {
         let what = describe(&spec, &params, lang);
         let yes = match asker {
@@ -268,9 +273,9 @@ pub async fn act(app: &AppHandle, action: &str, params: Value, asker: Asker, con
         // The main window was closed and Codi kept going: what is asked to be seen brings it back.
         crate::tray::show_main_window(app);
     }
-    let mut params = params;
-    if spec.risk == Risk::Destructive {
-        // The window's own guard (a destructive-looking button pressed through `ui.press`) reads it.
+    if spec.risk == Risk::Destructive || confirmed {
+        // The window's own guard (a destructive-looking button pressed through `ui.press`) reads it:
+        // set after the yes above, or when the caller's `confirmed` already stands for one.
         if let Value::Object(map) = &mut params {
             map.insert("confirmed".into(), Value::Bool(true));
         }
@@ -292,6 +297,14 @@ pub async fn act(app: &AppHandle, action: &str, params: Value, asker: Asker, con
         return send(app, &window, &spec.id, &params).await;
     }
     Ok(answered)
+}
+
+/// `params` as a caller may send them: without `confirmed`, which only [`act`] sets.
+fn without_confirmation(mut params: Value) -> Value {
+    if let Value::Object(map) = &mut params {
+        map.remove("confirmed");
+    }
+    params
 }
 
 /// Whether running `spec` puts something on screen: a navigation, or a job asked to be shown.
@@ -479,6 +492,13 @@ mod tests {
         let push = spec("git.push", Risk::Destructive, "main");
         assert_eq!(describe(&push, &json!({}), "es"), "es git.push");
         assert_eq!(describe(&push, &json!({ "force": true }), "en"), "en git.push {\"force\":true}");
+    }
+
+    #[test]
+    fn a_caller_cannot_confirm_its_own_press() {
+        let sent = without_confirmation(json!({ "ref": "c12", "confirmed": true }));
+        assert_eq!(sent, json!({ "ref": "c12" }));
+        assert_eq!(without_confirmation(json!("plain")), json!("plain"));
     }
 
     #[test]
