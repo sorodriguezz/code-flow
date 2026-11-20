@@ -13,6 +13,7 @@
 //! - [`forward`] keeps `kubectl port-forward`s running.
 
 pub mod azure;
+pub mod builds;
 pub mod cli;
 pub mod engine;
 pub mod files;
@@ -22,6 +23,7 @@ pub mod kube;
 pub mod kubeconfig;
 pub mod manage;
 pub mod run;
+pub mod scan;
 pub mod session;
 pub mod topology;
 
@@ -402,9 +404,23 @@ fn docker_desktop_candidates(
     out
 }
 
+/// The folders Docker Desktop keeps its `docker.exe` in on Windows (`<install>\resources\bin`), for the
+/// tools' search path: its installer puts that folder on PATH, but a per-user install, one on another
+/// drive, or a PATH this process read before the install all left the CLI — and so every Docker
+/// page — unfound while Docker Desktop was running.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn docker_desktop_bin_dirs(registry_location: Option<String>, env: impl Fn(&str) -> Option<String>) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = docker_desktop_candidates(None, registry_location, env)
+        .into_iter()
+        .filter_map(|exe| exe.parent().map(|install| install.join("resources").join("bin")))
+        .collect();
+    out.dedup();
+    out
+}
+
 /// `InstallLocation` from Docker Desktop's uninstall entry — per-user (HKCU) or machine-wide (HKLM).
 #[cfg(target_os = "windows")]
-fn docker_desktop_registry_location() -> Option<String> {
+pub(crate) fn docker_desktop_registry_location() -> Option<String> {
     use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
     let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
     let key = wide(r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Docker Desktop");
@@ -427,6 +443,19 @@ fn docker_desktop_registry_location() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn docker_desktop_cli_is_looked_for_beside_every_install() {
+        use std::path::PathBuf;
+        let env = |name: &str| match name {
+            "ProgramFiles" => Some(r"C:\Program Files".to_string()),
+            "LOCALAPPDATA" => Some(r"C:\Users\me\AppData\Local".to_string()),
+            _ => None,
+        };
+        let dirs = docker_desktop_bin_dirs(Some(r"E:\Docker".into()), env);
+        assert_eq!(dirs[0], PathBuf::from(r"E:\Docker").join("resources").join("bin"));
+        assert!(dirs.contains(&PathBuf::from(r"C:\Users\me\AppData\Local").join(r"Programs\Docker\Docker").join("resources").join("bin")));
+    }
 
     #[test]
     fn docker_desktop_is_looked_for_where_it_was_installed_first() {

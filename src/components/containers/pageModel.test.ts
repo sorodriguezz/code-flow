@@ -38,6 +38,7 @@ const container = (over: Partial<ContainerRow>): ContainerRow => ({
   ports: [],
   created: "",
   command: "",
+  mounts: [],
   project: "",
   service: "",
   projectDir: "",
@@ -301,5 +302,66 @@ describe("a saved log", () => {
     expect(lineCount("")).toBe(0);
     expect(lineCount("one")).toBe(1);
     expect(lineCount("one\ntwo")).toBe(2);
+  });
+});
+
+describe("the manager's newer reads", async () => {
+  const { buildSteps, glyphIdOf, imageRunConfig, splitLayers, stepText } = await import("./pageModel");
+
+  it("gives an image its mark by repository", () => {
+    expect(glyphIdOf("postgres:16")).toBe("postgresql");
+    expect(glyphIdOf("docker.io/library/nginx:alpine")).toBe("nginx");
+    expect(glyphIdOf("mcr.microsoft.com/mssql/server:2025-latest@sha256:245f")).toBe("mssql");
+    expect(glyphIdOf("bitnami/redis:7")).toBe("redis");
+    expect(glyphIdOf("node:22-alpine")).toBe("nodejs");
+    expect(glyphIdOf("my-company/api:1")).toBeNull();
+    expect(glyphIdOf("f634a44c5d75")).toBeNull();
+  });
+
+  it("splits an image's history at its base", () => {
+    const layer = (created: string, createdBy: string, size = 0) => ({ id: "", created, createdBy, size, comment: "" });
+    // `docker history` prints the newest first.
+    const { own, base } = splitLayers([
+      layer("2026-10-20T20:06:58-03:00", 'CMD ["/opt/mssql/bin/sqlservr"]'),
+      layer("2026-10-20T20:06:27-03:00", "RUN tar -xf /install.tar # buildkit", 1_460_000_000),
+      layer("2025-10-16T16:23:03-03:00", "/bin/sh -c #(nop) ADD file:ddf in / ", 85_700_000),
+      layer("2025-10-16T16:23:01-03:00", "/bin/sh -c #(nop)  ARG RELEASE"),
+    ]);
+    expect(base.map((s) => s.index)).toEqual([1, 2]);
+    expect(own.map((s) => s.command)).toEqual(["RUN tar -xf /install.tar", 'CMD ["/opt/mssql/bin/sqlservr"]']);
+    expect(splitLayers([layer("2026-01-01T00:00:00Z", "COPY . ."), layer("2026-01-01T00:00:05Z", "FROM")]).base).toEqual([]);
+    expect(stepText("COPY . . # buildkit")).toBe("COPY . .");
+  });
+
+  it("reads what an image runs", () => {
+    const config = imageRunConfig(
+      JSON.stringify([{ Os: "linux", Architecture: "amd64", Config: { User: "mssql", ExposedPorts: { "1433/tcp": {} }, Env: ["PATH=/bin", "SA_PASSWORD=x"], Entrypoint: ["/launch.sh"], Cmd: ["/sqlservr"], Labels: { vendor: "Microsoft" } } }]),
+    );
+    expect(config?.entrypoint).toBe("/launch.sh");
+    expect(config?.cmd).toBe("/sqlservr");
+    expect(config?.ports).toEqual(["1433/tcp"]);
+    expect(config?.env.find((e) => e.name === "SA_PASSWORD")?.secret).toBe(true);
+    expect(config?.platform).toBe("linux/amd64");
+    expect(imageRunConfig("nope")).toBeNull();
+  });
+
+  it("reads BuildKit's steps off its log", () => {
+    const steps = buildSteps(
+      [
+        "#1 [internal] load build definition from Dockerfile",
+        "#1 DONE 0.0s",
+        "#8 [base 2/2] RUN npm i -g pnpm",
+        "#8 CACHED",
+        "#11 [bundler 3/5] RUN pnpm install --prod",
+        "#11 0.512 Progress: resolved 1",
+        "#11 DONE 4.3s",
+        "#12 [bundler 4/5] RUN exit 1",
+        "#12 ERROR: process did not complete successfully: exit code: 1",
+      ].join("\n"),
+    );
+    expect(steps.map((s) => s.state)).toEqual(["done", "cached", "done", "error"]);
+    expect(steps[0].internal).toBe(true);
+    expect(steps[2]).toMatchObject({ stage: "bundler 3/5", command: "RUN pnpm install --prod", seconds: 4.3, output: ["Progress: resolved 1"] });
+    expect(steps[3].output[0]).toContain("exit code: 1");
   });
 });

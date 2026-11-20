@@ -123,15 +123,21 @@ export function engineMenu(args: {
         .getState()
         .start(t(title, { name }), { kind, runtime, context, target: name, projectDir: options.projectDir, configFiles: options.configFiles }, { refresh, done: t(done, { name }) });
     const up = rows.some((r) => r.state === "running");
+    const allUp = rows.length > 0 && rows.every((r) => r.state === "running");
+    const composeUp = job("composeUp", "containers.m.compose.upping", "containers.done.up", ["containers", "images", "volumes", "networks"]);
     const items: MenuItem[] = [];
-    if (canUp)
-      items.push({ label: t("containers.project.up"), icon: ArrowUpFromLine, onClick: job("composeUp", "containers.m.compose.upping", "containers.done.up", ["containers", "images", "volumes", "networks"]) });
+    // `up -d` on a project that already runs brings nothing up: it recreates what its file changed.
+    // Offered first as «Levantar» only while something is down; with everything running it is
+    // «Aplicar cambios del compose», after the actions that fit a running project (user, 2026-11-20:
+    // «es raro que diga levantar si ya está corriendo»).
+    if (canUp && !allUp) items.push({ label: t("containers.project.up"), icon: ArrowUpFromLine, onClick: composeUp });
     if (up) {
       items.push({ label: t("containers.project.restart"), icon: RotateCw, onClick: run("restart", "containers.done.restart") });
       items.push({ label: t("containers.project.stop"), icon: Square, onClick: run("stop", "containers.done.stop") });
     } else {
       items.push({ label: t("containers.project.start"), icon: Play, onClick: run("start", "containers.done.start") });
     }
+    if (canUp && allUp) items.push({ label: t("containers.project.apply"), icon: ArrowUpFromLine, onClick: composeUp, separated: true });
     if (canUp) items.push({ label: t("containers.project.pull"), icon: Download, onClick: job("composePull", "containers.m.compose.pulling", "containers.done.pull", ["images"]) });
     items.push({
       label: t("containers.project.down"),

@@ -69,17 +69,22 @@ const OPPOSITE: Record<TooltipSide, TooltipSide> = {
  * Where the box goes, given the trigger and the box's own measured size.
  *
  * Flips to the opposite side when the preferred one doesn't fit — a rail sits against a window edge,
- * so the side that works is decided by which edge, not by the call site — and then clamps on the
- * other axis, which is what keeps the label beside the *last* chip of a tall rail on screen.
+ * so the side that works is decided by which edge, not by the call site — then to the sides across
+ * when neither fits (a trigger as tall as the window), and clamps on the other axis, which is what
+ * keeps the label beside the *last* chip of a tall rail on screen.
  */
-function place(anchor: DOMRect, width: number, height: number, preferred: TooltipSide): Placement {
+export function place(anchor: DOMRect, width: number, height: number, preferred: TooltipSide): Placement {
   const fits = (side: TooltipSide) => {
     if (side === "right") return anchor.right + GAP + width <= window.innerWidth - MARGIN;
     if (side === "left") return anchor.left - GAP - width >= MARGIN;
     if (side === "top") return anchor.top - GAP - height >= MARGIN;
     return anchor.bottom + GAP + height <= window.innerHeight - MARGIN;
   };
-  const side = fits(preferred) ? preferred : fits(OPPOSITE[preferred]) ? OPPOSITE[preferred] : preferred;
+  // Neither the preferred side nor its opposite: the trigger spans that axis — a folded panel's
+  // bar, the whole window high. Above it, clamped to the window's top, the label sat over macOS'
+  // traffic lights (user, 2026-11-20); beside it there is room.
+  const across: TooltipSide[] = preferred === "top" || preferred === "bottom" ? ["right", "left"] : ["bottom", "top"];
+  const side = [preferred, OPPOSITE[preferred], ...across].find(fits) ?? preferred;
 
   const horizontal = side === "left" || side === "right";
   const left = horizontal
@@ -87,8 +92,13 @@ function place(anchor: DOMRect, width: number, height: number, preferred: Toolti
       ? anchor.right + GAP
       : anchor.left - GAP - width
     : anchor.left + anchor.width / 2 - width / 2;
+  // Beside a trigger much taller than the label, by its top end — where a tall bar's own icon is —
+  // rather than at its middle, half a window away from it.
+  const tall = anchor.height > height * 4;
   const top = horizontal
-    ? anchor.top + anchor.height / 2 - height / 2
+    ? tall
+      ? anchor.top + Math.min(8, anchor.height / 2)
+      : anchor.top + anchor.height / 2 - height / 2
     : side === "bottom"
       ? anchor.bottom + GAP
       : anchor.top - GAP - height;

@@ -85,6 +85,10 @@ fn extra_dirs() -> Vec<PathBuf> {
         ] {
             dirs.push(PathBuf::from(dir));
         }
+        // Docker Desktop wherever it was installed — the registry's record, per-user, another drive.
+        // Read once: this list is rebuilt for every command, and the install does not move.
+        static DOCKER_DESKTOP: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+        dirs.extend(DOCKER_DESKTOP.get_or_init(|| super::docker_desktop_bin_dirs(super::docker_desktop_registry_location(), |name| std::env::var(name).ok())).iter().cloned());
         if let Some(local) = dirs::data_local_dir() {
             dirs.push(local.join(r"Programs\Rancher Desktop\resources\resources\win32\bin"));
             dirs.push(local.join(r"Microsoft\WinGet\Links"));

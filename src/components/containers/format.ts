@@ -67,3 +67,36 @@ export function fmtPercent(value: number | null | undefined): string {
   return `${value >= 100 ? value.toFixed(0) : value.toFixed(1)}%`;
 }
 
+
+/**
+ * Why a container stopped, from its exit code — what «Detenido» alone does not say. 137 is a
+ * SIGKILL (`docker kill`, a stop that timed out, the kernel out of memory), 139 a segfault, 143 a
+ * SIGTERM the process did not handle (a plain `docker stop`, so no fault).
+ */
+export type StopReason = "stopped" | "killed" | "crashed" | "failed";
+
+export function stopReason(state: string, exitCode: number | null): StopReason | null {
+  if (state === "dead") return "failed";
+  if (state !== "exited") return null;
+  if (exitCode === null || exitCode === 0 || exitCode === 143) return "stopped";
+  if (exitCode === 137) return "killed";
+  if (exitCode === 139) return "crashed";
+  return "failed";
+}
+
+/** A container worth clearing away: it ended badly, died, or fails its health check. */
+export function hasFailed(row: { state: string; health: string; exitCode: number | null }): boolean {
+  if (row.health === "unhealthy") return true;
+  const reason = stopReason(row.state, row.exitCode);
+  return reason !== null && reason !== "stopped";
+}
+
+/** A build's or a step's length — 38s, 1m 12s, 0.4s. */
+export function fmtDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return "—";
+  if (seconds < 10) return `${Math.round(seconds * 10) / 10}s`;
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return s ? `${m}m ${s}s` : `${m}m`;
+}

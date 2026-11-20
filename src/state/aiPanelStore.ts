@@ -115,6 +115,8 @@ export interface TabView {
   /** Finding id → the comment text the human rewrote before publishing it (what gets posted
    *  instead of the generated one). */
   commentEdits?: Record<string, string>;
+  /** Finding id → ticked to be fixed together (the change analysis' "fix the selected ones"). */
+  fixPicked?: Record<string, boolean>;
 }
 
 export interface UnreadMark {

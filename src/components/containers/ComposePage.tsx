@@ -167,7 +167,13 @@ export function ComposePage({ runtime }: { runtime: RuntimeInfo }) {
                     <Td className="w-[128px]">
                       <div className="flex items-center justify-end gap-0.5">
                         <RowAction
-                          label={canUp ? t("containers.project.up") : `${t("containers.project.up")} — ${t("containers.m.compose.noFiles")}`}
+                          label={
+                            !canUp
+                              ? `${t("containers.project.up")} — ${t("containers.m.compose.noFiles")}`
+                              : project.running === total && total > 0
+                                ? t("containers.project.apply")
+                                : t("containers.project.up")
+                          }
                           disabled={!canUp || working}
                           onClick={() => up(project.name, project.projectDir, project.configFiles)}
                         >

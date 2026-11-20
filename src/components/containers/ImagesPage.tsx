@@ -1,38 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
-import { Download, MoreHorizontal, Play, Trash2 } from "lucide-react";
+import { Box, Download, MoreHorizontal, Play, Trash2 } from "lucide-react";
 import { Button } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
-import { Segmented } from "../common/Segmented";
 import { chipClass } from "../common/recipes";
-import { Facts, RowAction, SectionTitle, StateDot, ago, stateTone } from "./containerBits";
+import { RowAction, ago } from "./containerBits";
 import { engineMenu, runtimeLabel } from "./containerActions";
-import { DataTable, Dialog, EmptyLine, Field, LiveMark, LoadingLine, NO_ROWS, PageHead, PageToolbar, SearchField, Td, Th, fmtBytes, trClass } from "./ui";
+import { DataTable, Dialog, EmptyLine, Field, FilterChips, LiveMark, LoadingLine, NO_ROWS, PageHead, PageToolbar, SearchField, Td, Th, fmtBytes, trClass } from "./ui";
+import { ImageGlyph } from "./imageGlyph";
 import { RunContainerDialog } from "./RunContainerDialog";
-import {
-  BulkBar,
-  CopyText,
-  Drawer,
-  DrawerBody,
-  ImageSearchField,
-  InspectPane,
-  MutedLine,
-  StopClick,
-  menuAt,
-  useEngineList,
-  useInspect,
-  usePicked,
-  type DrawerView,
-  type MenuState,
-} from "./pageBits";
-import { firstRead, imageUseCount, imageUsers, layerCommand, pullableReference } from "./pageModel";
-import { containersImageHistory } from "../../lib/tauri/containersCommands";
+import { BulkBar, CopyText, ImageSearchField, StopClick, menuAt, useEngineList, usePicked, type MenuState } from "./pageBits";
+import { firstRead, imageUseCount, imageUsers, pullableReference, shortReference } from "./pageModel";
 import { confirmAction } from "../../state/confirmStore";
 import { useContainersJobsStore } from "../../state/containersJobsStore";
 import { useContainersStore } from "../../state/containersStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
-import type { ContainerRow, ImageLayer, ImageRow, RuntimeInfo } from "../../types/containers";
+import type { ContainerRow, ImageRow, RuntimeInfo } from "../../types/containers";
 
 /**
  * An engine's images as lite-dock lists them: every tag with its size and age, the containers that
@@ -40,7 +24,7 @@ import type { ContainerRow, ImageLayer, ImageRow, RuntimeInfo } from "../../type
  * run from one, and a side panel with its layers and its inspect document.
  */
 
-type Filter = "all" | "inUse" | "dangling";
+type Filter = "all" | "inUse" | "unused" | "dangling";
 type Usage = { users: ContainerRow[]; count: number };
 
 /** One row per tag, so a row is the image and the name it goes by. */
@@ -48,6 +32,7 @@ const keyOf = (row: ImageRow) => `${row.id}|${row.reference}`;
 /** What an engine removes or pulls a row by: its name, or its id when it has none. */
 const refOf = (row: ImageRow) => (row.dangling ? row.id : row.reference);
 const shortId = (id: string) => id.replace(/^sha256:/, "").slice(0, 12);
+const isUp = (row: ContainerRow) => row.state === "running" || row.state === "restarting";
 const UNUSED: Usage = { users: NO_ROWS, count: 0 };
 
 export function ImagesPage({ runtime }: { runtime: RuntimeInfo }) {
@@ -63,7 +48,7 @@ export function ImagesPage({ runtime }: { runtime: RuntimeInfo }) {
   const [filter, setFilter] = useState<Filter>("all");
   const { picked, toggle, setAll } = usePicked();
   const [menu, setMenu] = useState<MenuState>(null);
-  const [openKey, setOpenKey] = useState<string | null>(null);
+  const select = useContainersStore((s) => s.select);
   const [runImage, setRunImage] = useState<string | null>(null);
   const [pulling, setPulling] = useState(false);
   const startJob = useContainersJobsStore((s) => s.start);
@@ -99,6 +84,7 @@ export function ImagesPage({ runtime }: { runtime: RuntimeInfo }) {
     const needle = query.trim().toLowerCase().replace(/^sha256:/, "");
     return rows.filter((row) => {
       if (filter === "inUse" && !((usage.get(keyOf(row))?.count ?? 0) > 0)) return false;
+      if (filter === "unused" && (usage.get(keyOf(row))?.count ?? 0) > 0) return false;
       if (filter === "dangling" && !row.dangling) return false;
       if (!needle) return true;
       return row.reference.toLowerCase().includes(needle) || row.id.toLowerCase().replace(/^sha256:/, "").startsWith(needle);
@@ -106,7 +92,8 @@ export function ImagesPage({ runtime }: { runtime: RuntimeInfo }) {
   }, [rows, usage, query, filter]);
   const pickedRows = rows.filter((row) => picked.has(keyOf(row)));
   const allPicked = shown.length > 0 && shown.every((row) => picked.has(keyOf(row)));
-  const openRow = openKey ? rows.find((row) => keyOf(row) === openKey) : undefined;
+  /** The image's own page, over the list — its layers, how it runs, its vulnerabilities. */
+  const openImage = (row: ImageRow) => select({ runtime: runtime.id, context, namespace: null, object: "image", id: refOf(row), name: refOf(row) });
 
   const pull = (reference: string) =>
     void startJob(
@@ -149,7 +136,7 @@ export function ImagesPage({ runtime }: { runtime: RuntimeInfo }) {
   // The engine menu's own Run asks for ports through a prompt; here it opens the form. Its Remove
   // keeps an image in use like the row's button does.
   const rowMenu = (row: ImageRow): MenuItem[] =>
-    engineMenu({ runtime: runtime.id, context, object: "image", image: row, t, act, select: () => setOpenKey(keyOf(row)) }).map((item) =>
+    engineMenu({ runtime: runtime.id, context, object: "image", image: row, t, act, select: () => openImage(row) }).map((item) =>
       item.label === t("containers.image.run") ? { ...item, onClick: () => setRunImage(refOf(row)) } : item.danger ? { ...item, onClick: () => void removeOne(row) } : item,
     );
 
@@ -177,15 +164,15 @@ export function ImagesPage({ runtime }: { runtime: RuntimeInfo }) {
       </PageHead>
       <PageToolbar>
         <SearchField value={query} onChange={setQuery} placeholder={t("containers.m.images.search")} />
-        <Segmented
-          layoutId="images-filter"
-          size="sm"
+        <FilterChips
+          label={t("containers.m.filters")}
           value={filter}
           onChange={setFilter}
           options={[
-            { value: "all", label: `${t("containers.m.images.filter.all")} ${rows.length}` },
-            { value: "inUse", label: `${t("containers.m.images.inUse")} ${inUseCount}` },
-            { value: "dangling", label: `${t("containers.m.images.filter.dangling")} ${danglingCount}`, title: t("containers.m.images.danglingHint") },
+            { value: "all", label: t("containers.m.images.filter.all"), count: rows.length },
+            { value: "inUse", label: t("containers.m.images.inUse"), count: inUseCount, tone: "ok" },
+            { value: "unused", label: t("containers.m.images.filter.unused"), count: rows.length - inUseCount, tone: "idle" },
+            { value: "dangling", label: t("containers.m.images.filter.dangling"), count: danglingCount, title: t("containers.m.images.danglingHint") },
           ]}
         />
         <div className="flex-1" />
@@ -199,73 +186,115 @@ export function ImagesPage({ runtime }: { runtime: RuntimeInfo }) {
           </Button>
         </BulkBar>
       )}
-      <div className="flex min-h-0 flex-1">
-        {/* A fixed layout: the drawer narrows the table, and only the name column gives way. */}
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col [&_table]:table-fixed">
-          {!runtime.running ? (
-            <EmptyLine>{runtime.problem ?? t("containers.notRunningHint")}</EmptyLine>
-          ) : list?.error ? (
-            <EmptyLine>{list.error}</EmptyLine>
-          ) : firstRead(list) ? (
-            <LoadingLine />
-          ) : shown.length === 0 ? (
-            <EmptyLine>{rows.length ? t("containers.m.images.noMatch") : t("containers.m.images.none")}</EmptyLine>
-          ) : (
-            <DataTable minWidth={openRow ? 560 : 720}>
-              <thead>
-                <tr>
-                  <Th align="center" width={32}>
-                    <Checkbox checked={allPicked} onChange={() => setAll(allPicked ? null : shown.map(keyOf))} />
-                  </Th>
-                  <Th>{t("containers.m.images.col.reference")}</Th>
-                  <Th width={120}>{t("containers.fact.id")}</Th>
-                  <Th align="right" width={80}>
-                    {t("containers.m.images.col.size")}
-                  </Th>
-                  <Th width={84}>{t("containers.m.images.col.created")}</Th>
-                  <Th align="right" width={68}>
-                    {t("containers.m.images.inUse")}
-                  </Th>
-                  <Th align="right" width={96}>
-                    {t("containers.m.col.actions")}
-                  </Th>
-                </tr>
-              </thead>
-              <tbody>
-                {shown.map((row) => {
-                  const key = keyOf(row);
-                  const { users, count } = usageOf(row);
-                  const working = busy[`image|${refOf(row)}`];
-                  return (
-                    <tr key={key} className={trClass(picked.has(key) || openKey === key, true)} onClick={() => setOpenKey(key)} onContextMenu={(e) => setMenu(menuAt(e, rowMenu(row)))}>
-                      <Td align="center" className="w-8">
-                        <StopClick>
-                          <Checkbox checked={picked.has(key)} onChange={() => toggle(key)} />
-                        </StopClick>
-                      </Td>
-                      <Td>
-                        <div className="flex min-w-0 items-center gap-1.5">
-                          <span className={`truncate font-mono text-[12px] ${row.dangling ? "text-[var(--cf-text-faint)]" : "text-[var(--cf-text)]"}`} title={row.dangling ? row.id : row.reference}>
-                            {row.dangling ? "<none>:<none>" : row.reference}
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col [&_table]:table-fixed">
+        {!runtime.running ? (
+          <EmptyLine>{runtime.problem ?? t("containers.notRunningHint")}</EmptyLine>
+        ) : list?.error ? (
+          <EmptyLine>{list.error}</EmptyLine>
+        ) : firstRead(list) ? (
+          <LoadingLine />
+        ) : shown.length === 0 ? (
+          <EmptyLine>{rows.length ? t("containers.m.images.noMatch") : t("containers.m.images.none")}</EmptyLine>
+        ) : (
+          <DataTable minWidth={820}>
+            <thead>
+              <tr>
+                <Th align="center" width={32}>
+                  <Checkbox checked={allPicked} onChange={() => setAll(allPicked ? null : shown.map(keyOf))} />
+                </Th>
+                <Th>{t("containers.m.images.col.repository")}</Th>
+                <Th width={150}>{t("containers.m.images.col.tag")}</Th>
+                <Th width={150}>{t("containers.m.images.col.usedBy")}</Th>
+                <Th width={120}>{t("containers.fact.id")}</Th>
+                <Th align="right" width={84}>
+                  {t("containers.m.images.col.size")}
+                </Th>
+                <Th width={96}>{t("containers.m.images.col.created")}</Th>
+                <Th align="right" width={112}>
+                  {t("containers.m.col.actions")}
+                </Th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((row) => {
+                const key = keyOf(row);
+                const { users, count } = usageOf(row);
+                const working = busy[`image|${refOf(row)}`];
+                const running = users.filter(isUp).length;
+                const repository = row.dangling ? "<none>" : shortReference(row.repository);
+                return (
+                  <tr key={key} className={trClass(picked.has(key), true)} onClick={() => openImage(row)} onContextMenu={(e) => setMenu(menuAt(e, rowMenu(row)))}>
+                    <Td tall align="center" className="w-8">
+                      <StopClick>
+                        <Checkbox checked={picked.has(key)} onChange={() => toggle(key)} />
+                      </StopClick>
+                    </Td>
+                    <Td tall>
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <ImageGlyph reference={row.dangling ? "" : row.reference} dim={count === 0} />
+                        <span
+                          className={`truncate font-medium ${row.dangling ? "font-mono text-[var(--cf-text-faint)]" : "text-[var(--cf-text)] group-hover:text-[var(--cf-accent)]"}`}
+                          title={row.dangling ? row.id : row.reference}
+                        >
+                          {repository}
+                        </span>
+                        {row.dangling && (
+                          <span className={chipClass("neutral")} title={t("containers.m.images.danglingHint")}>
+                            {t("containers.m.images.dangling")}
                           </span>
-                          {row.dangling && (
-                            <span className={chipClass("neutral")} title={t("containers.m.images.danglingHint")}>
-                              {t("containers.m.images.dangling")}
+                        )}
+                      </div>
+                    </Td>
+                    <Td tall>
+                      {row.dangling || row.tag === "<none>" ? (
+                        <span className="text-[var(--cf-text-faint)]">—</span>
+                      ) : (
+                        <span className="inline-block max-w-full truncate rounded-full border border-[var(--cf-border)] bg-[var(--cf-hover)] px-2 py-px font-mono text-[11px] text-[var(--cf-text)]" title={row.tag}>
+                          {row.tag}
+                        </span>
+                      )}
+                    </Td>
+                    <Td tall title={users.map((u) => u.name).join(", ") || undefined}>
+                      {count > 0 ? (
+                        <span className="flex flex-col leading-tight">
+                          <span className="text-[var(--cf-text)]">{count === 1 ? t("containers.m.images.usedByOne") : t("containers.m.images.usedByMany", { count })}</span>
+                          {users.length > 0 && (
+                            <span className="flex items-center gap-2 text-[11px] text-[var(--cf-text-muted)]" title={t("containers.m.images.runningStopped", { running, stopped: users.length - running })}>
+                              {running > 0 && (
+                                <span className="inline-flex items-center gap-0.5">
+                                  <Box size={11} className="text-[var(--cf-success)]" />
+                                  {running}
+                                </span>
+                              )}
+                              {users.length - running > 0 && (
+                                <span className="inline-flex items-center gap-0.5">
+                                  <Box size={11} className="text-[var(--cf-text-faint)]" />
+                                  {users.length - running}
+                                </span>
+                              )}
                             </span>
                           )}
-                        </div>
-                      </Td>
-                      <Td>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[var(--cf-text-faint)]">
+                          <Box size={11} />
+                          {t("containers.m.images.notInUse")}
+                        </span>
+                      )}
+                    </Td>
+                    <Td tall>
+                      <StopClick>
                         <CopyText text={row.id} shown={shortId(row.id)} toast={t("containers.m.images.copiedId")} title={t("containers.copyId")} />
-                      </Td>
-                      <Td align="right" className="text-[var(--cf-text-muted)]">
-                        {row.sizeBytes !== null ? fmtBytes(row.sizeBytes) : row.size || "—"}
-                      </Td>
-                      <Td className="text-[var(--cf-text-muted)]">{ago(row.created, language) || "—"}</Td>
-                      <Td align="right" title={users.map((u) => u.name).join(", ") || undefined}>
-                        {count > 0 ? <span className="text-[var(--cf-text)]">{count}</span> : <span className="text-[var(--cf-text-faint)]">—</span>}
-                      </Td>
-                      <Td className="w-[96px]">
+                      </StopClick>
+                    </Td>
+                    <Td tall align="right" className="text-[var(--cf-text)]">
+                      {row.sizeBytes !== null ? fmtBytes(row.sizeBytes) : row.size || "—"}
+                    </Td>
+                    <Td tall className="whitespace-nowrap text-[var(--cf-text-muted)]" title={row.created}>
+                      {ago(row.created, language) || "—"}
+                    </Td>
+                    <Td tall align="right" className="w-[112px]">
+                      <StopClick>
                         <div className="flex items-center justify-end gap-0.5">
                           {!ctr && !row.dangling && (
                             <>
@@ -284,132 +313,19 @@ export function ImagesPage({ runtime }: { runtime: RuntimeInfo }) {
                             <MoreHorizontal size={13} />
                           </RowAction>
                         </div>
-                      </Td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </DataTable>
-          )}
-        </div>
-        {openRow && <ImageDrawer key={openKey} runtime={runtime} context={context} row={openRow} usage={usageOf(openRow)} onClose={() => setOpenKey(null)} />}
+                      </StopClick>
+                    </Td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </DataTable>
+        )}
       </div>
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
       {pulling && <PullDialog runtime={runtime} context={context} onPull={pull} onClose={() => setPulling(false)} />}
       {runImage !== null && <RunContainerDialog runtime={runtime} context={context} initialImage={runImage} onClose={() => setRunImage(null)} />}
     </div>
-  );
-}
-
-/** An image's facts and layers, or its inspect document — read once it is asked for. */
-function ImageDrawer({ runtime, context, row, usage, onClose }: { runtime: RuntimeInfo; context: string | null; row: ImageRow; usage: Usage; onClose: () => void }) {
-  const t = useT();
-  const language = useLanguageStore((s) => s.language);
-  const select = useContainersStore((s) => s.select);
-  const [view, setView] = useState<DrawerView>("details");
-  const [jsonAsked, setJsonAsked] = useState(false);
-  const [layers, setLayers] = useState<{ rows: ImageLayer[] | null; error: string | null }>({ rows: null, error: null });
-  const ref = refOf(row);
-  const inspect = useInspect(runtime.id, context, "image", jsonAsked ? ref : null);
-
-  useEffect(() => {
-    let alive = true;
-    setLayers({ rows: null, error: null });
-    containersImageHistory(runtime.id, context, ref)
-      .then((found) => {
-        if (alive) setLayers({ rows: found, error: null });
-      })
-      .catch((e: unknown) => {
-        if (alive) setLayers({ rows: null, error: String(e) });
-      });
-    return () => {
-      alive = false;
-    };
-  }, [runtime.id, context, ref]);
-
-  const created = row.created ? ago(row.created, language) : "";
-  return (
-    <Drawer
-      title={row.dangling ? shortId(row.id) : row.reference}
-      view={view}
-      onView={(next) => {
-        setView(next);
-        if (next === "json") setJsonAsked(true);
-      }}
-      onClose={onClose}
-      layoutId="images-drawer-view"
-    >
-      {view === "json" ? (
-        <InspectPane state={inspect} />
-      ) : (
-        <DrawerBody>
-          <Facts
-            rows={[
-              [t("containers.m.images.reference"), <span className="font-mono">{row.dangling ? "<none>:<none>" : row.reference}</span>],
-              [t("containers.fact.id"), <CopyText text={row.id} toast={t("containers.m.images.copiedId")} title={t("containers.copyId")} />],
-              [t("containers.m.images.col.size"), row.sizeBytes !== null ? fmtBytes(row.sizeBytes) : row.size],
-              [t("containers.m.images.col.created"), created && created !== row.created ? <span title={row.created}>{created}</span> : row.created],
-              [
-                t("containers.fact.usedBy"),
-                usage.users.length ? (
-                  <span className="flex flex-wrap gap-x-3 gap-y-0.5">
-                    {usage.users.map((user) => (
-                      <button
-                        key={user.id}
-                        onClick={() => select({ runtime: runtime.id, context, namespace: null, object: "container", id: user.id, name: user.name })}
-                        title={t("containers.m.openDetail")}
-                        className="inline-flex items-center gap-1 text-[var(--cf-accent)] hover:underline"
-                      >
-                        <StateDot tone={stateTone(user.state, user.health)} />
-                        {user.name}
-                      </button>
-                    ))}
-                  </span>
-                ) : usage.count > 0 ? (
-                  t("containers.m.images.nContainers", { count: usage.count })
-                ) : (
-                  <span className="text-[var(--cf-text-muted)]">{t("containers.none")}</span>
-                ),
-              ],
-            ]}
-          />
-          <SectionTitle>
-            {t("containers.m.images.layers")}
-            {layers.rows ? ` · ${layers.rows.length}` : ""}
-          </SectionTitle>
-          {layers.error ? (
-            <MutedLine>{layers.error}</MutedLine>
-          ) : !layers.rows ? (
-            <MutedLine>{t("containers.m.loading")}</MutedLine>
-          ) : layers.rows.length === 0 ? (
-            <MutedLine>{t("containers.m.images.noLayers")}</MutedLine>
-          ) : (
-            <table className="w-full table-fixed border-separate border-spacing-0 text-[11.5px]">
-              <thead>
-                <tr>
-                  <Th>{t("containers.m.images.col.step")}</Th>
-                  <Th align="right" width={76}>
-                    {t("containers.m.images.col.size")}
-                  </Th>
-                </tr>
-              </thead>
-              <tbody>
-                {layers.rows.map((layer, index) => (
-                  <tr key={`${layer.id}-${index}`}>
-                    <Td className="truncate font-mono text-[var(--cf-text)]" title={layer.createdBy}>
-                      {layerCommand(layer.createdBy) || "—"}
-                    </Td>
-                    <Td align="right" className={layer.size ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-text-faint)]"}>
-                      {fmtBytes(layer.size)}
-                    </Td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </DrawerBody>
-      )}
-    </Drawer>
   );
 }
 

@@ -1,4 +1,4 @@
-import type { ContainerRow, ContainerStats, ImageRow } from "../../types/containers";
+import type { ContainerRow, ContainerStats, ImageLayer, ImageRow } from "../../types/containers";
 
 /**
  * What the manager's pages work out from the lists the engines print — which containers an image
@@ -283,4 +283,214 @@ export function logFileName(subject: string, extension: "log" | "txt", now: Date
 export function lineCount(text: string): number {
   if (!text) return 0;
   return text.split("\n").length;
+}
+
+// ------------------------------------------------------------------------------- image marks
+
+/**
+ * Which mark an image wears in the lists — read off its repository's last part (`bitnami/redis`,
+ * `docker.io/library/postgres`, `mcr.microsoft.com/mssql/server`), so a container shows what it runs
+ * at a glance. `null` for anything the app has no mark for: the page draws its generic tile.
+ */
+const GLYPH_RULES: [RegExp, string][] = [
+  [/(^|\/)mssql(\/|$)|sqlserver|azure-sql-edge/, "mssql"],
+  [/(^|[/-])postgres(ql)?($|[-/])|(^|\/)postgis|timescale|pgvector|supabase\/postgres/, "postgresql"],
+  [/(^|\/)mariadb$/, "mariadb"],
+  [/(^|\/)mysql(-server)?$|percona/, "mysql"],
+  [/(^|\/)mongo(db)?(-community-server)?$/, "mongodb"],
+  [/(^|\/)(redis|valkey|redis-stack(-server)?|keydb)$/, "redis"],
+  [/(^|\/)(nginx|nginx-unprivileged|openresty)$/, "nginx"],
+  [/(^|\/)node$/, "nodejs"],
+  [/(^|\/)(python|pypy)$/, "python"],
+  [/(^|\/)rust$/, "rust"],
+  [/(^|\/)golang$|(^|\/)go$/, "go"],
+  [/(^|\/)alpine$/, "alpine"],
+  [/(^|\/)ubuntu$/, "ubuntu"],
+  [/(^|\/)debian$/, "debian"],
+  [/(^|\/)rabbitmq$/, "rabbitmq"],
+  [/(^|\/)(opensearch|opensearch-dashboards)$/, "opensearch"],
+  [/(^|\/)(elasticsearch|kibana)$/, "elastic"],
+  [/(^|\/)grafana(-oss|-enterprise)?$/, "grafana"],
+  [/kafka|redpanda/, "kafka"],
+  [/(^|\/)(openjdk|eclipse-temurin|amazoncorretto|maven|gradle)$/, "java"],
+  [/(^|\/)(traefik)$/, "traefik"],
+  [/(^|\/)(prometheus)$/, "prometheus"],
+];
+
+export function glyphIdOf(reference: string): string | null {
+  const repo = imageName(shortReference(reference.split("@")[0])).toLowerCase();
+  if (!repo || /^[0-9a-f]{12,}$/.test(repo)) return null;
+  for (const [rule, id] of GLYPH_RULES) if (rule.test(repo)) return id;
+  return null;
+}
+
+// ------------------------------------------------------------------------------- image layers
+
+export interface LayerStep {
+  /** 1 for the oldest step, as `docker history` would number them read bottom-up. */
+  index: number;
+  command: string;
+  size: number;
+  created: string;
+}
+
+/** A history step's command for the layers' list: `layerCommand`, without BuildKit's own marker. */
+export function stepText(createdBy: string): string {
+  return layerCommand(createdBy).replace(/\s*#\s*buildkit\s*$/, "");
+}
+
+/** Gaps shorter than this are one build pausing between steps, not a different build. */
+const BASE_GAP_MS = 60 * 60 * 1000;
+
+/**
+ * An image's history in two parts: what its own Dockerfile added, and what came with the image it
+ * was built `FROM`. Nothing in the history marks the boundary, so it is read off the clock: an
+ * image's own steps were all written in one build, its base's in an earlier one — the widest gap
+ * (over an hour) between consecutive steps is where one ends. Without such a gap (an image built
+ * `FROM scratch`, or no dates) it is all its own.
+ */
+export function splitLayers(layers: ImageLayer[]): { own: LayerStep[]; base: LayerStep[] } {
+  const chronological = [...layers].reverse().map((layer, i) => ({ index: i + 1, command: stepText(layer.createdBy), size: layer.size || 0, created: layer.created }));
+  const times = chronological.map((step) => Date.parse(step.created));
+  let cut = -1;
+  let widest = BASE_GAP_MS;
+  for (let i = 1; i < times.length; i++) {
+    const gap = times[i] - times[i - 1];
+    if (Number.isFinite(gap) && gap > widest) {
+      widest = gap;
+      cut = i;
+    }
+  }
+  if (cut < 0) return { own: chronological, base: [] };
+  return { own: chronological.slice(cut), base: chronological.slice(0, cut) };
+}
+
+// ------------------------------------------------------------------------------ how it runs
+
+export interface RunConfig {
+  entrypoint: string;
+  cmd: string;
+  user: string;
+  workdir: string;
+  ports: string[];
+  volumes: string[];
+  env: { name: string; value: string; secret: boolean }[];
+  labels: [string, string][];
+  healthcheck: string;
+  stopSignal: string;
+  platform: string;
+}
+
+/** Names whose value is not put on screen (the backend's `looks_secret`). */
+export function looksSecret(name: string): boolean {
+  return /(pass(word)?|secret|token|credential|api[_-]?key|private[_-]?key|(^|_)key$|dsn)/i.test(name);
+}
+
+const words = (value: unknown): string => (Array.isArray(value) ? value.filter((v) => typeof v === "string").join(" ") : typeof value === "string" ? value : "");
+
+/** What an image runs, out of its inspect document's `Config` (Docker and Podman alike). */
+export function imageRunConfig(text: string): RunConfig | null {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const image = Array.isArray(doc) ? doc[0] : doc;
+  if (!isObject(image)) return null;
+  const config = isObject(image.Config) ? image.Config : isObject(image.config) ? image.config : {};
+  const env = (Array.isArray(config.Env) ? config.Env : [])
+    .filter((e): e is string => typeof e === "string")
+    .map((line) => {
+      const at = line.indexOf("=");
+      const name = at < 0 ? line : line.slice(0, at);
+      return { name, value: at < 0 ? "" : line.slice(at + 1), secret: looksSecret(name) };
+    });
+  const health = isObject(config.Healthcheck) ? words(config.Healthcheck.Test).replace(/^CMD(-SHELL)? /, "") : "";
+  const labels = isObject(config.Labels) ? Object.entries(config.Labels).map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)] as [string, string]) : [];
+  const os = strings(image.Os) || strings(image.os);
+  const arch = strings(image.Architecture) || strings(image.architecture);
+  const variant = strings(image.Variant);
+  return {
+    entrypoint: words(config.Entrypoint),
+    cmd: words(config.Cmd),
+    user: strings(config.User),
+    workdir: strings(config.WorkingDir),
+    ports: isObject(config.ExposedPorts) ? Object.keys(config.ExposedPorts) : [],
+    volumes: isObject(config.Volumes) ? Object.keys(config.Volumes) : [],
+    env,
+    labels: labels.sort(([a], [b]) => a.localeCompare(b)),
+    healthcheck: health === "NONE" ? "" : health,
+    stopSignal: strings(config.StopSignal),
+    platform: [os, arch, variant].filter(Boolean).join("/"),
+  };
+}
+
+// ---------------------------------------------------------------------------- build steps
+
+export interface BuildStep {
+  /** BuildKit's vertex number (`#5`). */
+  n: number;
+  /** `[stage-2 3/3] COPY …` without the brackets: `stage-2 3/3`. */
+  stage: string;
+  command: string;
+  internal: boolean;
+  state: "done" | "cached" | "error" | "running";
+  /** Seconds, when it ran. */
+  seconds: number | null;
+  output: string[];
+}
+
+/**
+ * The steps of a build, out of BuildKit's plain progress log (`docker buildx history logs`):
+ *
+ * ```text
+ * #8 [base 2/2] RUN npm i -g pnpm
+ * #8 CACHED
+ * #11 [bundler 3/5] RUN pnpm install
+ * #11 0.512 Progress: resolved 1
+ * #11 DONE 4.3s
+ * ```
+ *
+ * Each `#n` opens a step the first time it is seen; what follows under the same number is its output,
+ * until `DONE`, `CACHED` or `ERROR` closes it.
+ */
+export function buildSteps(logs: string): BuildStep[] {
+  const steps = new Map<number, BuildStep>();
+  for (const raw of logs.split(/\r?\n/)) {
+    const line = /^#(\d+) (.*)$/.exec(raw);
+    if (!line) continue;
+    const n = Number(line[1]);
+    const rest = line[2];
+    let step = steps.get(n);
+    if (!step) {
+      const head = /^\[([^\]]+)\] (.*)$/.exec(rest);
+      step = {
+        n,
+        stage: head ? head[1] : "",
+        command: (head ? head[2] : rest).trim(),
+        internal: head ? head[1] === "internal" : true,
+        state: "running",
+        seconds: null,
+        output: [],
+      };
+      steps.set(n, step);
+      continue;
+    }
+    const done = /^DONE (\d+(?:\.\d+)?)s$/.exec(rest);
+    if (done) {
+      step.state = step.state === "error" ? "error" : "done";
+      step.seconds = Number(done[1]);
+    } else if (rest === "CACHED") {
+      step.state = "cached";
+    } else if (/^ERROR\b/.test(rest) || /^CANCELED\b/.test(rest)) {
+      step.state = "error";
+      const after = rest.replace(/^(ERROR|CANCELED):?\s*/, "");
+      if (after) step.output.push(after);
+    } else {
+      // `#11 0.512 Progress…`: BuildKit's own clock in front of the line.
+      step.output.push(rest.replace(/^\d+\.\d+ /, ""));
+    }
+  }
+  return [...steps.values()].sort((a, b) => a.n - b.n);
 }

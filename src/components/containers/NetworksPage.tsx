@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { Loader2, MoreHorizontal, Plus, Trash2 } from "lucide-react";
+import { Loader2, MoreHorizontal, Network, Plus, Trash2 } from "lucide-react";
 import { Button } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { ContextMenu } from "../common/ContextMenu";
 import { Select } from "../common/Select";
 import { chipClass, fieldClass } from "../common/recipes";
-import { Facts, RowAction, SectionTitle } from "./containerBits";
+import { Facts, RowAction, SectionTitle, ago } from "./containerBits";
+import { IconTile } from "./imageGlyph";
 import { engineMenu, runtimeLabel } from "./containerActions";
 import { DataTable, Dialog, EmptyLine, Field, LiveMark, LoadingLine, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
 import { BulkBar, CopyText, Drawer, DrawerBody, InspectPane, MutedLine, StopClick, menuAt, useEngineList, useInspect, usePicked, type DrawerView, type MenuState } from "./pageBits";
@@ -13,7 +14,7 @@ import { firstRead, networkFacts, validObjectName } from "./pageModel";
 import { containersCreateNetwork } from "../../lib/tauri/containersCommands";
 import { confirmAction } from "../../state/confirmStore";
 import { useContainersStore } from "../../state/containersStore";
-import { useT } from "../../state/languageStore";
+import { useLanguageStore, useT } from "../../state/languageStore";
 import { pushSuccessToast } from "../../state/toastStore";
 import type { ContainerRow, NetworkRow, RuntimeInfo } from "../../types/containers";
 
@@ -28,6 +29,7 @@ const shortId = (id: string) => id.slice(0, 12);
 
 export function NetworksPage({ runtime }: { runtime: RuntimeInfo }) {
   const t = useT();
+  const language = useLanguageStore((s) => s.language);
   const context = useContainersStore((s) => s.contextOf(runtime.id));
   const { list, rows } = useEngineList<NetworkRow>(runtime.id, context, "networks");
   const act = useContainersStore((s) => s.act);
@@ -117,16 +119,19 @@ export function NetworksPage({ runtime }: { runtime: RuntimeInfo }) {
           ) : shown.length === 0 ? (
             <EmptyLine>{rows.length ? t("containers.m.networks.noMatch") : t("containers.m.networks.none")}</EmptyLine>
           ) : (
-            <DataTable minWidth={openRow ? 480 : 620}>
+            <DataTable minWidth={openRow ? 520 : 720}>
               <thead>
                 <tr>
                   <Th align="center" width={32}>
                     <Checkbox checked={allPicked} onChange={() => setAll(allPicked ? null : pickable.map((row) => row.name))} disabled={pickable.length === 0} />
                   </Th>
                   <Th>{t("containers.m.col.name")}</Th>
-                  <Th width={120}>{t("containers.fact.id")}</Th>
-                  <Th width={100}>{t("containers.m.networks.col.driver")}</Th>
-                  <Th width={80}>{t("containers.m.networks.col.scope")}</Th>
+                  <Th width={90}>{t("containers.m.networks.col.driver")}</Th>
+                  <Th width={160}>{t("containers.m.networks.col.subnet")}</Th>
+                  <Th align="right" width={96}>
+                    {t("containers.m.networks.col.containers")}
+                  </Th>
+                  <Th width={96}>{t("containers.m.networks.col.created")}</Th>
                   <Th align="right" width={56}>
                     {t("containers.m.col.actions")}
                   </Th>
@@ -140,29 +145,52 @@ export function NetworksPage({ runtime }: { runtime: RuntimeInfo }) {
                     onClick={() => setOpenName(row.name)}
                     onContextMenu={(e) => setMenu(menuAt(e, rowMenu(row)))}
                   >
-                    <Td align="center" className="w-8">
+                    <Td tall align="center" className="w-8">
                       {!row.builtin && (
                         <StopClick>
                           <Checkbox checked={picked.has(row.name)} onChange={() => toggle(row.name)} />
                         </StopClick>
                       )}
                     </Td>
-                    <Td>
-                      <div className="flex min-w-0 items-center gap-1.5">
-                        <span className="truncate font-medium text-[var(--cf-text)]" title={row.name}>
-                          {row.name}
-                        </span>
-                        {row.builtin && (
-                          <span className={chipClass("neutral")} title={t("containers.m.networks.builtinHint")}>
-                            {t("containers.m.networks.builtin")}
+                    <Td tall>
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <IconTile icon={Network} />
+                        <div className="flex min-w-0 flex-col leading-tight">
+                          <span className="flex min-w-0 items-center gap-1.5">
+                            <span className="truncate font-medium text-[var(--cf-text)]" title={row.name}>
+                              {row.name}
+                            </span>
+                            {row.builtin && (
+                              <span className={chipClass("neutral")} title={t("containers.m.networks.systemHint")}>
+                                {t("containers.m.networks.system")}
+                              </span>
+                            )}
                           </span>
-                        )}
+                          {row.id && (
+                            <StopClick>
+                              <CopyText text={row.id} shown={shortId(row.id)} toast={t("containers.m.networks.copiedId")} title={t("containers.copyId")} />
+                            </StopClick>
+                          )}
+                        </div>
                       </div>
                     </Td>
-                    <Td>{row.id ? <CopyText text={row.id} shown={shortId(row.id)} toast={t("containers.m.networks.copiedId")} title={t("containers.copyId")} /> : <span className="text-[var(--cf-text-faint)]">—</span>}</Td>
-                    <Td className="text-[var(--cf-text-muted)]">{row.driver || "—"}</Td>
-                    <Td className="text-[var(--cf-text-muted)]">{row.scope || "—"}</Td>
-                    <Td className="w-[56px]">
+                    <Td tall className="text-[var(--cf-text-muted)]">{row.driver || "—"}</Td>
+                    <Td tall>
+                      {(row.subnets ?? []).length ? (
+                        <span className="block truncate font-mono text-[11.5px] text-[var(--cf-text)]" title={row.subnets.join(", ")}>
+                          {row.subnets.join(", ")}
+                        </span>
+                      ) : (
+                        <span className="text-[var(--cf-text-faint)]">—</span>
+                      )}
+                    </Td>
+                    <Td tall align="right" className={row.containers ? "text-[var(--cf-text)]" : "text-[var(--cf-text-faint)]"}>
+                      {row.containers === null || row.containers === undefined ? "—" : row.containers}
+                    </Td>
+                    <Td tall className="whitespace-nowrap text-[var(--cf-text-muted)]" title={row.created}>
+                      {ago(row.created, language) || "—"}
+                    </Td>
+                    <Td tall className="w-[56px]">
                       <div className="flex items-center justify-end gap-0.5">
                         {!row.builtin && (
                           <RowAction label={t("containers.remove")} danger disabled={busy[`network|${row.name}`]} onClick={() => void removeOne(row)}>

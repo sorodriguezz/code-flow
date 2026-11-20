@@ -93,16 +93,102 @@ export function Th({ children, className = "", width, align = "left" }: { childr
   );
 }
 
-export function Td({ children, className = "", align = "left", title }: { children?: ReactNode; className?: string; align?: "left" | "right" | "center"; title?: string }) {
+export function Td({ children, className = "", align = "left", title, tall = false }: { children?: ReactNode; className?: string; align?: "left" | "right" | "center"; title?: string; tall?: boolean }) {
   return (
     <td
       title={title}
-      className={`h-8 border-b border-[color-mix(in_srgb,var(--cf-border)_55%,transparent)] px-2 align-middle ${
+      className={`${tall ? "h-11" : "h-8"} border-b border-[color-mix(in_srgb,var(--cf-border)_55%,transparent)] px-2 align-middle ${
         align === "right" ? "text-right tabular-nums" : align === "center" ? "text-center" : ""
       } ${className}`}
     >
       {children}
     </td>
+  );
+}
+
+export interface FilterChip<T extends string> {
+  value: T;
+  label: string;
+  count: number;
+  /** The dot in front of the word — none for «Todos». */
+  tone?: "ok" | "warn" | "bad" | "idle";
+  title?: string;
+}
+
+/**
+ * A list's filters as pills with their counts — «Todos 21 · ● En ejecución 10 · ● Con fallas 3».
+ * One picked at a time; a filter with nothing in it stays (its 0 says so) but quieter.
+ */
+export function FilterChips<T extends string>({ value, onChange, options, label }: { value: T; onChange: (next: T) => void; options: FilterChip<T>[]; label: string }) {
+  return (
+    <div role="radiogroup" aria-label={label} className="flex min-w-0 shrink items-center gap-1 overflow-x-auto">
+      {options.map((option) => {
+        const on = option.value === value;
+        return (
+          <button
+            key={option.value}
+            role="radio"
+            aria-checked={on}
+            title={option.title}
+            onClick={() => onChange(option.value)}
+            className={`inline-flex h-[24px] shrink-0 items-center gap-1.5 rounded-full border px-2.5 text-[11.5px] transition-colors ${
+              on
+                ? "border-[color-mix(in_srgb,var(--cf-accent)_55%,transparent)] bg-[var(--cf-accent-soft)] font-medium text-[var(--cf-text)]"
+                : `border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] ${option.count === 0 && option.tone ? "opacity-60" : ""}`
+            }`}
+          >
+            {option.tone && <StateDot tone={option.tone} />}
+            {option.label}
+            <span className={`tabular-nums ${option.tone === "bad" && option.count > 0 ? "text-[var(--cf-danger)]" : "text-[var(--cf-text-faint)]"}`}>{option.count}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A thin bar for how big something is next to the biggest of its list — a layer, a build step. */
+export function CountBar({ value, max, tone = "accent", width = 120 }: { value: number; max: number; tone?: "accent" | "danger"; width?: number }) {
+  const share = max > 0 ? Math.max(0.02, Math.min(1, value / max)) : 0;
+  return (
+    <span aria-hidden className="block h-[3px] overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--cf-border)_80%,transparent)]" style={{ width }}>
+      <span className="block h-full rounded-full" style={{ width: `${share * 100}%`, background: tone === "danger" ? "var(--cf-danger)" : "var(--cf-accent)" }} />
+    </span>
+  );
+}
+
+/** Tabs under a detail page's head, the app's underline style. */
+export function PageTabs<T extends string>({ value, onChange, tabs }: { value: T; onChange: (next: T) => void; tabs: { value: T; label: ReactNode }[] }) {
+  return (
+    <div role="tablist" className="flex h-9 shrink-0 items-end gap-4 border-b border-[var(--cf-border)] px-4">
+      {tabs.map((tab) => {
+        const on = tab.value === value;
+        return (
+          <button
+            key={tab.value}
+            role="tab"
+            aria-selected={on}
+            onClick={() => onChange(tab.value)}
+            className={`-mb-px flex h-9 items-center border-b-2 text-[12.5px] transition-colors ${on ? "border-[var(--cf-accent)] font-medium text-[var(--cf-text)]" : "border-transparent text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"}`}
+          >
+            {tab.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** A boxed group of rows with its title and a summary on the right — a layers' group, «Cómo se ejecuta». */
+export function Panel({ title, aside, children }: { title: ReactNode; aside?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="overflow-hidden rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-surface)]">
+      <header className="flex h-9 items-center gap-2 border-b border-[var(--cf-border)] bg-[color-mix(in_srgb,var(--cf-hover)_60%,transparent)] px-3">
+        <h4 className="min-w-0 flex-1 truncate text-[12px] font-semibold text-[var(--cf-text)]">{title}</h4>
+        {aside && <span className="shrink-0 text-[11.5px] text-[var(--cf-text-muted)]">{aside}</span>}
+      </header>
+      {children}
+    </section>
   );
 }
 
@@ -144,7 +230,7 @@ export function StatePill({ state, health = "", since, title }: { state: string;
   return (
     <span className="inline-flex min-w-0 items-center gap-1.5" title={title}>
       <StateDot tone={tone} pulse={state === "restarting" || health === "starting"} />
-      <span className={tone === "bad" ? "text-[var(--cf-danger)]" : tone === "idle" ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-text)]"}>{label(state, health)}</span>
+      <span className={`whitespace-nowrap ${tone === "bad" ? "text-[var(--cf-danger)]" : tone === "idle" ? "text-[var(--cf-text-muted)]" : "text-[var(--cf-text)]"}`}>{label(state, health)}</span>
       {since && <span className="truncate text-[11px] text-[var(--cf-text-faint)]">{since}</span>}
     </span>
   );
@@ -290,4 +376,9 @@ export function LoadingLine({ children }: { children?: ReactNode }) {
       {children ?? t("containers.m.loading")}
     </p>
   );
+}
+
+/** A muted line inside a detail page's body, padded like the page. */
+export function MutedNote({ children }: { children: ReactNode }) {
+  return <p className="px-4 py-3 text-[12px] text-[var(--cf-text-muted)]">{children}</p>;
 }

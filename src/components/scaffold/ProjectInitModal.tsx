@@ -736,7 +736,7 @@ export function ProjectInitModal({ onClose }: { onClose: () => void }) {
         aria-label={t("scaffold.title")}
         tabIndex={-1}
         data-tour="scaffold-dialog"
-        className="cf-fade-in flex h-[680px] max-h-[90vh] w-[1000px] max-w-[94vw] flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)]"
+        className="cf-fade-in flex h-[min(900px,90vh)] w-[min(1280px,92vw)] flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)]"
       >
         {phase.kind === "run" ? (
           <RunView

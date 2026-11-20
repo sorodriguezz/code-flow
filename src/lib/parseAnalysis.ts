@@ -280,6 +280,25 @@ export function formatFindingAsFixPrompt(finding: AnalysisFinding): string {
 }
 
 /**
+ * Several findings as one fix prompt — "fix these together" from the analysis' checkboxes.
+ *
+ * One run rather than one per finding: they edit the same working tree, often the same file, and a
+ * queue of separate runs each re-reads code the previous one just changed. The fix's system prompt
+ * is written for a single finding, so the opening line widens it — every listed location is in
+ * scope — and asks for one line back per finding, by id, which is what each card shows as its
+ * result. A single finding is the single-finding prompt, unchanged.
+ */
+export function formatFindingsAsFixPrompt(findings: AnalysisFinding[]): string {
+  if (findings.length === 1) return formatFindingAsFixPrompt(findings[0]);
+  const ids = findings.map((f) => f.id).join(", ");
+  const head =
+    `Esta vez son ${findings.length} hallazgos (${ids}). Corrígelos todos en esta misma pasada: ` +
+    "cada uno en su propia ubicación, que queda dentro del alcance. Si dos se contradicen, prioriza el de mayor severidad y dilo. " +
+    "Al terminar responde con una línea por hallazgo, empezando por su id, diciendo qué cambiaste o por qué no lo tocaste.";
+  return [head, ...findings.map(formatFindingAsFixPrompt)].join("\n\n---\n\n");
+}
+
+/**
  * Folds the user's own words into a generated fix prompt.
  *
  * A finding is the model's reading of the diff, and it is regularly *nearly* right — correct

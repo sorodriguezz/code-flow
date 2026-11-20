@@ -30,6 +30,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import {
   computeQualityGatePassed,
   formatFindingAsFixPrompt,
+  formatFindingsAsFixPrompt,
   locationLabel,
   withExtraInstructions,
   type AnalysisFinding,
@@ -111,6 +112,91 @@ function fixTarget(projectId: string, resolutionKey: string | undefined): Notifi
   const thread = resolutionKey?.match(/^pr:(\d+):thread:/);
   if (thread) return { openAiPanel: true, projectId, select: { kind: "pullRequest", id: `${projectId}::${thread[1]}` } };
   return { openAiPanel: true, projectId };
+}
+
+/**
+ * One "fix with AI" run, start to finish: registered as a live run (watchable, stoppable), queued
+ * behind whatever holds the repository, its result filed by `onDone`, and a notification either way.
+ * Shared by a single card's fix and the analysis' "fix the selected ones", which differ only in how
+ * many findings the prompt carries and how many cards wait on the run.
+ */
+async function runFix({
+  projectId,
+  workspaceId,
+  target,
+  label,
+  prompt,
+  verifyCommand,
+  onStart,
+  onDone,
+  onSettled,
+}: {
+  projectId: string;
+  workspaceId: string | null;
+  target: NotificationTarget;
+  label?: string;
+  prompt: string;
+  verifyCommand?: string | null;
+  onStart: (run: RunningResolution) => void;
+  onDone: (text: string) => void;
+  onSettled: () => void;
+}) {
+  // A fix writes to the working tree, so it's the run that most needs to be watchable and
+  // stoppable — the id ties both to this particular fix.
+  const id = newRunId("fix");
+  // Stamped with the workspace it started in and pointed at what it is fixing, so the status-bar
+  // row can say where it lives and click back to it once the card is off screen.
+  useAiRunStore.getState().start(id, {
+    kindKey: "agents.liveKindFix",
+    detail: label ?? "",
+    workspaceId,
+    target,
+  });
+  onStart({ runId: id, startedAt: Date.now() });
+  try {
+    // Takes the repository's lease like a chat turn or an analysis does — and waits for it instead
+    // of failing when one of those holds it.
+    const result = await whenRepoFree(projectId, id, () => resolveFindingWithAi(projectId, prompt, id, verifyCommand));
+    onDone(result);
+    notify({ source: "review", titleKey: "notifications.fixDone", workspaceId, target, status: "success", detail: label });
+  } catch (e) {
+    // Stopping is a decision, not a failure — no error toast for it.
+    if (!isCancellation(e)) {
+      pushErrorToast(String(e));
+      notify({ source: "review", titleKey: "notifications.fixFailed", workspaceId, target, status: "error", detail: label });
+    }
+  } finally {
+    useAiRunStore.getState().finish(id);
+    onSettled();
+  }
+}
+
+/**
+ * "Fix the selected findings" — several findings of one analysis in a single run.
+ *
+ * Each finding's card is told it is being fixed (its `resolutionKey` is marked running with the
+ * shared run id) and is handed the run's reply as its result, so the cards look exactly as if each
+ * had been fixed on its own: spinner and live log while it runs, the "resolved" note afterwards.
+ */
+export function useResolveFindingsTogether(projectId: string) {
+  const t = useT();
+  const workspaceId = useWorkspaceStore((s) => s.workspaceOfProject(projectId));
+  return async (items: { finding: AnalysisFinding; resolutionKey: string }[], verifyCommand: string | null) => {
+    if (items.length === 0) return;
+    const store = useResolutionsStore.getState;
+    const runKeys = items.map((i) => resolutionRunKey(projectId, i.resolutionKey));
+    await runFix({
+      projectId,
+      workspaceId,
+      target: fixTarget(projectId, items[0].resolutionKey),
+      label: items.length === 1 ? items[0].finding.subtitle : t("analyze.fixManyLabel", { n: items.length }),
+      prompt: formatFindingsAsFixPrompt(items.map((i) => i.finding)),
+      verifyCommand,
+      onStart: (run) => runKeys.forEach((key) => store().startRun(key, run)),
+      onDone: (text) => items.forEach((i) => store().save(projectId, i.resolutionKey, text)),
+      onSettled: () => runKeys.forEach((key) => store().finishRun(key)),
+    });
+  };
 }
 
 /** Shared by `FindingCard` and `PrCommentCard` — applies a fix via Claude for whatever
@@ -199,57 +285,17 @@ export function useResolveWithAi(
     }
 
     if (!projectId) return;
-    // A fix writes to the working tree, so it's the run that most needs to be watchable and
-    // stoppable — the id ties both to this particular fix.
-    const id = newRunId("fix");
-    // The same one line the finished notification is titled with — see `label`.
-    //
-    // This used to carry no target, on the grounds that the proposal lands on the finding in the
-    // panel the user is already looking at. That holds for exactly as long as they keep looking at
-    // it — and this is the run that writes to the working tree and takes minutes, so it is the one
-    // they walk away from. Leaving the repository (or the workspace) unmounts the card with the
-    // only stop button and the only way back on it. Stamped with the workspace it started in and
-    // pointed at the project whose files it is editing, the status-bar row can say where it lives
-    // and click back to it.
-    const target = fixTarget(projectId, resolutionKey);
-    useAiRunStore.getState().start(id, {
-      kindKey: "agents.liveKindFix",
-      detail: label ?? "",
+    await runFix({
+      projectId,
       workspaceId,
-      target,
+      target: fixTarget(projectId, resolutionKey),
+      label,
+      prompt: promptText,
+      verifyCommand,
+      onStart: markRunning,
+      onDone: record,
+      onSettled: () => markRunning(null),
     });
-    markRunning({ runId: id, startedAt: Date.now() });
-    try {
-      // A fix writes to the working tree, so it takes the repository's lease like a chat turn or an
-      // analysis does — and waits for it instead of failing when one of those holds it.
-      const result = await whenRepoFree(projectId, id, () => resolveFindingWithAi(projectId, promptText, id, verifyCommand));
-      record(result);
-      // The proposal is on the finding it belongs to; the notification leads there.
-      notify({
-        source: "review",
-        titleKey: "notifications.fixDone",
-        workspaceId,
-        target,
-        status: "success",
-        detail: label,
-      });
-    } catch (e) {
-      // Stopping is a decision, not a failure — no error toast for it.
-      if (!isCancellation(e)) {
-        pushErrorToast(String(e));
-        notify({
-          source: "review",
-          titleKey: "notifications.fixFailed",
-          workspaceId,
-          target,
-          status: "error",
-          detail: label,
-        });
-      }
-    } finally {
-      useAiRunStore.getState().finish(id);
-      markRunning(null);
-    }
   };
 
   return { resolving, resolution, resolve, clearResolution, runId, runStartedAt };
@@ -265,7 +311,7 @@ const verifyCommands = new Map<string, string>();
  * turns verification off, as opposed to never having chosen (which gets the proposal again).
  * `command` is `null` until it has been read.
  */
-function useFixVerifyCommand(projectId: string | undefined) {
+export function useFixVerifyCommand(projectId: string | undefined) {
   const [command, setCommand] = useState<string | null>(projectId ? (verifyCommands.get(projectId) ?? null) : null);
   useEffect(() => {
     if (!projectId || verifyCommands.has(projectId)) return;

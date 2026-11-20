@@ -1,5 +1,7 @@
 import { invoke } from "./invoke";
 import type {
+  BuildDetail,
+  BuildRecord,
   CloudAccount,
   CloudCluster,
   CloudSource,
@@ -21,6 +23,8 @@ import type {
   KubeTopology,
   RunSpec,
   RuntimeInfo,
+  ScanResult,
+  Scanner,
 } from "../../types/containers";
 
 /**
@@ -180,6 +184,19 @@ export const containersCreateNetwork = (runtime: string, context: string | null,
 
 export const containersImageHistory = (runtime: string, context: string | null, image: string) =>
   invoke<ImageLayer[]>("containers_image_history", { runtime, context, image });
+
+/** BuildKit's build history (Docker with buildx); rejects with `"unsupported"` elsewhere. */
+export const containersBuilds = (runtime: string, context: string | null) => invoke<BuildRecord[]>("containers_buildkit_history", { runtime, context });
+
+export const containersBuildDetail = (runtime: string, context: string | null, id: string) => invoke<BuildDetail>("containers_buildkit_detail", { runtime, context, id });
+
+export const containersBuildRemove = (runtime: string, context: string | null, ids: string[]) => invoke<void>("containers_buildkit_remove", { runtime, context, ids });
+
+/** Trivy or Grype, when one is installed. */
+export const containersScanner = () => invoke<Scanner | null>("containers_scanner_detect");
+
+/** Rejects with `"no scanner"`, `"remote"` or `"unsupported"` when there is nothing to run it with. */
+export const containersImageScan = (runtime: string, context: string | null, image: string) => invoke<ScanResult>("containers_image_scan", { runtime, context, image });
 
 export const containersDiskUsage = (runtime: string, context: string | null) => invoke<DiskUsageRow[]>("containers_disk_usage", { runtime, context });
 

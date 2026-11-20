@@ -5,6 +5,7 @@ import { Button } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { RowAction } from "./containerBits";
 import { DataTable, EmptyLine, Td, Th, fmtBytes, trClass } from "./ui";
+import { StopClick } from "./pageBits";
 import { containersFileDelete, containersFileDownload, containersFileUpload, containersFiles } from "../../lib/tauri/containersCommands";
 import { confirmAction } from "../../state/confirmStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
@@ -105,6 +106,14 @@ export function ContainerFiles({ runtime, context, id, running }: { runtime: Run
     }
   };
 
+  const togglePick = (name: string) =>
+    setPicked((current) => {
+      const next = new Set(current);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+
   if (!running) return <EmptyLine>{t("containers.m.files.notRunning")}</EmptyLine>;
   const pickedNames = [...picked];
   const all = (entries ?? []).length > 0 && (entries ?? []).every((e) => picked.has(e.name));
@@ -171,25 +180,21 @@ export function ContainerFiles({ runtime, context, id, running }: { runtime: Run
           </thead>
           <tbody>
             {entries.map((entry) => (
-              <tr key={entry.name} className={trClass(picked.has(entry.name))} onDoubleClick={() => (entry.dir ? void load(join(path, entry.name)) : void download([entry.name]))}>
+              <tr
+                key={entry.name}
+                // The whole row is the click target, not just the name: a folder opens, a file is picked
+                // (there is nothing to open it in) and a double click downloads it.
+                className={`${trClass(picked.has(entry.name), true)} select-none`}
+                onClick={() => (entry.dir ? void load(join(path, entry.name)) : togglePick(entry.name))}
+                onDoubleClick={() => (entry.dir ? undefined : void download([entry.name]))}
+              >
                 <Td align="center">
-                  <Checkbox
-                    checked={picked.has(entry.name)}
-                    onChange={() =>
-                      setPicked((current) => {
-                        const next = new Set(current);
-                        if (next.has(entry.name)) next.delete(entry.name);
-                        else next.add(entry.name);
-                        return next;
-                      })
-                    }
-                  />
+                  <StopClick>
+                    <Checkbox checked={picked.has(entry.name)} onChange={() => togglePick(entry.name)} />
+                  </StopClick>
                 </Td>
                 <Td>
-                  <button
-                    onClick={() => (entry.dir ? void load(join(path, entry.name)) : undefined)}
-                    className={`flex min-w-0 items-center gap-1.5 text-left ${entry.dir ? "hover:text-[var(--cf-accent)]" : "cursor-default"}`}
-                  >
+                  <span className={`flex min-w-0 items-center gap-1.5 ${entry.dir ? "group-hover:text-[var(--cf-accent)]" : ""}`}>
                     {entry.dir ? (
                       <Folder size={13} className="shrink-0 text-[var(--cf-accent)]" />
                     ) : entry.link ? (
@@ -198,14 +203,14 @@ export function ContainerFiles({ runtime, context, id, running }: { runtime: Run
                       <File size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
                     )}
                     <span className="truncate font-mono text-[12px]">{entry.name}</span>
-                  </button>
+                  </span>
                 </Td>
                 <Td align="right" className="text-[var(--cf-text-muted)]">
                   {entry.dir ? "" : fmtBytes(entry.size)}
                 </Td>
                 <Td className="text-[11.5px] text-[var(--cf-text-muted)]">{entry.modified ? new Date(entry.modified * 1000).toLocaleString(language === "es" ? "es" : "en") : ""}</Td>
                 <Td align="right">
-                  <span className="flex justify-end gap-0.5 opacity-0 group-hover:opacity-100">
+                  <span className="flex justify-end gap-0.5 opacity-0 group-hover:opacity-100" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
                     <RowAction label={t("containers.m.files.downloadOne")} onClick={() => void download([entry.name])}>
                       <Download size={12} />
                     </RowAction>

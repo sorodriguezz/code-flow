@@ -364,6 +364,20 @@ pub struct ContainerRow {
     /// A Podman pod's name.
     pub pod: String,
     pub labels: BTreeMap<String, String>,
+    /// The volumes it mounts, by name — Docker's `Mounts` column. Podman prints the mount points
+    /// inside the container there instead, which name no volume: those are left out.
+    pub mounts: Vec<String>,
+}
+
+/// `ps`'s `Mounts`: Docker's `a,b,/host/dir`, or Podman's array of paths inside the container. Only
+/// names are kept — a path is a bind mount (or Podman's destination), never a volume's name.
+fn mounts_of(value: &Value) -> Vec<String> {
+    let all: Vec<String> = match get(value, &["Mounts", "mounts"]) {
+        Some(Value::String(s)) => s.split(',').map(|m| m.trim().to_string()).collect(),
+        Some(Value::Array(list)) => list.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        _ => vec![],
+    };
+    all.into_iter().filter(|m| !m.is_empty() && !m.starts_with('/') && !m.contains('\\')).collect()
 }
 
 pub fn parse_containers(text_out: &str) -> Vec<ContainerRow> {
@@ -407,6 +421,7 @@ pub fn parse_containers(text_out: &str) -> Vec<ContainerRow> {
                 config_files: label("com.docker.compose.project.config_files"),
                 project,
                 pod: text(value, &["PodName", "Pod"]).trim().to_string(),
+                mounts: mounts_of(value),
                 labels,
             }
         })
@@ -519,6 +534,8 @@ pub struct VolumeRow {
     pub mountpoint: String,
     pub project: String,
     pub labels: BTreeMap<String, String>,
+    /// When it was made, from its inspect document (`""` when that could not be read).
+    pub created: String,
 }
 
 pub fn parse_volumes(text_out: &str) -> Vec<VolumeRow> {
@@ -532,6 +549,7 @@ pub fn parse_volumes(text_out: &str) -> Vec<VolumeRow> {
                 mountpoint: text(value, &["Mountpoint", "mountpoint"]),
                 project: labels.get("com.docker.compose.project").cloned().unwrap_or_default(),
                 labels,
+                created: text(value, &["CreatedAt", "createdAt"]),
             }
         })
         .filter(|row| !row.name.is_empty())
@@ -547,6 +565,11 @@ pub struct NetworkRow {
     pub scope: String,
     /// One of the engine's own networks (`bridge`, `host`, `none`, `podman`), which cannot be removed.
     pub builtin: bool,
+    /// What its inspect document adds — `""`, empty, `None` when that could not be read.
+    pub created: String,
+    pub subnets: Vec<String>,
+    /// How many containers are attached; Podman's inspect does not say.
+    pub containers: Option<u64>,
 }
 
 pub fn parse_networks(text_out: &str) -> Vec<NetworkRow> {
@@ -560,10 +583,76 @@ pub fn parse_networks(text_out: &str) -> Vec<NetworkRow> {
                 name,
                 driver: text(value, &["Driver", "driver"]),
                 scope: text(value, &["Scope", "scope"]),
+                created: text(value, &["Created", "created", "CreatedAt"]),
+                subnets: vec![],
+                containers: None,
             }
         })
         .filter(|row| !row.name.is_empty())
         .collect()
+}
+
+/// The documents `volume inspect a b …` / `network inspect a b …` print, by name: one JSON array
+/// from Docker and Podman alike.
+fn inspected_by_name(text_out: &str) -> BTreeMap<String, Value> {
+    let docs: Vec<Value> = match serde_json::from_str::<Value>(text_out.trim()) {
+        Ok(Value::Array(list)) => list,
+        Ok(one @ Value::Object(_)) => vec![one],
+        _ => cli::json_values(text_out),
+    };
+    docs.into_iter().filter_map(|doc| {
+        let name = text(&doc, &["Name", "name"]);
+        (!name.is_empty()).then_some((name, doc))
+    }).collect()
+}
+
+/// A volume's creation time, out of its inspect document.
+pub fn enrich_volumes(rows: &mut [VolumeRow], inspected: &str) {
+    let docs = inspected_by_name(inspected);
+    for row in rows.iter_mut() {
+        if let Some(doc) = docs.get(&row.name) {
+            let created = text(doc, &["CreatedAt", "createdAt"]);
+            if !created.is_empty() {
+                row.created = created;
+            }
+        }
+    }
+}
+
+/// A network's creation time, subnets and members, out of its inspect document — Docker's
+/// `Created`, `IPAM.Config` and `Containers`, or Podman's `created` and `subnets`.
+pub fn enrich_networks(rows: &mut [NetworkRow], inspected: &str) {
+    let docs = inspected_by_name(inspected);
+    for row in rows.iter_mut() {
+        let Some(doc) = docs.get(&row.name) else { continue };
+        let created = text(doc, &["Created", "created"]);
+        if !created.is_empty() {
+            row.created = created;
+        }
+        let mut subnets = Vec::new();
+        let ipam = doc.get("IPAM").and_then(|i| i.get("Config")).and_then(Value::as_array).cloned().unwrap_or_default();
+        let podman = doc.get("subnets").and_then(Value::as_array).cloned().unwrap_or_default();
+        for entry in ipam.iter().chain(podman.iter()) {
+            let subnet = text(entry, &["Subnet", "subnet"]);
+            if !subnet.is_empty() && !subnets.contains(&subnet) {
+                subnets.push(subnet);
+            }
+        }
+        row.subnets = subnets;
+        row.containers = doc.get("Containers").and_then(Value::as_object).map(|m| m.len() as u64);
+    }
+}
+
+/// `inspect` for every name of a list at once, its text — `None` when it could not be read: the list
+/// is shown without what it would add rather than not at all.
+async fn inspect_all(target: &Target, object: &str, names: Vec<String>) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let mut args = vec![object.to_string(), "inspect".to_string()];
+    args.extend(names);
+    let output = target.run_owned(args, LIST_TIMEOUT).await.ok()?;
+    output.ok().then_some(output.stdout)
 }
 
 // ------------------------------------------------------------------------------------ listing
@@ -587,8 +676,20 @@ pub async fn list(target: &Target, what: &str) -> Result<Value, String> {
     Ok(match what {
         "containers" => json!(parse_containers(&run(json_fmt(&["ps", "-a", "--no-trunc"])).await?)),
         "images" => json!(parse_images(&run(json_fmt(&["images"])).await?)),
-        "volumes" => json!(parse_volumes(&run(json_fmt(&["volume", "ls"])).await?)),
-        "networks" => json!(parse_networks(&run(json_fmt(&["network", "ls"])).await?)),
+        "volumes" => {
+            let mut rows = parse_volumes(&run(json_fmt(&["volume", "ls"])).await?);
+            if let Some(text) = inspect_all(target, "volume", rows.iter().map(|r| r.name.clone()).collect()).await {
+                enrich_volumes(&mut rows, &text);
+            }
+            json!(rows)
+        }
+        "networks" => {
+            let mut rows = parse_networks(&run(json_fmt(&["network", "ls"])).await?);
+            if let Some(text) = inspect_all(target, "network", rows.iter().map(|r| r.name.clone()).collect()).await {
+                enrich_networks(&mut rows, &text);
+            }
+            json!(rows)
+        }
         other => return Err(format!("unknown list {other}")),
     })
 }
@@ -620,6 +721,7 @@ pub async fn list_containers(target: &Target) -> Result<Vec<ContainerRow>, Strin
                 config_files: String::new(),
                 pod: String::new(),
                 labels: BTreeMap::new(),
+                mounts: vec![],
             })
             .collect());
     }
@@ -665,6 +767,7 @@ async fn ctr_list(target: &Target, what: &str) -> Result<Value, String> {
                         config_files: String::new(),
                         pod: String::new(),
                         labels: BTreeMap::new(),
+                        mounts: vec![],
                     }
                 })
                 .collect::<Vec<_>>()))
@@ -1113,6 +1216,33 @@ mod tests {
         let networks = parse_networks(r#"[{"name":"podman","id":"2f25","driver":"bridge"},{"name":"shop_default","id":"9a","driver":"bridge"}]"#);
         assert!(networks[0].builtin);
         assert!(!networks[1].builtin);
+    }
+
+    #[test]
+    fn mounts_keep_volume_names_only() {
+        let docker = parse_containers(r#"{"ID":"a1","Names":"db","Image":"postgres","State":"running","Status":"Up","Mounts":"pgdata,/Users/me/init,shop_cache"}"#);
+        assert_eq!(docker[0].mounts, vec!["pgdata", "shop_cache"]);
+        let podman = parse_containers(r#"[{"Id":"b2","Names":["web"],"Image":"nginx","State":"running","Status":"Up","Mounts":["/usr/share/nginx/html"]}]"#);
+        assert!(podman[0].mounts.is_empty());
+    }
+
+    #[test]
+    fn inspect_fills_volumes_and_networks() {
+        let mut volumes = parse_volumes(r#"{"Driver":"local","Name":"pgdata"}"#);
+        enrich_volumes(&mut volumes, r#"[{"CreatedAt":"2026-11-16T11:56:03-03:00","Name":"pgdata"}]"#);
+        assert_eq!(volumes[0].created, "2026-11-16T11:56:03-03:00");
+        let mut networks = parse_networks(r#"{"ID":"9a","Name":"shop_default","Driver":"bridge"}
+{"ID":"2f","Name":"podman","Driver":"bridge"}"#);
+        enrich_networks(
+            &mut networks,
+            r#"[{"Name":"shop_default","Created":"2026-11-20T07:36:10Z","IPAM":{"Config":[{"Subnet":"172.18.0.0/16","Gateway":"172.18.0.1"}]},"Containers":{"x":{},"y":{}}},
+               {"name":"podman","created":"2026-11-01T00:00:00Z","subnets":[{"subnet":"10.88.0.0/16"}]}]"#,
+        );
+        assert_eq!(networks[0].subnets, vec!["172.18.0.0/16"]);
+        assert_eq!(networks[0].containers, Some(2));
+        assert_eq!(networks[1].subnets, vec!["10.88.0.0/16"]);
+        assert_eq!(networks[1].containers, None);
+        assert_eq!(networks[1].created, "2026-11-01T00:00:00Z");
     }
 
     #[test]

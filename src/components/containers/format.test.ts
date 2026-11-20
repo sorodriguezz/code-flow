@@ -21,3 +21,22 @@ describe("how long a container has been as it is", () => {
     expect(fmtPercent(250)).toBe("250%");
   });
 });
+
+describe("why a container stopped", () => {
+  it("reads the exit code", async () => {
+    const { stopReason, hasFailed, fmtDuration } = await import("./format");
+    expect(stopReason("running", null)).toBeNull();
+    expect(stopReason("exited", 0)).toBe("stopped");
+    expect(stopReason("exited", 143)).toBe("stopped");
+    expect(stopReason("exited", 137)).toBe("killed");
+    expect(stopReason("exited", 139)).toBe("crashed");
+    expect(stopReason("exited", 1)).toBe("failed");
+    expect(stopReason("dead", null)).toBe("failed");
+    expect(hasFailed({ state: "exited", health: "", exitCode: 0 })).toBe(false);
+    expect(hasFailed({ state: "exited", health: "", exitCode: 2 })).toBe(true);
+    expect(hasFailed({ state: "running", health: "unhealthy", exitCode: null })).toBe(true);
+    expect(fmtDuration(0.4)).toBe("0.4s");
+    expect(fmtDuration(22.3)).toBe("22s");
+    expect(fmtDuration(72)).toBe("1m 12s");
+  });
+});

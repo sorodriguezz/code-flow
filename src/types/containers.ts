@@ -47,6 +47,8 @@ export interface ContainerRow {
   configFiles: string;
   pod: string;
   labels: Record<string, string>;
+  /** The volumes it mounts, by name (Docker; Podman's list names none). */
+  mounts: string[];
 }
 
 export interface ImageRow {
@@ -67,6 +69,8 @@ export interface VolumeRow {
   mountpoint: string;
   project: string;
   labels: Record<string, string>;
+  /** From its inspect document; `""` when that could not be read. */
+  created: string;
 }
 
 export interface NetworkRow {
@@ -75,6 +79,10 @@ export interface NetworkRow {
   driver: string;
   scope: string;
   builtin: boolean;
+  created: string;
+  subnets: string[];
+  /** Containers attached — `null` when the engine does not say (Podman). */
+  containers: number | null;
 }
 
 export interface KubeRow {
@@ -470,4 +478,50 @@ export interface AzTopology {
   nodes: AzNode[];
   edges: AzEdge[];
   warnings: string[];
+}
+
+// ------------------------------------------------------------------- builds (BuildKit's history)
+
+export interface BuildRecord {
+  id: string;
+  name: string;
+  status: "completed" | "failed" | "running" | "canceled" | string;
+  createdAt: string;
+  completedAt: string;
+  totalSteps: number;
+  completedSteps: number;
+  cachedSteps: number;
+}
+
+export interface BuildDetail extends BuildRecord {
+  context: string;
+  dockerfile: string;
+  platforms: string[];
+  durationMs: number | null;
+  error: string;
+  logs: string;
+}
+
+// ------------------------------------------------------------------------ security (local scanner)
+
+export interface Scanner {
+  id: "trivy" | "grype" | string;
+  path: string;
+}
+
+export type Severity = "critical" | "high" | "medium" | "low" | "unknown";
+
+export interface Finding {
+  id: string;
+  severity: Severity;
+  package: string;
+  installed: string;
+  fixed: string;
+  title: string;
+  url: string;
+}
+
+export interface ScanResult {
+  scanner: string;
+  findings: Finding[];
 }

@@ -28,6 +28,7 @@ import { ContainerStats } from "./ContainerStats";
 import { NO_ROWS } from "./ui";
 import { confirmAction } from "../../state/confirmStore";
 import { KubeDetail } from "./KubeDetail";
+import { ImageDetail } from "./ImageDetail";
 import { DetailTabs, Facts, HeaderAction, RowAction, SectionTitle, StateDot, TextView, ago, stateTone, useInterval } from "./containerBits";
 import { engineMenu, runtimeLabel } from "./containerActions";
 import { projectOptions } from "./ContainersPanel";
@@ -46,6 +47,7 @@ export function ContainersDetail({ selection }: { selection: ContainerSelection 
     case "project":
       return <ProjectDetail selection={selection} />;
     case "image":
+      return <ImageDetail selection={selection} />;
     case "volume":
     case "network":
       return <ObjectDetail selection={selection} />;
@@ -547,7 +549,12 @@ function ProjectDetail({ selection }: { selection: ContainerSelection }) {
         subtitle={[t("containers.projectCount", { up, total: rows.length }), options.projectDir].filter(Boolean).join(" · ")}
         menu={menu}
       >
-        {options.configFiles && <HeaderAction icon={<ArrowUpFromLine size={11} />} label={t("containers.project.up")} onClick={() => menu.find((i) => i.label === t("containers.project.up"))?.onClick()} />}
+        {options.configFiles &&
+          (() => {
+            // «Levantar» while something is down; with everything running, `up` only applies the file's changes.
+            const label = up === rows.length && rows.length > 0 ? t("containers.project.apply") : t("containers.project.up");
+            return <HeaderAction icon={<ArrowUpFromLine size={11} />} label={label} onClick={() => menu.find((i) => i.label === label)?.onClick?.()} />;
+          })()}
         {up > 0 ? (
           <>
             <HeaderAction icon={<RotateCw size={11} />} label={t("containers.project.restart")} onClick={() => run("restart", "containers.done.restart")} />

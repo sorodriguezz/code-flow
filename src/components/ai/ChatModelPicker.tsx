@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Forward, Loader2, Lock, Settings2 } from "lucide-react";
-import { AI_PROVIDERS, isLegacyModel, modelDisplayLabel } from "../../lib/aiProviders";
+import { AI_PROVIDERS, isAgenticProvider, isLegacyModel, modelDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "./ProviderGlyph";
 import { modelOptionsFor } from "../settings/modelPicker";
 import { MODELS_MAX_AGE_MS, useAiModelsStore } from "../../state/aiModelsStore";
@@ -170,7 +170,14 @@ export function ChatModelPicker({
   // CodeFlow's own, no model ready) is not a choice, and listed as "No encontrado" it crowded the
   // menu with what cannot be picked (user's ask, 2026-10-10). The one in use stays, so the menu
   // never loses the current choice. Unchecked counts as usable — see `isProviderReady`.
-  const selectable = AI_PROVIDERS.filter((p) => p.available && (p.id === providerId || isProviderReady(statuses, p.id)));
+  // A task that edits files (the fix, a story's verification…) offers only engines that can: picked
+  // here, a text-only one would turn its button into an error — the same rule Settings applies.
+  const agenticOnly = AI_TASKS.some((entry) => entry.key === task && entry.agenticOnly);
+  const selectable = AI_PROVIDERS.filter(
+    (p) =>
+      p.available &&
+      (p.id === providerId || (isProviderReady(statuses, p.id) && (!agenticOnly || isAgenticProvider(p.id)))),
+  );
   // A configured model is what the next turn runs on, so it wins — the last turn's report would keep
   // naming the old model after a pick. Only with none configured does the reply say which the CLI
   // chose on its own.

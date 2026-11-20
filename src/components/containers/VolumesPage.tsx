@@ -1,36 +1,45 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArchiveRestore, HardDriveDownload, Loader2, MoreHorizontal, Plus, Trash2 } from "lucide-react";
+import { ArchiveRestore, HardDrive, HardDriveDownload, Loader2, MoreHorizontal, Plus, Trash2 } from "lucide-react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { ContextMenu } from "../common/ContextMenu";
 import { fieldClass } from "../common/recipes";
-import { Facts, RowAction, SectionTitle } from "./containerBits";
+import { Facts, RowAction, SectionTitle, StateDot, ago, stateTone } from "./containerBits";
 import { engineMenu, runtimeLabel } from "./containerActions";
-import { DataTable, Dialog, EmptyLine, Field, LiveMark, LoadingLine, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
+import { DataTable, Dialog, EmptyLine, Field, FilterChips, LiveMark, LoadingLine, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
+import { IconTile } from "./imageGlyph";
 import { BulkBar, CopyText, Drawer, DrawerBody, InspectPane, MutedLine, StopClick, menuAt, useEngineList, useInspect, usePicked, type DrawerView, type MenuState } from "./pageBits";
 import { firstRead, validObjectName } from "./pageModel";
 import { containersBackupVolume, containersCreateVolume, containersRestoreVolume } from "../../lib/tauri/containersCommands";
 import { chooseAction, confirmAction } from "../../state/confirmStore";
 import { useContainersStore } from "../../state/containersStore";
-import { useT } from "../../state/languageStore";
+import { useLanguageStore, useT } from "../../state/languageStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import type { MenuItem } from "../common/ContextMenu";
-import type { RuntimeInfo, VolumeRow } from "../../types/containers";
+import type { ContainerRow, RuntimeInfo, VolumeRow } from "../../types/containers";
 
 /**
  * An engine's volumes: the data its containers keep past their own removal. Each with its driver,
  * where the engine keeps it and the Compose project that made it; created, removed (one or several),
  * the unused ones cleaned up, and a side panel with its labels and its inspect document.
  *
- * Which containers use a volume is not on the row: `ps` does not print mounts, and asking every
- * container for them to fill one column is a read per container on every refresh.
+ * Which containers use a volume comes from `ps`'s own `Mounts` column (Docker prints the names) —
+ * one list already read, not a read per container. Podman prints mount points there instead, which
+ * name no volume: its rows say so rather than show every volume as unused.
  */
+
+type Filter = "all" | "inUse" | "unused";
+const NO_USERS: ContainerRow[] = [];
 
 export function VolumesPage({ runtime }: { runtime: RuntimeInfo }) {
   const t = useT();
   const context = useContainersStore((s) => s.contextOf(runtime.id));
+  const language = useLanguageStore((s) => s.language);
   const { list, rows } = useEngineList<VolumeRow>(runtime.id, context, "volumes");
+  const { rows: containers } = useEngineList<ContainerRow>(runtime.id, context, "containers");
+  const select = useContainersStore((s) => s.select);
+  const [filter, setFilter] = useState<Filter>("all");
   const act = useContainersStore((s) => s.act);
   const busy = useContainersStore((s) => s.busy);
   const refreshList = useContainersStore((s) => s.refreshList);
@@ -43,20 +52,33 @@ export function VolumesPage({ runtime }: { runtime: RuntimeInfo }) {
   const place = context || runtimeLabel(runtime.id, t);
 
   useEffect(() => {
-    if (runtime.running) void refreshList(runtime.id, "volumes");
+    if (!runtime.running) return;
+    void refreshList(runtime.id, "volumes");
+    void refreshList(runtime.id, "containers");
   }, [runtime.id, runtime.running, context, refreshList]);
+
+  // Who mounts each volume — known only where `ps` names volumes (Docker).
+  const usageKnown = runtime.id === "docker" || containers.some((c) => (c.mounts ?? []).length > 0);
+  const users = useMemo(() => {
+    const map = new Map<string, ContainerRow[]>();
+    for (const c of containers) for (const name of c.mounts ?? []) map.set(name, [...(map.get(name) ?? []), c]);
+    return map;
+  }, [containers]);
+  const usersOf = (row: VolumeRow) => users.get(row.name) ?? NO_USERS;
+  const inUseCount = rows.filter((row) => users.has(row.name)).length;
 
   const shown = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return rows;
     return rows.filter(
       (row) =>
+        (filter === "all" || (filter === "inUse" ? users.has(row.name) : !users.has(row.name))) &&
+        (!needle ||
         row.name.toLowerCase().includes(needle) ||
         row.driver.toLowerCase().includes(needle) ||
         row.project.toLowerCase().includes(needle) ||
-        row.mountpoint.toLowerCase().includes(needle),
+        row.mountpoint.toLowerCase().includes(needle)),
     );
-  }, [rows, query]);
+  }, [rows, query, filter, users]);
   const pickedRows = rows.filter((row) => picked.has(row.name));
   const allPicked = shown.length > 0 && shown.every((row) => picked.has(row.name));
   const openRow = openName ? rows.find((row) => row.name === openName) : undefined;
@@ -151,6 +173,18 @@ export function VolumesPage({ runtime }: { runtime: RuntimeInfo }) {
       </PageHead>
       <PageToolbar>
         <SearchField value={query} onChange={setQuery} placeholder={t("containers.m.volumes.search")} />
+        {usageKnown && (
+          <FilterChips
+            label={t("containers.m.filters")}
+            value={filter}
+            onChange={setFilter}
+            options={[
+              { value: "all", label: t("containers.m.filter.all"), count: rows.length },
+              { value: "inUse", label: t("containers.m.volumes.filter.inUse"), count: inUseCount, tone: "ok" },
+              { value: "unused", label: t("containers.m.volumes.filter.unused"), count: rows.length - inUseCount, tone: "idle" },
+            ]}
+          />
+        )}
         <div className="flex-1" />
         {runtime.running && <LiveMark />}
       </PageToolbar>
@@ -174,16 +208,17 @@ export function VolumesPage({ runtime }: { runtime: RuntimeInfo }) {
           ) : shown.length === 0 ? (
             <EmptyLine>{rows.length ? t("containers.m.volumes.noMatch") : t("containers.m.volumes.none")}</EmptyLine>
           ) : (
-            <DataTable minWidth={openRow ? 520 : 680}>
+            <DataTable minWidth={openRow ? 560 : 760}>
               <thead>
                 <tr>
                   <Th align="center" width={32}>
                     <Checkbox checked={allPicked} onChange={() => setAll(allPicked ? null : shown.map((row) => row.name))} />
                   </Th>
                   <Th>{t("containers.m.col.name")}</Th>
-                  <Th width={90}>{t("containers.m.volumes.col.driver")}</Th>
-                  <Th>{t("containers.m.volumes.col.mountpoint")}</Th>
-                  <Th width={130}>{t("containers.m.volumes.col.project")}</Th>
+                  <Th width={80}>{t("containers.m.volumes.col.driver")}</Th>
+                  <Th width={180}>{t("containers.m.volumes.col.usedBy")}</Th>
+                  <Th width={120}>{t("containers.m.volumes.col.project")}</Th>
+                  <Th width={96}>{t("containers.m.volumes.col.created")}</Th>
                   <Th align="right" width={56}>
                     {t("containers.m.col.actions")}
                   </Th>
@@ -197,24 +232,51 @@ export function VolumesPage({ runtime }: { runtime: RuntimeInfo }) {
                     onClick={() => setOpenName(row.name)}
                     onContextMenu={(e) => setMenu(menuAt(e, rowMenu(row)))}
                   >
-                    <Td align="center" className="w-8">
+                    <Td tall align="center" className="w-8">
                       <StopClick>
                         <Checkbox checked={picked.has(row.name)} onChange={() => toggle(row.name)} />
                       </StopClick>
                     </Td>
-                    <Td>
-                      <span className="flex min-w-0 items-center gap-1.5 font-medium text-[var(--cf-text)]" title={row.name}>
-                        <span className="truncate">{row.name}</span>
-                        {moving.has(row.name) && <Loader2 size={12} className="shrink-0 animate-spin text-[var(--cf-text-muted)]" />}
-                      </span>
+                    <Td tall>
+                      <div className="flex min-w-0 items-center gap-2.5">
+                        <IconTile icon={HardDrive} />
+                        <div className="flex min-w-0 flex-col leading-tight">
+                          <span className="flex min-w-0 items-center gap-1.5 font-medium text-[var(--cf-text)]" title={row.name}>
+                            <span className="truncate">{row.name}</span>
+                            {moving.has(row.name) && <Loader2 size={12} className="shrink-0 animate-spin text-[var(--cf-text-muted)]" />}
+                          </span>
+                          <span className="truncate font-mono text-[10.5px] text-[var(--cf-text-faint)]" title={row.mountpoint}>
+                            {row.mountpoint || "—"}
+                          </span>
+                        </div>
+                      </div>
                     </Td>
-                    <Td className="text-[var(--cf-text-muted)]">{row.driver || "—"}</Td>
-                    <Td>
-                      <span className="block truncate font-mono text-[11.5px] text-[var(--cf-text-muted)]" title={row.mountpoint}>
-                        {row.mountpoint || "—"}
-                      </span>
+                    <Td tall className="text-[var(--cf-text-muted)]">{row.driver || "—"}</Td>
+                    <Td tall>
+                      {!usageKnown ? (
+                        <span className="text-[var(--cf-text-faint)]" title={t("containers.m.volumes.usageUnknown")}>
+                          —
+                        </span>
+                      ) : usersOf(row).length ? (
+                        <StopClick>
+                          <span className="flex min-w-0 flex-wrap gap-x-2 gap-y-0.5">
+                            {usersOf(row).map((c) => (
+                              <button
+                                key={c.id}
+                                onClick={() => select({ runtime: runtime.id, context, namespace: null, object: "container", id: c.id, name: c.name })}
+                                className="inline-flex max-w-full items-center gap-1 text-[var(--cf-text)] hover:text-[var(--cf-accent)] hover:underline"
+                              >
+                                <StateDot tone={stateTone(c.state, c.health)} />
+                                <span className="truncate">{c.service || c.name}</span>
+                              </button>
+                            ))}
+                          </span>
+                        </StopClick>
+                      ) : (
+                        <span className="text-[var(--cf-text-faint)]">{t("containers.m.images.notInUse")}</span>
+                      )}
                     </Td>
-                    <Td>
+                    <Td tall>
                       {row.project ? (
                         <span className="block truncate text-[var(--cf-text)]" title={row.project}>
                           {row.project}
@@ -223,7 +285,10 @@ export function VolumesPage({ runtime }: { runtime: RuntimeInfo }) {
                         <span className="text-[var(--cf-text-faint)]">—</span>
                       )}
                     </Td>
-                    <Td className="w-[56px]">
+                    <Td tall className="whitespace-nowrap text-[var(--cf-text-muted)]" title={row.created}>
+                      {ago(row.created, language) || "—"}
+                    </Td>
+                    <Td tall className="w-[56px]">
                       <div className="flex items-center justify-end gap-0.5">
                         <RowAction label={t("containers.remove")} danger disabled={busy[`volume|${row.name}`]} onClick={() => void removeOne(row)}>
                           <Trash2 size={12} />

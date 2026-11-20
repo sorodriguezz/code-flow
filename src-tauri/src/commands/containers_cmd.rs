@@ -254,6 +254,36 @@ pub async fn containers_image_history(runtime: String, context: Option<String>, 
     containers::manage::image_history(&engine::Target { runtime, context }, &image).await
 }
 
+/// BuildKit's build history for a Docker engine (`docker buildx history ls`).
+#[tauri::command]
+pub async fn containers_buildkit_history(runtime: String, context: Option<String>) -> Result<Vec<containers::builds::BuildRecord>, String> {
+    containers::builds::list(&engine::Target { runtime, context }).await
+}
+
+/// One build of that history: its record and its plain log.
+#[tauri::command]
+pub async fn containers_buildkit_detail(runtime: String, context: Option<String>, id: String) -> Result<containers::builds::BuildDetail, String> {
+    containers::builds::detail(&engine::Target { runtime, context }, &id).await
+}
+
+/// Deletes builds from BuildKit's history (`docker buildx history rm`); the images they made stay.
+#[tauri::command]
+pub async fn containers_buildkit_remove(runtime: String, context: Option<String>, ids: Vec<String>) -> Result<(), String> {
+    containers::builds::remove(&engine::Target { runtime, context }, &ids).await
+}
+
+/// The vulnerability scanner installed on this computer (Trivy or Grype), if any.
+#[tauri::command]
+pub async fn containers_scanner_detect() -> Option<containers::scan::Scanner> {
+    tokio::task::spawn_blocking(containers::scan::detect).await.ok().flatten()
+}
+
+/// An image's known vulnerabilities, from that scanner run locally against the engine's copy.
+#[tauri::command]
+pub async fn containers_image_scan(runtime: String, context: Option<String>, image: String) -> Result<containers::scan::ScanResult, String> {
+    containers::scan::scan(&engine::Target { runtime, context }, &image).await
+}
+
 #[tauri::command]
 pub async fn containers_disk_usage(runtime: String, context: Option<String>) -> Result<Vec<containers::manage::DiskUsageRow>, String> {
     containers::manage::disk_usage(&engine::Target { runtime, context }).await

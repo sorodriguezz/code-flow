@@ -1,17 +1,29 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import { Loader2, RefreshCw, ShieldCheck, Square } from "lucide-react";
+import { ListChecks, Loader2, RefreshCw, ShieldCheck, Square } from "lucide-react";
+import { AiWand } from "../common/AiGlyph";
+import { Checkbox } from "../common/Checkbox";
+import { Tooltip } from "../common/Tooltip";
 import { buttonClass } from "../common/Button";
 import { parseAnalysis, type AnalysisFinding } from "../../lib/parseAnalysis";
 import { startAnalysis, useChangesToAnalyze } from "../../lib/aiPanelNav";
 import { useIsQueued } from "../../lib/repoQueue";
 import { Markdown } from "../common/Markdown";
-import { FindingCard, QualityGateBadges, SeverityCountBadges, SHORT_SUMMARY_MAX } from "./FindingCard";
+import {
+  FindingCard,
+  QualityGateBadges,
+  SeverityCountBadges,
+  SHORT_SUMMARY_MAX,
+  useFixVerifyCommand,
+  useResolveFindingsTogether,
+} from "./FindingCard";
 import { AiErrorBanner } from "./AiErrorBanner";
 import { AiRunLog } from "./AiRunLog";
 import { ChatModelPicker } from "./ChatModelPicker";
 import { ActionBar, DocHeader, RunMenu, SPLIT_MIN_WIDTH, relativeTime, useElementWidth, type RunChoice } from "./docParts";
 import { EMPTY_JOBS, useJobsStore } from "../../state/jobsStore";
-import { useResolutionsStore } from "../../state/resolutionsStore";
+import { resolutionRunKey, useResolutionsStore } from "../../state/resolutionsStore";
+import { useTaskProvider } from "../../state/aiProviderStore";
+import { isAgenticProvider } from "../../lib/aiProviders";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useUiStore } from "../../state/uiStore";
 import { useAiPanelStore, type TabView } from "../../state/aiPanelStore";
@@ -113,6 +125,44 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
   const expanded = view.expanded ?? EMPTY_FLAGS;
   const split = width >= SPLIT_MIN_WIDTH && findings.length > 0 && !hydrating;
   const picked = findings.find((f) => f.id === view.picked) ?? findings[0] ?? null;
+
+  // "Fix the selected ones": ticks beside the list, one run for all of them. Offered only where a
+  // single card's fix is — a write-capable engine, the newest run, no analysis under way — and only
+  // once there is more than one finding to choose between.
+  const keyOf = (finding: AnalysisFinding) => (displayJob ? `job:${displayJob.id}:${finding.id}` : "");
+  const fixProvider = useTaskProvider("fix");
+  const runningFixes = useResolutionsStore((s) => s.running);
+  const fixing = (finding: AnalysisFinding) => Boolean(runningFixes[resolutionRunKey(projectId, keyOf(finding))]);
+  const canPick = Boolean(displayJob) && isLatest && !runningJob && !hydrating && findings.length > 1 && isAgenticProvider(fixProvider);
+  const fixPicked = view.fixPicked ?? EMPTY_FLAGS;
+  const pickable = findings.filter((f) => !fixing(f));
+  const chosen = canPick ? pickable.filter((f) => fixPicked[f.id]) : EMPTY_FINDINGS;
+  const togglePick = (id: string) => {
+    const next = { ...fixPicked };
+    if (next[id]) delete next[id];
+    else next[id] = true;
+    setView({ fixPicked: next });
+  };
+  const pickAll = (all: boolean) =>
+    setView({ fixPicked: all ? Object.fromEntries(pickable.map((f) => [f.id, true])) : {} });
+  const verify = useFixVerifyCommand(projectId);
+  const verifyCommand = verify.command?.trim() || null;
+  const resolveTogether = useResolveFindingsTogether(projectId);
+  const fixChosen = () => {
+    const items = chosen.map((finding) => ({ finding, resolutionKey: keyOf(finding) }));
+    setView({ fixPicked: {} });
+    void resolveTogether(items, verifyCommand);
+  };
+  const pickBox = (finding: AnalysisFinding) =>
+    canPick ? (
+      <span className="mt-3 shrink-0" title={t("analyze.selectToFix")}>
+        <Checkbox
+          checked={Boolean(fixPicked[finding.id]) && !fixing(finding)}
+          disabled={fixing(finding)}
+          onChange={() => togglePick(finding.id)}
+        />
+      </span>
+    ) : null;
 
   const cardProps = (finding: AnalysisFinding, at: number) => ({
     finding,
@@ -219,17 +269,39 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
               {summary && (
                 <Markdown source={summary} className="cf-markdown-preview rounded-lg border border-[var(--cf-border)] px-3.5 py-2.5" />
               )}
+              {canPick && (
+                <div className="flex items-center gap-2 px-0.5 text-[12px] text-[var(--cf-text-muted)]">
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <Checkbox
+                      checked={pickable.length > 0 && chosen.length === pickable.length}
+                      indeterminate={chosen.length > 0 && chosen.length < pickable.length}
+                      disabled={pickable.length === 0}
+                      onChange={() => pickAll(chosen.length < pickable.length)}
+                    />
+                    {t("analyze.selectToFix")}
+                  </label>
+                  {chosen.length > 0 && (
+                    <span className="tabular-nums text-[var(--cf-text-faint)]">
+                      {t("doc.selectedOf", { n: chosen.length, total: findings.length })}
+                    </span>
+                  )}
+                </div>
+              )}
               {split && picked ? (
                 <div className="grid grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] items-start gap-3">
                   <div className="space-y-2">
                     {findings.map((finding, at) => (
-                      <FindingCard
-                        key={finding.id}
-                        {...cardProps(finding, at)}
-                        open={false}
-                        highlighted={finding.id === picked.id}
-                        onToggle={() => setView({ picked: finding.id })}
-                      />
+                      <div key={finding.id} className="flex items-start gap-2">
+                        {pickBox(finding)}
+                        <div className="min-w-0 flex-1">
+                          <FindingCard
+                            {...cardProps(finding, at)}
+                            open={false}
+                            highlighted={finding.id === picked.id}
+                            onToggle={() => setView({ picked: finding.id })}
+                          />
+                        </div>
+                      </div>
                     ))}
                   </div>
                   <div className="sticky top-2">
@@ -239,12 +311,16 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
               ) : (
                 <div className="space-y-2">
                   {findings.map((finding, at) => (
-                    <FindingCard
-                      key={finding.id}
-                      {...cardProps(finding, at)}
-                      open={Boolean(expanded[finding.id])}
-                      onToggle={() => setView({ expanded: { ...expanded, [finding.id]: !expanded[finding.id] } })}
-                    />
+                    <div key={finding.id} className="flex items-start gap-2">
+                      {pickBox(finding)}
+                      <div className="min-w-0 flex-1">
+                        <FindingCard
+                          {...cardProps(finding, at)}
+                          open={Boolean(expanded[finding.id])}
+                          onToggle={() => setView({ expanded: { ...expanded, [finding.id]: !expanded[finding.id] } })}
+                        />
+                      </div>
+                    </div>
                   ))}
                 </div>
               )}
@@ -256,6 +332,33 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
       </div>
 
       <ActionBar>
+        {chosen.length > 0 ? (
+          <div className="flex items-center gap-2">
+            <span className="shrink-0 text-[12px] font-semibold tabular-nums">
+              {t("doc.selectedOf", { n: chosen.length, total: findings.length })}
+            </span>
+            <Tooltip label={verifyCommand ? t("finding.verifyWithHint", { command: verifyCommand }) : t("finding.verifyOffHint")}>
+              <span
+                className={`flex min-w-0 items-center gap-1 truncate text-[12px] ${verifyCommand ? "text-[var(--cf-success)]" : "text-[var(--cf-text-faint)]"}`}
+              >
+                <ListChecks size={13} className="shrink-0" />
+                {verifyCommand ? t("finding.verifyOn") : t("finding.verifyOff")}
+              </span>
+            </Tooltip>
+            {/* The engine the fix runs on — the `fix` row, not the analysis' own: what found the
+                problems and what edits the files are routed separately. */}
+            <div className="min-w-0 flex-1">
+              <ChatModelPicker task="fix" liveModel={null} chatActive={false} />
+            </div>
+            <button onClick={() => setView({ fixPicked: {} })} className={buttonClass({ variant: "ghost", size: "md" })}>
+              {t("common.cancel")}
+            </button>
+            <button onClick={fixChosen} title={t("analyze.fixManyHint")} className={buttonClass({ variant: "primary", size: "md" })}>
+              <AiWand size={14} />
+              {t("analyze.fixMany", { n: chosen.length })}
+            </button>
+          </div>
+        ) : (
         <div className="flex items-center gap-2">
           {/* The engine the next analysis runs on, and where it changes: the `analyze` row, the same
               one the 🛡's chip in Changes and Settings write. */}
@@ -275,6 +378,7 @@ export function AnalysisDocument({ tabKey, projectId, jobId }: { tabKey: string;
             </button>
           </span>
         </div>
+        )}
       </ActionBar>
     </div>
   );

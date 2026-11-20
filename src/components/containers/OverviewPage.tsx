@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Eraser, Loader2, Power } from "lucide-react";
+import { ArrowDown, Eraser, Loader2, Power } from "lucide-react";
 import { Button } from "../common/Button";
-import { Segmented } from "../common/Segmented";
 import { Facts, RowAction, SectionTitle, useInterval } from "./containerBits";
 import { runtimeLabel } from "./containerActions";
 import { LiveMark, NO_ROWS, PageHead, Td, Th, fmtBytes, fmtPercent } from "./ui";
@@ -214,20 +213,7 @@ export function OverviewPage({ runtime }: { runtime: RuntimeInfo }) {
           )}
           {runtime.running && !ctr && (
             <section className="min-w-0">
-              <div className="flex items-center gap-2">
-                <SectionTitle>{t("containers.m.overview.busiest")}</SectionTitle>
-                <div className="flex-1" />
-                <Segmented
-                  layoutId="overview-busiest"
-                  size="sm"
-                  value={busiest}
-                  onChange={setBusiest}
-                  options={[
-                    { value: "cpu", label: "CPU" },
-                    { value: "memory", label: t("containers.stat.memory") },
-                  ]}
-                />
-              </div>
+              <SectionTitle>{t("containers.m.overview.busiest")}</SectionTitle>
               {up.length === 0 ? (
                 <MutedLine>{t("containers.m.overview.nothingRunning")}</MutedLine>
               ) : top.length === 0 ? (
@@ -239,6 +225,33 @@ export function OverviewPage({ runtime }: { runtime: RuntimeInfo }) {
                     <col className="w-[132px]" />
                     <col className="w-[132px]" />
                   </colgroup>
+                  {/* Column heads rather than a CPU/Memoria switch, which only reordered the rows and
+                      moved the emphasis — with one container, nothing at all (user, 2026-11-20). With
+                      several, a head sorts by its column. */}
+                  <thead>
+                    <tr>
+                      <Th>{t("containers.m.overview.container")}</Th>
+                      {(["cpu", "memory"] as Busiest[]).map((by) => (
+                        <Th key={by}>
+                          {top.length > 1 ? (
+                            <button
+                              onClick={() => setBusiest(by)}
+                              aria-pressed={busiest === by}
+                              title={t("containers.m.overview.sortBy")}
+                              className={`inline-flex items-center gap-1 hover:text-[var(--cf-text)] ${busiest === by ? "text-[var(--cf-text)]" : ""}`}
+                            >
+                              {by === "cpu" ? "CPU" : t("containers.stat.memory")}
+                              {busiest === by && <ArrowDown size={11} />}
+                            </button>
+                          ) : by === "cpu" ? (
+                            "CPU"
+                          ) : (
+                            t("containers.stat.memory")
+                          )}
+                        </Th>
+                      ))}
+                    </tr>
+                  </thead>
                   <tbody>
                     {top.map((sample) => {
                       const row = rowOfStats(up, sample);
@@ -259,10 +272,10 @@ export function OverviewPage({ runtime }: { runtime: RuntimeInfo }) {
                             )}
                           </Td>
                           <Td>
-                            <Meter share={sample.cpuPercent} label={fmtPercent(sample.cpuPercent)} strong={busiest === "cpu"} />
+                            <Meter share={sample.cpuPercent} label={fmtPercent(sample.cpuPercent)} strong={top.length < 2 || busiest === "cpu"} />
                           </Td>
                           <Td>
-                            <Meter share={memShare} label={fmtBytes(sample.memUsage)} strong={busiest === "memory"} />
+                            <Meter share={memShare} label={fmtBytes(sample.memUsage)} strong={top.length < 2 || busiest === "memory"} />
                           </Td>
                         </tr>
                       );

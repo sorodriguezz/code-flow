@@ -16,6 +16,7 @@ const row = (over: Partial<ContainerRow>): ContainerRow => ({
   ports: [],
   created: "",
   command: "",
+  mounts: [],
   project: "",
   service: "",
   projectDir: "",

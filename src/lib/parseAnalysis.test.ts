@@ -3,6 +3,8 @@ import {
   buildFixpack,
   computeQualityGatePassed,
   formatFindingAsComment,
+  formatFindingAsFixPrompt,
+  formatFindingsAsFixPrompt,
   formatSummaryComment,
   locationLabel,
   parseAnalysis,
@@ -270,5 +272,21 @@ describe("the fix-pack", () => {
       problema: "Se accede a `cuenta.saldo` sin verificar que exista.",
       correccion: "Guarda temprano y retorna 404.",
     });
+  });
+});
+
+describe("formatFindingsAsFixPrompt", () => {
+  const [first] = parseAnalysis(REPORT).findings;
+  const second = { ...first, id: "F-002", subtitle: "Otro problema" };
+
+  it("leaves a single finding's prompt as it was", () => {
+    expect(formatFindingsAsFixPrompt([first])).toBe(formatFindingAsFixPrompt(first));
+  });
+
+  it("puts every finding in one prompt, named up front", () => {
+    const prompt = formatFindingsAsFixPrompt([first, second]);
+    expect(prompt.split("\n")[0]).toContain("2 hallazgos (F-001, F-002)");
+    expect(prompt).toContain(formatFindingAsFixPrompt(first));
+    expect(prompt).toContain(formatFindingAsFixPrompt(second));
   });
 });
