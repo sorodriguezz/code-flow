@@ -26,6 +26,7 @@ import {
   Plus,
   Settings2,
   SquareArrowOutUpRight,
+  SquareTerminal,
   Trash2,
 } from "lucide-react";
 import { WORKSPACE_COLORS } from "../../lib/workspaceColors";
@@ -49,6 +50,8 @@ export interface ProjectMenuContext {
   onNewBranch?: () => void;
   onSettings: () => void;
   onRemove: () => void;
+  /** A new shell in the bottom dock, started in this repository's folder (user, 2026-11-19). */
+  onOpenTerminal?: () => void;
   /** The rest are offered where the caller wires them — the unfolded row and the folded chip both
    *  do, so folding the panel no longer takes verbs away. */
   editor?: ProjectEditorMenu;
@@ -127,6 +130,10 @@ export function projectMenuItems(context: ProjectMenuContext): MenuItem[] {
         ...editor.installed.map((option, i) => ({ label: option.label, checked: editor.chosen === option.id, separated: i === 0, onClick: () => editor.onChoose(option.id) })),
       ],
     });
+  }
+
+  if (context.onOpenTerminal) {
+    items.push({ label: t("sidebar.menuOpenTerminal"), icon: SquareTerminal, disabled: broken, onClick: context.onOpenTerminal });
   }
 
   const arrange: MenuItem[] = [];

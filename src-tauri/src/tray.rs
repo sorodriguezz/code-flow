@@ -150,7 +150,7 @@ pub(crate) fn changed_setting_key(payload: &str) -> Option<String> {
 /// order, with its labels (`tabbar.*`) in both languages. The keys are what an island is named by
 /// (`open_satellite`'s `ref_id`), so they must match the frontend's exactly; a key the frontend does
 /// not know opens nothing there.
-const RAIL_APPS: [(&str, &str, &str); 12] = [
+const RAIL_APPS: [(&str, &str, &str); 13] = [
     ("api:requests", "API Client", "Cliente API"),
     ("api:database", "Databases", "Bases de datos"),
     ("agents", "Agents", "Agentes"),
@@ -162,6 +162,7 @@ const RAIL_APPS: [(&str, &str, &str); 12] = [
     ("chat", "Chat", "Chat"),
     ("flows", "Flows", "Flujos"),
     ("architecture", "Architecture", "Arquitectura"),
+    ("containers", "Containers", "Contenedores"),
     ("toolbox", "Tools", "Herramientas"),
 ];
 

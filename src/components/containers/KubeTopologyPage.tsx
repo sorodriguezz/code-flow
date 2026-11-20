@@ -2,6 +2,9 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react
 import { AlertTriangle, ExternalLink, Loader2, RefreshCw, X } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { Button } from "../common/Button";
+import { ResizeHandle } from "../common/ResizeHandle";
+import { CollapsedPanelBar, useCollapsiblePanel } from "../common/CollapsedPanelBar";
+import { useLayoutStore } from "../../state/layoutStore";
 import { RowAction, StateDot, useInterval } from "./containerBits";
 import { EmptyLine, LoadingLine, PageHead, PageToolbar, SearchField } from "./ui";
 import { KUBE_DETAIL_KINDS, kubeLayer } from "./topologyModel";
@@ -74,6 +77,21 @@ export function KubeTopologyPage() {
   const [showPods, setShowPods] = useState(false);
   const [query, setQuery] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
+  // The side panel — the problems, or the node picked on the canvas — folds to a bar by dragging its
+  // seam past the minimum, like every other side panel (user, 2026-11-19).
+  const sideWidth = useLayoutStore((s) => s.sizes.kubeTopologySideWidth);
+  const setSize = useLayoutStore((s) => s.setSize);
+  const commitSize = useLayoutStore((s) => s.commitSize);
+  const side = useCollapsiblePanel("kubeTopologySideWidth");
+  // A node picked on the canvas while the panel is folded brings it back: its details are the answer
+  // to that click, and a folded panel would leave it with none.
+  const expandSide = side.expand;
+  const sideCollapsed = side.collapsed;
+  useEffect(() => {
+    if (picked && sideCollapsed) expandSide();
+    // Only on a new pick, not when the user folds the panel with a node still picked.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [picked]);
 
   const read = useCallback(() => {
     setLoading(true);
@@ -174,8 +192,28 @@ export function KubeTopologyPage() {
               <TopologyCanvas nodes={nodes} edges={edges} bandLabel={(band) => band || t("containers.topo.clusterWide")} selected={picked} onSelect={setPicked} />
             </Suspense>
           </div>
-          {(node || issues.length > 0) && (
-            <aside className="flex w-[270px] shrink-0 flex-col overflow-y-auto border-l border-[var(--cf-border)] bg-[var(--cf-surface)] p-3 text-[12px]">
+          {(node || issues.length > 0) && side.collapsed && (
+            <CollapsedPanelBar
+              side="right"
+              label={node ? `${BADGE[node.kind] ?? ""} ${node.name}`.trim() : t("containers.topo.problems", { count: issues.length })}
+              title={t("common.expandPanel")}
+              onExpand={side.expand}
+            />
+          )}
+          {(node || issues.length > 0) && !side.collapsed && (
+            <ResizeHandle
+              axis="x"
+              invert
+              value={sideWidth}
+              min={200}
+              max={520}
+              onChange={(value) => setSize("kubeTopologySideWidth", value)}
+              onCommit={(value) => commitSize("kubeTopologySideWidth", value)}
+              {...side.handleProps}
+            />
+          )}
+          {(node || issues.length > 0) && !side.collapsed && (
+            <aside style={{ width: sideWidth }} className="flex shrink-0 flex-col overflow-y-auto border-l border-[var(--cf-border)] bg-[var(--cf-surface)] p-3 text-[12px]">
               {node ? (
                 <NodeInfo topo={topo} node={node} onPick={setPicked} onOpen={open} onClose={() => setPicked(null)} />
               ) : (

@@ -6,11 +6,11 @@ import { SHORTCUT_BY_ID } from "./shortcuts";
 import { VIEW_ITEMS, viewRowKeys, viewShortcutId } from "./paletteItems";
 
 describe("palette view rows → shortcut ids", () => {
-  it("maps every view row to a real shortcut, or to none (toolbox only)", () => {
+  it("maps every view row to a real shortcut, or to none (toolbox and containers only)", () => {
     for (const row of VIEW_ITEMS) {
       const id = viewShortcutId(row.id, row.workspace);
       if (id) expect(SHORTCUT_BY_ID.has(id)).toBe(true);
-      else expect(row.id).toBe("toolbox");
+      else expect(["toolbox", "containers"]).toContain(row.id);
     }
   });
 

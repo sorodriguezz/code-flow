@@ -82,6 +82,7 @@ const APP_EXTRA: Record<string, Partial<Spoken>> = {
     es: ["herramientas", "caja de herramientas", "utilidades", "herramientas de desarrollo"],
     en: ["toolbox", "tools", "developer tools", "dev tools", "utilities"],
   },
+  containers: { es: ["contenedores", "docker", "kubernetes", "podman"], en: ["containers", "docker", "kubernetes", "podman"] },
 };
 
 export function appVocabulary(): Vocabulary {
@@ -151,7 +152,6 @@ export function tabVocabulary(): Vocabulary {
 /** The dock's panels. */
 const DOCK_NAMES: Record<string, [TranslationKey, Partial<Spoken>]> = {
   terminal: ["tabbar.terminal", { es: ["terminal", "terminales", "consola", "shell"], en: ["terminal", "terminals", "console", "shell"] }],
-  containers: ["containers.title", { es: ["contenedores", "docker", "kubernetes"], en: ["containers", "docker", "kubernetes"] }],
   services: ["services.title", { es: ["servicios", "procesos"], en: ["services", "processes"] }],
 };
 

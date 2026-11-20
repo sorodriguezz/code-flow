@@ -12,7 +12,6 @@ import {
   CirclePlay,
   Cloud,
   Code2,
-  Container,
   Eye,
   FolderGit2,
   FolderInput,
@@ -685,6 +684,7 @@ function CollapsedProjectChip({
             },
             onSettings: () => openSettings("projects"),
             onRemove: () => void removeMissing(),
+            onOpenTerminal: () => openTerminalIn(project.id, project.local_path),
             ...arrangement.extras,
           })}
           onClose={() => setMenu(null)}
@@ -693,6 +693,17 @@ function CollapsedProjectChip({
       {arrangement.moveOpen && <MoveProjectModal project={project} onClose={arrangement.closeMove} />}
     </div>
   );
+}
+
+/**
+ * «Abrir terminal» from a repository's menu: a new shell in the dock, in that repository's folder, with
+ * the dock showing that repository's terminals — whichever one is open in the view above.
+ */
+function openTerminalIn(projectId: string, path: string) {
+  const terminals = useTerminalStore.getState();
+  terminals.setDockProject(projectId);
+  terminals.showDock("terminal");
+  void terminals.openNew(projectId, path).catch((e: unknown) => pushErrorToast(String(e)));
 }
 
 function StashesSection() {
@@ -2417,6 +2428,7 @@ function ProjectRow({
             onNewBranch: isActive ? () => setShowCreateBranch(true) : undefined,
             onSettings: () => openSettings("projects"),
             onRemove: () => void removeMissing(),
+            onOpenTerminal: () => openTerminalIn(project.id, project.local_path),
             ...arrangement.extras,
           })}
           onClose={() => setMenu(null)}
@@ -2504,14 +2516,6 @@ function SidebarFoot({ collapsed }: { collapsed: boolean }) {
       icon: <TerminalSquare size={17} />,
       label: t("tabbar.terminal"),
       tip: hint("panel.terminal", t("terminal.toggle")),
-    },
-    {
-      tour: "toggle-containers",
-      open: dockOpen && dockView === "containers",
-      onClick: () => toggleDock("containers"),
-      icon: <Container size={17} />,
-      label: t("containers.title"),
-      tip: t("containers.toggle"),
     },
     {
       tour: "toggle-services",

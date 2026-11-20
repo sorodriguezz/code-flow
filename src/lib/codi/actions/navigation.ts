@@ -87,7 +87,6 @@ export function viewName(view: MainView): string {
 /** The dock's panels, by the name their buttons carry. */
 export const DOCK_LABEL: Record<DockView, TranslationKey> = {
   terminal: "tabbar.terminal",
-  containers: "containers.title",
   services: "services.title",
 };
 
@@ -277,7 +276,7 @@ export function navigationActions(): CodiAction[] {
       },
     }),
 
-    ...dockActions(["terminal", "containers", "services"]),
+    ...dockActions(["terminal", "services"]),
 
     defineAction({
       id: "sidebar.toggle",
@@ -429,8 +428,8 @@ export function dockActions(views: DockView[]): CodiAction[] {
     defineAction({
       id: "dock.show",
       title: {
-        en: "Show a panel of the bottom dock: the terminals, the containers or the services.",
-        es: "Muestra un panel del dock inferior: las terminales, los contenedores o los servicios.",
+        en: "Show a panel of the bottom dock: the terminals or the services.",
+        es: "Muestra un panel del dock inferior: las terminales o los servicios.",
       },
       aliases: { es: ["abre", "muestra", "abre la", "muestra la", "abre los", "muestra los", "abreme", "muestrame", "muestrame la", "muestrame los", "ve a"], en: ["open", "show", "open the", "show the", "show me", "show me the"] },
       get vocabulary() {

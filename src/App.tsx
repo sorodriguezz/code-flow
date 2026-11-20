@@ -157,6 +157,7 @@ const ArchitectureView = lazy(() =>
 );
 const ChatView = lazy(() => import("./components/chat/ChatView").then((m) => ({ default: m.ChatView })));
 const ToolboxView = lazy(() => import("./components/toolbox/ToolboxView").then((m) => ({ default: m.ToolboxView })));
+const ContainersView = lazy(() => import("./components/containers/ContainersView").then((m) => ({ default: m.ContainersView })));
 
 const loadServicesDock = () =>
   import("./components/services/ServicesDock").then((m) => ({ default: m.ServicesDock }));
@@ -352,6 +353,8 @@ const WORKSPACE_VIEWS: { id: MainView; render: () => ReactElement }[] = [
   { id: "architecture", render: () => <ArchitectureView /> },
   // The toolbox needs no repository at all — a JWT is decoded the same with or without one.
   { id: "toolbox", render: () => <ToolboxView /> },
+  // Machine-wide like the toolbox: an engine runs on this computer with or without a project.
+  { id: "containers", render: () => <ContainersView /> },
   // In this list because it renders with no project open, not because it follows the workspace —
   // the keyring is global. Membership here is what exempts a view from the "no project" empty
   // state, and the gate is `workspaceId !== null`, which is true whenever the app is usable.

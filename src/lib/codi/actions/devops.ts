@@ -1,6 +1,5 @@
 import { useUiStore } from "../../../state/uiStore";
 import { useRepoStore } from "../../../state/repoStore";
-import { useTerminalStore } from "../../../state/terminalStore";
 import { pipelinesAvailable, useVcsConnectionsStore } from "../../../state/vcsConnectionsStore";
 import { foldName } from "../fuzzy";
 import { CodiError, type CodiAction, type CodiOutcome } from "../registry";
@@ -194,7 +193,11 @@ function containerActions(): CodiAction[] {
       run: async ({ name }) => {
         const found = pickByName(await allContainers(), String(name), (c) => c.row.name, "container", (c) => isUp(c.row));
         const { useContainersStore } = await import("../../../state/containersStore");
-        useTerminalStore.getState().showDock("containers");
+        // An app of the rail since 2026-11-19 (it was a panel of the bottom dock): opened, or its
+        // island brought forward.
+        const { appByKey, openRailApp } = await import("../../railApps");
+        const app = appByKey("containers");
+        if (app) openRailApp(app);
         useContainersStore.getState().setNav({ runtime: found.runtime, section: "containers" });
         // A container's detail opens on its logs.
         useContainersStore.getState().select({

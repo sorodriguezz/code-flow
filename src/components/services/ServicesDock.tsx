@@ -3,7 +3,6 @@ import { memo, useCallback, useDeferredValue, useEffect, useMemo, useRef, useSta
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   CirclePlay,
-  Container,
   FolderGit2,
   Maximize2,
   Minimize2,
@@ -35,7 +34,6 @@ import { ServiceConsole } from "./ServiceConsole";
 import { PortsPanel } from "./PortsPanel";
 import { HeaderButton, PortsRow, SectionHeader, ServiceActions, ServiceList } from "./ServiceList";
 import { MockServiceRows } from "../api/MockServiceRows";
-import { ContainersList, ContainersPane, ContainersSummary, useContainersPulse } from "../containers/ContainersPanel";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useT } from "../../state/languageStore";
 import { STATUS_TONE, useServicesStore } from "../../state/servicesStore";
@@ -193,14 +191,13 @@ export function ServicesDock() {
    * the frame of the click, so the dock arrived late and all at once (user report, 2026-10-10:
    * "como que esperan que algo cargue antes de abrirse"). A hidden `TerminalPane` already lets its
    * renderer go and stops measuring (`visible`), so a closed dock costs little; what keeps working
-   * in the background — the containers' polling, the ports, a service's console — is unmounted
+   * in the background — the ports, a service's console — is unmounted
    * while it is closed and is cheap to bring back. See `App`, which keeps it mounted.
    */
   const open = useTerminalStore((s) => s.panelOpen);
   const toggleMaximized = useTerminalStore((s) => s.toggleDockMaximized);
   const height = useLayoutStore((s) => s.sizes.terminalPanelHeight);
   const servicesListWidth = useLayoutStore((s) => s.sizes.servicesListWidth);
-  const containersListWidth = useLayoutStore((s) => s.sizes.containersListWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
 
@@ -214,7 +211,7 @@ export function ServicesDock() {
   /**
    * Deferred: the click is answered first — the sidebar's box slides at once, it reads the store
    * itself — and the panel it asked for is built after, in a render React can set aside for a frame.
-   * Switching between Terminal, Contenedores and Servicios built the new list and pane in the click's
+   * Switching between Terminal and Servicios built the new list and pane in the click's
    * own frame, which is what stuttered (user report, 2026-11-18).
    */
   const view: DockView = useDeferredValue(showServices ? dockView : "terminal");
@@ -240,11 +237,8 @@ export function ServicesDock() {
       clearTimeout(timer);
     };
   }, [open, ready]);
-  /** The containers' list carries a runtime, its sections and rows three levels deep: its own width. */
-  const listKeyName = view === "containers" ? "containersListWidth" : "servicesListWidth";
-  const listWidth = view === "containers" ? containersListWidth : servicesListWidth;
-  // The engines are read only while their panel is on screen.
-  useContainersPulse(shown === "containers");
+  const listKeyName = "servicesListWidth" as const;
+  const listWidth = servicesListWidth;
 
   const [selection, setSelection] = useState<ServiceSelection | null>(null);
   /** The service whose console the pane shows, when that is what is picked. */
@@ -536,7 +530,7 @@ export function ServicesDock() {
   /** What the title row calls the panel. A satellite keeps the one name it always had, with the
    *  list's heading below it naming the repository. */
   const panelTitle =
-    view === "services" ? t("services.title") : view === "containers" ? t("containers.title") : showServices ? terminalsLabel : t("terminal.panelTitle");
+    view === "services" ? t("services.title") : showServices ? terminalsLabel : t("terminal.panelTitle");
 
   // What the header says about this workspace's services at a glance — the reason to look below.
   const here = services.map((service) => runtimeMap[service.id]).filter(Boolean);
@@ -577,8 +571,6 @@ export function ServicesDock() {
             combined panel after neither half. */}
         {view === "services" ? (
           <CirclePlay size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
-        ) : view === "containers" ? (
-          <Container size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
         ) : (
           <TerminalSquare size={13} className="shrink-0 text-[var(--cf-text-muted)]" />
         )}
@@ -616,8 +608,6 @@ export function ServicesDock() {
             )}
           </span>
         )}
-
-        {view === "containers" && <ContainersSummary />}
 
         <div className="flex-1" />
 
@@ -665,9 +655,7 @@ export function ServicesDock() {
           className="flex min-h-0 shrink-0 flex-col border-r border-[var(--cf-border)]"
           style={{ width: listWidth }}
         >
-          {shown === "containers" ? (
-            <ContainersList />
-          ) : shown === "services" ? (
+          {shown === "services" ? (
             <>
               {/* Detect, new group, new service: small, at the top of the column they act on — not in
                   the panel's title row, where they sat over the console and read as its controls.
@@ -792,7 +780,7 @@ export function ServicesDock() {
           axis="x"
           value={listWidth}
           min={160}
-          max={view === "containers" ? 520 : 400}
+          max={400}
           onChange={(w) => setSize(listKeyName, w)}
           onCommit={(w) => commitSize(listKeyName, w)}
         />
@@ -803,9 +791,7 @@ export function ServicesDock() {
           ref={paneAreaRef}
           className={`relative flex min-h-0 min-w-0 flex-1 ${view === "terminal" && visibleGroup?.dir === "column" ? "flex-col" : ""}`}
         >
-          {shown === "containers" ? (
-            <ContainersPane />
-          ) : shown === "services" ? (
+          {shown === "services" ? (
             selection?.kind === "ports" ? (
               <PortsPanel onOpenService={setSelectedId} onClose={() => setSelection(null)} />
             ) : selectedService ? (

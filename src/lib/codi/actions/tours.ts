@@ -104,14 +104,14 @@ const quiet = (result: unknown) => ({ result, say: "" });
  * sabe qué es el panel de contenedores siendo que sí existe»).
  */
 const ABOUT: Record<string, { say: TranslationKey; open?: { action: string; params: Record<string, unknown> } }> = {
-  containers: { say: "codi.about.containers", open: { action: "dock.show", params: { view: "containers" } } },
+  containers: { say: "codi.about.containers", open: { action: "app.open", params: { app: "containers" } } },
   services: { say: "codi.about.services", open: { action: "dock.show", params: { view: "services" } } },
   terminal: { say: "codi.about.terminal", open: { action: "dock.show", params: { view: "terminal" } } },
   aiPanel: { say: "codi.about.aiPanel", open: { action: "panel.ai", params: { state: "open" } } },
 };
 
 const ABOUT_NAMES = literal({
-  containers: { es: ["contenedores", "el panel de contenedores", "docker", "kubernetes"], en: ["containers", "the containers panel", "docker", "kubernetes"] },
+  containers: { es: ["contenedores", "la app de contenedores", "el panel de contenedores", "docker", "kubernetes"], en: ["containers", "the containers panel", "docker", "kubernetes"] },
   services: { es: ["servicios", "el panel de servicios"], en: ["services", "the services panel"] },
   terminal: { es: ["terminal", "terminales", "la terminal", "consola"], en: ["terminal", "terminals", "the terminal", "console"] },
   aiPanel: { es: ["panel de ia", "el panel de ia", "panel del asistente", "el asistente", "panel de chat", "el panel de chat"], en: ["ai panel", "the ai panel", "the assistant", "the assistant panel", "chat panel"] },

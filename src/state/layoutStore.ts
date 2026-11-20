@@ -53,7 +53,8 @@ export type LayoutKey =
   | "pipelinesListWidth"
   | "pipelinesGraphHeight"
   | "servicesListWidth"
-  | "containersListWidth";
+  | "containersListWidth"
+  | "kubeTopologySideWidth";
 
 const STORAGE_KEYS: Record<LayoutKey, string> = {
   sidebarWidth: "layout_sidebar_width",
@@ -106,6 +107,7 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   pipelinesGraphHeight: "layout_pipelines_graph_height",
   servicesListWidth: "layout_services_list_width",
   containersListWidth: "layout_containers_list_width",
+  kubeTopologySideWidth: "layout_kube_topology_side_width",
 };
 
 export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
@@ -213,6 +215,8 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // The Contenedores tree: a runtime, its sections and rows that carry a name, a status and a port —
   // three levels of indent deep, so wider than the services' list.
   containersListWidth: 280,
+  // Kubernetes topology: the problems, or the picked node, beside the canvas.
+  kubeTopologySideWidth: 270,
 };
 
 /**

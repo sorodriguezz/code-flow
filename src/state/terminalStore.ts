@@ -94,7 +94,7 @@ const DOCK_VIEW_KEY = "terminal_dock_view";
  * unmounts the shells (see `ServicesDock`). A satellite has no services, so it only ever shows
  * `"terminal"` and never reads or writes the remembered value.
  */
-export type DockView = "terminal" | "containers" | "services";
+export type DockView = "terminal" | "services";
 
 interface TerminalState {
   /** Hidden by default — only opens when the user asks for it (or a new terminal is created).
@@ -434,7 +434,9 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
     // there would turn its ⌘J into "switch to terminals" instead of "close". Only the view comes
     // back — the dock itself starts hidden (see `panelOpen`).
     const view = isMainWindow() ? await getSetting(DOCK_VIEW_KEY).catch(() => null) : null;
-    set({ dockView: view === "services" || view === "containers" ? view : "terminal" });
+    // "containers" was a third view until it became an app of the rail (2026-11-19): one remembered
+    // from before comes back as the terminals.
+    set({ dockView: view === "services" ? view : "terminal" });
     if (isMainWindow()) {
       savedAtStart = withoutForeignPaths(
         parseSavedDock(await getSetting(RESTORE_KEY).catch(() => null)),

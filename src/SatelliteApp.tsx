@@ -85,6 +85,7 @@ const DiagramsView = lazy(() =>
   import("./components/diagrams/DiagramsView").then((m) => ({ default: m.DiagramsView })),
 );
 const ToolboxView = lazy(() => import("./components/toolbox/ToolboxView").then((m) => ({ default: m.ToolboxView })));
+const ContainersView = lazy(() => import("./components/containers/ContainersView").then((m) => ({ default: m.ContainersView })));
 const FlowsView = lazy(() => import("./components/flows/FlowsView").then((m) => ({ default: m.FlowsView })));
 const ArchitectureView = lazy(() =>
   import("./components/architecture/ArchitectureView").then((m) => ({ default: m.ArchitectureView })),
@@ -128,6 +129,7 @@ const APP_VIEWS: Record<string, { view: MainView; workspace?: ApiWorkspace; rend
   flows: { view: "flows", render: () => <FlowsView /> },
   architecture: { view: "architecture", render: () => <ArchitectureView /> },
   toolbox: { view: "toolbox", render: () => <ToolboxView /> },
+  containers: { view: "containers", render: () => <ContainersView /> },
   vault: { view: "vault", render: () => <VaultView /> },
   chat: { view: "chat", render: () => <ChatView /> },
 };

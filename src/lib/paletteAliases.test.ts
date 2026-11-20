@@ -43,7 +43,7 @@ describe("palette aliases", () => {
     ["cron", "view:flows:"],
     ["automatizar", "view:flows:"],
     ["contraseñas", "view:vault:"],
-    ["docker", "view:containers"],
+    ["docker", "view:containers:"],
   ])("%s → %s", (query, key) => {
     expect(first(query)).toBe(key);
   });

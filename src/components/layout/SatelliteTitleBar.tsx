@@ -26,6 +26,7 @@ import {
   Network,
   Workflow,
   Wrench,
+  Container,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -623,6 +624,8 @@ function appMeta(refId: string): {
       return { labelKey: "tabbar.architecture", icon: Network };
     case "toolbox":
       return { labelKey: "tabbar.toolbox", icon: Wrench };
+    case "containers":
+      return { labelKey: "tabbar.containers", icon: Container };
     default:
       return { labelKey: "windows.unknownApp", icon: Layers };
   }

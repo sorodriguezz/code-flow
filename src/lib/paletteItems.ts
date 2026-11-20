@@ -155,12 +155,13 @@ export const VIEW_ITEMS: {
   { id: "chat", labelKey: "tabbar.chat", icon: MessagesSquare },
   { id: "flows", labelKey: "tabbar.flows", icon: Waypoints },
   { id: "architecture", labelKey: "tabbar.architecture", icon: Network },
+  { id: "containers", labelKey: "tabbar.containers", icon: Container },
   { id: "toolbox", labelKey: "tabbar.toolbox", icon: Wrench },
 ];
 
 /**
  * The shortcut command behind a view row, by the same `id` + `workspace` the rows are built from.
- * `null` where the app has none (the toolbox). The chord itself is read through `bindingFor`, so a
+ * `null` where the app has none (the toolbox, the containers). The chord itself is read through `bindingFor`, so a
  * user's rebinding — or clearing — is what the row shows.
  */
 export function viewShortcutId(id: MainView, workspace?: ApiWorkspace): ShortcutId | null {
@@ -224,7 +225,7 @@ export const PALETTE_ALIASES: Record<string, string> = {
   "view:toolbox:": "herramientas tools utilidades utilities",
   "view:ai-panel": "asistente assistant ia ai chat preguntar ask",
   "view:terminal": "terminal consola console shell bash zsh powershell cmd",
-  "view:containers": "docker contenedores containers kubernetes k8s pods compose",
+  "view:containers:": "docker contenedores containers kubernetes k8s pods compose",
   "view:services": "servicios services procesos processes npm run dev server levantar start",
   "action:pr-from-link": "pull request pr review revisar github azure enlace link",
   "action:fetch": "git fetch",
@@ -372,15 +373,6 @@ export function buildPaletteItems({
       label: t("tabbar.terminal"),
       group: "views" as const,
       onSelect: () => toggleTerminalPanel(),
-    },
-    // Its own entry since the dock split into two panels (2026-09-30), the same toggle as its
-    // button at the foot of the projects panel.
-    {
-      key: "view:containers",
-      icon: Container,
-      label: t("containers.title"),
-      group: "views" as const,
-      onSelect: () => toggleDock("containers"),
     },
     {
       key: "view:services",

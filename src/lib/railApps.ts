@@ -1,6 +1,7 @@
 import {
   Bot,
   ClipboardList,
+  Container,
   Database,
   KeyRound,
   MessagesSquare,
@@ -172,6 +173,16 @@ export const APPS: WorkspaceApp[] = [
     icon: Network,
     labelKey: "tabbar.architecture",
     descriptionKey: "tabbar.architectureDescription",
+  },
+  // Docker, Podman, Kubernetes and Azure — machine-wide, so global like the toolbox: an engine
+  // runs on this computer whichever workspace is open. It was a panel of the bottom dock until the
+  // user asked for a door of its own (2026-11-19, «tiene muchas funcionalidades»).
+  {
+    id: "containers",
+    global: true,
+    icon: Container,
+    labelKey: "tabbar.containers",
+    descriptionKey: "tabbar.containersDescription",
   },
   // The developer toolbox — encoders, JWT, formatters, generators — all local, nothing leaves the
   // machine. Newest, so last (user, 2026-10-23: «métele un montón de herramientas altiro»).

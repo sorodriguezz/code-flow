@@ -22,7 +22,7 @@ import { useT } from "../../state/languageStore";
 import type { ContainerRow } from "../../types/containers";
 
 /**
- * The Contenedores panel of the bottom dock — Docker, Podman, containerd and Kubernetes, found on
+ * The Contenedores app (see `ContainersView`, an app of the rail since 2026-11-19) — Docker, Podman, containerd and Kubernetes, found on
  * this computer and operated through their own tools (see `src-tauri/src/containers`).
  *
  * A manager in lite-dock's shape: the list column is the navigation (each runtime and what it holds,
@@ -100,7 +100,7 @@ export function projectOptions(rows: ContainerRow[]) {
   return { projectDir: first?.projectDir ?? "", configFiles: first?.configFiles ?? "" };
 }
 
-/** The navigation, in the dock's list column. */
+/** The navigation, in the app's explorer column. */
 export function ContainersList() {
   const setDialog = useContainersStore((s) => s.setDialog);
   return <ContainersNav onAddCluster={() => setDialog("cluster")} onAddEngine={() => setDialog("engine")} />;

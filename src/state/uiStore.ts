@@ -48,6 +48,11 @@ export type MainView =
    *  scoped to anything: rail-reached like the apps above, renders with no project open; see
    *  `components/toolbox`. */
   | "toolbox"
+  /** Contenedores — Docker, Podman, Kubernetes and Azure, found on this machine. Machine-wide like
+   *  the toolbox: rail-reached, renders with no project open. It lived in the bottom dock until
+   *  2026-11-19, when it moved to an app of its own (user: «tiene muchas funcionalidades»); see
+   *  `components/containers/ContainersView`. */
+  | "containers"
   | "vault"
   /**
    * The chat workspace — the odd one among the odd ones, and for a different reason than the vault.

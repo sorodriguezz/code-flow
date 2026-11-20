@@ -1,4 +1,4 @@
-import { ChevronsRight } from "lucide-react";
+import { ChevronsLeft, ChevronsRight } from "lucide-react";
 import { explorerClass } from "./recipes";
 import { LAYOUT_DEFAULTS, useLayoutStore, type LayoutKey } from "../../state/layoutStore";
 
@@ -13,6 +13,7 @@ export function CollapsedPanelBar({
   title,
   onExpand,
   tour,
+  side = "left",
 }: {
   /** The panel's name, written down the bar. */
   label: string;
@@ -21,7 +22,11 @@ export function CollapsedPanelBar({
   onExpand: () => void;
   /** The panel's `data-tour` anchor, kept on the bar so a tour step still finds it. */
   tour?: string;
+  /** Which edge of its view the panel sits on: a right-hand panel's bar points left, and its border
+   *  faces the content on its left. */
+  side?: "left" | "right";
 }) {
+  const Chevrons = side === "right" ? ChevronsLeft : ChevronsRight;
   return (
     <button
       type="button"
@@ -30,9 +35,9 @@ export function CollapsedPanelBar({
       title={title}
       aria-label={title}
       aria-expanded={false}
-      className={`${explorerClass} group flex h-full w-[28px] shrink-0 select-none flex-col items-center gap-3 overflow-hidden py-3 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]`}
+      className={`${explorerClass} ${side === "right" ? "border-l border-r-0" : ""} group flex h-full w-[28px] shrink-0 select-none flex-col items-center gap-3 overflow-hidden py-3 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]`}
     >
-      <ChevronsRight size={14} className="shrink-0 group-hover:text-[var(--cf-accent)]" />
+      <Chevrons size={14} className="shrink-0 group-hover:text-[var(--cf-accent)]" />
       <span className="whitespace-nowrap text-[11px] font-medium tracking-wide [writing-mode:vertical-rl]">{label}</span>
     </button>
   );
