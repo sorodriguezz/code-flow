@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildChart, defaultCategoryColumn, niceTicks, numericColumns } from "./chartData";
+import { buildChart, COUNT_ROWS, defaultCategoryColumn, defaultValueColumns, niceTicks, numericColumns } from "./chartData";
 
 const columns = [
   { name: "city", type_name: "text" },
@@ -32,5 +32,23 @@ describe("chartData", () => {
   it("picks round ticks", () => {
     expect(niceTicks(0, 93)).toEqual([0, 20, 40, 60, 80, 100]);
     expect(niceTicks(-5, 5)[0]).toBeLessThanOrEqual(-5);
+  });
+
+  it("does not take an all-NULL column as the category", () => {
+    const cols = [
+      { name: "RES_RowId", type_name: "BIGINT" },
+      { name: "RES_EQ_DR", type_name: "BIGINT" },
+      { name: "RES_Type", type_name: "VARCHAR" },
+      { name: "RES_Desc", type_name: "VARCHAR" },
+    ];
+    const data = [
+      ["4", null, "Care Provider", "Dr A"],
+      ["16", null, "Care Provider", "Dr B"],
+      ["17", null, "Room", "Dr C"],
+    ];
+    expect(defaultCategoryColumn(cols, data)).toBe(2);
+    // The only numbers are ids: count rows rather than sum them.
+    expect(defaultValueColumns(cols, data, 2)).toEqual([COUNT_ROWS]);
+    expect(buildChart(data, 2, [COUNT_ROWS], cols).series[0].values).toEqual([2, 1]);
   });
 });

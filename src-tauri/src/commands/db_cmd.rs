@@ -760,8 +760,9 @@ pub async fn db_schema_diagram(
     let config = resolve_config(&db, &connection_id)?;
     let session = registry.session(&config, node.database.as_deref()).await?;
     let key = DbRegistry::session_key(&connection_id, node.database.as_deref());
+    let filter = crate::datasource::DiagramFilter::for_schema(&config, node.schema());
     registry
-        .run(&run_id, &session, &key, session.schema_diagram(&node))
+        .run(&run_id, &session, &key, session.schema_diagram(&node, &filter))
         .await
 }
 
@@ -1204,10 +1205,12 @@ pub async fn db_ai_assist(
         // `read` and not `session`: a console left open overnight is holding a connection the
         // server has since dropped, and this retries once against a fresh one instead of failing
         // the first question of the morning.
+        let filter = crate::datasource::DiagramFilter::for_schema(&config, node.schema());
         let (diagram, info) = registry
             .read(&config, node.database.as_deref(), |session| {
                 let node = node.clone();
-                async move { Ok((session.schema_diagram(&node).await?, session.info())) }
+                let filter = filter.clone();
+                async move { Ok((session.schema_diagram(&node, &filter).await?, session.info())) }
             })
             .await?;
 

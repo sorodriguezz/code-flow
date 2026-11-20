@@ -166,6 +166,9 @@ export function DateField({
             <div
               ref={panelRef}
               role="dialog"
+              // Portalled out of whatever holds the field: a popover that closes on an outside click
+              // asks this mark whether the click was really outside (see `GraphFilters`).
+              data-cf-date-panel=""
               aria-label={ariaLabel}
               onKeyDown={onKeyDown}
               style={{ position: "fixed", left: pos.left, top: pos.top, bottom: pos.bottom }}

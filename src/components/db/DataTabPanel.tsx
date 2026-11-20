@@ -24,6 +24,7 @@ import {
   Square,
   Trash2,
   X,
+  SendHorizontal,
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { Kbd, buttonClass } from "../common/Button";
@@ -882,37 +883,9 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
             table name, which read as part of the breadcrumb and had to be hovered one by one to
             find (user report, 2026-11-18). The words drop to icons when the panel is narrow. */}
         <div className="ml-auto flex items-center gap-1 pl-2">
-          {tab.loading ? (
-            <LabelledButton icon={Square} danger onClick={() => void store.cancelRun(tab.id)} label={t("db.cancel")} />
-          ) : (
-            <LabelledButton
-              icon={RefreshCw}
-              onClick={() => void reload()}
-              label={t("db.refreshShort")}
-              title={t("db.refresh")}
-              shortcut={chord("db.refresh")}
-            />
-          )}
-          {/* On a collection this writes a document, not a row of nulls: there is no column list to
-              make one from, and a schemaless store's "add" has always meant "write one". */}
-          <LabelledButton
-            icon={Plus}
-            onClick={() => (documentStore ? addDocument() : store.addRow(tab.id))}
-            label={documentStore ? t("db.addDocumentShort") : t("db.addRowShort")}
-            title={documentStore ? t("db.addDocument") : t("db.addRow")}
-          />
-          {/* SQL tables only, and not on a read-only connection — the import writes. */}
-          {engine?.sql && !readOnly && tab.node.kind === "table" && (
-            <LabelledButton
-              icon={FileUp}
-              onClick={() => openModal({ kind: "importCsv", connectionId: tab.connectionId, node: tab.node, tabId: tab.id })}
-              label={t("db.importShort")}
-              title={t("db.importCsv")}
-            />
-          )}
-
-          <ToolbarSeparator />
-
+          {/* Left to right, what the bar is for: how you read the result, reloading it, getting
+              data in and out, and editing — «+ Fila» last, beside the state of the edits it starts
+              (user, 2026-11-19: the order had no logic to it). */}
           {/* Three ways to read documents, in Compass's own order: the list, the raw text, the grid. */}
           {hasDocuments && (
             <>
@@ -927,7 +900,7 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
                   { value: "grid", icon: TableIcon, title: t("db.showGrid") },
                 ]}
               />
-              <ToolbarSeparator />
+              {docView === "grid" && tab.result && <ToolbarSeparator />}
             </>
           )}
 
@@ -945,6 +918,33 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
               ]}
             />
           )}
+
+          {/* Only after a view switch that is actually on the bar: no stray rule at its left edge. */}
+          {(hasDocuments || tab.result) && <ToolbarSeparator />}
+
+          {tab.loading ? (
+            <LabelledButton icon={Square} danger onClick={() => void store.cancelRun(tab.id)} label={t("db.cancel")} />
+          ) : (
+            <LabelledButton
+              icon={RefreshCw}
+              onClick={() => void reload()}
+              label={t("db.refreshShort")}
+              title={t("db.refresh")}
+              shortcut={chord("db.refresh")}
+            />
+          )}
+
+          <ToolbarSeparator />
+
+          {/* SQL tables only, and not on a read-only connection — the import writes. */}
+          {engine?.sql && !readOnly && tab.node.kind === "table" && (
+            <LabelledButton
+              icon={FileUp}
+              onClick={() => openModal({ kind: "importCsv", connectionId: tab.connectionId, node: tab.node, tabId: tab.id })}
+              label={t("db.importShort")}
+              title={t("db.importCsv")}
+            />
+          )}
           <LabelledButton
             icon={Download}
             onClick={(e) => {
@@ -958,6 +958,14 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
 
           <ToolbarSeparator />
 
+          {/* On a collection this writes a document, not a row of nulls: there is no column list to
+              make one from, and a schemaless store's "add" has always meant "write one". */}
+          <LabelledButton
+            icon={Plus}
+            onClick={() => (documentStore ? addDocument() : store.addRow(tab.id))}
+            label={documentStore ? t("db.addDocumentShort") : t("db.addRowShort")}
+            title={documentStore ? t("db.addDocument") : t("db.addRow")}
+          />
           {/* What to do with what you changed — only once there is something. Two large disabled
               buttons on every untouched table were the heaviest thing on the bar and said nothing. */}
           {staged > 0 ? (
@@ -1293,6 +1301,17 @@ export function DataTabPanel({ tab }: { tab: DbDataTab }) {
               spellCheck={false}
               className={fieldClass({ size: "sm", className: "flex-1 font-mono placeholder:font-sans" })}
             />
+            {/* Enter already applies it; the button is the same submit for the mouse (user,
+                2026-11-19). `type="submit"`, so it runs exactly what Enter runs. */}
+            <button
+              type="submit"
+              disabled={tab.loading}
+              title={`${t("db.filterApply")} (↵)`}
+              aria-label={t("db.filterApply")}
+              className="flex h-[22px] w-[26px] shrink-0 items-center justify-center rounded border border-[var(--cf-border)] text-[var(--cf-text-muted)] transition-colors hover:border-[var(--cf-accent)] hover:text-[var(--cf-accent)] disabled:opacity-40"
+            >
+              <SendHorizontal size={13} />
+            </button>
             <AiFilterButton
               tab={tab}
               onFilter={(filter) => {

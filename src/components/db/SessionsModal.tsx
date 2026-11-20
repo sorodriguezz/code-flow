@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertTriangle, Loader2, RefreshCw, Square, XCircle } from "lucide-react";
 import { ApiModal, GhostButton } from "../api/ApiModal";
 import { Checkbox } from "../common/Checkbox";
@@ -48,7 +48,11 @@ export function SessionsModal({
 }) {
   const t = useT();
   const connection = useDbStore((s) => s.connections.find((c) => c.id === connectionId));
-  const dialect = connection ? sessionDialect(connection.kind) : null;
+  // Memoised on the engine: `sessionDialect` builds a new object per call, and a new `dialect` every
+  // render made a new `load`, which re-ran the effect below, which loaded, which rendered — the
+  // queries ran back to back and the refresh icon flickered without pause (user report, 2026-11-19).
+  const kind = connection?.kind ?? null;
+  const dialect = useMemo(() => (kind ? sessionDialect(kind) : null), [kind]);
   const [rows, setRows] = useState<SessionRow[]>([]);
   const [columns, setColumns] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -58,9 +62,14 @@ export function SessionsModal({
 
   const ctx = useMemo(() => ({ database, schema: null, max_rows: 1000 }), [database]);
 
-  const load = useCallback(async () => {
-    if (!dialect) return;
-    setLoading(true);
+  /** A read still in flight: a slow server must not get a second one stacked on top every 3 s. */
+  const inFlight = useRef(false);
+  /** `quiet` for the live refresh: the rows update in place and the icon stays still. The spinner
+   *  is for a load somebody asked for (opening, the button, after a cancel). */
+  const load = useCallback(async (quiet = false) => {
+    if (!dialect || inFlight.current) return;
+    inFlight.current = true;
+    if (!quiet) setLoading(true);
     try {
       const result = await dbExecute(connectionId, dialect.list, ctx, crypto.randomUUID());
       const first = result.results[0];
@@ -77,6 +86,7 @@ export function SessionsModal({
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
     } finally {
+      inFlight.current = false;
       setLoading(false);
     }
   }, [connectionId, ctx, dialect]);
@@ -85,7 +95,7 @@ export function SessionsModal({
     void load();
     if (!live) return;
     const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void load();
+      if (document.visibilityState === "visible") void load(true);
     }, REFRESH_MS);
     return () => window.clearInterval(timer);
   }, [load, live]);

@@ -427,7 +427,8 @@ pub async fn dbschema(request: &Request, app: &AppHandle) -> Reply {
         schema: schema.clone(),
         name: schema.clone().or_else(|| database.clone()),
     };
-    let mut diagram = match tokio::time::timeout(READ_LIMIT, session.schema_diagram(&node)).await {
+    let filter = crate::datasource::DiagramFilter::for_schema(&config, node.schema());
+    let mut diagram = match tokio::time::timeout(READ_LIMIT, session.schema_diagram(&node, &filter)).await {
         Ok(Ok(diagram)) => diagram,
         Ok(Err(error)) => return Reply::no(error),
         Err(_) => {

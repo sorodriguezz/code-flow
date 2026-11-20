@@ -1247,7 +1247,23 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
     setChart(false);
   }, [tab.result, tab.activeResult]);
 
+  /** The selection before a ⌘-drag began, which the drag adds its range to. */
+  const kept = useRef<Set<number>>(new Set());
+  /** Press-and-drag over the row numbers, as in the table view (user, 2026-11-19): the grid's
+   * sweep reports the range from the row pressed to the one under the pointer. */
+  const selectRange = (from: number, to: number, additive: boolean) => {
+    const [start, end] = from <= to ? [from, to] : [to, from];
+    setSelected((current) => {
+      if (!additive) kept.current = new Set();
+      else if (kept.current.size === 0) kept.current = new Set(current);
+      const next = new Set(kept.current);
+      for (let index = start; index <= end; index += 1) next.add(index);
+      return next;
+    });
+  };
+
   const selectRow = (row: number, mods: { range: boolean; toggle: boolean }) => {
+    kept.current = new Set();
     setSelected((current) => {
       if (mods.range && anchor.current !== null) {
         const [from, to] = [anchor.current, row].sort((a, b) => a - b);
@@ -1563,6 +1579,7 @@ function ConsoleResults({ tab }: { tab: DbConsoleTab }) {
             }}
             selectedRows={selected}
             onSelectRow={selectRow}
+            onSelectRange={selectRange}
             onSelectAllRows={(on) => {
               anchor.current = null;
               setSelected(on ? new Set(active.rows.map((_, index) => index)) : new Set());

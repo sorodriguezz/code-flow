@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Filter, X } from "lucide-react";
 import { Select } from "../common/Select";
+import { DateField } from "../common/DateField";
 import { Tooltip } from "../common/Tooltip";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { fieldClass, popoverClass } from "../common/recipes";
@@ -57,7 +58,9 @@ export function GraphFilterButton() {
       if (
         boxRef.current &&
         event.target instanceof Node &&
-        !boxRef.current.contains(event.target)
+        !boxRef.current.contains(event.target) &&
+        // The calendar is portalled to the body: a day picked in it is not a click outside.
+        !(event.target instanceof Element && event.target.closest("[data-cf-date-panel]"))
       )
         setOpen(false);
     };
@@ -133,9 +136,24 @@ export function GraphFilterButton() {
               t("graph.filterAuthorPlaceholder"),
             )}
             {field("path", t("graph.filterPath"), "text", "src/api")}
+            {/* The app's own calendar, not the system's `<input type="date">`: that one drew a
+                grey macOS grid that matched nothing else on screen (user, 2026-11-19). */}
             <div className="grid grid-cols-2 gap-2">
-              {field("since", t("graph.filterSince"), "date")}
-              {field("until", t("graph.filterUntil"), "date")}
+              {(["since", "until"] as const).map((key) => (
+                <div key={key} className="flex min-w-0 flex-col gap-1 text-[11.5px] text-[var(--cf-text-muted)]">
+                  {t(key === "since" ? "graph.filterSince" : "graph.filterUntil")}
+                  <DateField
+                    size="sm"
+                    clearable
+                    value={draft[key]}
+                    onChange={(value) => setDraft((current) => ({ ...current, [key]: value }))}
+                    min={key === "until" && draft.since ? draft.since : undefined}
+                    max={key === "since" && draft.until ? draft.until : undefined}
+                    ariaLabel={t(key === "since" ? "graph.filterSince" : "graph.filterUntil")}
+                    placeholder="—"
+                  />
+                </div>
+              ))}
             </div>
             <div className="flex items-center justify-end gap-2 pt-1">
               <button

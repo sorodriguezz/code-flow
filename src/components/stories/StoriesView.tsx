@@ -15,6 +15,7 @@ import { StoriesHelpModal } from "./StoriesHelpModal";
 import { CARD } from "../api/panelChrome";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { CollapsedPanelBar, useCollapsiblePanel } from "../common/CollapsedPanelBar";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useStoriesStore } from "../../state/storiesStore";
 import { useUiStore } from "../../state/uiStore";
@@ -63,6 +64,7 @@ export function StoriesView() {
   const selectedId = useStoriesStore((s) => s.selectedId);
   const targetOpen = useStoriesStore((s) => s.targetOpen);
   const listWidth = useLayoutStore((s) => s.sizes.storiesListWidth);
+  const listFold = useCollapsiblePanel("storiesListWidth");
   const railWidth = useLayoutStore((s) => s.sizes.storiesRailWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
@@ -163,15 +165,22 @@ export function StoriesView() {
           <WorkItemReviewView />
         ) : (
           <div className="flex min-h-0 flex-1 overflow-hidden">
-            <StoryBatchList width={listWidth} onNewBatch={() => setComposing(true)} />
-            <ResizeHandle
-              axis="x"
-              value={listWidth}
-              min={LIST_MIN}
-              max={LIST_MAX}
-              onChange={(value) => setSize("storiesListWidth", value)}
-              onCommit={(value) => commitSize("storiesListWidth", value)}
-            />
+            {listFold.collapsed ? (
+              <CollapsedPanelBar label={t("stories.batches")} title={t("common.expandPanel")} onExpand={listFold.expand} />
+            ) : (
+              <>
+                <StoryBatchList width={listWidth} onNewBatch={() => setComposing(true)} />
+                <ResizeHandle
+                  axis="x"
+                  value={listWidth}
+                  min={LIST_MIN}
+                  max={LIST_MAX}
+                  onChange={(value) => setSize("storiesListWidth", value)}
+                  onCommit={(value) => commitSize("storiesListWidth", value)}
+                  {...listFold.handleProps}
+                />
+              </>
+            )}
 
             {/* Keyed on the batch: every bit of local state in the detail pane — which card is open,
                 which criterion is being edited — belongs to one batch and must not survive a switch. */}

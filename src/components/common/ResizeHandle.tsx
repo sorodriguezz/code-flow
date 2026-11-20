@@ -44,6 +44,12 @@ interface ResizeHandleProps {
    * it): the grip is centred on the control instead of peeking out of one end of it.
    */
   gripOffset?: number;
+  /**
+   * Dragged this far past `min`, the panel folds instead of stopping at its minimum: `onCollapse`
+   * is called and the drag ends. Omit for a panel that only resizes.
+   */
+  collapseBeyond?: number;
+  onCollapse?: () => void;
 }
 
 export function ResizeHandle({
@@ -58,6 +64,8 @@ export function ResizeHandle({
   invert,
   quiet,
   gripOffset = 0,
+  collapseBeyond,
+  onCollapse,
 }: ResizeHandleProps) {
   const valueRef = useRef(value);
   valueRef.current = value;
@@ -115,7 +123,22 @@ export function ResizeHandle({
     if (dragStart.current) {
       let delta = posOf(e) - dragStart.current.pos;
       if (invert) delta = -delta;
-      value = Math.min(max, Math.max(min, dragStart.current.value + delta));
+      const raw = dragStart.current.value + delta;
+      if (onCollapse && collapseBeyond !== undefined && raw < min - collapseBeyond) {
+        // Past the fold point: the drag is over and the panel folds. The width it had stays
+        // committed, so unfolding restores a usable size rather than the minimum.
+        cancelAnimationFrame(frame.current);
+        frame.current = 0;
+        pending.current = null;
+        dragStart.current = null;
+        e.currentTarget.releasePointerCapture?.(e.pointerId);
+        delete document.documentElement.dataset.cfResizing;
+        onDragChange?.(false);
+        setGlow(null);
+        onCollapse();
+        return;
+      }
+      value = Math.min(max, Math.max(min, raw));
     }
     pending.current = { glow: glowOf(e), value };
     if (!frame.current) frame.current = requestAnimationFrame(flush);

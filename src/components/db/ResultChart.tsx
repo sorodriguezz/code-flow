@@ -1,8 +1,17 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { Check, ChevronDown, Search } from "lucide-react";
 import { Segmented } from "../common/Segmented";
-import { Select } from "../common/Select";
+import { fieldClass } from "../common/recipes";
 import { useT } from "../../state/languageStore";
-import { buildChart, defaultCategoryColumn, niceTicks, numericColumns } from "../../lib/db/chartData";
+import {
+  buildChart,
+  COUNT_ROWS,
+  defaultCategoryColumn,
+  defaultValueColumns,
+  niceTicks,
+  numericColumns,
+} from "../../lib/db/chartData";
 import type { DbColumn } from "../../types/database";
 
 /** Series colours, from the theme so a chart reads in light and dark alike. */
@@ -27,16 +36,20 @@ export function ResultChart({ columns, rows }: { columns: DbColumn[]; rows: (str
   const numeric = useMemo(() => numericColumns(columns, rows), [columns, rows]);
   const [kind, setKind] = useState<Kind>("bar");
   const [x, setX] = useState(() => defaultCategoryColumn(columns, rows));
-  const [ys, setYs] = useState<number[]>(() => numeric.filter((index) => index !== x).slice(0, 1));
+  const [ys, setYs] = useState<number[]>(() => defaultValueColumns(columns, rows, x));
 
   // A new result is new columns: the picks made against the last one may name nothing here.
   useEffect(() => {
     const nextX = defaultCategoryColumn(columns, rows);
     setX(nextX);
-    setYs(numericColumns(columns, rows).filter((index) => index !== nextX).slice(0, 1));
+    setYs(defaultValueColumns(columns, rows, nextX));
   }, [columns, rows]);
 
-  const data = useMemo(() => buildChart(rows, x, ys, columns), [rows, x, ys, columns]);
+  const countLabel = t("db.chart.count");
+  const data = useMemo(() => {
+    const built = buildChart(rows, x, ys, columns);
+    return { ...built, series: built.series.map((series, at) => (ys[at] === COUNT_ROWS ? { ...series, name: countLabel } : series)) };
+  }, [rows, x, ys, columns, countLabel]);
 
   const box = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ width: 600, height: 240 });
@@ -67,46 +80,44 @@ export function ResultChart({ columns, rows }: { columns: DbColumn[]; rows: (str
             { value: "pie", label: t("db.chart.pie") },
           ]}
         />
+        {/* Both axes are searchable dropdowns: a result of a hundred fields used to lay every
+            numeric one out as a chip in this bar, which wrapped into a wall (user, 2026-11-19). */}
         <span>{t("db.chart.x")}</span>
-        <div className="w-[140px]">
-          <Select
-            size="sm"
-            ariaLabel={t("db.chart.x")}
-            value={String(x)}
-            onChange={(value) => setX(Number(value))}
-            options={columns.map((column, index) => ({ value: String(index), label: column.name }))}
-          />
-        </div>
+        <ColumnPicker
+          label={columns[x]?.name ?? ""}
+          options={columns.map((column, index) => ({ value: index, label: column.name }))}
+          selected={[x]}
+          onToggle={(index) => setX(index)}
+          single
+        />
         <span>{t("db.chart.y")}</span>
-        {numeric
-          .filter((index) => index !== x)
-          .map((index) => {
-            const at = ys.indexOf(index);
-            return (
-              <button
-                key={index}
-                type="button"
-                onClick={() => toggleY(index)}
-                className={`flex items-center gap-1 rounded-md border px-1.5 py-[1px] ${
-                  at >= 0
-                    ? "border-[var(--cf-border-strong,var(--cf-border))] text-[var(--cf-text)]"
-                    : "border-transparent hover:bg-[var(--cf-hover)]"
-                }`}
-              >
-                <span
-                  className="h-2 w-2 rounded-sm"
-                  style={{ background: at >= 0 ? PALETTE[at % PALETTE.length] : "var(--cf-border)" }}
-                />
-                {columns[index].name}
-              </button>
-            );
-          })}
+        <ColumnPicker
+          label={
+            ys.length === 0
+              ? t("db.chart.none")
+              : ys.length === 1
+                ? ys[0] === COUNT_ROWS
+                  ? t("db.chart.count")
+                  : (columns[ys[0]]?.name ?? "")
+                : t("db.chart.seriesN", { n: String(ys.length) })
+          }
+          options={[
+            { value: COUNT_ROWS, label: t("db.chart.count") },
+            ...numeric.filter((index) => index !== x).map((index) => ({ value: index, label: columns[index].name })),
+          ]}
+          selected={ys}
+          onToggle={toggleY}
+          swatch={(value) => {
+            const at = ys.indexOf(value);
+            return at >= 0 ? PALETTE[at % PALETTE.length] : null;
+          }}
+        />
         {data.clipped && <span className="text-[var(--cf-warning)]">{t("db.chart.clipped", { n: "200" })}</span>}
       </div>
       <div ref={box} className="relative min-h-0 flex-1 overflow-hidden">
         {ys.length === 0 || data.categories.length === 0 ? (
           <p className="flex h-full items-center justify-center text-[12px] text-[var(--cf-text-muted)]">
-            {numeric.length === 0 ? t("db.chart.noNumbers") : t("db.chart.pickY")}
+            {t("db.chart.pickY")}
           </p>
         ) : kind === "pie" ? (
           <Pie data={data} width={size.width} height={size.height} />
@@ -275,4 +286,127 @@ function formatTick(value: number): string {
   if (abs >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
   if (abs >= 1e4) return `${(value / 1e3).toFixed(0)}k`;
   return String(value);
+}
+
+/**
+ * A column dropdown with a search box: one pick for X, several for Y (`single` off — the list stays
+ * open and each click toggles). Portalled, so the chart's own clipping never cuts it short.
+ */
+function ColumnPicker({
+  label,
+  options,
+  selected,
+  onToggle,
+  single = false,
+  swatch,
+}: {
+  label: string;
+  options: { value: number; label: string }[];
+  selected: number[];
+  onToggle: (value: number) => void;
+  single?: boolean;
+  swatch?: (value: number) => string | null;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (rect) setPos({ top: rect.bottom + 4, left: Math.min(rect.left, window.innerWidth - 268) });
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (!popRef.current?.contains(target) && !buttonRef.current?.contains(target)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const needle = query.trim().toLowerCase();
+  const filtered = needle ? options.filter((option) => option.label.toLowerCase().includes(needle)) : options;
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={() => {
+          setQuery("");
+          setOpen((value) => !value);
+        }}
+        className="flex h-[22px] max-w-[220px] items-center gap-1 rounded-md border border-[var(--cf-border)] px-1.5 text-[11px] text-[var(--cf-text)] hover:border-[var(--cf-accent)]"
+      >
+        <span className="min-w-0 truncate">{label}</span>
+        <ChevronDown size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
+      </button>
+      {open &&
+        createPortal(
+          <div
+            ref={popRef}
+            style={{ top: pos?.top ?? 0, left: pos?.left ?? 0, visibility: pos ? "visible" : "hidden" }}
+            className="fixed z-[9999] flex max-h-[min(360px,60vh)] w-[260px] flex-col rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+          >
+            <div className="relative shrink-0 p-1.5">
+              <Search size={12} className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]" />
+              <input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && filtered.length > 0) {
+                    onToggle(filtered[0].value);
+                    if (single) setOpen(false);
+                  }
+                }}
+                placeholder={t("db.chart.searchColumns")}
+                spellCheck={false}
+                className={fieldClass({ size: "sm", className: "w-full pl-6" })}
+              />
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto p-1 pt-0">
+              {filtered.map((option) => {
+                const on = selected.includes(option.value);
+                const color = swatch?.(option.value) ?? null;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => {
+                      onToggle(option.value);
+                      if (single) setOpen(false);
+                    }}
+                    className={`flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-[11.5px] hover:bg-[var(--cf-hover)] ${
+                      on ? "text-[var(--cf-text)]" : "text-[var(--cf-text-muted)]"
+                    }`}
+                  >
+                    {swatch ? (
+                      <span className="h-2 w-2 shrink-0 rounded-sm" style={{ background: color ?? "var(--cf-border)" }} />
+                    ) : (
+                      <Check size={11} className={`shrink-0 ${on ? "text-[var(--cf-accent)]" : "opacity-0"}`} />
+                    )}
+                    <span className="min-w-0 truncate">{option.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>,
+          document.body,
+        )}
+    </>
+  );
 }

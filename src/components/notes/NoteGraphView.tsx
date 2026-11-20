@@ -675,8 +675,8 @@ function GraphCanvas({
           {groups.map((group) => (
             <li key={group.id} className="flex items-center gap-1.5 text-[var(--cf-text-muted)]">
               <span className="size-2 shrink-0 rounded-full" style={{ background: group.color || "var(--cf-accent)" }} />
-              <span className="max-w-[180px] truncate text-[var(--cf-text)]">{group.name}</span>
-              <span className="tabular-nums text-[var(--cf-text-faint)]">{group.count}</span>
+              <span className="max-w-[180px] flex-1 truncate text-[var(--cf-text)]">{group.name}</span>
+              <span className="ml-3 shrink-0 text-right tabular-nums text-[var(--cf-text-faint)]">{group.count}</span>
             </li>
           ))}
         </ul>

@@ -827,15 +827,18 @@ export function ConnectionModal({
                 >
                   <Plus size={13} />
                 </IconButton>
-                <IconButton onClick={() => void remove()} title={t("db.removeConnection")}>
-                  <Minus size={13} />
-                </IconButton>
+                {/* Create, then pass on, then remove — the one that destroys last and set apart, so
+                    it isn't the button next to «+» a slipped click lands on (user, 2026-11-19). */}
                 <IconButton onClick={() => void clone()} title={t("db.duplicate")}>
                   <Copy size={12} />
                 </IconButton>
                 {/* A draft has nothing saved to send yet. */}
                 <IconButton onClick={() => setSharing(true)} title={t("db.share.title")} disabled={!row}>
                   <Share2 size={12} />
+                </IconButton>
+                <span aria-hidden className="mx-0.5 h-3.5 w-px bg-[var(--cf-border)]" />
+                <IconButton onClick={() => void remove()} title={t("db.removeConnection")}>
+                  <Minus size={13} />
                 </IconButton>
                 {/* No ordering controls here. This list is flat and the estate is not — since
                     connections were filed into groups, a pair of arrows acting on a flat list could

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ExternalLink, Maximize2 } from "lucide-react";
+import { ArrowDown, ArrowUp, Copy, ExternalLink, Eye, EyeOff, Maximize2, Pin, PinOff } from "lucide-react";
 import {
   CELL_ACTION,
   CellEditor,
@@ -8,6 +8,15 @@ import {
   referenceLabel,
   type ResultGridProps,
 } from "./ResultGrid";
+import { ContextMenu, type MenuItem } from "../common/ContextMenu";
+import {
+  arrangeColumns,
+  EMPTY_LAYOUT,
+  moveColumn,
+  toggleHidden,
+  togglePinned,
+  type ColumnLayout,
+} from "../../lib/db/gridColumns";
 import { useDbModalStore } from "../../state/dbModalStore";
 import { fieldFacts, recordModel } from "../../lib/db/engineModel";
 import { useT } from "../../state/languageStore";
@@ -62,6 +71,8 @@ export function RecordGrid({
   onFieldWidth,
   recordWidth: recordWidthProp,
   onRecordWidth,
+  columnLayout,
+  onColumnLayout,
 }: ResultGridProps) {
   const t = useT();
   const model = recordModel(engine);
@@ -80,6 +91,17 @@ export function RecordGrid({
   const applyRecordWidth = onRecordWidth ?? setLocalRecordWidth;
   const [editing, setEditing] = useState<{ row: number; column: string } | null>(null);
   const openModal = useDbModalStore((s) => s.openDbModal);
+  // The same column layout the grid keeps (hidden, pinned, moved), so a field hidden or moved in
+  // one view is hidden or moved in the other — read down the page here: pinned fields go to the top.
+  const [localLayout, setLocalLayout] = useState<ColumnLayout>(EMPTY_LAYOUT);
+  const layout = columnLayout ?? localLayout;
+  const applyLayout = (next: ColumnLayout) => (onColumnLayout ? onColumnLayout(next) : setLocalLayout(next));
+  const [fieldMenu, setFieldMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
+  const names = useMemo(() => columns.map((column) => column.name), [columns]);
+  const fieldOrder = useMemo(() => {
+    const { pinned, rest } = arrangeColumns(names, layout);
+    return [...pinned, ...rest];
+  }, [names, layout]);
   const sweep = useRecordSweep({ scrollRef, fieldWidth, recordWidth, count: rows.length, onSelectRange });
 
   useEffect(() => {
@@ -127,6 +149,48 @@ export function RecordGrid({
     if (row >= rows.length) onEditInserted?.({ row: row - rows.length, column, value: raw });
     else onEdit?.({ row, column, value: raw });
     setEditing(null);
+  };
+
+  /** Right-click on a field name: the grid's column menu, turned on its side (user report,
+   * 2026-11-19: in «Fichas» the right-click lost «copiar nombre» and the rest). */
+  const fieldMenuFor = (columnIndex: number): MenuItem[] => {
+    const name = columns[columnIndex].name;
+    const isPinned = layout.pinned.includes(name);
+    const hiddenCount = layout.hidden.filter((entry) => names.includes(entry)).length;
+    return [
+      { label: t("db.grid.hideColumn"), icon: EyeOff, onClick: () => applyLayout(toggleHidden(layout, name)) },
+      {
+        label: isPinned ? t("db.grid.unpinColumn") : t("db.grid.pinTop"),
+        icon: isPinned ? PinOff : Pin,
+        onClick: () => applyLayout(togglePinned(layout, name)),
+      },
+      ...(!isPinned
+        ? [
+            { label: t("db.grid.moveUp"), icon: ArrowUp, onClick: () => applyLayout(moveColumn(names, layout, name, -1)) },
+            { label: t("db.grid.moveDown"), icon: ArrowDown, onClick: () => applyLayout(moveColumn(names, layout, name, 1)) },
+          ]
+        : []),
+      {
+        label: t("db.grid.showColumns"),
+        icon: Eye,
+        separated: true,
+        disabled: hiddenCount === 0,
+        onClick: () => {},
+        children:
+          hiddenCount === 0
+            ? undefined
+            : [
+                { label: t("db.grid.showAll", { n: String(hiddenCount) }), onClick: () => applyLayout({ ...layout, hidden: [] }) },
+                ...layout.hidden
+                  .filter((entry) => names.includes(entry))
+                  .map((entry) => ({ label: entry, onClick: () => applyLayout(toggleHidden(layout, entry)) })),
+              ],
+      },
+      ...(layout.order.length > 0 || layout.pinned.length > 0
+        ? [{ label: t("db.grid.resetLayout"), onClick: () => applyLayout(EMPTY_LAYOUT) }]
+        : []),
+      { label: t("db.copyName"), icon: Copy, separated: true, onClick: () => void navigator.clipboard.writeText(name) },
+    ];
   };
 
   /** The gap standing in for the records scrolled off to the left, so the visible ones land in the
@@ -212,13 +276,19 @@ export function RecordGrid({
 
         {/* One flow row per field. The name cell is `sticky left-0`, which is what keeps the labels
             on screen however far right the records are scrolled. */}
-        {columns.map((column, columnIndex) => {
+        {fieldOrder.map((columnIndex) => {
+          const column = columns[columnIndex];
           const facts = fieldFacts(model, column, { primaryKeys, foreignKeys });
           return (
           <div key={`${column.name}-${columnIndex}`} className="flex" style={{ height: FIELD_HEIGHT }}>
             <div
               className="sticky left-0 z-10 flex shrink-0 items-center gap-1 border-b border-r border-[var(--cf-border)] bg-[var(--cf-surface)] px-2"
               style={{ width: fieldWidth }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setFieldMenu({ x: e.clientX, y: e.clientY, items: fieldMenuFor(columnIndex) });
+              }}
             >
               <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--cf-text)]">
                 {column.name}
@@ -358,6 +428,9 @@ export function RecordGrid({
         {/* Room past the last field for the selection bar — see `bottomInset` in `ResultGrid`. */}
         {bottomInset > 0 && <div aria-hidden style={{ height: bottomInset }} />}
       </div>
+      {fieldMenu && (
+        <ContextMenu x={fieldMenu.x} y={fieldMenu.y} items={fieldMenu.items} onClose={() => setFieldMenu(null)} />
+      )}
     </div>
   );
 }

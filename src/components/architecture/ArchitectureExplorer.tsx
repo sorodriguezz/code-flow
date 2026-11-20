@@ -9,7 +9,7 @@
  * «Mover a» in its menu. The drag is pointer-driven: Tauri's webview swallows HTML5 `dragstart`.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronRight, Copy, FilePlus2, Folder, FolderInput, FolderPlus, GitBranch, MoreVertical, Network, PanelLeftClose, Pencil, Pin, PinOff, Plus, Search, Trash2, Upload, X } from "lucide-react";
+import { ChevronRight, Copy, FilePlus2, Folder, FolderInput, FolderPlus, GitBranch, MoreVertical, Network, Pencil, Pin, PinOff, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { repoMenuItems } from "../../lib/repoMenu";
 import { DRAG_THRESHOLD, setDragCursor } from "../../lib/pointerDrag";
 import { folderSubtree, useArchitectureStore, type ArchFolder, type ArchItem } from "../../state/architectureStore";
@@ -35,7 +35,7 @@ type Dragged = { kind: "doc" | "folder"; id: string };
 const ROOT = "";
 const INDENT = 14;
 
-export function ArchitectureExplorer({ onClose }: { onClose: () => void }) {
+export function ArchitectureExplorer() {
   const t = useT();
   const items = useArchitectureStore((s) => s.items);
   const folders = useArchitectureStore((s) => s.folders);
@@ -304,9 +304,6 @@ export function ArchitectureExplorer({ onClose }: { onClose: () => void }) {
         </button>
         <button type="button" className={iconButtonClass({ size: "sm" })} title={t("arch.new")} aria-label={t("arch.new")} onClick={newMenu} data-tour="arch-new" disabled={!workspaceId}>
           <Plus size={15} />
-        </button>
-        <button type="button" className={iconButtonClass({ size: "sm" })} title={t("arch.documents.hide")} aria-label={t("arch.documents.hide")} onClick={onClose}>
-          <PanelLeftClose size={15} />
         </button>
       </div>
 

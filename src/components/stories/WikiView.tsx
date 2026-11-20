@@ -25,6 +25,7 @@ import { MARKDOWN_TOOL_CLASS, MarkdownEditor } from "../common/MarkdownEditor";
 import { AiGlyph } from "../common/AiGlyph";
 import { DocAiPanel } from "./DocAiPanel";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { CollapsedPanelBar, useCollapsiblePanel } from "../common/CollapsedPanelBar";
 import { Select } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
 import { ThinkingOrb } from "../common/ThinkingOrb";
@@ -1162,6 +1163,8 @@ export function WikiView() {
     if (useDocsStore.getState().pages.find((p) => p.id === selectedId)?.status !== "error") setAiOpen(false);
   }, [myRun, selectedId]);
 
+  const listFold = useCollapsiblePanel("wikiListWidth");
+
   // Mod+S, because this is now a field you save rather than one that saves itself. Bound while
   // this view is mounted — it unmounts when the section switches tab, so nothing else on screen
   // has to be asked whether the chord was meant for it.
@@ -1178,6 +1181,10 @@ export function WikiView() {
 
   return (
     <div className="flex min-h-0 flex-1 overflow-hidden bg-[var(--cf-surface)]">
+      {listFold.collapsed ? (
+        <CollapsedPanelBar label={t("docs.documents")} title={t("common.expandPanel")} onExpand={listFold.expand} />
+      ) : (
+      <>
       <DocumentList width={listWidth} />
       {/* Outside the branch below on purpose: the list is there whether or not a page is open, so
           its seam has to be draggable in the empty state too — that is the state a workspace with
@@ -1189,7 +1196,10 @@ export function WikiView() {
         max={LIST_MAX}
         onChange={(value) => setSize("wikiListWidth", value)}
         onCommit={(value) => commitSize("wikiListWidth", value)}
+        {...listFold.handleProps}
       />
+      </>
+      )}
 
       {!page ? (
         <div className="flex min-h-0 flex-1 items-center justify-center">

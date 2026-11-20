@@ -43,6 +43,7 @@ import {
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { CollapsedPanelBar, useCollapsiblePanel } from "../common/CollapsedPanelBar";
 import { Segmented } from "../common/Segmented";
 import { iconButtonClass } from "../common/Button";
 import {
@@ -1997,6 +1998,7 @@ export function DbExplorer() {
   const t = useT();
   const chord = useShortcutChord();
   const width = useLayoutStore((s) => s.sizes.dbSidebarWidth);
+  const fold = useCollapsiblePanel("dbSidebarWidth");
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   const connections = useDbStore((s) => s.connections);
@@ -2068,6 +2070,19 @@ export function DbExplorer() {
    * only place to reach, now that it is gone. */
   const [treeMenu, setTreeMenu] = useState<{ x: number; y: number } | null>(null);
 
+  // Folded: a thin bar the height of the panel, the whole of it one button that unfolds the explorer
+  // at the suggested width (user, 2026-11-19). Dragging the seam well past the minimum folds it.
+  if (fold.collapsed) {
+    return (
+      <CollapsedPanelBar
+        tour="db-explorer"
+        label={t("db.explorer")}
+        title={t("db.explorerExpand")}
+        onExpand={fold.expand}
+      />
+    );
+  }
+
   return (
     <>
       <div
@@ -2101,16 +2116,6 @@ export function DbExplorer() {
             />
           </div>
           <div data-tour="db-explorer-actions" className="flex shrink-0 items-center gap-0.5">
-            {/* Any object on any connected server, by name — the tree's own filter only sees what
-                is already expanded. */}
-            <ToolbarButton
-              size="sm"
-              onClick={() => openModal({ kind: "objectSearch" })}
-              title={t("db.objectSearch")}
-              shortcut={chord("db.objectSearch")}
-            >
-              <Search size={15} />
-            </ToolbarButton>
             {/* The whole set, not one connection: the way into "set my databases up" that doesn't
                 require having a connection to right-click first. Arranging the order is not in
                 there — that is this tree's own job, by dragging a row. */}
@@ -2259,6 +2264,7 @@ export function DbExplorer() {
         max={WIDTH_MAX}
         onChange={(value) => setSize("dbSidebarWidth", value)}
         onCommit={(value) => commitSize("dbSidebarWidth", value)}
+        {...fold.handleProps}
       />
 
       {treeMenu && (

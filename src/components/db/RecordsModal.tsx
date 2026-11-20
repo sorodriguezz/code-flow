@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, ChevronLeft, ChevronRight, Columns3, Copy, LayoutGrid, Rows3, Search, X } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Check, ChevronDown, ChevronUp, Copy, Rows3, Search, X } from "lucide-react";
 import { ApiModal, GhostButton } from "../api/ApiModal";
-import { Segmented } from "../common/Segmented";
 import { fieldClass } from "../common/recipes";
 import { IdentityBadge } from "./dbChrome";
 import { referenceLabel } from "./ResultGrid";
 import { fieldFacts, recordModel, type EngineRecordModel } from "../../lib/db/engineModel";
+import { useFrameThrottle } from "../../lib/frameThrottle";
 import { useT } from "../../state/languageStore";
 import type { DbColumn, DbForeignKey, DbKind } from "../../types/database";
 
@@ -18,63 +18,87 @@ export interface RecordsModalData {
   foreignKeys?: Map<string, DbForeignKey>;
 }
 
-type Mode = "card" | "compare";
+/** Width of the pinned field column and of each record column, in px. Fixed so the record columns
+ * can be windowed: only the ones in view are rendered. */
+const FIELD_WIDTH = 240;
+const RECORD_WIDTH = 240;
+/** How wide a record column may grow when there are few rows and room to spare. */
+const RECORD_WIDTH_MAX = 720;
+/** A value taller than this many lines is shown folded, with «ver todo» to open it in place. */
+const FOLD_LINES = 8;
+/** Record columns rendered either side of the viewport, so a fast sideways scroll doesn't flash gaps. */
+const OVERSCAN = 3;
 
 /**
- * Rows read down instead of across — redone for the tables this is actually opened on: forty, eighty
- * columns, several rows selected. The stacked list it replaced was one long column of `name: value`
- * lines per row, a scroll of thousands of pixels with nothing to find a field by (user report,
- * 2026-11-18). Now:
+ * The selected rows read down instead of across: field names pinned on the left, one column per
+ * row, and a search over field names *and* values. The marks on fields whose values differ were
+ * taken out too (user, 2026-11-19): they did not say much. The «ocultar
+ * NULL» and «solo diferencias» switches were taken out (user, 2026-11-19): the search is the filter.
  *
- * - **Ficha** — one row at a time, its fields laid out in as many columns as the window holds, with
- *   ← → (and the arrows) to walk the selection. Reading a record is looking, not scrolling.
- * - **Comparar** — the selected rows side by side, one column each, the field names pinned on the
- *   left; a field whose values differ is marked, and «solo diferencias» leaves only those.
- * - A search over field names *and* values, and «ocultar NULL», so eighty fields come down to the
- *   few the user came for.
+ * The «Ficha» view (one row at a time, its fields as cards) is gone: it showed what a single column
+ * here shows, in more space, and never two rows at once (user, 2026-11-19).
  *
- * The row's own number stays on everything: a record read here is worth much less if you can't find
- * the row it came from back in the grid.
+ * **Windowed sideways.** Five hundred selected rows by fifty fields were 25 000 table cells, all
+ * mounted and all re-rendered on every keystroke in the search box — the modal froze. Only the record
+ * columns in view (plus `OVERSCAN`) are rendered now, the way `RecordGrid` does it.
+ *
+ * **Opaque hover.** The hover tint is a see-through colour; laid on the pinned field cell it let the
+ * values scrolled under that cell show through, the hovered row's label and values drawn on top of
+ * each other. The pinned cell mixes the tint into its own surface, so it stays solid. The copy button
+ * shows for the cell under the pointer, not for the whole row.
  */
 export function RecordsModal({ modal, onClose }: { modal: RecordsModalData; onClose: () => void }) {
   const t = useT();
   const model = recordModel(modal.engine);
-  const many = modal.records.length > 1;
-  const [mode, setMode] = useState<Mode>("card");
-  const [at, setAt] = useState(0);
   const [query, setQuery] = useState("");
-  const [hideNull, setHideNull] = useState(false);
-  const [onlyDiff, setOnlyDiff] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
-  const record = modal.records[Math.min(at, modal.records.length - 1)];
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollLeft, setScrollLeft] = useState(0);
+  const onScrollLeft = useFrameThrottle(setScrollLeft);
+  const [viewportWidth, setViewportWidth] = useState(1200);
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const observer = new ResizeObserver(() => setViewportWidth(element.clientWidth));
+    observer.observe(element);
+    setViewportWidth(element.clientWidth);
+    return () => observer.disconnect();
+  }, []);
 
   const facts = useMemo(
     () => modal.columns.map((column) => fieldFacts(model, column, { primaryKeys: modal.primaryKeys, foreignKeys: modal.foreignKeys })),
     [modal.columns, model, modal.primaryKeys, modal.foreignKeys],
   );
-  /** Fields whose value is not the same in every selected row — what «comparar» is for. */
-  const differs = useMemo(
-    () => modal.columns.map((_, index) => modal.records.some((r) => (r.values[index] ?? null) !== (modal.records[0].values[index] ?? null))),
-    [modal.columns, modal.records],
-  );
 
-  /** The fields shown, as indexes into `columns`, after the search and the switches. */
+  /** The fields shown, as indexes into `columns`, after the search. */
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    const rows = mode === "card" ? [record] : modal.records;
     return modal.columns
       .map((_, index) => index)
       .filter((index) => {
-        const values = rows.map((r) => r.values[index] ?? null);
-        if (hideNull && values.every((value) => value === null)) return false;
-        if (mode === "compare" && onlyDiff && !differs[index]) return false;
         if (!needle) return true;
         return (
           modal.columns[index].name.toLowerCase().includes(needle) ||
-          values.some((value) => value !== null && value.toLowerCase().includes(needle))
+          modal.records.some((r) => {
+            const value = r.values[index] ?? null;
+            return value !== null && value.toLowerCase().includes(needle);
+          })
         );
       });
-  }, [query, hideNull, onlyDiff, mode, record, modal.columns, modal.records, differs]);
+  }, [query, modal.columns, modal.records]);
+
+  const total = modal.records.length;
+  // Few rows, wide window: the columns share the room instead of leaving it empty — one record's
+  // long JSON read in a 240px strip beside a screen of nothing (user, 2026-11-19).
+  const recordWidth = Math.round(
+    Math.min(RECORD_WIDTH_MAX, Math.max(RECORD_WIDTH, (viewportWidth - FIELD_WIDTH) / Math.max(1, total))),
+  );
+  const first = Math.max(0, Math.floor(scrollLeft / recordWidth) - OVERSCAN);
+  const last = Math.min(total, Math.ceil((scrollLeft + viewportWidth) / recordWidth) + OVERSCAN);
+  const shown = modal.records.slice(first, last);
+  const leadingGap = first * recordWidth;
+  const trailingGap = Math.max(0, total - last) * recordWidth;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -82,23 +106,22 @@ export function RecordsModal({ modal, onClose }: { modal: RecordsModalData; onCl
       if (e.key === "/" && !typing) {
         e.preventDefault();
         searchRef.current?.focus();
-      } else if (mode === "card" && !typing && (e.key === "ArrowRight" || e.key === "ArrowLeft")) {
-        e.preventDefault();
-        setAt((current) => {
-          const next = current + (e.key === "ArrowRight" ? 1 : -1);
-          return Math.max(0, Math.min(modal.records.length - 1, next));
-        });
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [mode, modal.records.length]);
+  }, []);
 
-  const asText = (rows: typeof modal.records) =>
-    rows
-      .map((r) => modal.columns.map((column, index) => `${column.name}: ${r.values[index] ?? "NULL"}`).join("\n"))
-      .join("\n\n");
-  const copyShown = () => void navigator.clipboard.writeText(asText(mode === "card" ? [record] : modal.records));
+  const copyAll = () =>
+    void navigator.clipboard.writeText(
+      modal.records
+        .map((r) => modal.columns.map((column, index) => `${column.name}: ${r.values[index] ?? "NULL"}`).join("\n"))
+        .join("\n\n"),
+    );
+
+  const headerCell =
+    "flex shrink-0 items-center border-b border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]";
+  const gapHeader = "shrink-0 border-b border-[var(--cf-border)] bg-[var(--cf-surface-raised)]";
 
   return (
     <ApiModal
@@ -112,30 +135,16 @@ export function RecordsModal({ modal, onClose }: { modal: RecordsModalData; onCl
       onClose={onClose}
       footer={
         <div className="flex w-full items-center justify-between gap-2">
-          <span className="text-[11px] text-[var(--cf-text-faint)]">
-            {mode === "card" && many ? t("db.records.keysHint") : t("db.records.searchHint")}
-          </span>
+          <span className="text-[11px] text-[var(--cf-text-faint)]">{t("db.records.searchHint")}</span>
           <span className="flex items-center gap-2">
-            <GhostButton onClick={copyShown}>{mode === "card" ? t("db.records.copyRecord") : t("db.copy")}</GhostButton>
+            <GhostButton onClick={copyAll}>{t("db.copy")}</GhostButton>
             <GhostButton onClick={onClose}>{t("common.close")}</GhostButton>
           </span>
         </div>
       }
     >
-      {/* The toolbar: how to look, what to look for, which row. */}
+      {/* The toolbar: what to look for, and which fields to leave out. */}
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-4 py-2.5">
-        {many && (
-          <Segmented<Mode>
-            layoutId="db-records-mode"
-            size="sm"
-            value={mode}
-            onChange={setMode}
-            options={[
-              { value: "card", label: t("db.records.card"), icon: LayoutGrid },
-              { value: "compare", label: t("db.records.compare"), icon: Columns3 },
-            ]}
-          />
-        )}
         <div className="relative min-w-[200px] flex-1">
           <Search size={13} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]" />
           <input
@@ -163,78 +172,60 @@ export function RecordsModal({ modal, onClose }: { modal: RecordsModalData; onCl
             </button>
           )}
         </div>
-        <Toggle on={hideNull} onChange={setHideNull} label={t("db.records.hideNull")} />
-        {mode === "compare" && <Toggle on={onlyDiff} onChange={setOnlyDiff} label={t("db.records.onlyDiff")} />}
         <span className="text-[11px] tabular-nums text-[var(--cf-text-faint)]">
           {t("db.records.shown", { n: String(visible.length), total: String(modal.columns.length) })}
         </span>
-        {mode === "card" && many && (
-          <span className="ml-auto flex items-center gap-1">
-            <NavButton disabled={at === 0} onClick={() => setAt(at - 1)} label={t("db.records.previous")}>
-              <ChevronLeft size={14} />
-            </NavButton>
-            <span className="min-w-[88px] text-center text-[12px] font-medium tabular-nums text-[var(--cf-text)]">
-              {t(model.itemLabel, { n: String(record.index + 1) })}
-              <span className="ml-1 font-normal text-[var(--cf-text-faint)]">
-                ({at + 1}/{modal.records.length})
-              </span>
-            </span>
-            <NavButton disabled={at >= modal.records.length - 1} onClick={() => setAt(at + 1)} label={t("db.records.next")}>
-              <ChevronRight size={14} />
-            </NavButton>
-          </span>
-        )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div
+        ref={scrollRef}
+        className="isolate min-h-0 flex-1 overflow-auto text-[12px]"
+        // Coalesced to one write per painted frame: `scrollLeft` decides which record columns exist.
+        onScroll={(e) => onScrollLeft(e.currentTarget.scrollLeft)}
+      >
         {visible.length === 0 ? (
           <p className="p-8 text-center text-[12px] text-[var(--cf-text-muted)]">{t("db.records.noMatch")}</p>
-        ) : mode === "card" ? (
-          // As many columns of fields as the window holds: eighty fields read as a page, not a scroll.
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-2 p-4">
-            {visible.map((index) => (
-              <div key={modal.columns[index].name} className="group min-w-0 rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 py-2 hover:border-[color-mix(in_oklab,var(--cf-accent)_40%,var(--cf-border))]">
-                <FieldLabel column={modal.columns[index]} facts={facts[index]} model={model} query={query} />
-                <Value value={record.values[index] ?? null} query={query} />
-              </div>
-            ))}
-          </div>
         ) : (
-          <table className="w-max min-w-full border-separate border-spacing-0 text-[12px]">
-            <thead>
-              <tr>
-                <th className="sticky left-0 top-0 z-20 border-b border-r border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
-                  {t("db.records.field")}
-                </th>
-                {modal.records.map((r) => (
-                  <th key={r.index} className="sticky top-0 z-10 min-w-[200px] max-w-[360px] border-b border-[var(--cf-border)] bg-[var(--cf-surface-raised)] px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-faint)]">
-                    {t(model.itemLabel, { n: String(r.index + 1) })}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((index) => (
-                <tr key={modal.columns[index].name} className="group">
-                  <th
-                    scope="row"
-                    className={`sticky left-0 z-10 w-[220px] max-w-[260px] border-b border-r border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 py-1.5 text-left font-normal group-hover:bg-[var(--cf-hover)] ${
-                      differs[index] ? "shadow-[inset_3px_0_0_var(--cf-accent)]" : ""
-                    }`}
+          <div style={{ width: FIELD_WIDTH + total * recordWidth, minWidth: "100%" }}>
+            {/* The row headers, pinned to the top; the corner pinned both ways. */}
+            <div className="sticky top-0 z-20 flex h-[34px]">
+              <div className={`${headerCell} sticky left-0 z-30 border-r`} style={{ width: FIELD_WIDTH }}>
+                {t("db.records.field")}
+              </div>
+              {leadingGap > 0 && <div className={gapHeader} style={{ width: leadingGap }} />}
+              {shown.map((r) => (
+                <div key={r.index} className={headerCell} style={{ width: recordWidth }}>
+                  {t(model.itemLabel, { n: String(r.index + 1) })}
+                </div>
+              ))}
+              {trailingGap > 0 && <div className={gapHeader} style={{ width: trailingGap }} />}
+              <div className={`${gapHeader} flex-1`} />
+            </div>
+            {visible.map((index) => {
+              return (
+                <div key={`${modal.columns[index].name}-${index}`} className="group flex">
+                  <div
+                    className={`sticky left-0 z-10 flex shrink-0 items-start border-b border-r border-[var(--cf-border)] bg-[var(--cf-surface)] px-3 py-1.5 group-hover:bg-[color-mix(in_oklab,var(--cf-text)_6%,var(--cf-surface))]`}
+                    style={{ width: FIELD_WIDTH }}
                   >
                     <FieldLabel column={modal.columns[index]} facts={facts[index]} model={model} query={query} />
-                  </th>
-                  {modal.records.map((r) => (
-                    <td key={r.index} className={`max-w-[360px] border-b border-[var(--cf-border)] px-3 py-1.5 align-top group-hover:bg-[var(--cf-hover)] ${
-                      differs[index] ? "bg-[color-mix(in_oklab,var(--cf-accent)_5%,transparent)]" : ""
-                    }`}>
-                      <Value value={r.values[index] ?? null} query={query} compact />
-                    </td>
+                  </div>
+                  {leadingGap > 0 && <div className="shrink-0 border-b border-[var(--cf-border)]" style={{ width: leadingGap }} />}
+                  {shown.map((r) => (
+                    <div
+                      key={r.index}
+                      className={`group/cell min-w-0 shrink-0 border-b border-[var(--cf-border)] px-3 py-1.5 group-hover:bg-[var(--cf-hover)]`}
+                      style={{ width: recordWidth }}
+                    >
+                      <Value value={r.values[index] ?? null} query={query} />
+                    </div>
                   ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  {trailingGap > 0 && <div className="shrink-0 border-b border-[var(--cf-border)]" style={{ width: trailingGap }} />}
+                  <div className="flex-1 border-b border-[var(--cf-border)] group-hover:bg-[var(--cf-hover)]" />
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
     </ApiModal>
@@ -254,7 +245,7 @@ function FieldLabel({
 }) {
   const t = useT();
   return (
-    <div className="min-w-0" title={facts.type ? `${column.name} · ${facts.type}` : column.name}>
+    <div className="w-full min-w-0" title={facts.type ? `${column.name} · ${facts.type}` : column.name}>
       <div className="flex min-w-0 items-center gap-1.5">
         <span className="min-w-0 truncate text-[11.5px] font-medium text-[var(--cf-text-muted)]">
           <Highlight text={column.name} query={query} />
@@ -281,33 +272,94 @@ function FieldLabel({
   );
 }
 
-/** One value, wrapped rather than cut, with its own copy button on hover. */
-function Value({ value, query, compact = false }: { value: string | null; query: string; compact?: boolean }) {
+/** JSON pretty-printed for reading — an object on one wrapped line is a wall of braces. The raw
+ * text is what gets copied and searched; this only changes how it is laid out. */
+function readable(value: string): string {
+  const trimmed = value.trim();
+  if (!(trimmed.startsWith("{") || trimmed.startsWith("[")) || trimmed.length < 2) return value;
+  try {
+    return JSON.stringify(JSON.parse(trimmed), null, 2);
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * One value, wrapped rather than cut, with its own copy button while the pointer is on its cell.
+ *
+ * A long one (more than `FOLD_LINES` lines, as laid out) is folded to that height with a fade, and
+ * «ver todo» opens it in place — nothing is cut away, the row just stops being a screen tall until
+ * you ask for all of it (user, 2026-11-19).
+ */
+function Value({ value, query }: { value: string | null; query: string }) {
   const t = useT();
   const [copied, setCopied] = useState(false);
+  const [open, setOpen] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  const textRef = useRef<HTMLSpanElement>(null);
   const empty = value === "";
+  const text = useMemo(() => (value === null || empty ? "" : readable(value)), [value, empty]);
+  const lines = useMemo(() => text.split("\n").length, [text]);
+
+  // Measured rather than guessed from the character count: how many lines a value takes depends on
+  // the column's width, which depends on the window.
+  useLayoutEffect(() => {
+    const element = textRef.current;
+    if (!element) return;
+    const measure = () => {
+      const lineHeight = parseFloat(getComputedStyle(element).lineHeight) || 18;
+      setOverflows(element.scrollHeight > lineHeight * FOLD_LINES + 2);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [text]);
+
+  // A search hit hidden in the folded part would be a match you cannot see: open it.
+  const needle = query.trim().toLowerCase();
+  const hit = needle.length > 0 && text.toLowerCase().includes(needle);
+  const folded = overflows && !open && !hit;
   return (
-    <div className={`relative flex min-w-0 items-start gap-1 ${compact ? "" : "mt-1"}`}>
-      <span
-        className={`min-w-0 flex-1 whitespace-pre-wrap break-words font-mono text-[12px] ${
-          value === null || empty ? "italic text-[var(--cf-text-faint)]" : "text-[var(--cf-text)]"
-        } ${compact ? "" : "max-h-[160px] overflow-auto"}`}
-      >
-        {value === null ? "NULL" : empty ? t("db.records.empty") : <Highlight text={value} query={query} />}
-      </span>
-      {value !== null && !empty && (
+    <div className="relative min-w-0">
+      <div className="flex min-w-0 items-start gap-1">
+        <span
+          ref={textRef}
+          style={folded ? { maxHeight: `calc(${FOLD_LINES} * 1.5em)` } : undefined}
+          className={`min-w-0 flex-1 whitespace-pre-wrap break-words font-mono text-[12px] leading-[1.5] ${
+            value === null || empty ? "italic text-[var(--cf-text-faint)]" : "text-[var(--cf-text)]"
+          } ${folded ? "overflow-hidden [mask-image:linear-gradient(to_bottom,black_70%,transparent)]" : ""}`}
+        >
+          {value === null ? "NULL" : empty ? t("db.records.empty") : <Highlight text={text} query={query} />}
+        </span>
+        {value !== null && !empty && (
+          <button
+            type="button"
+            onClick={() => {
+              void navigator.clipboard.writeText(value);
+              setCopied(true);
+              window.setTimeout(() => setCopied(false), 1200);
+            }}
+            title={t("db.records.copyValue")}
+            aria-label={t("db.records.copyValue")}
+            className="shrink-0 rounded p-0.5 text-[var(--cf-text-faint)] opacity-0 hover:text-[var(--cf-text)] focus:opacity-100 group-hover/cell:opacity-100"
+          >
+            {copied ? <Check size={12} className="text-[var(--cf-success)]" /> : <Copy size={12} />}
+          </button>
+        )}
+      </div>
+      {overflows && !hit && (
         <button
           type="button"
-          onClick={() => {
-            void navigator.clipboard.writeText(value);
-            setCopied(true);
-            window.setTimeout(() => setCopied(false), 1200);
-          }}
-          title={t("db.records.copyValue")}
-          aria-label={t("db.records.copyValue")}
-          className="shrink-0 rounded p-0.5 text-[var(--cf-text-faint)] opacity-0 hover:text-[var(--cf-text)] focus:opacity-100 group-hover:opacity-100"
+          onClick={() => setOpen((current) => !current)}
+          className="mt-1 flex items-center gap-1 text-[11px] font-medium text-[var(--cf-accent)] hover:underline"
         >
-          {copied ? <Check size={12} className="text-[var(--cf-success)]" /> : <Copy size={12} />}
+          {open ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+          {open
+            ? t("db.records.showLess")
+            : lines > FOLD_LINES
+              ? t("db.records.showAll", { n: String(lines) })
+              : t("db.records.showAllShort")}
         </button>
       )}
     </div>
@@ -328,38 +380,5 @@ function Highlight({ text, query }: { text: string; query: string }) {
       </mark>
       {text.slice(at + needle.length)}
     </>
-  );
-}
-
-function Toggle({ on, onChange, label }: { on: boolean; onChange: (on: boolean) => void; label: string }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      onClick={() => onChange(!on)}
-      className={`flex h-[26px] shrink-0 items-center rounded-md border px-2 text-[11.5px] transition-colors ${
-        on
-          ? "border-[var(--cf-accent)] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-          : "border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
-      }`}
-    >
-      {label}
-    </button>
-  );
-}
-
-function NavButton({ disabled, onClick, label, children }: { disabled: boolean; onClick: () => void; label: string; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      title={label}
-      aria-label={label}
-      className="flex h-[26px] w-[26px] items-center justify-center rounded-md border border-[var(--cf-border)] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] disabled:opacity-35"
-    >
-      {children}
-    </button>
   );
 }

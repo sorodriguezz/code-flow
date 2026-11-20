@@ -680,12 +680,21 @@ impl JdbcSession {
 
     /// Every table and view of the schema with its columns, and the foreign keys between them —
     /// columns in one listing for the whole schema, keys a table at a time (see [`DIAGRAM_TABLES`]).
-    pub async fn schema_diagram(&self, node: &DbNodeRef) -> Result<DbSchemaDiagram, String> {
+    pub async fn schema_diagram(
+        &self,
+        node: &DbNodeRef,
+        filter: &super::DiagramFilter,
+    ) -> Result<DbSchemaDiagram, String> {
         let relations = self.meta("tables", node.db(), node.schema(), None).await?;
         let mut tables: Vec<DbDiagramTable> = relations
             .iter()
             .filter_map(|row| {
                 let view = relation_kind(&row.get("TABLE_TYPE"))?;
+                // The connection's object filter, before any per-table key read is spent on a
+                // table the tree doesn't even show.
+                if !filter.keeps(&row.get("TABLE_NAME"), view) {
+                    return None;
+                }
                 Some(DbDiagramTable {
                     schema: node.schema().map(str::to_string),
                     name: row.get("TABLE_NAME"),
@@ -703,7 +712,17 @@ impl JdbcSession {
             ));
             tables.truncate(DIAGRAM_TABLES);
         }
-        for row in self.meta("columns", node.db(), node.schema(), None).await.unwrap_or_default() {
+        // A failed read used to vanish into `unwrap_or_default` and the diagram came out without
+        // columns or lines and no word why. It still draws what it has, and now says what's missing.
+        let columns = match self.meta("columns", node.db(), node.schema(), None).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                notes.push(format!("Columns could not be read: {e}"));
+                Vec::new()
+            }
+        };
+        let mut key_errors = 0usize;
+        for row in columns {
             let owner = row.get("TABLE_NAME");
             if let Some(table) = tables.iter_mut().find(|table| table.name == owner) {
                 table.columns.push(DbDiagramColumn {
@@ -717,14 +736,21 @@ impl JdbcSession {
         }
         let mut edges = Vec::new();
         for table in tables.iter_mut().filter(|table| table.kind == DbNodeKind::Table) {
-            let keys = self.meta("primaryKeys", node.db(), node.schema(), Some(&table.name)).await.unwrap_or_default();
+            let keys = self.meta("primaryKeys", node.db(), node.schema(), Some(&table.name)).await.unwrap_or_else(|_| {
+                key_errors += 1;
+                Vec::new()
+            });
             for key in &keys {
                 let column = key.get("COLUMN_NAME");
                 if let Some(found) = table.columns.iter_mut().find(|c| c.name == column) {
                     found.primary_key = true;
                 }
             }
-            for row in self.meta("importedKeys", node.db(), node.schema(), Some(&table.name)).await.unwrap_or_default() {
+            let imported = self.meta("importedKeys", node.db(), node.schema(), Some(&table.name)).await.unwrap_or_else(|_| {
+                key_errors += 1;
+                Vec::new()
+            });
+            for row in imported {
                 edges.push(DbDiagramEdge {
                     constraint: row.get("FK_NAME"),
                     from_schema: node.schema().map(str::to_string),
@@ -736,6 +762,9 @@ impl JdbcSession {
                     inferred: false,
                 });
             }
+        }
+        if key_errors > 0 {
+            notes.push(format!("{key_errors} key lookups failed; some primary keys or relationships may be missing."));
         }
         super::mark_foreign_keys(&mut tables, &edges);
         Ok(DbSchemaDiagram { database: node.db().map(str::to_string), schema: node.schema().map(str::to_string), tables, edges, notes })

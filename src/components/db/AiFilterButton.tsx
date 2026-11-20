@@ -1,6 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { CornerDownLeft, Square } from "lucide-react";
 import { AiSparkles } from "../common/AiGlyph";
+import { ChatModelPicker } from "../ai/ChatModelPicker";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { fieldClass } from "../common/recipes";
 import { dbAiFilter } from "../../lib/tauri/dbCommands";
@@ -24,14 +26,33 @@ export function AiFilterButton({ tab, onFilter }: { tab: DbDataTab; onFilter: (f
   const [runId, setRunId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const rootRef = useRef<HTMLSpanElement>(null);
+  const popRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const [pos, setPos] = useState<{ right: number; bottom: number } | null>(null);
   const running = runId !== null;
+
+  // Portalled and placed from the button's rect: the pager row it sits in scrolls sideways
+  // (`overflow-x-auto`), and an `absolute` popover inside it was clipped to nothing — the button lit
+  // up and no prompt ever appeared (user report, 2026-11-19).
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const rect = rootRef.current?.getBoundingClientRect();
+      if (rect) setPos({ right: Math.max(8, window.innerWidth - rect.right), bottom: window.innerHeight - rect.top + 8 });
+    };
+    place();
+    window.addEventListener("resize", place);
+    return () => window.removeEventListener("resize", place);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
     const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node) && !running) setOpen(false);
+      const target = e.target as Element;
+      // The model picker's own list is portalled too: a click in it is a click in this popover.
+      if (rootRef.current?.contains(target) || popRef.current?.contains(target) || target.closest?.('[role="menu"]')) return;
+      if (!running) setOpen(false);
     };
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
@@ -85,17 +106,25 @@ export function AiFilterButton({ tab, onFilter }: { tab: DbDataTab; onFilter: (f
         <span className="hidden sm:inline">{t("db.aiFilterShort")}</span>
       </button>
 
-      {open && (
+      {open &&
+        createPortal(
         // Above the bar: the bar sits at the bottom of the panel, and a popover opening downward
         // would open off the panel.
         <div
+          ref={popRef}
           role="dialog"
           aria-label={t("db.aiFilter")}
-          className="absolute bottom-full right-0 z-30 mb-2 w-[min(460px,80vw)] rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2.5 shadow-[var(--cf-shadow-modal)]"
+          style={{ right: pos?.right ?? 0, bottom: pos?.bottom ?? 0, visibility: pos ? "visible" : "hidden" }}
+          className="fixed z-[9000] w-[min(460px,80vw)] rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2.5 shadow-[var(--cf-shadow-modal)]"
         >
           <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-[var(--cf-text)]">
             <AiSparkles size={12} className="text-[var(--cf-accent)]" />
             {t("db.aiFilter")}
+            {/* The engine this runs on — the `db_query` row, the same one the console's assistant
+                and Settings use. Before, there was no way to see or change it from here. */}
+            <span className="ml-auto">
+              <ChatModelPicker task="db_query" variant="tag" liveModel={null} chatActive={false} />
+            </span>
           </div>
           <div className="flex items-center gap-1.5">
             <input
@@ -147,7 +176,8 @@ export function AiFilterButton({ tab, onFilter }: { tab: DbDataTab; onFilter: (f
               {tab.filter.trim() ? t("db.aiFilterRefineHint") : t("db.aiFilterHint")}
             </p>
           )}
-        </div>
+        </div>,
+        document.body,
       )}
     </span>
   );

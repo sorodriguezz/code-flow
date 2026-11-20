@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { CollapsedPanelBar, useCollapsiblePanel } from "../common/CollapsedPanelBar";
 import { Tooltip } from "../common/Tooltip";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import {
@@ -97,6 +98,12 @@ export function HostExplorer({ onImport }: { onImport: () => void }) {
   const width = useLayoutStore((s) => s.sizes.remoteSidebarWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
+  const fold = useCollapsiblePanel("remoteSidebarWidth");
+  const t = useT();
+
+  if (fold.collapsed) {
+    return <CollapsedPanelBar tour="remote-hosts" label={t("remote.hosts")} title={t("common.expandPanel")} onExpand={fold.expand} />;
+  }
 
   return (
     <>
@@ -114,6 +121,7 @@ export function HostExplorer({ onImport }: { onImport: () => void }) {
         seamless
         onChange={(value) => setSize("remoteSidebarWidth", value)}
         onCommit={(value) => void commitSize("remoteSidebarWidth", value)}
+        {...fold.handleProps}
       />
     </>
   );

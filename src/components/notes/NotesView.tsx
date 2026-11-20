@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { NotebookPen } from "lucide-react";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { CollapsedPanelBar, useCollapsiblePanel } from "../common/CollapsedPanelBar";
 import { ViewSkeleton } from "../common/ViewSkeleton";
 import { NoteExplorer } from "./NoteExplorer";
 import { NoteEditor } from "./NoteEditor";
@@ -45,6 +46,8 @@ export function NotesView() {
   const hasDraft = useNotesStore((s) => s.draft !== null);
 
   const sidebarWidth = useLayoutStore((s) => s.sizes.notesSidebarWidth);
+
+  const sidebarFold = useCollapsiblePanel("notesSidebarWidth");
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   const t = useT();
@@ -80,21 +83,28 @@ export function NotesView() {
 
   return (
     <div className={`flex h-full min-h-0 ${CARD}`} data-tour="notes-view">
-      <div
-        style={{ width: sidebarWidth }}
-        className="flex shrink-0 flex-col border-r border-[var(--cf-border)]"
-      >
-        {loading ? <ViewSkeleton /> : <NoteExplorer />}
-      </div>
+      {sidebarFold.collapsed ? (
+        <CollapsedPanelBar label={t("notes.title")} title={t("common.expandPanel")} onExpand={sidebarFold.expand} />
+      ) : (
+        <>
+          <div
+            style={{ width: sidebarWidth }}
+            className="flex shrink-0 flex-col border-r border-[var(--cf-border)]"
+          >
+            {loading ? <ViewSkeleton /> : <NoteExplorer />}
+          </div>
 
-      <ResizeHandle
-        axis="x"
-        value={sidebarWidth}
-        min={200}
-        max={480}
-        onChange={(value) => setSize("notesSidebarWidth", value)}
-        onCommit={(value) => commitSize("notesSidebarWidth", value)}
-      />
+          <ResizeHandle
+            axis="x"
+            value={sidebarWidth}
+            min={200}
+            max={480}
+            onChange={(value) => setSize("notesSidebarWidth", value)}
+            onCommit={(value) => commitSize("notesSidebarWidth", value)}
+            {...sidebarFold.handleProps}
+          />
+        </>
+      )}
 
       <div className="min-w-0 flex-1">
         {activeId === null ? (

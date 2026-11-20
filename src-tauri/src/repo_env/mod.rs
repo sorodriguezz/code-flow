@@ -107,6 +107,16 @@ pub const MAX_BYTES: u64 = 1024 * 1024;
 
 /// The files the patterns match under `root`, plus the ones added by hand, minus the ignored ones —
 /// normalized relative paths, sorted. `true` when a budget cut the walk short.
+/// A JSON Schema that sits beside the files it describes — `appsettings.schema.json`. The default
+/// `appsettings.*.json` pattern matches it, and read as settings it became one more "environment"
+/// whose every `definitions:…:properties:…` key was missing from the real ones: hundreds of false
+/// problems in one repository (user report, 2026-11-19). Skipped when found by a pattern; a file
+/// added by hand is still read.
+fn is_schema_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".schema.json") || lower == "schema.json"
+}
+
 pub fn find_files(root: &Path, eff: &Effective, matcher: &Matcher) -> (Vec<String>, bool) {
     let exclude: Vec<String> = eff.exclude.iter().map(|e| e.to_ascii_lowercase()).collect();
     let mut found: Vec<String> = Vec::new();
@@ -139,7 +149,7 @@ pub fn find_files(root: &Path, eff: &Effective, matcher: &Matcher) -> (Vec<Strin
                 } else {
                     truncated = true;
                 }
-            } else if kind.is_file() && matcher.is_match(&child_rel) && !eff.ignore.contains(&child_rel) {
+            } else if kind.is_file() && matcher.is_match(&child_rel) && !eff.ignore.contains(&child_rel) && !is_schema_file(&name) {
                 if found.len() >= MAX_FILES {
                     truncated = true;
                     continue;
@@ -549,5 +559,18 @@ mod tests {
         assert_eq!(std::fs::read_to_string(root.join(".env")).unwrap(), "A=2\n");
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "no temporary file left behind");
         std::fs::remove_dir_all(root).ok();
+    }
+}
+
+#[cfg(test)]
+mod schema_file_tests {
+    use super::is_schema_file;
+
+    #[test]
+    fn schema_files_are_not_settings() {
+        assert!(is_schema_file("appsettings.schema.json"));
+        assert!(is_schema_file("appsettings.project.SCHEMA.json"));
+        assert!(!is_schema_file("appsettings.Development.json"));
+        assert!(!is_schema_file("appsettings.json"));
     }
 }

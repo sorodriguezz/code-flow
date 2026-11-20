@@ -44,6 +44,7 @@ import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
 import { MarkdownEditor } from "../common/MarkdownEditor";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { CollapsedPanelBar, useCollapsiblePanel } from "../common/CollapsedPanelBar";
 import { Select } from "../common/Select";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { confirmAction } from "../../state/confirmStore";
@@ -2752,6 +2753,7 @@ export function WorkItemReviewView() {
   const draft = useWorkItemReviewStore((s) => s.draft);
   const tab = useWorkItemReviewStore((s) => s.tab);
   const sourceWidth = useLayoutStore((s) => s.sizes.huReviewSourceWidth);
+  const sourceFold = useCollapsiblePanel("huReviewSourceWidth");
   // Read here as well as in `DraftTab`: the panes are its children but the custom properties have
   // to be declared on the row that lays them out, which is this one.
   const draftDescWidth = useLayoutStore((s) => s.sizes.huReviewDraftDescWidth);
@@ -2798,7 +2800,10 @@ export function WorkItemReviewView() {
   // The draggable seam of the two-pane tabs. Handed to each of them rather than drawn here,
   // because it belongs *between* their two panes and the tab is what renders those. Hidden below
   // `lg`, where the panes stack and there is no horizontal seam to drag.
-  const seam = (
+  // Folded, the source pane is hidden and the seam's place holds the bar that brings it back.
+  const seam = sourceFold.collapsed ? (
+    <CollapsedPanelBar label={t("huReview.sourcePane")} title={t("common.expandPanel")} onExpand={sourceFold.expand} />
+  ) : (
     <span className="contents max-lg:hidden">
       <ResizeHandle
         axis="x"
@@ -2807,9 +2812,11 @@ export function WorkItemReviewView() {
         max={SOURCE_MAX}
         onChange={(value) => setSize("huReviewSourceWidth", value)}
         onCommit={(value) => commitSize("huReviewSourceWidth", value)}
+        {...sourceFold.handleProps}
       />
     </span>
   );
+  const sourceClass = sourceFold.collapsed ? "hidden" : SOURCE_WIDTH;
 
   return (
     // `flex-1`, not `h-full`: this is one child of the stories view's column, under the tab strip.
@@ -3070,9 +3077,9 @@ export function WorkItemReviewView() {
             }
           >
             {tab === "story" && <StoryTab key="story" />}
-            {tab === "description" && <DescriptionTab key="description" width={SOURCE_WIDTH} seam={seam} />}
-            {tab === "criteria" && <CriteriaTab key="criteria" width={SOURCE_WIDTH} seam={seam} />}
-            {tab === "tasks" && <TasksTab key="tasks" width={SOURCE_WIDTH} seam={seam} />}
+            {tab === "description" && <DescriptionTab key="description" width={sourceClass} seam={seam} />}
+            {tab === "criteria" && <CriteriaTab key="criteria" width={sourceClass} seam={seam} />}
+            {tab === "tasks" && <TasksTab key="tasks" width={sourceClass} seam={seam} />}
             {tab === "draft" && <DraftTab key="draft" />}
           </div>
         </>

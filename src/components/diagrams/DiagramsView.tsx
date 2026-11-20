@@ -3,6 +3,7 @@ import { ArrowLeft, Download, FileWarning, GitBranch, GitCompare, History, Undo2
 import { AiSparkles } from "../common/AiGlyph";
 import { EmptyState } from "../common/EmptyState";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { CollapsedPanelBar, useCollapsiblePanel } from "../common/CollapsedPanelBar";
 import { ViewSkeleton } from "../common/ViewSkeleton";
 import { DiagramExplorer } from "./DiagramExplorer";
 import { DiagramGallery } from "./DiagramGallery";
@@ -138,6 +139,8 @@ export function DiagramsView() {
   const isMermaid = openFormat === FORMAT_MERMAID;
 
   const sidebarWidth = useLayoutStore((s) => s.sizes.diagramsSidebarWidth);
+
+  const sidebarFold = useCollapsiblePanel("diagramsSidebarWidth");
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   const language = useLanguageStore((s) => s.language);
@@ -368,21 +371,28 @@ export function DiagramsView() {
 
   return (
     <div className={`flex h-full min-h-0 ${CARD}`} data-tour="diagrams-view">
-      <div
-        style={{ width: sidebarWidth }}
-        className="flex shrink-0 flex-col border-r border-[var(--cf-border)]"
-      >
-        {loading ? <ViewSkeleton /> : <DiagramExplorer />}
-      </div>
+      {sidebarFold.collapsed ? (
+        <CollapsedPanelBar label={t("diagrams.title")} title={t("common.expandPanel")} onExpand={sidebarFold.expand} />
+      ) : (
+        <>
+          <div
+            style={{ width: sidebarWidth }}
+            className="flex shrink-0 flex-col border-r border-[var(--cf-border)]"
+          >
+            {loading ? <ViewSkeleton /> : <DiagramExplorer />}
+          </div>
 
-      <ResizeHandle
-        axis="x"
-        value={sidebarWidth}
-        min={200}
-        max={480}
-        onChange={(value) => setSize("diagramsSidebarWidth", value)}
-        onCommit={(value) => commitSize("diagramsSidebarWidth", value)}
-      />
+          <ResizeHandle
+            axis="x"
+            value={sidebarWidth}
+            min={200}
+            max={480}
+            onChange={(value) => setSize("diagramsSidebarWidth", value)}
+            onCommit={(value) => commitSize("diagramsSidebarWidth", value)}
+            {...sidebarFold.handleProps}
+          />
+        </>
+      )}
 
       <div className="flex min-w-0 flex-1 flex-col">
         {activeId === null ? (

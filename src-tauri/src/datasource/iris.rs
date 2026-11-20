@@ -621,26 +621,111 @@ impl IrisSession {
         Ok(out)
     }
 
-    pub async fn schema_diagram(&self, node: &DbNodeRef) -> Result<DbSchemaDiagram, String> {
+    pub async fn schema_diagram(
+        &self,
+        node: &DbNodeRef,
+        filter: &super::DiagramFilter,
+    ) -> Result<DbSchemaDiagram, String> {
         let schema = node.schema().unwrap_or("SQLUser");
         let literal = quote_literal(Some(schema))?;
+        let mut notes = Vec::new();
 
-        // `%STARTSWITH 'PK'` is the same primary-key test the column list uses: IRIS names the
-        // constraint after the class, and its own catalog offers no flag for it.
-        let rows = self
+        // The names first, and only the names: one cheap catalog read, narrowed by the connection's
+        // object filter (the same one the tree applies) and capped. It used to be one query for
+        // every column of every table in the schema, with a correlated sub-select per column for
+        // the primary key — on TrakCare's `SQLUser`, thousands of tables, the server gave up with
+        // SQLCODE -400 «Fatal error occurred» (user report, 2026-11-19).
+        let listed = self
             .rows(&format!(
-                "SELECT c.TABLE_NAME, t.TABLE_TYPE, c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, \
-                        c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, \
-                        (SELECT COUNT(*) FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k \
-                         WHERE k.TABLE_SCHEMA = c.TABLE_SCHEMA AND k.TABLE_NAME = c.TABLE_NAME \
-                           AND k.COLUMN_NAME = c.COLUMN_NAME AND k.CONSTRAINT_NAME %STARTSWITH 'PK') \
-                 FROM INFORMATION_SCHEMA.COLUMNS c \
-                 JOIN INFORMATION_SCHEMA.TABLES t \
-                   ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME \
-                 WHERE c.TABLE_SCHEMA = {literal} \
-                 ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION"
+                "SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES \
+                 WHERE TABLE_SCHEMA = {literal} ORDER BY TABLE_NAME"
             ))
             .await?;
+        let total = listed.len();
+        let mut wanted: Vec<(String, bool)> = listed
+            .iter()
+            .map(|row| (cell(row, 0), cell(row, 1).eq_ignore_ascii_case("VIEW")))
+            .filter(|(name, view)| filter.keeps(name, *view))
+            .collect();
+        if filter.narrows() && wanted.len() < total {
+            notes.push(format!("Filtered by the connection's object filter: {} of {total} tables.", wanted.len()));
+        }
+        if wanted.len() > super::DIAGRAM_MAX_TABLES {
+            notes.push(format!(
+                "Showing the first {} of {} tables. Narrow the schema with the explorer's filter (Filtrar…) to draw the ones you need.",
+                super::DIAGRAM_MAX_TABLES,
+                wanted.len()
+            ));
+            wanted.truncate(super::DIAGRAM_MAX_TABLES);
+        }
+        if wanted.is_empty() {
+            return Ok(DbSchemaDiagram {
+                database: node.db().map(str::to_string),
+                schema: Some(schema.to_string()),
+                tables: Vec::new(),
+                edges: Vec::new(),
+                notes,
+            });
+        }
+
+        // Columns, primary keys and foreign keys for those tables only, a slice of names at a time
+        // so no statement carries an `IN` list the server balks at.
+        let mut rows = Vec::new();
+        let mut pk_columns: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        let mut edge_rows = Vec::new();
+        for chunk in wanted.chunks(100) {
+            let names = chunk
+                .iter()
+                .map(|(name, _)| quote_literal(Some(name)))
+                .collect::<Result<Vec<_>, _>>()?
+                .join(", ");
+            rows.extend(
+                self.rows(&format!(
+                    "SELECT c.TABLE_NAME, '' AS TABLE_TYPE, c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, \
+                            c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE \
+                     FROM INFORMATION_SCHEMA.COLUMNS c \
+                     WHERE c.TABLE_SCHEMA = {literal} AND c.TABLE_NAME IN ({names}) \
+                     ORDER BY c.TABLE_NAME, c.ORDINAL_POSITION"
+                ))
+                .await?,
+            );
+            // `%STARTSWITH 'PK'` is the same primary-key test the column list uses: IRIS names the
+            // constraint after the class, and its own catalog offers no flag for it. A failure here
+            // costs the key marks, not the diagram — and says so.
+            match self
+                .rows(&format!(
+                    "SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE \
+                     WHERE TABLE_SCHEMA = {literal} AND TABLE_NAME IN ({names}) \
+                       AND CONSTRAINT_NAME %STARTSWITH 'PK'"
+                ))
+                .await
+            {
+                Ok(found) => pk_columns.extend(found.iter().map(|row| (cell(row, 0), cell(row, 1)))),
+                Err(e) => notes.push(format!("Primary keys could not be read: {e}")),
+            }
+            match self
+                .rows(&format!(
+                    "SELECT k.CONSTRAINT_NAME, k.TABLE_NAME, k.COLUMN_NAME, \
+                            t.TABLE_SCHEMA, t.TABLE_NAME, t.COLUMN_NAME \
+                     FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k \
+                     JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS r \
+                       ON r.CONSTRAINT_NAME = k.CONSTRAINT_NAME \
+                      AND r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA \
+                     JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE t \
+                       ON t.CONSTRAINT_NAME = r.UNIQUE_CONSTRAINT_NAME \
+                      AND t.CONSTRAINT_SCHEMA = r.UNIQUE_CONSTRAINT_SCHEMA \
+                      AND t.ORDINAL_POSITION = k.ORDINAL_POSITION \
+                     WHERE k.TABLE_SCHEMA = {literal} AND k.TABLE_NAME IN ({names}) \
+                     ORDER BY k.CONSTRAINT_NAME, k.ORDINAL_POSITION"
+                ))
+                .await
+            {
+                Ok(found) => edge_rows.extend(found),
+                Err(e) => notes.push(format!("Foreign keys could not be read: {e}")),
+            }
+        }
+        let views: std::collections::HashSet<&str> =
+            wanted.iter().filter(|(_, view)| *view).map(|(name, _)| name.as_str()).collect();
 
         let mut tables: Vec<DbDiagramTable> = Vec::new();
         for row in &rows {
@@ -651,7 +736,7 @@ impl IrisSession {
                     tables.push(DbDiagramTable {
                         schema: Some(schema.to_string()),
                         name: name.clone(),
-                        kind: if cell(row, 1).eq_ignore_ascii_case("VIEW") {
+                        kind: if views.contains(name.as_str()) {
                             DbNodeKind::View
                         } else {
                             DbNodeKind::Table
@@ -672,27 +757,12 @@ impl IrisSession {
                     cell(row, 7).parse().ok(),
                 ),
                 nullable: nullable.eq_ignore_ascii_case("YES") || nullable == "1",
-                primary_key: cell(row, 8).parse::<i64>().unwrap_or(0) > 0,
+                primary_key: pk_columns.contains(&(name.clone(), cell(row, 2))),
                 foreign_key: false,
             });
         }
 
-        let edges = self
-            .rows(&format!(
-                "SELECT k.CONSTRAINT_NAME, k.TABLE_NAME, k.COLUMN_NAME, \
-                        t.TABLE_SCHEMA, t.TABLE_NAME, t.COLUMN_NAME \
-                 FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k \
-                 JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS r \
-                   ON r.CONSTRAINT_NAME = k.CONSTRAINT_NAME \
-                  AND r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA \
-                 JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE t \
-                   ON t.CONSTRAINT_NAME = r.UNIQUE_CONSTRAINT_NAME \
-                  AND t.CONSTRAINT_SCHEMA = r.UNIQUE_CONSTRAINT_SCHEMA \
-                  AND t.ORDINAL_POSITION = k.ORDINAL_POSITION \
-                 WHERE k.TABLE_SCHEMA = {literal} \
-                 ORDER BY k.CONSTRAINT_NAME, k.ORDINAL_POSITION"
-            ))
-            .await?
+        let edges = edge_rows
             .iter()
             .map(|row| DbDiagramEdge {
                 constraint: cell(row, 0),
@@ -711,7 +781,7 @@ impl IrisSession {
             schema: Some(schema.to_string()),
             tables,
             edges,
-            notes: Vec::new(),
+            notes,
         })
     }
 

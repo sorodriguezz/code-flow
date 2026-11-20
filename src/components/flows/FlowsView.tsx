@@ -1,6 +1,7 @@
 import { FailuresView } from "./FailuresView";
 import { lazy, Suspense, useEffect } from "react";
 import { ResizeHandle } from "../common/ResizeHandle";
+import { CollapsedPanelBar, useCollapsiblePanel } from "../common/CollapsedPanelBar";
 import { ViewSkeleton } from "../common/ViewSkeleton";
 import { explorerClass } from "../common/recipes";
 import { FlowExplorer } from "./FlowExplorer";
@@ -15,6 +16,7 @@ import { ensureFlowsStoreLoaded, useFlowsStore } from "../../state/flowsStore";
 import { useFlowVaultStore } from "../../state/flowVaultStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLayoutStore } from "../../state/layoutStore";
+import { useT } from "../../state/languageStore";
 
 /** The canvas and React Flow arrive the first time a flow is opened, not with the app. */
 const FlowEditor = lazy(() => import("./FlowEditor").then((m) => ({ default: m.FlowEditor })));
@@ -36,6 +38,8 @@ export function FlowsView() {
   const sidebarWidth = useLayoutStore((s) => s.sizes.flowsSidebarWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
+  const sidebarFold = useCollapsiblePanel("flowsSidebarWidth");
+  const t = useT();
 
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
 
@@ -63,17 +67,24 @@ export function FlowsView() {
 
   return (
     <div className="flex h-full min-h-0 bg-[var(--cf-surface)]" data-tour="flows-view">
-      <div style={{ width: sidebarWidth }} className={explorerClass}>
-        {loading ? <ViewSkeleton /> : <FlowExplorer />}
-      </div>
-      <ResizeHandle
-        axis="x"
-        value={sidebarWidth}
-        min={200}
-        max={460}
-        onChange={(value) => setSize("flowsSidebarWidth", value)}
-        onCommit={(value) => commitSize("flowsSidebarWidth", value)}
-      />
+      {sidebarFold.collapsed ? (
+        <CollapsedPanelBar label={t("flows.title")} title={t("common.expandPanel")} onExpand={sidebarFold.expand} />
+      ) : (
+        <>
+          <div style={{ width: sidebarWidth }} className={explorerClass}>
+            {loading ? <ViewSkeleton /> : <FlowExplorer />}
+          </div>
+          <ResizeHandle
+            axis="x"
+            value={sidebarWidth}
+            min={200}
+            max={460}
+            onChange={(value) => setSize("flowsSidebarWidth", value)}
+            onCommit={(value) => commitSize("flowsSidebarWidth", value)}
+            {...sidebarFold.handleProps}
+          />
+        </>
+      )}
       <div className="relative flex min-w-0 flex-1 flex-col">
         {pane === "schedule" ? (
           <ScheduleView />

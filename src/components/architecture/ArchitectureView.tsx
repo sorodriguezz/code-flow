@@ -1,8 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import { LoaderCircle, PanelLeft } from "lucide-react";
-import { iconButtonClass } from "../common/Button";
+import { LoaderCircle } from "lucide-react";
 import { ResizeHandle } from "../common/ResizeHandle";
-import { Tooltip } from "../common/Tooltip";
+import { CollapsedPanelBar, useCollapsiblePanel } from "../common/CollapsedPanelBar";
 import { ViewSkeleton } from "../common/ViewSkeleton";
 import { explorerClass, toolbarClass } from "../common/recipes";
 import { ensureArchitectureStoreLoaded, useArchitectureStore } from "../../state/architectureStore";
@@ -41,16 +40,14 @@ export function ArchitectureView() {
   const commitSize = useLayoutStore((s) => s.commitSize);
   const root = useRef<HTMLDivElement>(null);
   const explorerPanel = useRef<HTMLElement>(null);
-  const documentsButton = useRef<HTMLButtonElement>(null);
   const [compact, setCompact] = useState(false);
-  const [wideExplorer, setWideExplorer] = useState(true);
+  // Wide: the explorer folds to a bar by dragging its seam past the minimum, like every other side
+  // panel, and the bar brings it back — the show/hide buttons are gone (user, 2026-11-19).
+  // Compact: the bar stays put and opens the explorer as an overlay over the document.
+  const fold = useCollapsiblePanel("architectureSidebarWidth");
   const [compactExplorer, setCompactExplorer] = useState(false);
-  const explorerOpen = compact ? compactExplorer : wideExplorer;
-  const setExplorerOpen = compact ? setCompactExplorer : setWideExplorer;
-  const closeExplorer = () => {
-    setExplorerOpen(false);
-    requestAnimationFrame(() => documentsButton.current?.focus());
-  };
+  const explorerOpen = compact ? compactExplorer : !fold.collapsed;
+  const closeExplorer = () => setCompactExplorer(false);
 
   useEffect(() => {
     void ensureArchitectureStoreLoaded();
@@ -89,17 +86,15 @@ export function ArchitectureView() {
     };
   }, []);
 
-  const documentsLabel = t(explorerOpen ? "arch.documents.hide" : "arch.documents.show");
-  const documentsControl = (
-    <Tooltip label={documentsLabel}>
-      <button ref={documentsButton} type="button" className={iconButtonClass({ size: "md", active: explorerOpen })} aria-label={documentsLabel} aria-expanded={explorerOpen} aria-controls={explorerOpen ? "arch-documents" : undefined} onClick={() => setExplorerOpen(!explorerOpen)}>
-        <PanelLeft size={16} />
-      </button>
-    </Tooltip>
-  );
-
   return (
     <div ref={root} className="relative isolate flex h-full min-h-0 bg-[var(--cf-surface)]" data-tour="arch-view">
+      {compact || fold.collapsed ? (
+        <CollapsedPanelBar
+          label={t("arch.documents")}
+          title={t("arch.documents.show")}
+          onExpand={() => (compact ? setCompactExplorer(true) : fold.expand())}
+        />
+      ) : null}
       {explorerOpen ? (
         <>
           {compact ? <div aria-hidden className="absolute inset-0 z-30 bg-black/30" onClick={closeExplorer} /> : null}
@@ -114,10 +109,10 @@ export function ArchitectureView() {
               if (compact && event.key === "Escape" && !event.defaultPrevented) closeExplorer();
             }}
           >
-            {loading ? <ViewSkeleton /> : <ArchitectureExplorer onClose={closeExplorer} />}
+            {loading ? <ViewSkeleton /> : <ArchitectureExplorer />}
           </aside>
           {!compact ? (
-            <ResizeHandle axis="x" value={sidebarWidth} min={180} max={420} onChange={(value) => setSize("architectureSidebarWidth", value)} onCommit={(value) => commitSize("architectureSidebarWidth", value)} />
+            <ResizeHandle axis="x" value={sidebarWidth} min={180} max={420} onChange={(value) => setSize("architectureSidebarWidth", value)} onCommit={(value) => commitSize("architectureSidebarWidth", value)} {...fold.handleProps} />
           ) : null}
         </>
       ) : null}
@@ -125,13 +120,12 @@ export function ArchitectureView() {
         {draftId ? (
           <Suspense fallback={<ArchitectureLoading opening />}>
             <div className={`flex min-h-0 flex-1 flex-col ${opening ? "invisible" : ""}`} inert={!!opening}>
-              <ArchEditor key={draftId} documentsControl={documentsControl} />
+              <ArchEditor key={draftId} documentsControl={null} />
             </div>
           </Suspense>
         ) : (
           <>
             <header className={`${toolbarClass} gap-2 pl-2.5`}>
-              {documentsControl}
               <span className="text-[13px] font-semibold text-[var(--cf-text)]">{t("arch.home.overview")}</span>
             </header>
             {loading ? <ArchitectureLoading /> : <ArchitectureHome />}

@@ -1466,6 +1466,37 @@ pub struct DbObjectInfo {
 /// tables would be 600 round trips and would take minutes on anything remote. Every driver answers
 /// this with two catalog queries — all columns, then all foreign keys — and the frontend does the
 /// counting and the layout.
+/// The most tables a schema diagram reads columns and keys for. A diagram past this is not readable
+/// anyway, and on a large catalog (TrakCare's `SQLUser`) reading all of them is what made the
+/// server abort the statement.
+pub const DIAGRAM_MAX_TABLES: usize = 150;
+
+/// Which tables and views a schema diagram keeps: the object filter in force on the schema's
+/// `Tables` and `Views` folders, exactly as the explorer tree narrows them.
+#[derive(Clone, Debug, Default)]
+pub struct DiagramFilter {
+    pub tables: String,
+    pub views: String,
+}
+
+impl DiagramFilter {
+    pub fn for_schema(config: &DbConnectionConfig, schema: Option<&str>) -> Self {
+        Self {
+            tables: config.object_filter_for(schema, DbNodeKind::TableFolder).trim().to_string(),
+            views: config.object_filter_for(schema, DbNodeKind::ViewFolder).trim().to_string(),
+        }
+    }
+
+    pub fn narrows(&self) -> bool {
+        !self.tables.is_empty() || !self.views.is_empty()
+    }
+
+    pub fn keeps(&self, name: &str, view: bool) -> bool {
+        let filter = if view { &self.views } else { &self.tables };
+        filter.is_empty() || object_filter_matches(filter, name)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbSchemaDiagram {
     pub database: Option<String>,
@@ -1858,18 +1889,27 @@ impl Session {
         }
     }
 
-    pub async fn schema_diagram(&self, node: &DbNodeRef) -> Result<DbSchemaDiagram, String> {
+    /// The schema drawn, narrowed by `filter` — the connection's object filter, the one the tree
+    /// already applies. The two drivers whose catalog reads grow with the schema (IRIS and JDBC)
+    /// apply it *before* asking for columns and keys; for the rest it is applied to the answer, so
+    /// the picture matches the tree whatever the engine.
+    pub async fn schema_diagram(&self, node: &DbNodeRef, filter: &DiagramFilter) -> Result<DbSchemaDiagram, String> {
         let mut diagram = match self {
             Session::Postgres(s) => s.schema_diagram(node).await,
             Session::Mssql(s) => s.schema_diagram(node).await,
             Session::Mongo(s) => s.schema_diagram(node).await,
-            Session::Iris(s) => s.schema_diagram(node).await,
+            Session::Iris(s) => s.schema_diagram(node, filter).await,
             Session::Redis(s) => s.schema_diagram(node).await,
             Session::Mysql(s) => s.schema_diagram(node).await,
             Session::Sqlite(s) => s.schema_diagram(node).await,
             Session::Oracle(s) => s.schema_diagram(node).await,
-            Session::Jdbc(s) => s.schema_diagram(node).await,
+            Session::Jdbc(s) => s.schema_diagram(node, filter).await,
         }?;
+        if filter.narrows() {
+            diagram.tables.retain(|table| filter.keeps(&table.name, table.kind == DbNodeKind::View));
+            let kept: std::collections::HashSet<String> = diagram.tables.iter().map(|table| table.name.clone()).collect();
+            diagram.edges.retain(|edge| kept.contains(&edge.from_table));
+        }
         mark_foreign_keys(&mut diagram.tables, &diagram.edges);
         Ok(diagram)
     }
@@ -3984,5 +4024,22 @@ mod tests {
         assert_eq!(refused("BEGIN purge_rows; END;", SqlDialect::Oracle), "PL/SQL block");
         assert_eq!(refused("DECLARE n NUMBER; BEGIN NULL; END;", SqlDialect::Oracle), "PL/SQL block");
         assert_eq!(refused("SELECT orders_seq.NEXTVAL FROM DUAL", SqlDialect::Oracle), "NEXTVAL");
+    }
+}
+
+#[cfg(test)]
+mod diagram_filter_tests {
+    use super::DiagramFilter;
+
+    #[test]
+    fn keeps_only_what_the_tree_shows() {
+        let filter = DiagramFilter { tables: "PA_*, !PA_Old*".into(), views: String::new() };
+        assert!(filter.narrows());
+        assert!(filter.keeps("PA_Person", false));
+        assert!(!filter.keeps("PA_OldPerson", false));
+        assert!(!filter.keeps("ARC_Alias", false));
+        // No pattern on the views folder: every view stays.
+        assert!(filter.keeps("V_Anything", true));
+        assert!(!DiagramFilter::default().narrows());
     }
 }

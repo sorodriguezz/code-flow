@@ -41,6 +41,7 @@ import { useApiTreeStore, type ApiSidebarSection } from "../../state/apiTreeStor
 import { useCollabStore } from "../../state/collabStore";
 import { useUiStore } from "../../state/uiStore";
 import { useLayoutStore } from "../../state/layoutStore";
+import { CollapsedPanelBar, useCollapsiblePanel } from "../common/CollapsedPanelBar";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { ApiCollection, ApiFolder, ApiRequestRow } from "../../types/api";
@@ -314,6 +315,7 @@ export function ApiSidebar() {
   const width = useLayoutStore((s) => s.sizes.apiSidebarWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
+  const fold = useCollapsiblePanel("apiSidebarWidth");
   const createCollection = useApiStore((s) => s.createCollection);
   const collections = useApiStore((s) => s.collections);
   const openTabs = useApiStore((s) => s.openTabs);
@@ -364,6 +366,18 @@ export function ApiSidebar() {
       onClick: () => useUiStore.getState().openApiSettings(),
     },
   ];
+
+  // Folded to a bar by dragging the seam past the minimum; a click unfolds it at the suggested width.
+  if (fold.collapsed) {
+    return (
+      <CollapsedPanelBar
+        tour="api-sidebar"
+        label={t("api.title")}
+        title={t("api.sidebarExpand")}
+        onExpand={fold.expand}
+      />
+    );
+  }
 
   return (
     <>
@@ -471,16 +485,8 @@ export function ApiSidebar() {
             >
               <Plus size={15} />
             </ToolbarButton>
-            <ToolbarButton
-              onClick={() =>
-                runnerCollectionId &&
-                openModal({ kind: "runner", collectionId: runnerCollectionId, folderId: null })
-              }
-              disabled={runnerCollectionId === null}
-              title={t("api.runner.title")}
-            >
-              <Play size={15} />
-            </ToolbarButton>
+            {/* Bring things in (new, import), work with the team (invitations, conflicts), run, and
+                the rest under «…» — grouped by what they are for (user, 2026-11-19). */}
             <ToolbarButton onClick={() => openModal({ kind: "import" })} title={t("api.import.title")}>
               <Download size={15} />
             </ToolbarButton>
@@ -504,6 +510,16 @@ export function ApiSidebar() {
                 </span>
               </ToolbarButton>
             )}
+            <ToolbarButton
+              onClick={() =>
+                runnerCollectionId &&
+                openModal({ kind: "runner", collectionId: runnerCollectionId, folderId: null })
+              }
+              disabled={runnerCollectionId === null}
+              title={t("api.runner.title")}
+            >
+              <Play size={15} />
+            </ToolbarButton>
             <ToolbarButton
               onClick={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
@@ -544,6 +560,7 @@ export function ApiSidebar() {
         onChange={(value) => setSize("apiSidebarWidth", value)}
         onCommit={(value) => commitSize("apiSidebarWidth", value)}
         seamless
+        {...fold.handleProps}
       />
 
       {menu && (

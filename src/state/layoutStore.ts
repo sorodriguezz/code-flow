@@ -260,6 +260,11 @@ const FLAG_DEFAULTS: Record<LayoutFlag, boolean> = {
  * Being in `app_settings` is also what puts it in the backup: that table travels whole.
  */
 const RAIL_ORDER_KEY = "layout_app_rail_order";
+/**
+ * The side panels folded to a bar (see `CollapsiblePanel`), by the `LayoutKey` of their width. One
+ * list rather than a flag per panel: folding is the same gesture on every explorer that has it.
+ */
+const COLLAPSED_PANELS_KEY = "layout_collapsed_panels";
 const REPO_TAB_ORDER_KEY = "layout_repo_tab_order";
 
 /** Tolerant on purpose: a corrupt or hand-edited row means "no preference", not a rail that fails
@@ -320,6 +325,9 @@ interface LayoutState {
   /** Empty means "nobody has rearranged the rail", which is not the same as "no apps" — the rail
    *  falls back to its declared order rather than to nothing. */
   railOrder: string[];
+  /** Panels folded to a bar, by the `LayoutKey` of their width. */
+  collapsedPanels: LayoutKey[];
+  setPanelCollapsed: (key: LayoutKey, collapsed: boolean) => void;
   /** Repository navigation order, including temporarily hidden tabs. */
   repoTabOrder: string[];
   init: () => Promise<void>;
@@ -340,6 +348,7 @@ export const useLayoutStore = create<LayoutState>((set) => ({
   flags: { ...FLAG_DEFAULTS },
   railOrder: [],
   repoTabOrder: [],
+  collapsedPanels: [],
 
   // Every stored size and flag in ONE round-trip. This used to be 33 `getSetting` calls plus 2 more
   // for the flags, wrapped in `Promise.all` — which bought nothing: `get_setting` takes the database
@@ -361,6 +370,7 @@ export const useLayoutStore = create<LayoutState>((set) => ({
       ...flagKeys.map((key) => FLAG_STORAGE_KEYS[key]),
       RAIL_ORDER_KEY,
       REPO_TAB_ORDER_KEY,
+      COLLAPSED_PANELS_KEY,
     ]).catch(() => ({}) as Record<string, string>);
 
     const sizes = {} as Record<LayoutKey, number>;
@@ -378,6 +388,9 @@ export const useLayoutStore = create<LayoutState>((set) => ({
       sizes,
       flags,
       railOrder: parseOrder(stored[RAIL_ORDER_KEY] ?? null),
+      collapsedPanels: parseOrder(stored[COLLAPSED_PANELS_KEY] ?? null).filter(
+        (key): key is LayoutKey => key in STORAGE_KEYS,
+      ),
       repoTabOrder: parseOrder(stored[REPO_TAB_ORDER_KEY] ?? null),
     });
   },
@@ -393,6 +406,15 @@ export const useLayoutStore = create<LayoutState>((set) => ({
       const next = !s.flags[key];
       persist(FLAG_STORAGE_KEYS[key], next ? "1" : "0");
       return { flags: { ...s.flags, [key]: next } };
+    }),
+
+  setPanelCollapsed: (key, collapsed) =>
+    set((s) => {
+      const has = s.collapsedPanels.includes(key);
+      if (has === collapsed) return {};
+      const next = collapsed ? [...s.collapsedPanels, key] : s.collapsedPanels.filter((entry) => entry !== key);
+      persist(COLLAPSED_PANELS_KEY, JSON.stringify(next));
+      return { collapsedPanels: next };
     }),
 
   setRailOrder: (order) => {

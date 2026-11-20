@@ -14,6 +14,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  ChevronDown,
+  ChevronRight,
   CircleAlert,
   Eye,
   EyeOff,
@@ -359,7 +361,9 @@ function GroupTable({
 }) {
   const t = useT();
   const [menu, setMenu] = useState<{ source: EnvSource; rect: DOMRect } | null>(null);
+  const [open, setOpen] = useState(true);
   const label = [group.dir || t("env.root"), t(FAMILY_LABEL[group.family]), group.service].filter(Boolean).join(" · ");
+  const withProblems = group.rows.filter((row) => row.problems.length > 0).length;
   const menuItems = (source: EnvSource): MenuItem[] => [
     { label: t("env.column.open"), icon: FileCode2, onClick: () => onOpen(source.path) },
     { label: t("env.column.rename"), icon: SlidersHorizontal, onClick: () => onRename(source) },
@@ -368,8 +372,27 @@ function GroupTable({
 
   return (
     <section className="mt-5">
-      <h3 className={`${sectionLabelClass} px-0`}>{label}</h3>
-      {rows.length === 0 ? (
+      {/* A heading you can fold: a repository with five groups was one long scroll of tables, and
+          the counts say which group is worth opening before you open it (user, 2026-11-19). */}
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="mb-1.5 flex w-full items-center gap-1.5 rounded px-0 py-0.5 text-left hover:text-[var(--cf-text)]"
+      >
+        {open ? <ChevronDown size={12} className="shrink-0 text-[var(--cf-text-faint)]" /> : <ChevronRight size={12} className="shrink-0 text-[var(--cf-text-faint)]" />}
+        <span role="heading" aria-level={3} className={`${sectionLabelClass} px-0`}>{label}</span>
+        <span className="text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+          {t("env.groupCounts", { vars: group.rows.length, files: group.sources.length })}
+        </span>
+        {withProblems > 0 && (
+          <span className={chipClass("bad")}>
+            <TriangleAlert size={10} />
+            {withProblems}
+          </span>
+        )}
+      </button>
+      {!open ? null : rows.length === 0 ? (
         <p className="text-[12px] text-[var(--cf-text-faint)]">{t(group.rows.length === 0 ? "env.groupEmpty" : "env.noMatches")}</p>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-[var(--cf-border)]">
@@ -404,11 +427,16 @@ function GroupTable({
             <tbody>
               {rows.map((row) => (
                 <tr key={row.key} className="group/row border-t border-[var(--cf-border)] hover:bg-[var(--cf-hover)]">
-                  <td className="sticky left-0 z-10 bg-[var(--cf-surface)] px-3 py-1 align-middle group-hover/row:bg-[color-mix(in_oklab,var(--cf-hover)_100%,var(--cf-surface))]">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <code className="break-all font-mono text-[12px] text-[var(--cf-text)]">{row.key}</code>
+                  <td className="sticky left-0 z-10 max-w-[560px] bg-[var(--cf-surface)] px-3 py-1.5 align-middle group-hover/row:bg-[color-mix(in_oklab,var(--cf-text)_5%,var(--cf-surface))]">
+                    {/* One line per variable: a long dotted key used to wrap and push its badge onto a
+                        second line, so rows were different heights and the table read ragged. The
+                        key is cut with an ellipsis (whole on hover) and the badges never wrap. */}
+                    <div className="flex min-w-0 items-center gap-2">
+                      <code title={row.key} className="min-w-0 flex-1 truncate font-mono text-[12px] text-[var(--cf-text)]">
+                        {row.key}
+                      </code>
                       {row.problems.map((problem) => (
-                        <span key={problem} className={chipClass(problem === "empty" ? "neutral" : problem === "notInExample" ? "warn" : "bad")}>
+                        <span key={problem} className={`${chipClass(problem === "empty" ? "neutral" : problem === "notInExample" ? "warn" : "bad")} shrink-0 whitespace-nowrap`}>
                           {t(PROBLEM_LABEL[problem], { count: row.missingIn.length })}
                         </span>
                       ))}
@@ -469,12 +497,14 @@ function Cell({
   onOpen: (line: number) => void;
 }) {
   const t = useT();
-  const base = "border-l border-[var(--cf-border)] px-2 py-1 align-middle";
+  const base = "border-l border-[var(--cf-border)] px-2 py-1.5 align-middle";
   if (cell.state === "missing") {
     return (
-      <td className={`${base} bg-[color-mix(in_oklab,var(--cf-danger)_5%,transparent)]`}>
+      // A dash and a faint tint rather than the word «Falta» in red in every cell: a column of
+      // them was a red wall that drowned the one badge on the row that already says what is wrong.
+      <td className={`${base} bg-[color-mix(in_oklab,var(--cf-danger)_4%,transparent)]`} title={t("env.cell.missing")}>
         <div className="flex items-center gap-1">
-          <span className="text-[11.5px] text-[var(--cf-danger)]">{t("env.cell.missing")}</span>
+          <span aria-label={t("env.cell.missing")} className="font-mono text-[12px] text-[color-mix(in_oklab,var(--cf-danger)_70%,var(--cf-text-faint))]">—</span>
           {canAdd && (
             <Tooltip label={t("env.usage.addTo", { file: source.path })}>
               <button type="button" aria-label={t("env.usage.addTo", { file: source.path })} className={iconButtonClass({ size: "xs" })} onClick={onAdd}>
