@@ -34,6 +34,8 @@ mod local_agent;
 mod backup;
 /// Opening the database at startup without a panic, and the watchdog for a frontend that never loads.
 mod boot_guard;
+mod browser_tools;
+mod browser_window;
 mod caveman;
 mod agentcli;
 mod agentstatus;
@@ -106,6 +108,7 @@ mod opencode;
 mod paths;
 mod architecture;
 mod power;
+mod preview_server;
 mod pr_link;
 mod refrepos;
 mod prettier;
@@ -1218,6 +1221,17 @@ sharded_invoke_handler! {
         windows::restore_satellites,
         windows::quick_ask_open,
         windows::attention_open,
+        browser_window::browser_open,
+        browser_window::browser_show,
+        browser_window::browser_focus_bar,
+        browser_window::browser_go,
+        browser_window::browser_tab_new,
+        browser_window::browser_tab_select,
+        browser_window::browser_tab_close,
+        browser_window::browser_layout,
+        browser_window::browser_state,
+        browser_window::browser_seen,
+        preview_server::preview_file_url,
         windows::quick_ask_close,
         windows::show_main_window,
         windows::register_quick_ask_shortcut,

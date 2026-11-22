@@ -512,6 +512,119 @@ pub async fn execute(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     Ok(vec![result?])
 }
 
+/// What [`read_page`] is asked for — an agent's `browser_read`.
+pub struct ReadOptions {
+    pub url: String,
+    pub width: u32,
+    pub height: u32,
+    /// A CSS selector to wait for after the load, for a page that draws itself late. Empty: none.
+    pub wait_for: String,
+    /// Time to wait after the load (and the selector), in milliseconds.
+    pub wait_ms: u64,
+    pub screenshot: bool,
+    /// The whole page rather than the first screen — capped, see [`read_page`].
+    pub full_page: bool,
+    pub timeout: Duration,
+}
+
+/// What [`read_page`] saw.
+pub struct PageRead {
+    pub url: String,
+    pub title: String,
+    /// The page as Markdown, after its scripts ran.
+    pub markdown: String,
+    /// What the page complained about while loading: `console.error`, uncaught errors, rejected
+    /// promises, resources that failed to load. At most fifty.
+    pub errors: Vec<String>,
+    /// A PNG, base64.
+    pub screenshot: Option<String>,
+}
+
+/// Installed before any of the page's own scripts: what it reports as broken, kept for the reader.
+const ERROR_TRAP: &str = r#"(() => {
+  const out = []; window.__cfErrors = out;
+  const push = (m) => { if (out.length < 50) out.push(String(m).slice(0, 500)); };
+  const show = (x) => { if (x && x.stack) return x.stack; if (typeof x === 'object') { try { return JSON.stringify(x); } catch (_) {} } return String(x); };
+  const original = console.error;
+  console.error = function (...args) { push(args.map(show).join(' ')); return original.apply(this, args); };
+  window.addEventListener('error', (e) => {
+    if (e.target && e.target !== window) { push('Failed to load ' + (e.target.src || e.target.href || e.target.tagName)); return; }
+    push((e.message || 'Error') + (e.filename ? ' (' + e.filename + ':' + e.lineno + ')' : ''));
+  }, true);
+  window.addEventListener('unhandledrejection', (e) => push('Unhandled rejection: ' + show(e.reason)));
+})();"#;
+
+/// The tallest full-page screenshot taken, in CSS pixels: past it a picture is too large to be read.
+const MAX_SHOT_HEIGHT: f64 = 8000.0;
+
+/// Renders one page in a headless browser of its own and reports what it shows — the agents'
+/// `browser_read`. The same browser and the same throwaway profile as the node (never the user's
+/// sessions), closed with everything it started when the read ends.
+pub async fn read_page(options: ReadOptions) -> Result<PageRead, String> {
+    let binary = find_browser("")?;
+    let width = options.width.clamp(320, 3840);
+    let height = options.height.clamp(240, 2160);
+    let profile = std::env::temp_dir().join(format!("codeflow-browse-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]));
+    let mut browser = launch(&binary, &profile, width, height).await?;
+    let timeout = options.timeout;
+    let work = async {
+        let cdp = Cdp::connect(&browser.ws).await?;
+        let target = cdp.call(None, "Target.createTarget", json!({"url": "about:blank"}), timeout).await?;
+        let target_id = target.get("targetId").and_then(Value::as_str).unwrap_or_default().to_string();
+        let attached = cdp.call(None, "Target.attachToTarget", json!({"targetId": target_id, "flatten": true}), timeout).await?;
+        let session = attached.get("sessionId").and_then(Value::as_str).unwrap_or_default().to_string();
+        cdp.call(Some(&session), "Page.enable", json!({}), timeout).await?;
+        cdp.call(Some(&session), "Runtime.enable", json!({}), timeout).await?;
+        cdp.call(Some(&session), "Emulation.setDeviceMetricsOverride", json!({"width": width, "height": height, "deviceScaleFactor": 1, "mobile": width < 700}), timeout).await?;
+        cdp.call(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({"source": ERROR_TRAP}), timeout).await?;
+        navigate(&cdp, &session, &options.url, timeout).await?;
+        wait_for(&cdp, &session, &options.wait_for, timeout).await?;
+        if options.wait_ms > 0 {
+            tokio::time::sleep(Duration::from_millis(options.wait_ms.min(60_000))).await;
+        }
+        let eval = |expression: &str| {
+            let expression = expression.to_string();
+            let cdp = &cdp;
+            let session = &session;
+            async move {
+                cdp.call(Some(session), "Runtime.evaluate", json!({"expression": expression, "returnByValue": true}), timeout)
+                    .await
+                    .map(|answer| answer.pointer("/result/value").cloned().unwrap_or(Value::Null))
+            }
+        };
+        let info = eval("({url: location.href, title: document.title})").await?;
+        let url = info.get("url").and_then(Value::as_str).unwrap_or_default().to_string();
+        let title = info.get("title").and_then(Value::as_str).unwrap_or_default().to_string();
+        let html = eval("document.documentElement.outerHTML").await?.as_str().unwrap_or_default().to_string();
+        let base = url::Url::parse(&url).ok();
+        let markdown = super::utils::page_markdown(&html, base.as_ref()).get("markdown").and_then(Value::as_str).unwrap_or_default().to_string();
+        let errors = eval("window.__cfErrors || []")
+            .await?
+            .as_array()
+            .map(|list| list.iter().filter_map(|e| e.as_str().map(str::to_string)).collect())
+            .unwrap_or_default();
+        let screenshot = if options.screenshot {
+            let mut request = json!({"format": "png", "captureBeyondViewport": options.full_page});
+            if options.full_page {
+                let metrics = cdp.call(Some(&session), "Page.getLayoutMetrics", json!({}), timeout).await?;
+                let w = metrics.pointer("/cssContentSize/width").and_then(Value::as_f64).unwrap_or(width as f64);
+                let h = metrics.pointer("/cssContentSize/height").and_then(Value::as_f64).unwrap_or(height as f64).min(MAX_SHOT_HEIGHT);
+                request["clip"] = json!({"x": 0, "y": 0, "width": w, "height": h, "scale": 1});
+            }
+            let shot = cdp.call(Some(&session), "Page.captureScreenshot", request, timeout).await?;
+            shot.get("data").and_then(Value::as_str).map(str::to_string)
+        } else {
+            None
+        };
+        let _ = cdp.call(None, "Browser.close", json!({}), Duration::from_secs(5)).await;
+        Ok::<_, String>(PageRead { url, title, markdown, errors, screenshot })
+    };
+    let result = tokio::time::timeout(timeout + Duration::from_secs(30), work).await.unwrap_or_else(|_| Err("the page took too long".to_string()));
+    browser.stop().await;
+    let _ = std::fs::remove_dir_all(&profile);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,6 +653,41 @@ mod tests {
         assert!(shot["data"].as_str().unwrap().len() > 100);
         browser.stop().await;
         let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    /// `read_page` end to end, against a built site served by the preview server: its absolute asset
+    /// loads, what it logs as broken is reported, and a screenshot comes back.
+    /// `CODEFLOW_LIVE_BROWSER=1 cargo test --lib flows::nodes::browser -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_read_page() {
+        if std::env::var("CODEFLOW_LIVE_BROWSER").is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("cf-read-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(dir.join("dist/assets")).unwrap();
+        std::fs::write(dir.join("dist/index.html"), "<title>Sitio</title><main id=app></main><img src=missing.png><script type=module src=\"/assets/app.js\"></script>").unwrap();
+        std::fs::write(dir.join("dist/assets/app.js"), "document.getElementById('app').innerHTML = '<h1>Hola desde el bundle</h1>'; console.error('boom');").unwrap();
+        let url = crate::preview_server::url_for(&dir, "dist/index.html").await.unwrap();
+        let page = read_page(ReadOptions {
+            url,
+            width: 800,
+            height: 600,
+            wait_for: "h1".into(),
+            wait_ms: 0,
+            screenshot: true,
+            full_page: false,
+            timeout: Duration::from_secs(20),
+        })
+        .await
+        .unwrap();
+        println!("{} | {:?}\n{}", page.title, page.errors, page.markdown);
+        assert_eq!(page.title, "Sitio");
+        assert!(page.markdown.contains("Hola desde el bundle"));
+        assert!(page.errors.iter().any(|e| e.contains("boom")));
+        assert!(page.errors.iter().any(|e| e.contains("missing.png")));
+        assert!(page.screenshot.is_some_and(|png| png.len() > 100));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// An answer over the limit fails the command waiting for it at once, and every command after it,

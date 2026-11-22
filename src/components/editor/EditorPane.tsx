@@ -37,6 +37,7 @@ import {
 import { MarkdownPreview } from "./MarkdownPreview";
 import { DbmlDiagram } from "./DbmlDiagram";
 import { FileNoticeView } from "./FileNoticeView";
+import { isPagePath, RepoFilePreview } from "../browser/WebPreview";
 import { isWritable, type FileNotice, type ReadOnlyReason } from "../../lib/editorFiles";
 import { useLiveEditing } from "./useLiveEditing";
 import type { DiskVersion } from "../../lib/tauri/commands";
@@ -254,7 +255,7 @@ async function loadFullFileDiff(
   return file;
 }
 
-export type PreviewKind = "markdown" | "dbml" | "svg" | null;
+export type PreviewKind = "markdown" | "dbml" | "svg" | "html" | null;
 /** `preview`/`split` are the rendered-output modes, and only mean anything for a file with a
  * `PreviewKind`. `diff` is orthogonal to both: any file with uncommitted changes can be shown as
  * before-vs-after, so it's offered on its own toggle rather than as a fourth button in that group. */
@@ -369,7 +370,16 @@ export function previewKindFor(path: string | null): PreviewKind {
   if (lower.endsWith(".dbml")) return "dbml";
   // SVG is text, and editable as text; the preview is the image it draws.
   if (lower.endsWith(".svg")) return "svg";
+  // A page: the preview is the page as a browser draws it, served from the repository so its
+  // stylesheets, scripts and images load (`preview_server.rs`).
+  if (isPagePath(lower)) return "html";
   return null;
+}
+
+/** A file's version on disk as a string that changes when its bytes do — what a served preview is
+ *  reloaded on. */
+function diskKey(version: DiskVersion | null): string {
+  return version ? `${version.hash}:${version.mtime_ms}:${version.size}` : "";
 }
 
 function resolveCssColor(varName: string, fallback: string): string {
@@ -707,6 +717,7 @@ export function EditorPane({
   onViewMode,
   onSave,
   onReload,
+  onWebNavigate,
   onDiskAction,
   onOpenInDiagrams,
   onCodeSnap,
@@ -751,6 +762,8 @@ export function EditorPane({
   onSave: () => void;
   /** Reads the file again — a notice's Retry, or its "open anyway" with `allowLarge`. */
   onReload: (path: string, opts?: { allowLarge?: boolean }) => void;
+  /** A web tab's address bar went somewhere else (`FileNotice` `web`). */
+  onWebNavigate?: (path: string, url: string) => void;
   /** One of the three answers to a file that changed on disk under this buffer. */
   onDiskAction: (path: string, action: DiskAction) => void;
   /**
@@ -3291,6 +3304,8 @@ export function EditorPane({
                 repoPath={project.local_path}
                 onRetry={() => onReload(activeTab.path)}
                 onOpenAnyway={() => onReload(activeTab.path, { allowLarge: true })}
+                onWebNavigate={onWebNavigate ? (url) => onWebNavigate(activeTab.path, url) : undefined}
+                reloadKey={diskKey(activeTab.version)}
               />
             ) : viewMode === "diff" ? (
               diffSides ? (
@@ -3351,6 +3366,8 @@ export function EditorPane({
             ) : viewMode === "preview" ? (
               previewKind === "markdown" ? (
                 <MarkdownPreview content={content} />
+              ) : previewKind === "html" ? (
+                <RepoFilePreview repoPath={project.local_path} path={activeTab.path} reloadKey={diskKey(activeTab.version)} />
               ) : previewKind === "svg" ? (
                 <SvgPreview source={content} name={activeTab.path} />
               ) : (
@@ -3363,6 +3380,9 @@ export function EditorPane({
                   {/* No scroll sync for an image: its height has nothing to do with the source's. */}
                   {previewKind === "markdown" ? (
                     <MarkdownPreview content={content} ref={previewScrollRef} />
+                  ) : previewKind === "html" ? (
+                    // The page as saved: it is served from disk, so it follows ⌘S, not each keystroke.
+                    <RepoFilePreview repoPath={project.local_path} path={activeTab.path} reloadKey={diskKey(activeTab.version)} />
                   ) : previewKind === "svg" ? (
                     <SvgPreview source={content} name={activeTab.path} />
                   ) : (

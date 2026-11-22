@@ -1,5 +1,6 @@
 import { useState, type MouseEvent, type ReactNode } from "react";
 import {
+  AppWindow,
   Bug,
   ChevronDown,
   MessageSquareText,
@@ -21,6 +22,7 @@ import {
 import { canDebugService } from "../../lib/serviceDebug";
 import { askInWorkspaceChat } from "../../lib/aiPanelNav";
 import { serviceLog } from "../../lib/tauri/services";
+import { openInCodeFlow } from "../../lib/webPreview";
 import { pushErrorToast } from "../../state/toastStore";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
 import { Tooltip } from "../common/Tooltip";
@@ -489,6 +491,15 @@ function ServiceRowItem({
       : { label: t("services.start"), icon: CirclePlay, onClick: () => void start(service.id) },
     ...(!active && debuggable ? [{ label: t("services.debug"), icon: Bug, onClick: () => void debug(service.id) }] : []),
     { label: t("services.restart"), leading: still(RotateCw), onClick: () => void restart(service.id), disabled: !active },
+    // The page it serves, beside the code (`lib/webPreview`): one row per port it is listening on now.
+    ...(active && live
+      ? ports.map((port, index) => ({
+          label: t("browser.openPortInCodeFlow", { port: String(port) }),
+          icon: AppWindow,
+          separated: index === 0,
+          onClick: () => openInCodeFlow(`http://localhost:${port}`),
+        }))
+      : []),
     { label: t("services.askChat"), icon: MessageSquareText, onClick: () => void askChat(), separated: true },
     { label: t("services.edit"), icon: Pencil, onClick: onEdit, separated: true },
     { label: t("services.duplicate"), icon: Copy, onClick: duplicate },

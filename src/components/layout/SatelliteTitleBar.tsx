@@ -122,7 +122,7 @@ const BranchSwitcherModal = lazy(() =>
  * show a *different* repository, which is the line the rest of this bar is drawn along.
  */
 
-function WindowsControls() {
+export function WindowsControls() {
   const maximized = useSyncExternalStore(subscribeWindowStatus, () => getWindowStatus().maximized);
   const t = useT();
   return (
@@ -460,7 +460,7 @@ function ChatCrumb({ refId }: { refId: string }) {
  *
  * Starts off: a window that opened above everything would be one you could not get behind.
  */
-function KeepOnTop() {
+export function KeepOnTop({ native = false }: { native?: boolean } = {}) {
   const [onTop, setOnTop] = useState(false);
   const t = useT();
   // What the window really is, read once: a reload of the page must not show an unpinned pin on a
@@ -483,11 +483,23 @@ function KeepOnTop() {
       .then(() => setOnTop(next))
       .catch((e: unknown) => pushErrorToast(String(e)));
   };
+  const button = (
+    <button
+      onClick={toggle}
+      aria-pressed={onTop}
+      aria-label={label}
+      // `native`: the platform's own tooltip, for a bar with a native webview under it that the
+      // app's tooltip would be drawn behind («Navegador», `BrowserWindow`).
+      title={native ? `${label} — ${t("windows.pinOnTopHint")}` : undefined}
+      className={iconButtonClass({ size: "sm", active: onTop })}
+    >
+      <Pin size={15} className={onTop ? "fill-current" : ""} />
+    </button>
+  );
+  if (native) return button;
   return (
     <Tooltip side="bottom" label={label} description={t("windows.pinOnTopHint")}>
-      <button onClick={toggle} aria-pressed={onTop} aria-label={label} className={iconButtonClass({ size: "sm", active: onTop })}>
-        <Pin size={15} className={onTop ? "fill-current" : ""} />
-      </button>
+      {button}
     </Tooltip>
   );
 }

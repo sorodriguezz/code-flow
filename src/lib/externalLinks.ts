@@ -1,5 +1,6 @@
 import { openExternalUrl } from "./tauri/commands";
 import { pushErrorToast } from "../state/toastStore";
+import { openInCodeFlow } from "./webPreview";
 
 /**
  * Sends every link click to the user's own browser instead of to the webview.
@@ -19,6 +20,10 @@ import { pushErrorToast } from "../state/toastStore";
  * DOMPurify already strips `javascript:` hrefs, and `open_external_url` refuses anything that is
  * not http(s) — but a `file:` link that reaches neither would still be handed to the webview to
  * follow. Anything absolute and not on the list is swallowed: not opened, and not navigated to.
+ *
+ * **Shift-click opens it inside CodeFlow** instead (`lib/webPreview`): the user's own pages in an
+ * editor tab, the internet in «Navegador». Shift because it already means "somewhere else" for a
+ * link, and because ⌘/Ctrl-click is the terminal's way to follow one at all.
  */
 
 /** Schemes worth handing to the OS. */
@@ -46,6 +51,10 @@ export function startExternalLinks() {
 
     event.preventDefault();
     if (!EXTERNAL.test(href)) return;
+    if (event.shiftKey && /^https?:/i.test(href)) {
+      openInCodeFlow(href);
+      return;
+    }
     void openExternalUrl(href).catch((e: unknown) => pushErrorToast(String(e)));
   });
 }

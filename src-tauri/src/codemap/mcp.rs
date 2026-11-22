@@ -1097,6 +1097,8 @@ pub fn tools_for(acts: bool) -> Vec<Value> {
     all.extend(app_read_tools().into_iter().map(read_only));
     all.extend(infra_tools());
     all.extend(crate::app_gateway::tools(acts));
+    // The browser: reading a page for anyone, showing one to the user for a run that may act.
+    all.extend(crate::browser_tools::schemas(acts));
     if acts {
         all.extend(app_action_tools());
     }
@@ -1794,6 +1796,7 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
                 let mut own = workspace_tools();
                 own.extend(crate::ai_memory::tools::schemas(access.acts));
                 own.extend(workspace_app_tools(access.acts));
+                own.extend(crate::browser_tools::schemas(access.acts));
                 own.extend(infra_tools());
                 own.extend(crate::app_gateway::tools(access.acts));
                 own
@@ -1857,13 +1860,19 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
                 });
             }
             let about_a_reference = REFERENCE_TOOLS.contains(&name) || (MAP_TOOLS.contains(&name) && args.get("repo").and_then(Value::as_str).is_some_and(|r| !r.trim().is_empty()));
-            let workspace_app_tool = is_workspace_app_tool(name) || crate::app_gateway::is_tool(name);
+            let workspace_app_tool = is_workspace_app_tool(name) || crate::app_gateway::is_tool(name) || crate::browser_tools::is_tool(name);
             if access.workspace && !WORKSPACE_TOOLS.contains(&name) && !DB_TOOLS.contains(&name) && !workspace_app_tool && !about_a_reference {
                 let why = if MAP_TOOLS.contains(&name) { "name a reference repository in repo — there is no single repository of its own here" } else { "there is no single repository here" };
                 return Some(text_result(id, format!("{name} is not available in the workspace chat: {why}"), true));
             }
             if access.grounding && !GROUNDING_TOOLS.contains(&name) && !REFERENCE_TOOLS.contains(&name) {
                 return Some(text_result(id, format!("{name} is not available to this run: it answers about the material it was given, with the map and the knowledge"), true));
+            }
+            if crate::browser_tools::is_tool(name) {
+                return Some(match crate::browser_tools::call(&access.root, access.acts, name, &args).await {
+                    Ok(content) => result_reply(id, json!({"content": content, "isError": false})),
+                    Err(error) => text_result(id, error, true),
+                });
             }
             if let Some(result) = app_tool(access, name, &args).await {
                 return Some(match result {
@@ -2073,11 +2082,13 @@ mod tests {
         // so does the whole app (`app_gateway`).
         let own: Vec<String> = tool_names(&reply)
             .into_iter()
-            .filter(|n| !INFRA_TOOLS.contains(&n.as_str()) && !crate::chat_refs::is_tool(n) && !crate::app_gateway::is_tool(n) && n != PERMISSION_PROMPT_TOOL)
+            .filter(|n| !INFRA_TOOLS.contains(&n.as_str()) && !crate::chat_refs::is_tool(n) && !crate::app_gateway::is_tool(n) && !crate::browser_tools::is_tool(n) && n != PERMISSION_PROMPT_TOOL)
             .collect();
         let expected: Vec<&str> = ["search_knowledge", "recall", "read_note", "memory_list", "read_memory"].into_iter().chain(WORKSPACE_APP_READ_TOOLS.iter().copied()).collect();
         assert_eq!(own, expected);
         assert!(tool_names(&reply).iter().any(|n| n == "chat_read") && !tool_names(&reply).iter().any(|n| n == "chat_send"));
+        // The browser rides it too (`browser_tools`): reading a page, never showing one, for this token.
+        assert!(tool_names(&reply).iter().any(|n| n == "browser_read") && !tool_names(&reply).iter().any(|n| n == "browser_open"));
         assert!(reply["result"]["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
 
         for name in ["find_symbol", "pipelines", "open_in_editor", "run_with_secret"] {
@@ -2154,7 +2165,7 @@ mod tests {
         // as in the workspace chat's test. This counted them as they were added and went stale.
         let own: Vec<String> = tool_names(&reply)
             .into_iter()
-            .filter(|n| !INFRA_TOOLS.contains(&n.as_str()) && !crate::chat_refs::is_tool(n) && !crate::app_gateway::is_tool(n) && n != PERMISSION_PROMPT_TOOL)
+            .filter(|n| !INFRA_TOOLS.contains(&n.as_str()) && !crate::chat_refs::is_tool(n) && !crate::app_gateway::is_tool(n) && !crate::browser_tools::is_tool(n) && n != PERMISSION_PROMPT_TOOL)
             .collect();
         let expected: Vec<&str> = MAP_TOOLS
             .iter()

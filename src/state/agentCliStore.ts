@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { agentCliAnswer, agentCliFocus } from "../lib/tauri/commands";
 import { onAgentCliAsk, onAgentCliDone, onAgentCliNotify, onAgentCliOpen, onAgentCliReview, type AgentCliAsk } from "../lib/tauri/events";
+import { onBrowserShow } from "../lib/tauri/browserCommands";
+import { openInCodeFlow } from "../lib/webPreview";
 import { focusEditorOn } from "../lib/editorIslands";
 import { taskForCwd } from "../lib/agents/terminalTask";
 import { isMainWindow } from "../lib/windowIdentity";
@@ -25,7 +27,8 @@ import { translate } from "./languageStore";
  *   and each shell is blocked on its own, so a second one must never take the first one's place.
  * - `review` opens the diff of the task that owns the folder the agent is standing in — the same
  *   match the terminal's own menu makes, so "my worktree" means one thing everywhere.
- * - `open` puts a project's file on screen in the editor, at a line.
+ * - `open` puts a project's file on screen in the editor, at a line; `browser:show` (an agent's
+ *   `browser_open`) a page, where `lib/webPreview` says it goes.
  * - and what the window has in focus goes the other way, so `cf status` can answer.
  *
  * One subscription set, in the main window only: the events reach every window because the endpoint
@@ -66,6 +69,10 @@ export const useAgentCliStore = create<AgentCliState>((set, get) => ({
     void onAgentCliOpen(({ projectId, path, line }) => {
       void focusEditorOn(projectId).then(() => useUiStore.getState().openInEditor(path, line ?? undefined));
     });
+
+    // An agent's `browser_open` (`browser_tools.rs`): a page put in front of the user, by the same
+    // rule as a link.
+    void onBrowserShow(({ url }) => openInCodeFlow(url));
 
     void onAgentCliReview((cwd) => {
       const task = taskForCwd(useAgentsStore.getState().tasks, cwd);

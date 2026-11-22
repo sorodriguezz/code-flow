@@ -53,8 +53,12 @@ export const MAIN_LABEL = "main";
  * `chat` is one assistant conversation torn out of the side panel — see `lib/chatIslands`. Its
  * `refId` is `"panel:<project id>:<conversation id>"` or `"ws:<workspace id>:<conversation id>"`.
  * Not counted against the island limit.
+ *
+ * `browser` is «Navegador» (`windows::open_browser_window`, `window.html?kind=browser&ref=web`): its
+ * own webview draws the bar, and the page is a second, native webview under it
+ * (`browser_window.rs`). See `components/browser/BrowserWindow`.
  */
-export type SatelliteKind = "app" | "repo" | "quick" | "file" | "codi" | "attention" | "chat";
+export type SatelliteKind = "app" | "repo" | "quick" | "file" | "codi" | "attention" | "chat" | "browser";
 
 /**
  * The kinds a window can be *detached into*, which is not all of them.
@@ -66,7 +70,7 @@ export type SatelliteKind = "app" | "repo" | "quick" | "file" | "codi" | "attent
  * generic builder would produce a window that looks like the ask box and behaves like a satellite.
  * Codi's window is the same case: `codi_open_window` builds it, frameless and always on top.
  */
-export type DetachableKind = Exclude<SatelliteKind, "quick" | "codi" | "attention">;
+export type DetachableKind = Exclude<SatelliteKind, "quick" | "codi" | "attention" | "browser">;
 
 export interface WindowIdentity {
   /** The platform's own window label — `"main"`, or `sat-app-notes`. */
@@ -115,7 +119,7 @@ export function parseIdentity(label: string, search: string): WindowIdentity {
     // except that it happens on a window that is working perfectly: the webview loads, the label is
     // right, and `SatelliteApp` is handed `satellite: null` and paints a skeleton forever.
     satellite:
-      (kind === "app" || kind === "repo" || kind === "quick" || kind === "file" || kind === "codi" || kind === "attention" || kind === "chat") && refId
+      (kind === "app" || kind === "repo" || kind === "quick" || kind === "file" || kind === "codi" || kind === "attention" || kind === "chat" || kind === "browser") && refId
         ? { kind, refId }
         : null,
   };

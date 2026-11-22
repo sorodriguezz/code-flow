@@ -19,6 +19,7 @@ import { codiOpenWindow } from "./tauri/codiCommands";
 import { fetchNow, pullNow, pushNow } from "./gitActions";
 import type { Chord } from "./keys";
 import type { TranslationKey } from "./i18n/translations";
+import { showBrowser } from "./webPreview";
 
 export type ShortcutGroup =
   | "general"
@@ -49,6 +50,7 @@ export type ShortcutId =
   | "panel.sidebar"
   | "panel.ai"
   | "panel.terminal"
+  | "browser.new"
   | "terminal.new"
   | "view.graph"
   | "view.changes"
@@ -421,6 +423,15 @@ export const SHORTCUT_COMMANDS: ShortcutCommand[] = [
     labelKey: "shortcuts.cmdTerminal",
     defaultChord: "Mod+J",
     run: () => useTerminalStore.getState().togglePanel(),
+  },
+  // «Navegador», with a new tab's address ready (`lib/webPreview`'s `showBrowser`) — the rail's
+  // globe, from the keyboard.
+  {
+    id: "browser.new",
+    group: "panels",
+    labelKey: "browser.railButton",
+    defaultChord: "Mod+Shift+Y",
+    run: () => showBrowser(),
   },
   {
     id: "terminal.new",

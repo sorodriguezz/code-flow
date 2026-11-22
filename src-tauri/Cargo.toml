@@ -89,7 +89,9 @@ strip = "symbols"
 # `drawsBackground`); it pairs with `app.macOSPrivateApi` in `tauri.conf.json`, and tauri-build
 # refuses a build where the two disagree. It costs the Mac App Store, which this app is not in.
 # See `glass.rs`.
-tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
+# `unstable` is Tauri's multiwebview (`Window::add_child`): the browser window draws the app's bar in
+# its own webview and the page in a second one under it — see `browser_window.rs`.
+tauri = { version = "2", features = ["tray-icon", "macos-private-api", "unstable"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-os = "2"

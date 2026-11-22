@@ -91,6 +91,12 @@ pub enum SatelliteKind {
     /// island limit** — the user asked for several chats open at once without spending islands on
     /// them — so it has a backstop of its own, [`MAX_CHAT_SATELLITES`].
     Chat,
+    /// «Navegador»: the in-app browser for pages that are not the user's own — a site on the internet,
+    /// opened from a link, the command palette or an agent (`crate::browser_window`). One window,
+    /// built by its own command, holding two webviews: the app's bar on top, the page under it.
+    /// Not counted against the ceilings and never parked with the desk — a page is not a screen of
+    /// the app to restore — but closed with it.
+    Browser,
 }
 
 /// The chat islands' own backstop: they do not count against [`MAX_SATELLITES`] (see
@@ -101,7 +107,7 @@ impl SatelliteKind {
     /// Whether it counts as part of the desk — the screens the person arranged — rather than a
     /// summoned utility. The ask box, Codi and this one outlive the desk and are never counted.
     fn is_utility(self) -> bool {
-        matches!(self, SatelliteKind::Quick | SatelliteKind::Codi | SatelliteKind::Attention)
+        matches!(self, SatelliteKind::Quick | SatelliteKind::Codi | SatelliteKind::Attention | SatelliteKind::Browser)
     }
 
     /// Whether it spends one of the islands the ceilings allow: everything on the desk but chats.
@@ -118,6 +124,7 @@ impl SatelliteKind {
             SatelliteKind::Codi => "codi",
             SatelliteKind::Attention => "attention",
             SatelliteKind::Chat => "chat",
+            SatelliteKind::Browser => "browser",
         }
     }
 }
@@ -406,6 +413,26 @@ pub async fn open_satellite(
         builder = builder.initialization_script(script);
     }
 
+    builder = with_satellite_chrome(&app, builder);
+
+    let window = builder.build().map_err(|e| e.to_string())?;
+    crate::glass::on_create(&window, &look);
+
+    if let Ok(mut held) = registry.open.lock() {
+        held.insert(
+            label.clone(),
+            SatelliteInfo { label: label.clone(), kind, ref_id, title: title.clone() },
+        );
+    }
+    announce(&app);
+    Ok(label)
+}
+
+/// The frame every satellite that holds a screen is built with — see the note inside.
+fn with_satellite_chrome<'a>(
+    app: &'a AppHandle,
+    mut builder: WebviewWindowBuilder<'a, tauri::Wry, AppHandle>,
+) -> WebviewWindowBuilder<'a, tauri::Wry, AppHandle> {
     // Same chrome as the main window, because a satellite draws the same title bar. On macOS that
     // means keeping the real decorations (and with them the rounded corners and a working green
     // button) while the webview paints under them; everywhere else it means no frame at all so the
@@ -434,20 +461,10 @@ pub async fn open_satellite(
     }
     #[cfg(not(target_os = "macos"))]
     {
+        let _ = app;
         builder = builder.decorations(false);
     }
-
-    let window = builder.build().map_err(|e| e.to_string())?;
-    crate::glass::on_create(&window, &look);
-
-    if let Ok(mut held) = registry.open.lock() {
-        held.insert(
-            label.clone(),
-            SatelliteInfo { label: label.clone(), kind, ref_id, title: title.clone() },
-        );
-    }
-    announce(&app);
-    Ok(label)
+    builder
 }
 
 /// Where the next satellite lands, so a second one does not open exactly on top of the first.
@@ -558,6 +575,10 @@ pub fn close_all<R: Runtime>(app: &AppHandle<R>) {
             let _ = window.hide();
         }
     }
+    // The browser is not parked (see `SatelliteKind::Browser`), but it does not outlive the desk.
+    if let Some(window) = app.get_window(&browser_label()) {
+        let _ = window.close();
+    }
 }
 
 /// A window saying whether it holds unsaved work — the satellites' half of [`close_all`]'s rule.
@@ -598,6 +619,9 @@ pub fn forget(app: &AppHandle, label: &str) {
     crate::codi::ui::forget(label);
     if label == label_for(SatelliteKind::Codi, CODI_REF_ID) {
         crate::codi::window_closed(app);
+    }
+    if label == browser_label() {
+        crate::browser_window::closed();
     }
     let registry = app.state::<SatelliteRegistry>();
     let removed = registry
@@ -1029,6 +1053,91 @@ pub async fn open_codi(app: AppHandle) -> Result<String, String> {
     }
     announce(&app);
     Ok(label)
+}
+
+/// The browser window's id — there is one (see `SatelliteKind::Browser`).
+pub const BROWSER_REF_ID: &str = "web";
+
+/// The browser window's label.
+pub fn browser_label() -> String {
+    label_for(SatelliteKind::Browser, BROWSER_REF_ID)
+}
+
+/// The browser window's bar — its own webview, the first child of the window (see
+/// [`open_browser_window`]). The window's label is the satellite one ([`browser_label`]): that is what
+/// the capability and the frontend's identity read, through `getCurrentWindow()`.
+pub fn browser_bar_label() -> String {
+    format!("{}-bar", browser_label())
+}
+
+/// Opens the browser window, or brings it forward, and hands it back.
+///
+/// A plain window with **only child webviews** — the bar, filling the window and following its
+/// size, and each tab's page laid over it below the bar (`crate::browser_window`) — which is how
+/// Tauri's multiwebview is meant to be used. A first version put the pages into a `WebviewWindow`
+/// beside its own webview, a mix Tauri barely exercises, and the bar stopped answering while a page
+/// was open (user report, 2026-11-22).
+pub async fn open_browser_window(app: &AppHandle) -> Result<tauri::Window, String> {
+    let label = browser_label();
+    if let Some(existing) = app.get_window(&label) {
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(existing);
+    }
+    crate::applog::info(&format!("window: open browser {label}"));
+    let registry = app.state::<SatelliteRegistry>();
+    {
+        let mut held = registry.open.lock().map_err(|e| e.to_string())?;
+        held.insert(
+            label.clone(),
+            SatelliteInfo { label: label.clone(), kind: SatelliteKind::Browser, ref_id: BROWSER_REF_ID.to_string(), title: "Navegador".to_string() },
+        );
+    }
+    let forget_on_error = |e: String| {
+        if let Ok(mut held) = registry.open.lock() {
+            held.remove(&label);
+        }
+        e
+    };
+    let (width, height) = (1200.0, 820.0);
+    let mut builder = tauri::window::WindowBuilder::new(app, &label)
+        .title("Navegador")
+        .inner_size(width, height)
+        .min_inner_size(480.0, 360.0)
+        .position(cascade_offset(app), cascade_offset(app) + 24.0);
+    // The same frame as every satellite (see `with_satellite_chrome`): AppKit's lights over the bar on
+    // macOS, no frame elsewhere so the bar draws its own controls.
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder.decorations(true).title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        builder = builder.decorations(false);
+    }
+    let window = builder.build().map_err(|e| forget_on_error(e.to_string()))?;
+    let url = format!("window.html?kind={}&ref={}", SatelliteKind::Browser.slug(), BROWSER_REF_ID);
+    let bar = tauri::WebviewBuilder::new(browser_bar_label(), WebviewUrl::App(url.into()))
+        // As every window: without it WebView2 refuses every clipboard read — the address bar's paste.
+        .enable_clipboard_access()
+        .auto_resize();
+    let size = window.inner_size().map_err(|e| e.to_string())?.to_logical::<f64>(window.scale_factor().unwrap_or(1.0));
+    window
+        .add_child(bar, tauri::LogicalPosition::new(0.0, 0.0), tauri::LogicalSize::new(size.width, size.height))
+        .map_err(|e| {
+            let _ = window.close();
+            forget_on_error(e.to_string())
+        })?;
+    // The pages have fixed frames: they follow the window by hand.
+    let handle = app.clone();
+    window.on_window_event(move |event| {
+        if matches!(event, tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }) {
+            crate::browser_window::relayout(&handle);
+        }
+    });
+    announce(app);
+    Ok(window)
 }
 
 /// The «Te necesitan» window's id.

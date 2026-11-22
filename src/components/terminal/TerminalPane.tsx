@@ -36,6 +36,7 @@ import { notify } from "../../state/notificationStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pushSuccessToast } from "../../state/toastStore";
+import { openInCodeFlow } from "../../lib/webPreview";
 import { AiSparkles } from "../common/AiGlyph";
 import { findFileRefs, quotePath, resolveRef } from "./fileLinks";
 import { useRepoSummaryStore } from "../../state/repoSummaryStore";
@@ -615,13 +616,18 @@ export function TerminalPane({
     const searchAddon = new SearchAddon({ highlightLimit: 2000 });
     term.loadAddon(searchAddon);
     searchRef.current = searchAddon;
-    // A URL a command printed is a link: ⌘/Ctrl-click opens it in the browser. Only http(s) — the
-    // addon's own pattern matches nothing else, and the check says so again where it matters, at
-    // the moment something is about to be opened.
+    // A URL a command printed is a link: ⌘/Ctrl-click opens it in the browser, and with ⇧ as well
+    // inside CodeFlow (`lib/webPreview`) — the dev server's «Local: http://localhost:5173» beside
+    // the code. Only http(s) — the addon's own pattern matches nothing else, and the check says so
+    // again where it matters, at the moment something is about to be opened.
     term.loadAddon(
       new WebLinksAddon((event, uri) => {
         if (!/^https?:\/\//i.test(uri)) return;
         event.preventDefault();
+        if (event.shiftKey) {
+          openInCodeFlow(uri);
+          return;
+        }
         void openUrl(uri).catch((e: unknown) => pushErrorToast(String(e)));
       }),
     );

@@ -7,6 +7,7 @@ import { formatBytes } from "../../state/systemLoadStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { buttonClass } from "../common/Button";
+import { isPdfPath, RepoFilePreview, WebPreview } from "../browser/WebPreview";
 
 /**
  * What an editor tab shows when its file is not text it can edit — see `FileNotice`. Nothing here is
@@ -20,12 +21,18 @@ export function FileNoticeView({
   repoPath,
   onRetry,
   onOpenAnyway,
+  onWebNavigate,
+  reloadKey,
 }: {
   notice: FileNotice;
   path: string;
   repoPath: string;
   onRetry: () => void;
   onOpenAnyway: () => void;
+  /** A web tab's address bar went somewhere else. */
+  onWebNavigate?: (url: string) => void;
+  /** The file's version on disk — a PDF's preview loads it again when it changes. */
+  reloadKey?: string;
 }) {
   const t = useT();
   /** The binary shown as a hex dump instead of the notice — VS Code's «Open With… Hex Editor». */
@@ -34,6 +41,11 @@ export function FileNoticeView({
     void openInDefaultApp(repoPath, path).catch((e: unknown) => pushErrorToast(String(e)));
 
   if (notice.kind === "image") return <ImageView src={notice.src} mime={notice.mime} size={notice.size} name={path} />;
+  if (notice.kind === "web") return <WebPreview url={notice.url} onNavigate={onWebNavigate} />;
+  // A PDF is binary to the editor and a document to the engine's own viewer: shown, not described.
+  if ((notice.kind === "binary" || notice.kind === "tooLarge") && isPdfPath(path) && !hex) {
+    return <RepoFilePreview repoPath={repoPath} path={path} kind="pdf" reloadKey={reloadKey} />;
+  }
   if (hex) return <HexView repoPath={repoPath} path={path} />;
 
   const external = (

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
-import { ArrowUpRight, Layers } from "lucide-react";
+import { ArrowUpRight, Globe, Layers } from "lucide-react";
+import { showBrowser } from "../../lib/webPreview";
 import { HOLD_REVEAL_MS, HOLD_SLOP, HoldProgress, HoldScrim, slotShift, useHoldReorder } from "../../lib/holdReorder";
 import { openCodi } from "../codi/openCodi";
 import { useMotionLevel } from "../../lib/motion";
@@ -495,6 +496,7 @@ export function AppRail() {
         {/* Opt-in plan limits, one ring per account (see `RailQuotaRings`). In the fixed foot, so they
             take their room from the app list above — which scrolls — instead of covering it. */}
         <RailQuotaRings />
+        <BrowserButton />
         <AssistantButton />
         <span className="my-1 h-px w-5 bg-[var(--cf-border)]" />
         <TourLauncher />
@@ -539,6 +541,28 @@ const WOKE_MS = 1200;
 /** In Motion «Completa» the mark itself is the indicator, from half a second in — a click is well
  *  under it — instead of the ring (user, 2026-10-21: «de 0.5 s a 2 s en vez de salir el círculo»). */
 const CHARGE_FROM_MS = 500;
+
+/**
+ * «Navegador», one press away: the window forward with a new tab's address ready to type — for a
+ * page to open before there is a link to it. In the foot with the assistant, because like it it is
+ * a tool beside every app rather than an app of its own (a browser with no page is a blank screen).
+ */
+function BrowserButton() {
+  const t = useT();
+  const hint = useShortcutHint();
+  return (
+    <Tooltip side="left" label={hint("browser.new", t("browser.railButton"))} description={t("browser.railButtonHint")}>
+      <button
+        type="button"
+        onClick={() => showBrowser()}
+        aria-label={t("browser.railButton")}
+        className="cf-d-rail-slot flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+      >
+        <Globe size={18} />
+      </button>
+    </Tooltip>
+  );
+}
 
 function AssistantButton() {
   const open = useUiStore((s) => s.aiPanelOpen);

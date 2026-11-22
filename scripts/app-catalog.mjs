@@ -34,6 +34,13 @@ const INVITATION = /^collab_(?:share|invite|join|join_preview|take_join_link|liv
  *  the window's replies to the app's questions, the interface it already drives through `ui_act`. */
 const SELF = /^(?:agentcli_|flows_bridge_|codi_act_result|codi_register|codi_ui_|mcp_trust|log_frontend_error|codi_confirm$|codi_act$)/;
 
+/** The browser's own plumbing (`browser_window.rs`, `preview_server.rs`): the bar reporting its
+ *  height, its tabs, the editor reporting what it shows, and `preview_file_url`, which serves **any** folder
+ *  it is handed over loopback — through `app_call` a model could have it serve `~/.ssh` and read it
+ *  back with `browser_read`, outside every sandbox. Models have `browser_read`/`browser_open`, which
+ *  serve files of their own repository only (`browser_tools.rs`). */
+const BROWSER_PLUMBING = /^(?:browser_layout|browser_seen|browser_state|browser_go|browser_tab_new|browser_tab_select|browser_tab_close|browser_show|browser_focus_bar|preview_file_url)$/;
+
 /** Commands that run a program or a shell line the caller names — `reviewer_run`'s prepare/build/test,
  *  `codi_run_command`, a debugger, a language server, a container. Through `app_call` they run in the
  *  app's own process, outside the CLI's sandbox and its permission prompt, so a turn that may act
@@ -118,7 +125,7 @@ const NOUNS = [
 
 /** How risky a command is, from the words of its name — the area prefix (`ado_`, `db_`) says nothing. */
 export function riskOf(name) {
-  if (SECRET.test(name) || SELF.test(name) || INVITATION.test(name) || MEMORY_PANE.test(name) || REPOINTS.test(name) || HANDS_OVER.test(name)) return "blocked";
+  if (SECRET.test(name) || SELF.test(name) || BROWSER_PLUMBING.test(name) || INVITATION.test(name) || MEMORY_PANE.test(name) || REPOINTS.test(name) || HANDS_OVER.test(name)) return "blocked";
   if (EXECUTES.test(name) || OUTWARD.test(name) || SPAWNS.test(name)) return "destructive";
   let plain = name;
   for (const [noun, word] of NOUNS) plain = plain.replace(noun, word);

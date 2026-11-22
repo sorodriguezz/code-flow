@@ -163,6 +163,9 @@ interface UiState {
   /** 1-based line to reveal in that file — set when the jump came from a search hit, so the
    * editor lands on the match instead of at the top of the file. */
   pendingEditorLine: number | null;
+  /** A page the editor should open as a tab of its own (`lib/webPreview.ts`); consumed once. The
+   *  nonce lets the same address be asked for twice in a row. */
+  pendingWebPage: { url: string; nonce: number } | null;
   /** The AI panel (PRs / open questions / change analysis) is a persistent left-docked panel,
    * not a tab — it stays mounted and scoped to whatever project is active regardless of which
    * main view or project the user switches to. */
@@ -254,6 +257,9 @@ interface UiState {
   closeSettings: () => void;
   openInEditor: (relPath: string, line?: number) => void;
   clearPendingEditorPath: () => void;
+  /** Opens a page — the user's own, see `lib/webPreview.ts` — as a tab of the editor. */
+  openWebInEditor: (url: string) => void;
+  clearPendingWebPage: () => void;
   toggleAiPanel: () => void;
   openAiPanel: () => void;
   openCommandPalette: (scope?: PaletteScope) => void;
@@ -290,6 +296,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   chatComposerFocus: 0,
   pendingEditorPath: null,
   pendingEditorLine: null,
+  pendingWebPage: null,
   aiPanelOpen: false,
   commandPaletteOpen: false,
   commandPaletteScope: "all",
@@ -339,6 +346,13 @@ export const useUiStore = create<UiState>((set, get) => ({
       settingsOpen: false,
     }),
   clearPendingEditorPath: () => set({ pendingEditorPath: null, pendingEditorLine: null }),
+  openWebInEditor: (url) =>
+    set((s) => ({
+      activeView: "editor",
+      pendingWebPage: { url, nonce: (s.pendingWebPage?.nonce ?? 0) + 1 },
+      settingsOpen: false,
+    })),
+  clearPendingWebPage: () => set({ pendingWebPage: null }),
   toggleAiPanel: () => set((s) => ({ aiPanelOpen: !s.aiPanelOpen })),
   openAiPanel: () => set({ aiPanelOpen: true }),
   openCommandPalette: (scope = "all") => set({ commandPaletteOpen: true, commandPaletteScope: scope }),

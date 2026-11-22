@@ -137,6 +137,8 @@ import { useThemeStore } from "../../state/themeStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
+import { addressLabel, openInBrowserWindow } from "../../lib/webPreview";
+import { previewFileUrl } from "../../lib/tauri/browserCommands";
 import { useDebugStore, normalizePath } from "../../state/debugStore";
 import { useBookmarkStore } from "../../state/bookmarkStore";
 import { useEditorCommandStore } from "../../state/editorCommandStore";
@@ -391,6 +393,8 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
   const pendingEditorPath = useUiStore((s) => s.pendingEditorPath);
   const pendingEditorLine = useUiStore((s) => s.pendingEditorLine);
   const clearPendingEditorPath = useUiStore((s) => s.clearPendingEditorPath);
+  const pendingWebPage = useUiStore((s) => s.pendingWebPage);
+  const clearPendingWebPage = useUiStore((s) => s.clearPendingWebPage);
   const treeWidth = useLayoutStore((s) => s.sizes.editorTreeWidth);
   const changesWidth = useLayoutStore((s) => s.sizes.editorChangesWidth);
   const panelHeight = useLayoutStore((s) => s.sizes.editorPanelHeight);
@@ -757,6 +761,50 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     setReveal({ groupId, request: { path, line: 1, column: 1, nonce: revealNonce.current } });
   }, []);
 
+  /**
+   * A page in a tab of its own — the user's dev server, a file of the repository as a browser draws
+   * it (`lib/webPreview`). A scratch tab like the two above, holding a `web` notice instead of text:
+   * nothing to save, nothing on disk, gone when closed. The same address asked for again brings its
+   * tab forward rather than opening a second one.
+   */
+  const openWeb = useCallback((url: string, name?: string) => {
+    const targetId = activeGroupIdRef.current;
+    const existing = tabsRef.current.find((tab) => tab.notice?.kind === "web" && tab.notice.url === url);
+    const path = existing
+      ? existing.path
+      : freeScratchPath(name ?? addressLabel(url), (candidate) => tabsRef.current.some((tab) => tab.path === candidate));
+    const outcome = openInGroups(groupsRef.current, targetId, path, true, () => false);
+    setGroups(outcome.groups);
+    setActiveGroupId(targetId);
+    if (existing) return;
+    setTabs((prev) => [...prev, { ...loadingTab(path, false), loading: false, notice: { kind: "web", url } }]);
+  }, []);
+
+  /**
+   * A web tab's address bar went somewhere else: the tab now holds that address, and is named after
+   * it — a scratch tab's path is its name, so the path changes, in the registry and in every group
+   * showing it, the way a file's does when the explorer moves it (`handlePathMoved`).
+   */
+  const navigateWeb = useCallback((path: string, url: string) => {
+    const next = freeScratchPath(addressLabel(url), (candidate) => candidate !== path && tabsRef.current.some((tab) => tab.path === candidate));
+    setTabs((prev) => prev.map((tab) => (tab.path === path && tab.notice?.kind === "web" ? { ...tab, path: next, notice: { kind: "web", url } } : tab)));
+    if (next === path) return;
+    const rename = (p: string) => (p === path ? next : p);
+    setGroups((prev) => prev.map((g) => ({ ...g, paths: g.paths.map(rename), activePath: g.activePath ? rename(g.activePath) : null })));
+  }, []);
+
+  /** The explorer's «Preview in browser»: the file (or a built site's folder) served and opened. */
+  const previewInBrowser = useCallback(
+    (path: string) => {
+      const repoPath = projectRef.current?.local_path;
+      if (!repoPath) return;
+      void previewFileUrl(repoPath, path)
+        .then((url) => openWeb(url, path.split("/").pop() || path))
+        .catch((e: unknown) => pushErrorToast(String(e)));
+    },
+    [openWeb],
+  );
+
   const closeTab = useCallback(async (groupId: string, path: string) => {
     const tab = tabsRef.current.find((item) => item.path === path);
     if (!tab) return;
@@ -1073,6 +1121,12 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       const current = projectRef.current;
       if (!canDetach || !current) return;
       const tab = tabsRef.current.find((item) => item.path === path);
+      // A page torn off goes where a page has a window of its own: «Navegador», with back and forward.
+      if (tab?.notice?.kind === "web") {
+        openInBrowserWindow(tab.notice.url);
+        removeEverywhere(path);
+        return;
+      }
       // A scratch buffer is no file the window could read back if it ever had to start from disk,
       // and a tab still loading has nothing to hand over yet.
       if (!tab || tab.loading || isScratchPath(path)) return;
@@ -2458,6 +2512,12 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     clearPendingEditorPath();
   }, [pendingEditorPath, pendingEditorLine, openFile, openHit, clearPendingEditorPath]);
 
+  useEffect(() => {
+    if (!pendingWebPage) return;
+    openWeb(pendingWebPage.url);
+    clearPendingWebPage();
+  }, [pendingWebPage, openWeb, clearPendingWebPage]);
+
   /**
    * The editor's own shortcuts, arriving as requests rather than as keystrokes.
    *
@@ -2867,6 +2927,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       }
       onSave={() => group.activePath && void save(group.activePath)}
       onReload={(path, opts) => void reloadTab(path, opts)}
+      onWebNavigate={navigateWeb}
       onDiskAction={diskAction}
       // Only for a diagram file. Not a disabled button on every other file — there is nothing to
       // explain about a bridge that does not apply, and a permanently greyed-out icon in a five-icon
@@ -3109,6 +3170,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
               onOpenScratch={openScratch}
               onOpenInDiagrams={openInDiagrams}
               onSendToNotes={sendFileToNotes}
+              onPreviewInBrowser={previewInBrowser}
             />
           )}
         </div>

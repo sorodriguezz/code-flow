@@ -30,7 +30,7 @@ macro_rules! or_next {
 pub(crate) mod ai;
 mod app;
 pub(crate) mod binary;
-mod browser;
+pub(crate) mod browser;
 pub(crate) mod connector;
 mod containers;
 pub(crate) mod data;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ExternalLink, LoaderCircle, Network, RefreshCw, Search, Square, X } from "lucide-react";
+import { AppWindow, ExternalLink, LoaderCircle, Network, RefreshCw, Search, Square, X } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { Tooltip } from "../common/Tooltip";
 import { confirmAction } from "../../state/confirmStore";
@@ -7,6 +7,7 @@ import { useT } from "../../state/languageStore";
 import { useServicesStore } from "../../state/servicesStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { openExternalUrl } from "../../lib/tauri/commands";
+import { openInCodeFlow } from "../../lib/webPreview";
 import { freePort, listeningPorts } from "../../lib/tauri/services";
 import type { ListeningPort } from "../../types/services";
 import { fieldClass } from "../common/recipes";
@@ -202,6 +203,15 @@ export function PortsPanel({ onOpenService, onClose }: { onOpenService: (id: str
                   </td>
                   <td className="whitespace-nowrap border-b border-[var(--cf-border)] px-2 py-1 text-right">
                     <div className="flex items-center justify-end gap-0.5 opacity-60 group-hover/port:opacity-100">
+                      <Tooltip label={t("browser.openInCodeFlow")}>
+                        <button
+                          onClick={() => openInCodeFlow(`http://localhost:${row.port}`)}
+                          aria-label={t("browser.openInCodeFlow")}
+                          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+                        >
+                          <AppWindow size={11} />
+                        </button>
+                      </Tooltip>
                       <Tooltip label={t("services.ports.open")}>
                         <button
                           onClick={() => void openExternalUrl(`http://localhost:${row.port}`)}

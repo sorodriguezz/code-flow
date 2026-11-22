@@ -44,7 +44,10 @@ export type FileNotice =
   | { kind: "error"; message: string }
   | { kind: "binary"; size: number }
   | { kind: "image"; src: string; mime: string; size: number }
-  | { kind: "tooLarge"; size: number; canForce: boolean };
+  | { kind: "tooLarge"; size: number; canForce: boolean }
+  /** A page, not a file: a scratch tab (`lib/scratchTabs`) holding an address — the user's dev
+   *  server, a file of the repository as a browser renders it. See `lib/webPreview`. */
+  | { kind: "web"; url: string };
 
 /**
  * Why a tab shows text it will not save. `large`: opened past the read cap on request, where Monaco

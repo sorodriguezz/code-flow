@@ -21,6 +21,7 @@ import {
   Trash2,
   Workflow,
   GitCompareArrows,
+  Globe,
 } from "lucide-react";
 import { isDiagramPath } from "../../lib/dbmlBridge";
 import { isMarkdownPath } from "../../lib/notesBridge";
@@ -654,6 +655,7 @@ export function FileTree({
   onOpenScratch,
   onOpenInDiagrams,
   onSendToNotes,
+  onPreviewInBrowser,
 }: {
   repoPath: string;
   /** The project the terminal dock indexes its shells by — what "Open in Integrated Terminal" files
@@ -719,6 +721,9 @@ export function FileTree({
   onOpenInDiagrams?: (path: string) => void;
   /** "Send to Notes" on a Markdown file — a note that mirrors it (`lib/notesBridge.ts`). */
   onSendToNotes?: (path: string) => void;
+  /** «Preview in browser» on a page or a built site's folder — a tab with the page as a browser
+   *  draws it, served from the repository (`preview_server.rs`). */
+  onPreviewInBrowser?: (path: string) => void;
 }) {
   const t = useT();
   const chord = useShortcutChord();
@@ -1577,6 +1582,11 @@ export function FileTree({
           items.push({ label: t("editor.sendToNotes"), icon: NotebookPen, onClick: () => onSendToNotes(path) });
         }
       }
+      // A page, or the folder a build writes a site into: served as a browser would load it.
+      if (entry && onPreviewInBrowser && (entry.is_dir ? isSiteFolder(entry.path) : isPreviewablePath(entry.path))) {
+        const path = entry.path;
+        items.push({ label: t("browser.previewInBrowser"), icon: Globe, onClick: () => onPreviewInBrowser(path) });
+      }
       items.push(
         {
           label: t("editor.newFile"),
@@ -1795,6 +1805,7 @@ export function FileTree({
       onOpenScratch,
       onOpenInDiagrams,
       onSendToNotes,
+      onPreviewInBrowser,
       // Paste is greyed while neither clipboard — the explorer's, the file manager's — has anything.
       canPaste,
       // The menu's labels count the selection, so it has to be rebuilt when that count moves.
@@ -2486,4 +2497,15 @@ export function FileTree({
       )}
     </div>
   );
+}
+
+/** A file the explorer offers «Preview in browser» for: a page, or a document a browser draws. */
+function isPreviewablePath(path: string): boolean {
+  return /\.(html?|xhtml|pdf|svg)$/i.test(path);
+}
+
+/** A folder a build usually writes a site into — offered «Preview in browser» for its `index.html`. */
+function isSiteFolder(path: string): boolean {
+  const name = path.split("/").pop()?.toLowerCase() ?? "";
+  return ["dist", "build", "out", "public", "site", "_site", "www", "docs", "storybook-static", "coverage"].includes(name);
 }

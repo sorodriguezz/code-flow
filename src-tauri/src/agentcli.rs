@@ -788,7 +788,7 @@ fn created(app: &AppHandle, kind: &str, id: &str, title: &str) {
     let _ = app.emit("agentcli:created", serde_json::json!({ "kind": kind, "id": id, "title": title }));
 }
 
-fn raise(app: &AppHandle) {
+pub(crate) fn raise(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else { return };
     let _ = window.unminimize();
     let _ = window.show();

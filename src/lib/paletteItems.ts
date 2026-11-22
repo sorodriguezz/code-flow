@@ -14,6 +14,7 @@ import {
   FolderPlus,
   GitBranch,
   Glasses,
+  Globe,
   History,
   KeyRound,
   MessageCircle,
@@ -53,6 +54,8 @@ import { useEditorCommandStore } from "../state/editorCommandStore";
 import { ensureApiStoreLoaded, useApiStore } from "../state/apiStore";
 import { useApiModalStore } from "../state/apiModalStore";
 import { useQuickAskHotkeyStore } from "../state/quickAskHotkeyStore";
+import { promptAction } from "../state/promptStore";
+import { normalizeAddress, openInCodeFlow } from "./webPreview";
 import type { Translate } from "../state/languageStore";
 import type { TranslationKey } from "./i18n/translations";
 import type { SatelliteInfo } from "./tauri/windows";
@@ -396,6 +399,24 @@ export function buildPaletteItems({
    * that fast.
    */
   const actionItems: PaletteItem[] = [
+    // A page inside CodeFlow (`lib/webPreview`): the user's own in an editor tab, the internet in
+    // «Navegador».
+    {
+      key: "action:open-url",
+      icon: Globe,
+      label: t("browser.openAddress"),
+      group: "actions",
+      keywords: "url browser navegador web localhost http",
+      onSelect: () => {
+        void promptAction(t("browser.openAddress"), {
+          placeholder: t("browser.addressPlaceholder"),
+          confirmLabel: t("browser.open"),
+          validate: (value) => (normalizeAddress(value) ? null : t("browser.badAddress", { address: value })),
+        }).then((address) => {
+          if (address?.trim()) openInCodeFlow(address);
+        });
+      },
+    },
     // Needs nothing but the link — no project open, no repository picked.
     {
       key: "action:pr-from-link",

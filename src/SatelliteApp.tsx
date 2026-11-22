@@ -97,6 +97,7 @@ const QuickAskWindow = lazy(() =>
 // Its own chunk, and small: the voice assistant's window draws a face, two switches and a log.
 const CodiWindow = lazy(() => import("./components/codi/CodiWindow").then((m) => ({ default: m.CodiWindow })));
 const AttentionWindow = lazy(() => import("./components/layout/AttentionWindow").then((m) => ({ default: m.AttentionWindow })));
+const BrowserWindow = lazy(() => import("./components/browser/BrowserWindow").then((m) => ({ default: m.BrowserWindow })));
 const PanelChat = lazy(() => import("./components/ai/PanelChat").then((m) => ({ default: m.PanelChat })));
 const WorkspaceChat = lazy(() => import("./components/ai/WorkspaceChat").then((m) => ({ default: m.WorkspaceChat })));
 const GraphView = lazy(() => import("./components/git/GraphView").then((m) => ({ default: m.GraphView })));
@@ -728,6 +729,19 @@ export default function SatelliteApp() {
         <ConfirmModal />
         <TitleTooltips />
       </div>
+    );
+  }
+
+  // «Navegador»: its own bar is the whole window this webview draws — the page is a native webview
+  // under it (`browser_window.rs`). Mounted before the boot is done, like Codi's: the bar is what
+  // the page is laid under, and the page may already be loading.
+  if (spec && kind === "browser") {
+    return (
+      <ErrorBoundary resetKey={spec.refId}>
+        <Suspense fallback={<div className="cf-frame h-screen" />}>
+          <BrowserWindow />
+        </Suspense>
+      </ErrorBoundary>
     );
   }
 
