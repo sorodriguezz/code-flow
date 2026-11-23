@@ -307,19 +307,126 @@ async fn run_git(
     args: &[&str],
     extra_env: &[(&str, &str)],
 ) -> Result<(), String> {
-    let app = app.clone();
+    let handle = app.clone();
     let emit: Emit = Arc::new(move |event| match event {
         Emitted::Progress(e) => {
-            let _ = app.emit("git:progress", e);
+            let _ = handle.emit("git:progress", e);
         }
         Emitted::Remote(e) => {
-            let _ = app.emit("git:remote-progress", e);
+            let _ = handle.emit("git:remote-progress", e);
         }
         Emitted::Done(e) => {
-            let _ = app.emit("git:done", e);
+            let _ = handle.emit("git:done", e);
         }
     });
-    run_git_with(emit, op, cwd, args, extra_env).await
+    // A caller that brings its own credential (the publish flow's first push) is run as asked.
+    if extra_env.iter().any(|(key, _)| *key == "GIT_CONFIG_COUNT") {
+        return run_git_with(emit, op, cwd, args, extra_env).await;
+    }
+
+    // First as the user's own git would run it, so a credential helper that works keeps winning.
+    // Its "done" is held back: if the run is retried below, the failure is not the outcome.
+    let held: Arc<Mutex<Option<GitDoneEvent>>> = Arc::default();
+    let first: Emit = {
+        let emit = emit.clone();
+        let held = held.clone();
+        Arc::new(move |event| match event {
+            Emitted::Done(e) => *held.lock().unwrap_or_else(|p| p.into_inner()) = Some(e),
+            other => emit(other),
+        })
+    };
+    let result = run_git_with(first, op, cwd, args, extra_env).await;
+    let release = |held: &Mutex<Option<GitDoneEvent>>| {
+        if let Some(done) = held.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            emit(Emitted::Done(done));
+        }
+    };
+    let Err(error) = &result else {
+        release(&held);
+        return result;
+    };
+    if !wants_connected_account(error) {
+        release(&held);
+        return result;
+    }
+    let urls = remote_urls(op, cwd, args);
+    let env = connected_account_env(app, &urls);
+    if env.is_empty() {
+        release(&held);
+        return result;
+    }
+    // git had nothing to answer the remote with (or what it had was refused) and an account the
+    // user connected in CodeFlow is for this host — the PAT already used for its API.
+    let _ = held.lock().map(|mut h| h.take());
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).chain(extra_env.iter().copied()).collect();
+    run_git_with(emit, op, cwd, args, &env).await
+}
+
+/// Whether a failure is one an account connected in CodeFlow could answer: no credential at all, or
+/// one the remote refused.
+fn wants_connected_account(error: &str) -> bool {
+    [RemoteFailure::AuthRequired, RemoteFailure::AuthFailed]
+        .iter()
+        .any(|failure| error.starts_with(&format!("{REMOTE_FAILURE_PREFIX}{}\n", failure.code())))
+}
+
+/// The `http(s)` URLs a run talks to: the one being cloned, or every remote of the repository (the
+/// header is scoped to its own host, so one more than needed costs nothing).
+fn remote_urls(op: &str, cwd: Option<&str>, args: &[&str]) -> Vec<String> {
+    let mut urls: Vec<String> = args
+        .iter()
+        .filter(|a| a.starts_with("https://") || a.starts_with("http://"))
+        .map(|a| a.to_string())
+        .collect();
+    if op != "clone" {
+        if let Some(dir) = cwd {
+            if let Ok(remotes) = crate::git::remotes::list_remotes(dir) {
+                urls.extend(remotes.into_iter().map(|r| r.url));
+            }
+        }
+    }
+    urls
+}
+
+/// The credential of each account connected in CodeFlow that one of `urls` belongs to, as an
+/// `http.<https://host/>.extraHeader` handed to this one process through `GIT_CONFIG_*` — never on
+/// the command line, never in a config file or remote URL. Same mechanism the publish flow's first
+/// push and the reference repositories use (`refrepos::auth_for`, `publish_cmd::push_credential`).
+///
+/// The prefix is the URL's own host rather than the one `push_credential` names, so an Azure remote
+/// on `<org>.visualstudio.com` is covered as well as one on `dev.azure.com`.
+fn connected_account_env(app: &AppHandle, urls: &[String]) -> Vec<(String, String)> {
+    use tauri::Manager;
+    let Some(db) = app.try_state::<crate::db::Db>() else { return Vec::new() };
+    let accounts: Vec<(String, String)> = {
+        let Ok(conn) = db.0.lock() else { return Vec::new() };
+        urls.iter()
+            .filter_map(|url| {
+                let (host, _) = crate::refrepos::https_parts(url)?;
+                let auth = crate::refrepos::auth_for(&conn, url);
+                (!auth.is_empty()).then(|| (format!("https://{host}/"), auth))
+            })
+            .collect()
+    };
+    let mut seen = std::collections::HashSet::new();
+    let headers: Vec<(String, String)> = accounts
+        .into_iter()
+        .filter(|(prefix, _)| seen.insert(prefix.clone()))
+        .filter_map(|(prefix, auth)| {
+            let (provider, account) = auth.split_once(':')?;
+            let (_, header) = crate::commands::publish_cmd::push_credential(provider, account).ok()?;
+            Some((prefix, header))
+        })
+        .collect();
+    if headers.is_empty() {
+        return Vec::new();
+    }
+    let mut env = vec![("GIT_CONFIG_COUNT".to_string(), headers.len().to_string())];
+    for (i, (prefix, header)) in headers.into_iter().enumerate() {
+        env.push((format!("GIT_CONFIG_KEY_{i}"), format!("http.{prefix}.extraHeader")));
+        env.push((format!("GIT_CONFIG_VALUE_{i}"), format!("Authorization: {header}")));
+    }
+    env
 }
 
 /// Where a run's events go. A closure over the `AppHandle` in production; a collector in tests.
@@ -998,6 +1105,28 @@ pub async fn submodule_update(app: AppHandle, repo_path: String, path: Option<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_missing_or_refused_credential_retries_with_the_connected_account() {
+        let missing = failure_message(
+            "clone",
+            "fatal: could not read Username for 'https://dev.azure.com': terminal prompts disabled",
+            "fatal: could not read Username",
+        );
+        assert!(wants_connected_account(&missing));
+        let refused = failure_message("fetch", "fatal: Authentication failed for 'https://dev.azure.com/x'", "x");
+        assert!(wants_connected_account(&refused));
+        let network = failure_message("fetch", "fatal: unable to access 'https://x/': Could not resolve host: x", "x");
+        assert!(!wants_connected_account(&network));
+        assert!(!wants_connected_account("git clone failed: something else"));
+    }
+
+    #[test]
+    fn a_clone_talks_to_its_url_only() {
+        let urls = remote_urls("clone", None, &["clone", "https://dev.azure.com/o/P/_git/r", "/tmp/r"]);
+        assert_eq!(urls, vec!["https://dev.azure.com/o/P/_git/r".to_string()]);
+        assert!(remote_urls("clone", None, &["clone", "git@ssh.dev.azure.com:v3/o/P/r", "/tmp/r"]).is_empty());
+    }
 
     #[test]
     fn a_pull_spells_out_each_reconciliation() {

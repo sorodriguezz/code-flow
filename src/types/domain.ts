@@ -403,6 +403,9 @@ export interface ReviewRunSummary {
   level: string;
   findings_count: number;
   created_at: string;
+  /** The repository it reviewed (`provider:host/owner/repo`). With an empty `project_id` it is all
+   * there is: a review reached by link, kept by repository until the repo is cloned and linked. */
+  repo_key?: string;
 }
 
 /** One finding inside a saved run's `findings` JSON (mirrors the Rust `MemoryFinding`). */
@@ -440,6 +443,37 @@ export interface SavedFinding {
   publicado_en_iter?: number | null;
   /** Its thread is a plain PR comment (no location, or the host refused the line). */
   hilo_general?: boolean;
+  /** On a `resuelto` a reviewer judged: what fixes it (1–2 sentences). */
+  resolucion?: string | null;
+  /** The file the fix lives in, when it is not the finding's own. */
+  resolucion_archivo?: string | null;
+  /** The lines of the fix — what the thread's "📄 Código que lo resuelve" snippet is cut from. */
+  resolucion_lineas?: string | null;
+  /** A re-review's new finding on code that had not changed since the iteration before. */
+  tardio?: boolean;
+  /** Its state came from the PR's own threads (the team closed it, or a reply opened with the
+   * verdict) rather than from a click here — a human verdict all the same. */
+  sincronizado_desde_hilo?: boolean;
+  /** How: `status` (the thread's status) · `texto` (a reply on its thread) · `resumen` (a reply to
+   * the summary comment). */
+  sincronizado_via?: "status" | "texto" | "resumen" | null;
+  sincronizado_en_iter?: number | null;
+  /** A verdict the PR gave that did not apply on its own (said mid-comment, or its file changed since):
+   * offered as one click. */
+  veredicto_pr?: PrVerdict | null;
+  /** When a human reopened it here — older verdicts on the PR are the ones they overrode. */
+  reabierto_en?: string | null;
+}
+
+/** What the pull request said a finding is, read from its threads (mirrors the Rust `VeredictoPr`). */
+export interface PrVerdict {
+  /** `falso_positivo` · `ignorado` · `deuda_tecnica`. */
+  estado: string;
+  /** The human's words — the reason, once applied. */
+  motivo: string;
+  via: "status" | "texto" | "resumen";
+  autor?: string;
+  fecha?: string;
 }
 
 /** A standing "this is a known false positive" rule for one repository (mirrors the Rust

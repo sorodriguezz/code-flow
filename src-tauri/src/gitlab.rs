@@ -319,6 +319,10 @@ struct RawPipeline {
     status: String,
     #[serde(default)]
     web_url: Option<String>,
+    /// The percentage the pipeline's coverage regex parsed out of its job logs — a string
+    /// (`"72.50"`) on most versions, a number on some, absent when the project measures none.
+    #[serde(default)]
+    coverage: Option<serde_json::Value>,
 }
 
 /// Collapses GitLab's state plus its draft flag into the same four buckets the sidebar groups by,
@@ -1174,6 +1178,19 @@ fn job_check(job: RawJob, pipeline_id: i64) -> crate::ado::PrCheck {
         required: None,
         name: job.name,
     }
+}
+
+/// The line coverage the merge request's head pipeline reported, as a percentage — what GitLab's
+/// own merge-request widget shows. `None` when the project configures no coverage parsing.
+pub async fn pr_code_coverage(host: &str, project: &str, iid: i64, token: &str) -> Option<f64> {
+    let mr = fetch_merge_request(host, project, iid, token).await.ok()?;
+    let raw = mr.head_pipeline?.coverage?;
+    let pct = match raw {
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(s) => s.trim().trim_end_matches('%').parse::<f64>().ok(),
+        _ => None,
+    }?;
+    (0.0..=100.0).contains(&pct).then_some(pct)
 }
 
 /// The merge request's head pipeline and its jobs. The pipeline is "required" when the project only

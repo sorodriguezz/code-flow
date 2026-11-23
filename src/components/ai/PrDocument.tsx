@@ -14,6 +14,7 @@ import {
   PencilLine,
   RefreshCw,
   Search,
+  ShieldCheck,
   SkipForward,
   Square,
   ThumbsDown,
@@ -28,6 +29,7 @@ import { Tooltip } from "../common/Tooltip";
 import { CONFIRM_POST_KEYS, POSTED_KEYS, VIEW_ON_KEYS } from "../../lib/providerLabels";
 import {
   discardPrFinding,
+  discardPrLinkFinding,
   getReviewRun,
   notifyStateChange,
   previewPrReview,
@@ -35,6 +37,7 @@ import {
   type ReviewPreview,
 } from "../../lib/tauri/commands";
 import {
+  approvalAccount,
   listCommentThreads,
   mergeOptions as loadMergeOptions,
   resolveCommentThread,
@@ -44,9 +47,18 @@ import {
   type PrTarget,
 } from "../../lib/prTarget";
 import { tallyPublish } from "../../lib/prOutcomes";
+import {
+  approvalBlocker,
+  describeApprovalError,
+  hidesApproval,
+  isGateInconclusive,
+  recordedApproval,
+  type RecordedApproval,
+} from "../../lib/prApproval";
 import { runCostLine } from "../../lib/runCost";
 import {
   buildFixpack,
+  computeQualityGatePassed,
   formatDecisionComment,
   formatFindingAsComment,
   formatSummaryComment,
@@ -114,6 +126,7 @@ import type {
 } from "../../types/domain";
 
 const EMPTY_VIEW: TabView = {};
+const NO_RUN_FACTS: { incomplete: boolean; approval: RecordedApproval | null } = { incomplete: false, approval: null };
 const EMPTY_FLAGS: Record<string, boolean> = {};
 const EMPTY_FINDINGS: AnalysisFinding[] = [];
 const EMPTY_IDS: string[] = [];
@@ -278,26 +291,42 @@ export function PrDocument({
   // Which findings earlier iterations closed, and the scope and depth this run ran at. Only a
   // project-backed review keeps memory (a link session has no run to save).
   const [runMemory, setRunMemory] = useState<SummaryMemory | null>(null);
+  /** What the run's meta says beyond the summary's memory: whether part of the PR went unreviewed
+   * (no grounds for approving), and who approved it from here, if anyone did. */
+  const [runFacts, setRunFacts] = useState<{ incomplete: boolean; approval: RecordedApproval | null }>(NO_RUN_FACTS);
   const runId = displayJob?.id ?? null;
   const memoryReqRef = useRef(0);
   const loadRunMemory = useCallback(async () => {
     const token = ++memoryReqRef.current;
-    if (!runId || linkOnly) {
+    // A link review keeps memory too (by repository); one saved before it did simply has no run,
+    // and reads as null — the session-only behaviour below.
+    if (!runId) {
       setRunMemory(null);
+      setRunFacts(NO_RUN_FACTS);
       return;
     }
     try {
       const run = await getReviewRun(runId);
       if (!run || memoryReqRef.current !== token) return;
       setRunMemory(summaryMemoryOf(run));
+      let meta: Record<string, unknown> | null = null;
+      try {
+        meta = JSON.parse(run.meta) as Record<string, unknown>;
+      } catch {
+        meta = null;
+      }
+      setRunFacts({ incomplete: meta?.incomplete === true, approval: recordedApproval(meta) });
     } catch {
       // The summary simply loses its "already fixed" half — never a reason to break the review.
     }
-  }, [runId, linkOnly]);
+  }, [runId]);
   useEffect(() => {
     setRunMemory(null);
     void loadRunMemory();
   }, [loadRunMemory]);
+  /** A link review with no saved run (one made before link reviews kept memory): what it published
+   * is only known for this session. Every other review reads it from its memory. */
+  const sessionOnly = linkOnly && runMemory === null;
 
   const marks = useMemo(() => {
     const map = new Map<string, FindingMark>();
@@ -305,6 +334,9 @@ export function PrDocument({
       map.set(f.id, {
         estado: f.estado,
         motivo: f.motivo_descarte,
+        // What the PR's own threads said: a state taken from them, or a verdict offered to apply.
+        syncedVia: f.sincronizado_desde_hilo ? (f.sincronizado_via ?? "texto") : null,
+        prVerdict: f.veredicto_pr ?? null,
         posted: f.thread_id != null,
         publishedNow: runMemory !== null && runMemory.iter > 0 && f.publicado_en_iter === runMemory.iter,
       });
@@ -365,10 +397,10 @@ export function PrDocument({
     };
   }, [wantsPreview, projectId, pr.id, reviewLevel]);
 
-  // What changed since the review before this one. Only a project review keeps its finding ids
+  // What changed since the review before this one. Only a review with memory keeps its finding ids
   // stable across iterations (the memory reconciles them), so only there is the comparison honest.
   const diff = useMemo(() => {
-    if (linkOnly || !previousReview?.result || !parsed) return null;
+    if (sessionOnly || !previousReview?.result || !parsed) return null;
     const before = parseAnalysis(previousReview.result).findings;
     const beforeIds = new Set(before.map((f) => f.id));
     const nowIds = new Set(findings.map((f) => f.id));
@@ -376,7 +408,7 @@ export function PrDocument({
     const resolved = before.filter((f) => !nowIds.has(f.id)).length;
     if (added === 0 && resolved === 0) return null;
     return { added, resolved, kept: findings.length - added };
-  }, [linkOnly, previousReview?.result, parsed, findings]);
+  }, [sessionOnly, previousReview?.result, parsed, findings]);
 
   // ── Selection for publishing ──────────────────────────────────────────────────────────────
   const deselected = view.deselected ?? EMPTY_FLAGS;
@@ -387,17 +419,17 @@ export function PrDocument({
     displayJob ? (s.postedFindingsByRun[postedKey(prKey, displayJob.id)] ?? EMPTY_IDS) : EMPTY_IDS,
   );
   // What this very review already put on the pull request: offered again, a finding opened a moment
-  // ago would get a "sigue presente" reply on its own new thread. A project review reads it from the
-  // memory; a link review has none, so it keeps the ids that landed this session.
+  // ago would get a "sigue presente" reply on its own new thread. A review with memory reads it from
+  // there; a link review saved without one keeps the ids that landed this session.
   const publishable = useMemo(
     () =>
-      activeFindings.filter((f) => (linkOnly ? !postedFindings.includes(f.id) : !marks.get(f.id)?.publishedNow)),
-    [activeFindings, linkOnly, postedFindings, marks],
+      activeFindings.filter((f) => (sessionOnly ? !postedFindings.includes(f.id) : !marks.get(f.id)?.publishedNow)),
+    [activeFindings, sessionOnly, postedFindings, marks],
   );
   const chosen = publishable.filter((f) => !deselected[f.id]);
   // What is left to publish: a project review knows per finding (its memory has the thread); a
   // link review knows what landed this session, and whether the whole run went out.
-  const unpublished = linkOnly
+  const unpublished = sessionOnly
     ? postedRun
       ? 0
       : activeFindings.filter((f) => !postedFindings.includes(f.id)).length
@@ -409,19 +441,31 @@ export function PrDocument({
   // ── Discarding a finding ──────────────────────────────────────────────────────────────────
   const [discardingId, setDiscardingId] = useState<string | null>(null);
   const discardFinding = async (findingId: string, estado: string, opts: DiscardOptions) => {
-    if (!displayJob || !projectId) return;
+    if (!displayJob || (!projectId && target.kind !== "link")) return;
     setDiscardingId(findingId);
     try {
-      const outcome = await discardPrFinding(
-        projectId,
-        pr.id,
-        displayJob.id,
-        findingId,
-        estado,
-        opts.motivo || undefined,
-        opts.scopeRepo,
-        opts.notifyHost,
-      );
+      const outcome =
+        target.kind === "link"
+          ? await discardPrLinkFinding(
+              target.url,
+              target.workspaceId,
+              displayJob.id,
+              findingId,
+              estado,
+              opts.motivo || undefined,
+              opts.scopeRepo,
+              opts.notifyHost,
+            )
+          : await discardPrFinding(
+              projectId ?? "",
+              pr.id,
+              displayJob.id,
+              findingId,
+              estado,
+              opts.motivo || undefined,
+              opts.scopeRepo,
+              opts.notifyHost,
+            );
       // Publishing something just called a non-defect is exactly what the mark is meant to
       // prevent, so the selection follows the ruling.
       const next = { ...deselected };
@@ -433,7 +477,7 @@ export function PrDocument({
       else if (outcome.host_notified) useToastStore.getState().pushToast(t("finding.discardHostNotified"), "success");
       await loadRunMemory();
       // The only way another client (a paired phone) hears about the ruling.
-      notifyStateChange("reviews", projectId);
+      if (projectId) notifyStateChange("reviews", projectId);
     } catch (e) {
       pushErrorToast(String(e));
     } finally {
@@ -533,6 +577,53 @@ export function PrDocument({
           }
         : null;
     void actOnPr(target, pr.id, action, note);
+  };
+
+  // ── Approving because the review passed ───────────────────────────────────────────────────
+  // Its own action rather than the decision menu's approve: that one is a decision the human takes
+  // whatever the review said; this one is offered only when the latest review's gate passed —
+  // conclusively, on a complete review — and records in that run's memory who approved. Nothing is
+  // published with it: approving and commenting are separate acts.
+  const gatePassed = useMemo(
+    () => computeQualityGatePassed(activeFindings, runMemory?.gatePolicy),
+    [activeFindings, runMemory?.gatePolicy],
+  );
+  const approvalBlock =
+    displayJob && parsed && !hydrating
+      ? approvalBlocker({
+          gatePassed,
+          inconclusive: isGateInconclusive(reviewText),
+          incomplete: runFacts.incomplete,
+          prStatus: pr.status,
+          decision,
+          stale: Boolean(pinned) || Boolean(runningJob),
+        })
+      : "stale";
+  const [approvalAsking, setApprovalAsking] = useState(false);
+  const approveFromReview = async () => {
+    if (!displayJob) return;
+    const runIdNow = displayJob.id;
+    setApprovalAsking(true);
+    let account: string | null;
+    try {
+      // Asked right before the confirmation, never cached: the account is what the person is
+      // agreeing to approve as, and a token can be swapped in Settings at any moment.
+      account = await approvalAccount(target);
+    } catch (e) {
+      pushErrorToast(describeApprovalError(String(e), t));
+      return;
+    } finally {
+      setApprovalAsking(false);
+    }
+    const message = t("pr.approveFromReviewConfirm", {
+      id: String(pr.id),
+      title: pr.title,
+      account: account ?? t("pr.approveAccountUnknown"),
+    });
+    if (!(await confirmAction(message, false, t("pr.approveFromReviewConfirmButton")))) return;
+    const ok = await actOnPr(target, pr.id, "approve", null, { runId: runIdNow, account });
+    // The run's meta now names who approved; read it back so the header says so.
+    if (ok) await loadRunMemory();
   };
 
   // ── Waiting on me ─────────────────────────────────────────────────────────────────────────
@@ -670,10 +761,10 @@ export function PrDocument({
       mark,
       stale: Boolean(runningJob),
       onOpenLocation: openLocation,
-      // Only a project-backed review has a run to record the ruling in; a link session would
-      // take the click and forget it.
+      // Only a review with a saved run can record the ruling — every project review, and a link
+      // review since link reviews keep memory; an older one would take the click and forget it.
       onDiscard:
-        projectId && displayJob && !linkOnly && !pinned
+        (projectId || (linkOnly && runMemory !== null)) && displayJob && !pinned
           ? (estado: string, opts: DiscardOptions) => void discardFinding(finding.id, estado, opts)
           : undefined,
       discarding: discardingId === finding.id,
@@ -963,6 +1054,7 @@ export function PrDocument({
             <div className="flex flex-wrap items-center gap-1.5">
               <QualityGateBadges grades={parsed.grades} findings={activeFindings} blocking={runMemory?.gatePolicy} />
               <SeverityCountBadges findings={activeFindings} />
+              {runFacts.approval && <ApprovalRecordChip approval={runFacts.approval} />}
               <RunMenu
                 runs={iterations}
                 current={displayJob.id}
@@ -1209,6 +1301,34 @@ export function PrDocument({
                 </span>
               </button>
             </span>
+            {!hidesApproval(approvalBlock) && (
+              // The title rides on a wrapper for the same reason the publish button's does: a
+              // disabled button takes no pointer events, and "why not" is what it has to say.
+              <span
+                className="flex min-w-0"
+                title={
+                  approvalBlock === "inconclusive"
+                    ? t("pr.approveFromReviewInconclusive")
+                    : approvalBlock === "incomplete"
+                      ? t("pr.approveFromReviewIncomplete")
+                      : t("pr.approveFromReviewHint")
+                }
+              >
+                <button
+                  onClick={() => void approveFromReview()}
+                  aria-label={t("pr.approveFromReview")}
+                  disabled={approvalBlock !== null || prActionBusy !== null || approvalAsking || merging}
+                  className={buttonClass({ variant: "secondary", size: "md", className: "min-w-0" })}
+                >
+                  {approvalAsking || prActionBusy === "approve" ? (
+                    <Loader2 size={14} className="shrink-0 animate-spin" />
+                  ) : (
+                    <ShieldCheck size={14} className="shrink-0 text-[var(--cf-success)]" />
+                  )}
+                  <span className="hidden truncate @[34rem]:inline">{t("pr.approveFromReview")}</span>
+                </button>
+              </span>
+            )}
             {/* Offered after approving too: merging is the step that follows an approval, and the
                 approval itself shows in the header's chip and at the top of the menu. */}
             <DecideMenu
@@ -1698,6 +1818,23 @@ function PreviewEstimate({ preview }: { preview: ReviewPreview }) {
   );
 }
 
+/**
+ * Who approved this pull request from CodeFlow on the strength of this review, and when — read from
+ * the run's memory. A person, always: the chip exists so the record never reads as if the reviewer
+ * had approved anything.
+ */
+function ApprovalRecordChip({ approval }: { approval: RecordedApproval }) {
+  const t = useT();
+  const who = approval.account ?? t("pr.approveAccountUnknown");
+  const when = approval.approvedAt.slice(0, 16).replace("T", " ");
+  return (
+    <span className={chipClass("ok", "min-w-0")} title={t("pr.approvalRecordedHint", { account: who, date: when })}>
+      <ShieldCheck size={12} className="shrink-0" />
+      <span className="truncate">{t("pr.approvalRecorded", { account: who })}</span>
+    </span>
+  );
+}
+
 function LinkReviewNotice({ session }: { session: LinkPrSession }) {
   const t = useT();
   const openCloneOffer = useUiStore((s) => s.openPrLinkModal);
@@ -1708,7 +1845,9 @@ function LinkReviewNotice({ session }: { session: LinkPrSession }) {
         <span className="font-medium text-[var(--cf-text)]">{session.repoLabel}</span> · {t("doc.noLocalClone")}
       </p>
       <button
-        onClick={openCloneOffer}
+        // This PR's own link, not whatever is on the clipboard: the offer is about the review on
+        // screen, and the clipboard may well hold another PR from the same batch.
+        onClick={() => openCloneOffer(session.url)}
         className="inline-flex h-6 shrink-0 items-center whitespace-nowrap rounded-md px-2 text-[12px] font-medium text-[var(--cf-accent)] transition-colors duration-100 hover:bg-[var(--cf-accent-soft)]"
       >
         {t("prLink.cloneInstead")}

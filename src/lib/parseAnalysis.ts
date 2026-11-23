@@ -33,6 +33,9 @@ export interface AnalysisFinding {
   exampleCode: string;
   replacement: FindingReplacement | null;
   confidence: number | null;
+  /** Set on a re-review's new finding about code that was already there in the iteration before
+   * (`⏳ Tardío: …` in the report) — the note itself, e.g. "el código ya estaba en la iteración 2". */
+  late?: string | null;
 }
 
 export interface QualityGrades {
@@ -167,6 +170,7 @@ export function parseAnalysis(raw: string): ParsedAnalysis {
     const codeMatch = exampleSection.match(/```(\w*)\n([\s\S]*?)```/);
     const replacementMatch = block.match(REPLACEMENT_RE);
     const confidenceMatch = block.match(/🎯\s*Confianza:\s*(\d+)/);
+    const lateMatch = block.match(/⏳\s*Tard[ií]o:\s*([^\n]+)/);
 
     findings.push({
       id: id.trim(),
@@ -189,6 +193,7 @@ export function parseAnalysis(raw: string): ParsedAnalysis {
           }
         : null,
       confidence: confidenceMatch ? Number(confidenceMatch[1]) : null,
+      late: lateMatch ? lateMatch[1].trim() : null,
     });
   }
 
@@ -253,6 +258,9 @@ export function replacementMarkdown(finding: AnalysisFinding, provider?: string)
  * giant comment. */
 export function formatFindingAsComment(finding: AnalysisFinding, provider?: string): string {
   const lines = [`### ${SEVERITY_EMOJI[finding.severity]} [${finding.type}] ${finding.category} · ${finding.id}`, "", finding.subtitle];
+  // Mirrors `render::comment_markdown`: a late finding says so, so the team can tell a miss from a
+  // regression.
+  if (finding.late) lines.push("", `⏳ _(tardío: ${finding.late})_`);
   if (finding.why) lines.push("", `💭 **Por qué:** ${finding.why}`);
   if (finding.suggestion) lines.push("", `💡 **Sugerencia:** ${finding.suggestion}`);
   if (finding.exampleCode) lines.push("", "🛠️ Ejemplo de solución:", `\`\`\`${finding.exampleLang}`, finding.exampleCode, "```");
@@ -370,6 +378,9 @@ export interface SummaryMemory {
    * alongside the rest because a review that quietly drops what it got wrong is a review whose
    * numbers nobody can check. */
   discarded: SavedFinding[];
+  /** Accepted technical debt (`deuda_tecnica`): real and still in the code, out of the gate, and
+   * carried visibly until a review finds it paid. Optional for callers that build a memory by hand. */
+  debt?: SavedFinding[];
   /** Which run of this PR this is (1 = first review). */
   iter: number;
   /** `basico` · `completo` · `ultra`. */
@@ -434,12 +445,60 @@ function severityOf(raw: string): AnalysisFinding["severity"] {
   return raw === "critical" || raw === "warning" ? raw : "info";
 }
 
+/** The heading the review writes its "what the PR gets right" section under — byte-for-byte
+ * `review::render::POSITIVES_HEADING`. */
+export const POSITIVES_HEADING = "👍 **Lo que está bien:**";
+
+/** The heading line of the positives section, however the model dressed it — the backend
+ * normalises its own reports, but a review reached by link is the model's prose as written. */
+const POSITIVES_LINE_RE = /^(?:[\s#*_>]|👍|️)*lo que est[aá] bien(?![\p{L}])[\s:*_]*(.*)$/iu;
+const BULLET_RE = /^\s*(?:[-*•]|\d+[.)])\s+(.*)$/;
+const COVERAGE_LINE_RE = /^⚠️?\s*Cobertura de código\b.*$/mu;
+
+/**
+ * Splits the review's prose into its "what is good" points and everything else, so the summary
+ * comment can print them as one list wherever it ends up — including the branches that otherwise
+ * print no prose at all. Same tolerance as the backend's `normalize_positives`: a bold label with
+ * the points inline (`;`-separated), a heading over a bullet or numbered list, or one sentence.
+ */
+export function extractPositives(summary: string): { rest: string; positives: string[] } {
+  const lines = summary.split("\n");
+  const start = lines.findIndex((l) => POSITIVES_LINE_RE.test(l));
+  if (start < 0) return { rest: summary, positives: [] };
+  const positives: string[] = [];
+  const inline = (lines[start].match(POSITIVES_LINE_RE)?.[1] ?? "").trim();
+  for (const point of inline.split(";").map((p) => p.trim()).filter(Boolean)) positives.push(point);
+  let i = start + 1;
+  for (; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) {
+      if (positives.length > 0) break;
+      continue;
+    }
+    const bullet = line.match(BULLET_RE);
+    if (bullet) positives.push(bullet[1].trim());
+    else if (positives.length === 0 && !line.startsWith("**") && !line.startsWith("#")) positives.push(line);
+    else break;
+  }
+  const rest = [...lines.slice(0, start), ...lines.slice(i)].join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return { rest, positives };
+}
+
+/** The positives as the summary comment prints them; empty when the review named none. */
+function positivesLines(positives: string[]): string[] {
+  return positives.length > 0 ? ["", POSITIVES_HEADING, ...positives.map((p) => `- ${p}`)] : [];
+}
+
 export function formatSummaryComment(
   parsed: ParsedAnalysis,
   date: string,
   posted: AnalysisFinding[],
   memory?: SummaryMemory | null,
 ): string {
+  // The positives travel as their own list, so they read the same in every branch below — and the
+  // coverage warning is carried even where the review's prose is not.
+  const { rest: prose, positives } = extractPositives(parsed.summary);
+  const coverage = prose.match(COVERAGE_LINE_RE)?.[0]?.trim() ?? null;
   const passed = computeQualityGatePassed(parsed.findings, memory?.gatePolicy);
   const lines = [`### 📋 Revisión automatizada (pr-review) — ${date}`, "", `🛡️ **Quality Gate:** ${passed ? "✅ PASSED" : "❌ FAILED"}`];
   if (parsed.grades) {
@@ -450,19 +509,25 @@ export function formatSummaryComment(
   lines.push("");
 
   // Everything the memory carries as done: what earlier iterations of this same PR reported and
-  // this one no longer finds. It's the half of the story the review text can't tell — a clean run
+  // a reviewer judged fixed. It's the half of the story the review text can't tell — a clean run
   // looks identical whether the PR never had a defect or had three that were all fixed.
   const resolved = memory?.resolved ?? [];
+  const debt = memory?.debt ?? [];
   const counts = severityTally(posted);
+  if (parsed.findings.length === 0 && resolved.length > 0) {
+    lines.push("✅ **Sin hallazgos activos** — Todos los hallazgos de la iteración previa fueron corregidos.", "");
+  }
 
   // Nothing open and nothing on the record. Rejections still count as "on the record": a review
   // whose every finding was thrown out must say so, not report a clean bill of health.
-  if (posted.length === 0 && resolved.length === 0 && (memory?.discarded.length ?? 0) === 0) {
+  if (posted.length === 0 && resolved.length === 0 && debt.length === 0 && (memory?.discarded.length ?? 0) === 0) {
     lines.push(
       parsed.findings.length > 0
         ? `La revisión encontró ${parsed.findings.length} hallazgo(s), ninguno de los cuales se publicó como comentario.`
-        : parsed.summary || "✅ No se encontraron problemas en este cambio.",
+        : prose || "✅ No se encontraron problemas en este cambio.",
     );
+    if (coverage && (parsed.findings.length > 0 || !prose)) lines.push("", coverage);
+    lines.push(...positivesLines(positives));
     lines.push(...scopeLines(memory));
     return lines.join("\n");
   }
@@ -473,6 +538,7 @@ export function formatSummaryComment(
     tally.push(`📌 ${posted.length}${outOf} publicado(s) (${counts.join(" · ")})`);
   }
   if (resolved.length > 0) tally.push(`✔️ ${resolved.length} resuelto(s)`);
+  if (debt.length > 0) tally.push(`🧾 ${debt.length} deuda técnica`);
   if ((memory?.discarded.length ?? 0) > 0) tally.push(`🚫 ${memory?.discarded.length} descartado(s)`);
   lines.push(`**Hallazgos:** ${tally.join(" · ")}`, "");
 
@@ -497,10 +563,13 @@ export function formatSummaryComment(
       );
     }
   }
+  lines.push(...resolvedLines(resolved));
+  lines.push(...debtLines(debt));
 
   lines.push(...discardedLines(memory));
   lines.push(...scopeLines(memory));
-  if (parsed.summary.trim()) lines.push("", parsed.summary.trim());
+  if (prose.trim()) lines.push("", prose.trim());
+  lines.push(...positivesLines(positives));
   if (memory?.engine) {
     lines.push(
       "",
@@ -511,6 +580,45 @@ export function formatSummaryComment(
     );
   }
   return lines.join("\n");
+}
+
+/** A stored finding's fine severity — `severidad` when the run kept it, the bucket's most likely
+ * member otherwise. */
+function savedSeverityLabel(f: SavedFinding): string {
+  if (f.severidad) return f.severidad;
+  return f.severity === "critical" ? "Crítico" : f.severity === "warning" ? "Mayor" : "Menor";
+}
+
+/** One line of free text, safe inside a bullet. */
+function oneLine(text: string | null | undefined): string {
+  return (text ?? "").replace(/\s*\n\s*/g, " ").trim();
+}
+
+/**
+ * What each resolved finding was fixed by, under the struck-through table: the row says *that* it
+ * was fixed, this says *how* — the resolution a reviewer judged, which is also what its thread was
+ * told when it was closed as fixed.
+ */
+function resolvedLines(resolved: SavedFinding[]): string[] {
+  if (resolved.length === 0) return [];
+  const out = ["", `✔️ **${resolved.length} hallazgos resueltos** (hilos individuales actualizados a \`fixed\`):`, ""];
+  for (const f of resolved) {
+    out.push(`- ${f.id} (${savedSeverityLabel(f)}) — ${f.archivo ?? "—"} — ${oneLine(f.subtitulo) || f.categoria}`);
+    const how = oneLine(f.resolucion);
+    if (how) out.push(`  - 🛠️ ${how}`);
+  }
+  return out;
+}
+
+/** Accepted technical debt: still in the code and out of the gate — listed so it stays in sight. */
+function debtLines(debt: SavedFinding[]): string[] {
+  if (debt.length === 0) return [];
+  const out = ["", "🧾 **Deuda técnica aceptada** (sigue en el código, fuera del Quality Gate):", ""];
+  for (const f of debt) {
+    const motivo = oneLine(f.motivo_descarte);
+    out.push(`- ${f.id} (${savedSeverityLabel(f)}) — ${f.archivo ?? "—"} — ${oneLine(f.subtitulo) || f.categoria}${motivo ? ` — _${motivo}_` : ""}`);
+  }
+  return out;
 }
 
 /**
@@ -607,6 +715,7 @@ export function summaryMemoryOf(run: Pick<ReviewRunDetail, "findings" | "meta" |
     all: saved,
     resolved: saved.filter((f) => f.estado === "resuelto"),
     discarded: saved.filter((f) => f.estado === "falso_positivo" || f.estado === "ignorado"),
+    debt: saved.filter((f) => f.estado === "deuda_tecnica"),
     iter: run.iter,
     level: run.level,
     engine: typeof meta.engine === "string" ? meta.engine : "",

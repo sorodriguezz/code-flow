@@ -72,6 +72,9 @@ pub struct ReportContext<'a> {
     /// because their file did not change (or their reviewer failed). Said once, so a re-review that
     /// read three files does not look as if it found what it only kept.
     pub carried: usize,
+    /// Non-blocking lines stated under the header, one each: the calibration in force, the CI's code
+    /// coverage when it is below the level's line. They qualify the review without moving the gate.
+    pub notes: &'a [String],
 }
 
 /// What the checks between the reviewers and the report did, for the one line that says so.
@@ -100,6 +103,89 @@ pub fn strip_grades(text: &str) -> String {
         .to_string()
 }
 
+/// The heading the "what the PR gets right" section is written under — byte-for-byte what
+/// `parseAnalysis.ts` looks for when it carries the section into the summary comment.
+pub const POSITIVES_HEADING: &str = "👍 **Lo que está bien:**";
+
+/// Whether a line opens the positives section, however the model dressed it: `**Lo que está
+/// bien:**`, `## Lo que está bien`, `👍 Lo que esta bien:` — with or without the accent.
+fn positives_heading_rest(line: &str) -> Option<&str> {
+    let bare = line.trim().trim_start_matches(|c: char| matches!(c, '#' | '*' | '_' | '>' | ' ') || c == '👍' || c == '\u{FE0F}');
+    let lower = bare.to_lowercase();
+    let key = ["lo que está bien", "lo que esta bien"].into_iter().find(|k| lower.starts_with(k))?;
+    let rest = &bare[key.len()..];
+    Some(rest.trim_start_matches(|c: char| matches!(c, ':' | '*' | '_' | ' ')).trim())
+}
+
+fn bullet_text(line: &str) -> Option<&str> {
+    let t = line.trim();
+    if let Some(rest) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")).or_else(|| t.strip_prefix("• ")) {
+        return Some(rest.trim());
+    }
+    let digits = t.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits > 0 {
+        if let Some(rest) = t[digits..].strip_prefix(". ").or_else(|| t[digits..].strip_prefix(") ")) {
+            return Some(rest.trim());
+        }
+    }
+    None
+}
+
+/// Rewrites the model's "what is good" section into the one shape the report and the summary
+/// comment carry: [`POSITIVES_HEADING`] and `- ` bullets under it.
+///
+/// The models write it a dozen ways (a bold label with the points inline, a `##` heading, a
+/// numbered list), and every one of them used to reach the summary comment as whatever it was —
+/// or, inline after the label, not as a list at all. Everything else in the prose is left as is.
+pub fn normalize_positives(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let Some(start) = lines.iter().position(|l| positives_heading_rest(l).is_some()) else { return text.to_string() };
+    let mut out: Vec<String> = lines[..start].iter().map(|l| l.to_string()).collect();
+    while out.last().is_some_and(|l| l.trim().is_empty()) {
+        out.pop();
+    }
+    if !out.is_empty() {
+        out.push(String::new());
+    }
+    out.push(POSITIVES_HEADING.to_string());
+    let inline = positives_heading_rest(lines[start]).unwrap_or_default();
+    let mut items = 0usize;
+    for point in inline.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        out.push(format!("- {point}"));
+        items += 1;
+    }
+    let mut i = start + 1;
+    while i < lines.len() {
+        let line = lines[i].trim();
+        if line.is_empty() {
+            // A blank line ends the section once it has a point; before that it is only spacing.
+            if items > 0 {
+                break;
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(point) = bullet_text(line) {
+            out.push(format!("- {point}"));
+        } else if items == 0 && !line.starts_with("**") && !line.starts_with('#') {
+            // A sentence right under the label is the point itself, written as prose.
+            out.push(format!("- {line}"));
+        } else {
+            break;
+        }
+        items += 1;
+        i += 1;
+    }
+    while i < lines.len() && lines[i].trim().is_empty() {
+        i += 1;
+    }
+    if i < lines.len() {
+        out.push(String::new());
+        out.extend(lines[i..].iter().map(|l| l.to_string()));
+    }
+    out.join("\n").trim().to_string()
+}
+
 /// One finding, in the exact block the standard specifies.
 fn render_finding(finding: &Finding) -> String {
     let mut out = format!(
@@ -120,6 +206,9 @@ fn render_finding(finding: &Finding) -> String {
             Some(lines) => out.push_str(&format!("📍 Ubicación: {file}:{lines}\n\n")),
             None => out.push_str(&format!("📍 Ubicación: {file}\n\n")),
         }
+    }
+    if let Some(note) = late_note(finding) {
+        out.push_str(&format!("⏳ Tardío: {note}\n\n"));
     }
     if !finding.por_que.is_empty() {
         out.push_str(&format!("💭 Por qué: {}\n\n", finding.por_que));
@@ -146,6 +235,17 @@ fn render_finding(finding: &Finding) -> String {
     }
     out.push_str("---\n\n");
     out
+}
+
+/// What a late finding says about itself: the code it is about was already there in the iteration
+/// before, so the review of that iteration should have caught it. `None` for every other finding.
+///
+/// A label, not a demotion — the finding is as real as any other; the point is that the team can
+/// tell a regression the latest push introduced from something the reviewer missed last time.
+pub fn late_note(finding: &Finding) -> Option<String> {
+    finding
+        .tardio
+        .then(|| format!("el código ya estaba en la iteración {}", finding.introducido_en_iter.saturating_sub(1).max(1)))
 }
 
 fn span_label(start: u32, end: u32) -> String {
@@ -201,6 +301,9 @@ pub fn comment_markdown(finding: &Finding, provider: &str) -> String {
     );
     if !finding.subtitulo.is_empty() {
         out.push_str(&format!("\n\n{}", finding.subtitulo));
+    }
+    if let Some(note) = late_note(finding) {
+        out.push_str(&format!("\n\n⏳ _(tardío: {note})_"));
     }
     if !finding.por_que.is_empty() {
         out.push_str(&format!("\n\n💭 **Por qué:** {}", finding.por_que));
@@ -325,9 +428,14 @@ pub fn review_markdown(findings: &[Finding], ctx: &ReportContext) -> String {
             ctx.degraded.join(", ")
         ));
     }
+    for note in ctx.notes.iter().map(|n| n.trim()).filter(|n| !n.is_empty()) {
+        out.push_str(note);
+        out.push('\n');
+    }
     out.push('\n');
 
-    let narrative = ctx.narrative.trim();
+    let narrative = normalize_positives(ctx.narrative.trim());
+    let narrative = narrative.trim();
     if !narrative.is_empty() {
         out.push_str(narrative);
         out.push_str("\n\n");
@@ -372,6 +480,7 @@ mod tests {
             failed_passes: &[],
             checking: Checking::default(),
             carried: 0,
+            notes: &[],
         }
     }
 
@@ -633,5 +742,34 @@ mod tests {
         assert!(review_markdown(&[f.clone()], &ctx(&contract("completo"), &[Severity::Blocker], "")).contains("✏️ Reemplazo: 4-5"));
         f.lineas = Some("9".into());
         assert!(!comment_markdown(&f, "github").contains("```suggestion"), "anchored elsewhere: a plain block");
+    }
+
+    /// Every spelling the models use lands as the one heading with `- ` bullets, and the prose
+    /// around it is left alone.
+    #[test]
+    fn the_positives_section_is_normalized_whatever_the_model_wrote() {
+        let inline = normalize_positives("El PR agrega pagos.\n**Lo que está bien:** buen manejo de errores; tests claros\n\n**Notas:** correr la migración.");
+        assert_eq!(
+            inline,
+            "El PR agrega pagos.\n\n👍 **Lo que está bien:**\n- buen manejo de errores\n- tests claros\n\n**Notas:** correr la migración."
+        );
+        let listed = normalize_positives("Resumen.\n\n## Lo que esta bien\n1. Valida la entrada\n2) Cierra el recurso\nFin.");
+        assert!(listed.contains("👍 **Lo que está bien:**\n- Valida la entrada\n- Cierra el recurso\n\nFin."), "{listed}");
+        let prose = normalize_positives("👍 Lo que está bien:\nel helper nuevo evita duplicar la consulta.");
+        assert_eq!(prose, "👍 **Lo que está bien:**\n- el helper nuevo evita duplicar la consulta.");
+        assert_eq!(normalize_positives("Sin sección."), "Sin sección.");
+    }
+
+    /// The notes sit under the header, before the prose — and the positives reach the report.
+    #[test]
+    fn notes_and_positives_reach_the_report() {
+        let c = contract("completo");
+        let notes = vec!["⚠️ Cobertura de código 72 % (< 80 % del nivel)".to_string()];
+        let context = ReportContext { notes: &notes, ..ctx(&c, &[Severity::Blocker], "Bien.\n**Lo que está bien:** valida montos") };
+        let md = review_markdown(&[], &context);
+        let note_at = md.find("⚠️ Cobertura de código 72 %").expect("the note");
+        let prose_at = md.find("Bien.").expect("the prose");
+        assert!(note_at < prose_at);
+        assert!(md.contains("👍 **Lo que está bien:**\n- valida montos"));
     }
 }

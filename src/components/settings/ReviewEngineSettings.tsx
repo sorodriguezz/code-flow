@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Layers, Loader2, RotateCcw, Ruler, ScanSearch, ShieldAlert, Users } from "lucide-react";
+import { Check, GitMerge, Layers, Loader2, RotateCcw, Ruler, ScanSearch, ShieldAlert, Target, Users } from "lucide-react";
 import {
   getReviewEngineConfig,
   resetReviewEngineConfig,
@@ -16,6 +16,7 @@ import { Skeleton } from "../common/Skeleton";
 import { buttonClass } from "../common/Button";
 import { chipClass, fieldClass } from "../common/recipes";
 import { Group } from "../api/settingsChrome";
+import { DeterministicSettings } from "./DeterministicSettings";
 
 /** The five severities, in report order. Matches `review::contract::Severity` — the backend parses
  * these labels back, accents and all, so they are values rather than display strings. */
@@ -246,6 +247,10 @@ export function ReviewEngineSettings() {
     );
   }
 
+  // Optional on the way in: a backend that predates them simply doesn't show these sections.
+  const calibration = config.calibration;
+  const promotion = config.triage?.promotion;
+
   const lensOptions = config.lensCatalog.map(([n, label]) => ({
     value: String(n),
     // The number is the identity; the label is long enough that a chip row of six would wrap into
@@ -376,6 +381,14 @@ export function ReviewEngineSettings() {
                 });
               }}
             />
+            <NumberField
+              label={t("settings.engineCoverage")}
+              hint={t("settings.engineCoverageHint")}
+              value={level.warnCodeCoverageBelowPct ?? 0}
+              min={0}
+              max={100}
+              onChange={(warnCodeCoverageBelowPct) => patchLevel(level.level, { warnCodeCoverageBelowPct })}
+            />
           </Group>
         ))}
       </div>
@@ -398,6 +411,82 @@ export function ReviewEngineSettings() {
             }}
           />
         </Group>
+
+        {calibration && (
+          <Group title={t("settings.engineCalibration")} collapsible defaultOpen={false}>
+            <p className="mb-1 flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+              <Target size={12} className="mt-px shrink-0" />
+              {t("settings.engineCalibrationHint")}
+            </p>
+            <ToggleField
+              label={t("settings.engineCalibrationEnabled")}
+              hint={t("settings.engineCalibrationEnabledHint")}
+              checked={calibration.enabled}
+              onChange={(enabled) => void persist({ ...config, calibration: { ...calibration, enabled } })}
+            />
+            <NumberField
+              label={t("settings.engineCalibrationMinSamples")}
+              hint={t("settings.engineCalibrationMinSamplesHint")}
+              value={calibration.minSamples}
+              min={1}
+              max={100}
+              onChange={(minSamples) => void persist({ ...config, calibration: { ...calibration, minSamples } })}
+            />
+            <NumberField
+              label={t("settings.engineCalibrationMinRate")}
+              hint={t("settings.engineCalibrationMinRateHint")}
+              value={Math.round(calibration.minRate * 100)}
+              min={1}
+              max={100}
+              onChange={(pct) => void persist({ ...config, calibration: { ...calibration, minRate: pct / 100 } })}
+            />
+            <NumberField
+              label={t("settings.engineCalibrationMaxCategories")}
+              hint={t("settings.engineCalibrationMaxCategoriesHint")}
+              value={calibration.maxCategories}
+              min={1}
+              max={50}
+              onChange={(maxCategories) => void persist({ ...config, calibration: { ...calibration, maxCategories } })}
+            />
+            <NumberField
+              label={t("settings.engineCalibrationMinConfidence")}
+              hint={t("settings.engineCalibrationMinConfidenceHint")}
+              value={calibration.minConfidence}
+              min={0}
+              max={100}
+              onChange={(minConfidence) => void persist({ ...config, calibration: { ...calibration, minConfidence } })}
+            />
+          </Group>
+        )}
+
+        <DeterministicSettings config={config} persist={(next) => void persist(next)} />
+
+        {promotion && (
+          <Group title={t("settings.enginePromotion")} collapsible defaultOpen={false}>
+            <p className="mb-1 flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+              <GitMerge size={12} className="mt-px shrink-0" />
+              {t("settings.enginePromotionHint")}
+            </p>
+            <ToggleField
+              label={t("settings.enginePromotionEnabled")}
+              hint={t("settings.enginePromotionEnabledHint")}
+              checked={promotion.enabled}
+              onChange={(enabled) => void persist({ ...config, triage: { promotion: { ...promotion, enabled } } })}
+            />
+            <GlobList
+              label={t("settings.enginePromotionSource")}
+              hint={t("settings.enginePromotionSourceHint")}
+              value={promotion.source}
+              onChange={(source) => void persist({ ...config, triage: { promotion: { ...promotion, source } } })}
+            />
+            <GlobList
+              label={t("settings.enginePromotionTarget")}
+              hint={t("settings.enginePromotionTargetHint")}
+              value={promotion.target}
+              onChange={(target) => void persist({ ...config, triage: { promotion: { ...promotion, target } } })}
+            />
+          </Group>
+        )}
 
         <Group title={t("settings.engineScope")} collapsible defaultOpen={false}>
           <p className="mb-1 flex items-start gap-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">

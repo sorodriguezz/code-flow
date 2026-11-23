@@ -556,7 +556,7 @@ Por stdin recibes el título y la descripción del PR, y la lista ya consolidada
 
 Escribe SOLO el resumen que abre el reporte, en español:
 - 2 a 4 frases en prosa: qué hace el PR, qué tan sano se ve y cuál es el riesgo principal si lo hay.
-- Después, si corresponde, una línea `**Lo que está bien:**` con 1 a 3 puntos concretos.
+- Después, SIEMPRE, una línea `👍 **Lo que está bien:**` seguida de 1 a 3 viñetas (`- `) con aciertos concretos del PR.
 - Si hay algo que el equipo deba saber y no es un hallazgo (una variable de entorno nueva, una migración que correr), agrégalo como `**Notas:**` con 1 a 3 puntos.
 
 Reglas:
@@ -564,6 +564,22 @@ Reglas:
 - NO escribas la línea 📈 CALIDAD, ni el Quality Gate, ni encabezados `###`: eso lo arma el reporte.
 - No inventes nada que no esté en los hallazgos o en la descripción del PR.
 - Si no hay hallazgos, dilo en una o dos frases sin adornos."#;
+
+/// What the PR gets right, asked for on top of whichever prompt writes the report's prose — the
+/// single reviewer's (`basico`, or any review that did not fan out) and the fan-out's closing pass.
+///
+/// In code rather than only in the editable prompts because it is part of the report's format, not
+/// of its wording: `render::normalize_positives` and `parseAnalysis.ts` look for exactly this
+/// heading, and a workspace that customised its standard before it existed would otherwise never
+/// get the section at all. A review that only lists defects reads as a verdict; one that also says
+/// what is solid reads as a review, and it is the half an author actually keeps.
+pub const REVIEW_POSITIVES_NOTE: &str = "\n\n## LO QUE ESTÁ BIEN (obligatorio)\n\
+Antes del primer hallazgo (justo después de la línea de CALIDAD, si la escribes, y de tu resumen), incluye SIEMPRE \
+esta sección, también cuando no haya hallazgos:\n\n\
+👍 **Lo que está bien:**\n\
+- {1 a 3 aciertos concretos del cambio: qué está bien resuelto y por qué importa; cita archivo o función}\n\n\
+Nada genérico (\"el código está limpio\"): si no hay un acierto concreto que nombrar, escribe uno solo, honesto. \
+No repitas aquí ningún hallazgo.";
 
 /// The pass no single-file reviewer can do.
 ///

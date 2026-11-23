@@ -80,6 +80,58 @@ pub fn backup_save_settings(db: State<Db>, settings: backup::BackupSettings) -> 
     backup::save_settings(&conn, &settings)
 }
 
+/// One project's folder as "What to include" lists it: what it is, and roughly what it adds to the
+/// file.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositorySize {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    /// Bytes the backup would read from it, with the same exclusions as the backup itself.
+    /// `None` when the folder could not be measured — see `error`.
+    pub bytes: Option<u64>,
+    pub error: String,
+}
+
+/// Every project's folder with its approximate size, for the per-repository choice under
+/// "Repository folders". The rows are read under the lock; the walking happens after it is
+/// released and off the main thread, because a large checkout takes a while to measure.
+#[tauri::command]
+pub async fn backup_repository_sizes(app: AppHandle) -> Result<Vec<RepositorySize>, String> {
+    let projects: Vec<(String, String, String)> = {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let mut statement = conn
+            .prepare("SELECT id, name, local_path FROM projects ORDER BY name COLLATE NOCASE")
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut measured: std::collections::HashMap<String, Result<u64, String>> = Default::default();
+        projects
+            .into_iter()
+            .filter(|(_, _, path)| !path.trim().is_empty())
+            .map(|(id, name, path)| {
+                let size = measured
+                    .entry(path.clone())
+                    .or_insert_with(|| backup::repositories::folder_size(std::path::Path::new(&path)))
+                    .clone();
+                let (bytes, error) = match size {
+                    Ok(bytes) => (Some(bytes), String::new()),
+                    Err(error) => (None, error),
+                };
+                RepositorySize { id, name, path, bytes, error }
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// Stops the scheduled backup and forgets what the step-by-step setup was told, so it asks again.
 /// Nothing already written is touched — see [`backup::reset_auto`] for what survives and why.
 #[tauri::command]

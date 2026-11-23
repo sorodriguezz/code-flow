@@ -37,6 +37,7 @@ import {
   backupRestoreDrive,
   backupRestoreFile,
   backupRestoreOneDrive,
+  backupRepositorySizes,
   backupResetAuto,
   backupRunNow,
   backupSaveDrive,
@@ -45,16 +46,22 @@ import {
   backupSetPassphrase,
   backupState,
   destinationReady,
+  displayRemote,
   formatBytes,
   INCLUDE_KEYS,
+  repositoryIncluded,
+  toggleRepository,
   passphraseStrength,
   writesToFolder,
   type BackupInclude,
   type BackupInfo,
   type BackupSettings as Settings,
   type BackupState,
+  type CloneCandidate,
+  type RepositorySize,
   type RestoreReport,
 } from "../../lib/tauri/backupCommands";
+import { checkoutRemoteTracking, gitClone } from "../../lib/tauri/commands";
 import { relaunch } from "@tauri-apps/plugin-process";
 import type { TranslationKey } from "../../lib/i18n/translations";
 
@@ -64,8 +71,9 @@ import type { TranslationKey } from "../../lib/i18n/translations";
  *
  * That move is the point of the feature: what used to travel was one workspace's collections; what
  * travels now is the install — every workspace, project, collection, database connection, prompt,
- * agent and setting, plus every credential in the OS store. Restore it on another
- * computer with repositories, Git history, uncommitted work and usage statistics included.
+ * agent and setting, plus every credential in the OS store. Restore it on another computer with
+ * usage statistics included — and the repositories' folders (Git history, uncommitted work) when
+ * the user keeps that optional section on, all of them or only some.
  *
  * Two things about the shape of this panel are deliberate:
  *
@@ -334,16 +342,22 @@ function IncludeRow({
   label,
   detail,
   checked,
+  indeterminate,
   onChange,
   alwaysLabel,
+  children,
 }: {
   label: string;
   detail: string;
   checked?: boolean;
+  /** Some of what the row stands for is in — the repositories row with a few left out. */
+  indeterminate?: boolean;
   onChange?: (checked: boolean) => void;
   /** Set for the one row that has no switch — the core. Its slot gets a padlock instead of a
    *  checkbox, so the row still reads as one of the list rather than as a paragraph above it. */
   alwaysLabel?: string;
+  /** More than prose behind the disclosure — mounted only while open. */
+  children?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -374,7 +388,11 @@ function IncludeRow({
           {alwaysLabel !== undefined ? (
             <Lock size={13} className="text-[var(--cf-text-muted)]" aria-label={alwaysLabel} />
           ) : (
-            <Checkbox checked={checked ?? false} onChange={onChange ?? (() => {})} />
+            <Checkbox
+              checked={checked ?? false}
+              indeterminate={indeterminate}
+              onChange={onChange ?? (() => {})}
+            />
           )}
         </span>
       </div>
@@ -385,6 +403,87 @@ function IncludeRow({
           {detail}
         </p>
       )}
+      {open && children}
+    </div>
+  );
+}
+
+/**
+ * The repositories row's detail: every project's folder with roughly what it adds to the file, each
+ * with its own box. Measured when the row is opened, not when the pane is — walking every checkout
+ * on the way to toggling the credentials switch would be a cost nobody asked for.
+ */
+function RepositoryPicker({
+  include,
+  onChange,
+}: {
+  include: BackupInclude;
+  onChange: (include: BackupInclude) => void;
+}) {
+  const t = useT();
+  const [sizes, setSizes] = useState<RepositorySize[] | null>(null);
+  const [failed, setFailed] = useState("");
+  useEffect(() => {
+    let live = true;
+    backupRepositorySizes()
+      .then((rows) => live && setSizes(rows))
+      .catch((e) => live && setFailed(String(e)));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  if (failed !== "") {
+    return <p className="mb-1 pl-[19px] text-[11px] text-[var(--cf-danger)]">{failed}</p>;
+  }
+  if (sizes === null) {
+    return (
+      <p className="mb-1 flex items-center gap-1.5 pl-[19px] text-[11px] text-[var(--cf-text-muted)]">
+        <Loader2 size={11} className="animate-spin" />
+        {t("backup.repoSizesLoading")}
+      </p>
+    );
+  }
+  if (sizes.length === 0) {
+    return <p className="mb-1 pl-[19px] text-[11px] text-[var(--cf-text-muted)]">{t("backup.repoNone")}</p>;
+  }
+  const ids = sizes.map((row) => row.id);
+  // A folder shared by two projects is one folder in the file, so it is counted once.
+  const chosen = new Map<string, number>();
+  for (const row of sizes) {
+    if (row.bytes !== null && repositoryIncluded(include, row.id)) chosen.set(row.path, row.bytes);
+  }
+  const total = [...chosen.values()].reduce((sum, bytes) => sum + bytes, 0);
+  return (
+    <div className="mb-1.5 pl-[19px] pr-0">
+      <ul className="max-h-56 overflow-y-auto rounded-md border border-[var(--cf-border)]">
+        {sizes.map((row) => (
+          <li
+            key={row.id}
+            className="flex items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1 last:border-b-0"
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[12px] text-[var(--cf-text)]">{row.name}</span>
+              <span className="block truncate font-mono text-[10px] text-[var(--cf-text-faint)]" title={row.path}>
+                {row.path}
+              </span>
+            </span>
+            <span
+              className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-muted)]"
+              title={row.error || undefined}
+            >
+              {row.bytes === null ? t("backup.repoSizeUnavailable") : `~${formatBytes(row.bytes)}`}
+            </span>
+            <Checkbox
+              checked={repositoryIncluded(include, row.id)}
+              onChange={(on) => onChange(toggleRepository(include, row.id, on, ids))}
+            />
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">
+        {t("backup.repoTotal", { size: formatBytes(total), n: String(chosen.size) })}
+      </p>
     </div>
   );
 }
@@ -410,7 +509,12 @@ function IncludeGroup({
   onChange: (include: BackupInclude) => void;
 }) {
   const t = useT();
-  const count = INCLUDE_KEYS.filter((key) => include[key]).length;
+  const excluded = include.excludedRepositories ?? [];
+  const reposPartial = include.repositories && excluded.length > 0;
+  // `repositories` counts as one more switch; with only some folders in, it is not "everything".
+  const total = INCLUDE_KEYS.length + 1;
+  const count =
+    INCLUDE_KEYS.filter((key) => include[key]).length + (include.repositories && !reposPartial ? 1 : 0);
 
   return (
     <>
@@ -430,6 +534,19 @@ function IncludeGroup({
           detail={t("backup.include.coreHint")}
           alwaysLabel={t("backup.include.coreAlways")}
         />
+        {/* Right after the core because it is what the core used to carry, and because it is the
+            switch that decides most of the file's size. Its detail is the per-project choice. */}
+        <IncludeRow
+          label={t("backup.include.repositories")}
+          detail={t("backup.include.repositoriesHint")}
+          checked={include.repositories && !reposPartial}
+          indeterminate={reposPartial}
+          onChange={(checked) =>
+            onChange({ ...include, repositories: checked, excludedRepositories: [] })
+          }
+        >
+          <RepositoryPicker include={include} onChange={onChange} />
+        </IncludeRow>
         {INCLUDE_KEYS.map((key) => (
           <IncludeRow
             key={key}
@@ -445,9 +562,9 @@ function IncludeGroup({
         <Note tone="warning">{t("backup.includeAgentWorkNeedsConversations")}</Note>
       )}
       <p className="mt-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-        {count === INCLUDE_KEYS.length
+        {count === total
           ? t("backup.includeAllHint")
-          : t("backup.includePartialHint", { n: String(INCLUDE_KEYS.length - count) })}
+          : t("backup.includePartialHint", { n: String(total - count) })}
       </p>
     </>
   );
@@ -690,6 +807,10 @@ function RestoreDoneModal({ report, onClose }: { report: RestoreReport; onClose:
         {report.repositories > 0 && <p className="mb-2">{t("backup.restoredRepositories", { n: String(report.repositories) })}</p>}
         <Note>{t("backup.restartHint")}</Note>
 
+        {(report.clonableRepositories ?? []).length > 0 && (
+          <CloneOffer candidates={report.clonableRepositories} />
+        )}
+
         {report.missingProjectPaths.length > 0 && (
           <div className="mt-2">
             <Note tone="warning">
@@ -712,6 +833,97 @@ function RestoreDoneModal({ report, onClose }: { report: RestoreReport; onClose:
         )}
       </div>
     </ApiModal>
+  );
+}
+
+type CloneState = "idle" | "cloning" | "done" | "branch-failed" | "failed";
+
+/**
+ * The repositories the file did not carry, offered back from their remotes — through the same
+ * `git_clone` as "Clone repository", so the connected account's credential is used the same way.
+ * Each goes into the folder its project already points at, and is switched to the branch it was on
+ * when backed up. Optional and one at a time: a restore that cloned twenty repositories unasked
+ * would be the heavy backup again, paid for in the network instead of in the file.
+ */
+function CloneOffer({ candidates }: { candidates: CloneCandidate[] }) {
+  const t = useT();
+  const [states, setStates] = useState<Record<string, CloneState>>({});
+  const set = (path: string, state: CloneState) => setStates((current) => ({ ...current, [path]: state }));
+
+  const clone = async (candidate: CloneCandidate) => {
+    set(candidate.path, "cloning");
+    try {
+      await gitClone(candidate.remoteUrl, candidate.path);
+    } catch (e) {
+      set(candidate.path, "failed");
+      pushErrorToast(String(e));
+      return;
+    }
+    if (candidate.branch.trim() !== "") {
+      try {
+        // Reuses the local branch when the clone already made it (the remote's default).
+        await checkoutRemoteTracking(candidate.path, `origin/${candidate.branch}`);
+      } catch {
+        set(candidate.path, "branch-failed");
+        return;
+      }
+    }
+    set(candidate.path, "done");
+  };
+
+  const pending = candidates.filter((candidate) => {
+    const state = states[candidate.path] ?? "idle";
+    return state === "idle" || state === "failed";
+  });
+  const cloneAll = async () => {
+    for (const candidate of pending) await clone(candidate);
+  };
+  const anyRunning = Object.values(states).includes("cloning");
+
+  return (
+    <div className="mt-2">
+      <div className="mb-1 flex items-start justify-between gap-2">
+        <Note>{t("backup.clonableIntro", { n: String(candidates.length) })}</Note>
+        {pending.length > 1 && (
+          <GhostButton onClick={() => void cloneAll()} disabled={anyRunning}>
+            {t("backup.cloneAll")}
+          </GhostButton>
+        )}
+      </div>
+      <ul className="max-h-40 overflow-y-auto rounded-md border border-[var(--cf-border)]">
+        {candidates.map((candidate) => {
+          const state = states[candidate.path] ?? "idle";
+          return (
+            <li
+              key={candidate.path}
+              className="flex items-center gap-2 border-b border-[var(--cf-border)] px-2 py-1 last:border-b-0"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[12px]">
+                  {candidate.name || candidate.path}
+                  {candidate.branch !== "" && (
+                    <span className="ml-1.5 font-mono text-[10px] text-[var(--cf-text-muted)]">{candidate.branch}</span>
+                  )}
+                </span>
+                <span className="block truncate font-mono text-[10px] text-[var(--cf-text-faint)]" title={candidate.path}>
+                  {displayRemote(candidate.remoteUrl)}
+                </span>
+              </span>
+              {state === "done" ? (
+                <Status tone="success">{t("backup.cloned")}</Status>
+              ) : state === "branch-failed" ? (
+                <Status tone="warning">{t("backup.clonedBranchFailed", { branch: candidate.branch })}</Status>
+              ) : (
+                <GhostButton onClick={() => void clone(candidate)} disabled={state === "cloning" || anyRunning}>
+                  {state === "cloning" ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />}
+                  {state === "cloning" ? t("backup.cloning") : t("backup.cloneAction")}
+                </GhostButton>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
   );
 }
 

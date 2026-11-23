@@ -498,7 +498,7 @@ pub fn name_from_url(url: &str) -> String {
 
 /// The host and path of an `http(s)` URL, without the user name some hosts put in it. `None` for an
 /// SSH remote, which authenticates through the user's own agent.
-fn https_parts(url: &str) -> Option<(String, String)> {
+pub(crate) fn https_parts(url: &str) -> Option<(String, String)> {
     let rest = url.trim().strip_prefix("https://").or_else(|| url.trim().strip_prefix("http://"))?;
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
     let host = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority).to_lowercase();

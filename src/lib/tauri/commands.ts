@@ -1239,7 +1239,70 @@ export const listReviewRuns = (workspaceId: string) =>
 
 export const getReviewRun = (id: string) => invoke<ReviewRunDetail | null>("get_review_run", { id });
 
+/** What the review metrics view filters by — a repository key from {@link ReviewMetrics.repos} and
+ * an inclusive `YYYY-MM-DD` range; anything left out is not filtered on. */
+export interface ReviewMetricsFilter {
+  repo?: string | null;
+  from?: string | null;
+  to?: string | null;
+}
+
+/** Severity label → count, always with all five keys (mirrors `review_metrics::SEVERITIES`). */
+export type SeverityCounts = Record<string, number>;
+
+export interface ReviewMetricsRate {
+  key: string;
+  findings: number;
+  false_positives: number;
+  rate: number;
+}
+
+export interface ReviewMetricsCount {
+  key: string;
+  count: number;
+}
+
+/** The aggregate of a workspace's saved review runs — see `src-tauri/src/review_metrics.rs` for
+ * what is counted where (new findings per run, everything else from each PR's latest run). */
+export interface ReviewMetrics {
+  repos: { key: string; label: string; runs: number }[];
+  total_runs: number;
+  total_prs: number;
+  gate_passed: number;
+  gate_failed: number;
+  approved: number;
+  months: { month: string; runs: number; gate_passed: number; gate_failed: number; new_findings: SeverityCounts }[];
+  by_repo: {
+    key: string;
+    label: string;
+    runs: number;
+    prs: number;
+    open: SeverityCounts;
+    runs_with_cost: number;
+    total_cost_usd: number;
+    avg_cost_usd: number | null;
+  }[];
+  top_categories: ReviewMetricsCount[];
+  false_positive: ReviewMetricsRate;
+  false_positive_by_engine: ReviewMetricsRate[];
+  false_positive_by_category: ReviewMetricsRate[];
+  by_state: ReviewMetricsCount[];
+  resolved: number;
+  cost: { runs_with_cost: number; total_cost_usd: number; avg_cost_usd: number | null; total_tokens: number };
+  runs_by_level: ReviewMetricsCount[];
+}
+
+/** The review metrics of a workspace, computed on demand from its saved runs. */
+export const reviewMetrics = (workspaceId: string, filter: ReviewMetricsFilter) =>
+  invoke<ReviewMetrics>("review_metrics", { workspaceId, filter });
+
 /** `estado` is "falso_positivo" | "ignorado" to mark, or "abierto" to clear the mark. */
+/** The debt scan (per workspace, off by default): whether reviews also carry debt accepted in other
+ * PRs of the same repository on the files they touch, and settle it when it is found fixed. */
+export const getReviewDebtScan = (workspaceId: string) => invoke<boolean>("get_review_debt_scan", { workspaceId });
+export const setReviewDebtScan = (workspaceId: string, enabled: boolean) =>
+  invoke<void>("set_review_debt_scan", { workspaceId, enabled });
+
 export const markReviewFinding = (runId: string, findingId: string, estado: string, motivo?: string) =>
   invoke<void>("mark_review_finding", { runId, findingId, estado, motivo: motivo ?? null });
 
@@ -1273,6 +1336,29 @@ export const discardPrFinding = (
     notifyHost,
   });
 
+/** [`discardPrFinding`] for a review reached by link: the run's memory is kept by repository, and
+ * the reply (when asked for) goes to the PR the link names. */
+export const discardPrLinkFinding = (
+  url: string,
+  workspaceId: string,
+  runId: string,
+  findingId: string,
+  estado: string,
+  motivo: string | undefined,
+  scopeRepo: boolean,
+  notifyHost: boolean,
+) =>
+  invoke<DiscardOutcome>("discard_pr_link_finding", {
+    url,
+    workspaceId,
+    runId,
+    findingId,
+    estado,
+    motivo: motivo ?? null,
+    scopeRepo,
+    notifyHost,
+  });
+
 /** Every standing false-positive rule in the workspace, across its repositories. */
 export const listFpSuppressions = (workspaceId: string) =>
   invoke<FpSuppression[]>("list_fp_suppressions", { workspaceId });
@@ -1283,8 +1369,10 @@ export const removeFpSuppression = (workspaceId: string, id: string) =>
 
 export const deleteReviewRun = (id: string) => invoke<void>("delete_review_run", { id });
 
-export const deleteReviewRunsForPr = (projectId: string, prId: number) =>
-  invoke<void>("delete_review_runs_for_pr", { projectId, prId });
+/** Deletes one PR's saved runs — a project's, or (with an empty `projectId`) the repository-only
+ * runs a link review left, named by `workspaceId` + `repoKey`. */
+export const deleteReviewRunsForPr = (projectId: string, prId: number, repo?: { workspaceId: string; repoKey: string }) =>
+  invoke<void>("delete_review_runs_for_pr", { projectId, prId, workspaceId: repo?.workspaceId ?? null, repoKey: repo?.repoKey ?? null });
 
 export const purgeWorkspaceReviewRuns = (workspaceId: string) =>
   invoke<void>("purge_workspace_review_runs", { workspaceId });
@@ -1304,6 +1392,9 @@ export interface MemoryImportOutcome {
   /** Repositories named by runs in the folder that no project here is linked to. Named rather than
    * counted, because the fix is to link that repository and import again. */
   unmatchedRepos: string[];
+  /** Repositories no project here is linked to, whose runs landed by repository alone (like a link
+   * review's) — picked up by the project the day it is linked. Absent from older backends. */
+  repoOnly?: string[];
   /** Folders that looked like a run but couldn't be read back. */
   unreadable: number;
 }
@@ -2081,10 +2172,32 @@ export interface ReviewLevelSettings {
   effort: string;
   /** The severities that get a second look (a refutation pass) before they are reported. */
   verify: string[];
+  /** Below this % of lines covered by the PR's own CI, the report warns (non-blocking). `0` = never. */
+  warnCodeCoverageBelowPct: number;
 }
 
 /** The workspace's whole PR review policy. The numbers the engine enforces and freezes into every
  * saved review — deliberately apart from the prompts, which are text handed to a model. */
+/** The review's deterministic pass, per workspace: the pre-scan of the added lines (secrets, debug
+ * leftovers, new dependencies, `.env` files) and the rules that hand the reviewers verified facts. */
+export interface DeterministicConfig {
+  prescan: boolean;
+  rules: boolean;
+  /** Per-rule switches by id; a rule absent here keeps its own default. */
+  ruleOverrides: Record<string, boolean>;
+}
+
+/** One deterministic rule as `review::deterministic::RuleInfo` describes it. */
+export interface ReviewRuleInfo {
+  id: string;
+  title: string;
+  severity: string;
+  categories: string[];
+  paths: string[];
+  levels: string[];
+  enabledByDefault: boolean;
+}
+
 export interface ReviewEngineConfig {
   levels: ReviewLevelSettings[];
   qualityGate: { blockingSeverities: string[] };
@@ -2092,6 +2205,15 @@ export interface ReviewEngineConfig {
   graph: { enabled: boolean; maxSymbols: number; maxCallers: number };
   bundles: { contextLines: number; maxLinesPerFile: number; maxKbPerGroup: number };
   workers: { maxParallel: number };
+  /** The categories this repository keeps dismissing get a higher confidence bar — never a filter. */
+  calibration: { enabled: boolean; minSamples: number; minRate: number; maxCategories: number; minConfidence: number };
+  /** Pull requests that move reviewed work between long-lived branches ask before being reviewed. */
+  triage: { promotion: { enabled: boolean; source: string[]; target: string[] } };
+  /** The pre-scan and the deterministic rules — see `review::deterministic`. Optional on the way in
+   * so a backend that predates them still loads. */
+  deterministic?: DeterministicConfig;
+  /** Every deterministic rule the backend knows. Read-only: ignored when saved. */
+  ruleCatalog?: ReviewRuleInfo[];
   /** Every lens the catalog knows, as `[number, label]` — from the editable `review_lenses`
    * prompt, so the level editor offers them by name rather than by number. */
   lensCatalog: [number, string][];
@@ -2118,6 +2240,8 @@ export const reviewPrFromLink = (
   level: string,
   workspaceId: string,
   agent?: ChatAgentOverride | null,
+  /** The human already said "review it anyway" to the question a first review asked (a promotion). */
+  force = false,
 ) =>
   invoke<string>("review_pr_from_link", {
     url,
@@ -2128,6 +2252,7 @@ export const reviewPrFromLink = (
     agentModel: agent?.model ?? null,
     agentPrompt: agent?.prompt || null,
     agentAccount: agent?.account ?? null,
+    force,
   });
 
 /** One human-selected finding to post. `id` (its `F-NNN`) is what matches it to its stored finding
@@ -2170,12 +2295,17 @@ export const postPrLinkReviewComment = (
   items: PostFindingItem[],
   postSummary: boolean,
   summary: string | null,
+  /** The saved run being published — link reviews keep memory, so a publish reconciles against it. */
+  runId: string | null = null,
+  closeResolved = false,
 ) =>
   invoke<import("../../types/domain").PublishOutcome>("post_pr_link_review_comment", {
     url,
     items,
     postSummary,
     summary,
+    runId,
+    closeResolved,
   });
 
 export type PrAction = "approve" | "request_changes" | "close";
@@ -2799,6 +2929,40 @@ export const prLinkDecision = (url: string) => invoke<PrDecision>("pr_link_decis
  * plus the workspace Activity row the decision was filed under. */
 export const actOnPrLink = (url: string, workspaceId: string, action: PrAction, body?: string) =>
   invoke<PrLinkActionOutcome>("act_on_pr_link", { url, workspaceId, action, body });
+
+/** The account an approval of this PR would be cast as — named by the approval's confirmation
+ * before anything is sent. `null` when the host cannot say (a Bitbucket access token is no person). */
+export const prApprovalAccount = (target: { projectId?: string; url?: string }) =>
+  invoke<string | null>("pr_approval_account", { projectId: target.projectId ?? null, url: target.url ?? null });
+
+/** What approving on the strength of a review left behind (see `approve_pr_from_review`). */
+export interface PrApprovalOutcome {
+  pr: PullRequestSummary;
+  activity: JobHistoryEntry | WorkspaceActivityEntry;
+  account: string | null;
+  /** Whether the run's memory now records who approved — false for a review with no saved run. */
+  recorded: boolean;
+}
+
+/** Approves the PR because the review `runId` passed its Quality Gate, recording in that run's
+ * memory who approved (`account`, as the confirmation named it), when, and under which gate. The
+ * backend re-checks the gate against the run's findings as they stand now and refuses otherwise. */
+export const approvePrFromReview = (args: {
+  projectId?: string;
+  url?: string;
+  workspaceId?: string;
+  prId: number;
+  runId: string | null;
+  account: string | null;
+}) =>
+  invoke<PrApprovalOutcome>("approve_pr_from_review", {
+    projectId: args.projectId ?? null,
+    url: args.url ?? null,
+    workspaceId: args.workspaceId ?? null,
+    prId: args.prId,
+    runId: args.runId,
+    account: args.account,
+  });
 
 /** How a pull request can be merged from here — methods, switches, and what the host says about
  * merging it now. Asked when the merge step opens, never before. */

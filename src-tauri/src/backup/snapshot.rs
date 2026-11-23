@@ -544,7 +544,7 @@ pub const GROUPS: &[Group] = &[
 /// Which groups go into the file. Every field defaults to `true`, which is what makes an install
 /// upgrading from a build without this setting keep backing up everything rather than quietly
 /// starting to leave things out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Selection {
     /// Not a table group: every token, key and password in the OS credential store. Its own switch
@@ -567,6 +567,15 @@ pub struct Selection {
     pub cookies: bool,
     /// Memories, knowledge folders, experiences and bench reports — see the `aiLearning` group.
     pub ai_learning: bool,
+    /// Not a table group: the repositories' folders themselves — working tree, `.git` and
+    /// uncommitted changes (see `backup::repositories`). The projects' *entries* (name, remote URL,
+    /// the branch they were on) are core and travel either way; with this off a restore points each
+    /// project where its folder would go and offers to clone it from its remote.
+    pub repositories: bool,
+    /// Project ids whose folder stays out of the file while `repositories` is on. An exclusion list
+    /// rather than an inclusion one, so a repository added after the choice was made is backed up
+    /// like every other one instead of being quietly left behind.
+    pub excluded_repositories: Vec<String>,
 }
 
 impl Default for Selection {
@@ -587,6 +596,8 @@ impl Default for Selection {
             agent_work: true,
             cookies: true,
             ai_learning: true,
+            repositories: true,
+            excluded_repositories: Vec::new(),
         }
     }
 }
@@ -684,6 +695,16 @@ pub struct Snapshot {
     /// Version 1 files carried database rows only and remain readable.
     #[serde(default)]
     pub repositories: Vec<super::repositories::RepositoryArchive>,
+    /// The projects whose folder the user chose to leave out: where each was, and enough to clone
+    /// it again (remote URL, branch). Absent from files written before that choice existed, which
+    /// always carried every folder — so an old file restores exactly as it did.
+    #[serde(default)]
+    pub skipped_repositories: Vec<super::repositories::RepositoryRef>,
+    /// The selection the rows were collected under, so the folders are chosen by the same answer
+    /// once the database lock is released. Never written: the choice already travels in
+    /// `backup_settings`.
+    #[serde(skip)]
+    pub selection: Selection,
 }
 
 /// What a restore changed, per table, plus the two things worth warning about afterwards.

@@ -99,41 +99,56 @@ pub const WORKSPACE_PROMPT_KINDS: &[(&str, &str)] = &[
 
 // ---------- review runs (durable review memory) ----------
 
-/// The `WHERE` every memory read shares: this project, this pull request — **and this repository**.
+/// Whose review memory a read is about: one repository's pull request, seen from a local project
+/// when there is one and always from a workspace.
 ///
-/// The repository clause is the one that isn't obvious. A project row points at a clone and can be
-/// re-linked to a different repository; without this, the new repository would inherit the old
-/// one's findings for a PR that merely happens to share its number. Runs written before the key
-/// existed carry an empty one and are still matched, since back then the project *was* the
-/// repository — dropping them would silently erase memory that is still correct.
-const MEMORY_SCOPE: &str = "project_id = ?1 AND pr_id = ?2 \
-     AND COALESCE(json_extract(meta, '$.repo_key'), '') IN ('', ?3)";
+/// The repository is the identity, not the project. A project row points at a clone and can be
+/// re-linked to a different repository; and a pull request reviewed from its link has no project at
+/// all. Keying memory by `repo_key` (`provider:host/owner/repo`, case-folded — see
+/// `ado_cmd::repo_key`) is what lets the two meet: the day that repository is cloned and linked, its
+/// project's review of the same PR continues the runs the link reviews left.
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryScope<'a> {
+    /// The local project reviewing it, or `None` for a review reached by link.
+    pub project_id: Option<&'a str>,
+    pub workspace_id: &'a str,
+    pub repo_key: &'a str,
+}
+
+/// The `WHERE` every memory read shares (`?1` project or NULL, `?2` PR, `?3` repository, `?4`
+/// workspace): this pull request **of this repository**, from this project or from anywhere in the
+/// workspace that reviewed the same repository — a link review, or another clone of it.
+///
+/// Runs written before the key existed carry an empty one and are still matched by their project,
+/// since back then the project *was* the repository — dropping them would silently erase memory that
+/// is still correct. An empty key never matches across projects: it names no repository.
+const MEMORY_SCOPE: &str = "pr_id = ?2 AND ( \
+     (?1 IS NOT NULL AND project_id = ?1 AND repo_key IN ('', ?3)) \
+     OR (?3 <> '' AND repo_key = ?3 AND workspace_id = ?4))";
+
+impl MemoryScope<'_> {
+    fn params(&self, pr_id: i64) -> (Option<String>, i64, String, String) {
+        (self.project_id.map(str::to_string), pr_id, self.repo_key.to_lowercase(), self.workspace_id.to_string())
+    }
+}
 
 /// How many runs this PR already has — used to number the next iteration.
-pub fn count_review_runs(
-    conn: &Connection,
-    project_id: &str,
-    pr_id: i64,
-    repo_key: &str,
-) -> rusqlite::Result<i64> {
+pub fn count_review_runs(conn: &Connection, scope: &MemoryScope, pr_id: i64) -> rusqlite::Result<i64> {
+    let p = scope.params(pr_id);
     conn.query_row(
         &format!("SELECT COUNT(*) FROM review_runs WHERE {MEMORY_SCOPE}"),
-        params![project_id, pr_id, repo_key],
+        params![p.0, p.1, p.2, p.3],
         |row| row.get(0),
     )
 }
 
 /// The newest run's `findings` JSON for this PR, if any — read back on a re-review to reconcile
 /// against the previous run.
-pub fn latest_review_findings(
-    conn: &Connection,
-    project_id: &str,
-    pr_id: i64,
-    repo_key: &str,
-) -> rusqlite::Result<Option<String>> {
+pub fn latest_review_findings(conn: &Connection, scope: &MemoryScope, pr_id: i64) -> rusqlite::Result<Option<String>> {
+    let p = scope.params(pr_id);
     conn.query_row(
         &format!("SELECT findings FROM review_runs WHERE {MEMORY_SCOPE} ORDER BY created_at DESC LIMIT 1"),
-        params![project_id, pr_id, repo_key],
+        params![p.0, p.1, p.2, p.3],
         |row| row.get::<_, String>(0),
     )
     .optional()
@@ -141,32 +156,24 @@ pub fn latest_review_findings(
 
 /// Every saved report of this PR, newest first — where a finding carried forward without being
 /// re-read is found again in full, in the run that last rendered it.
-pub fn review_reports_for_pr(
-    conn: &Connection,
-    project_id: &str,
-    pr_id: i64,
-    repo_key: &str,
-) -> rusqlite::Result<Vec<String>> {
+pub fn review_reports_for_pr(conn: &Connection, scope: &MemoryScope, pr_id: i64) -> rusqlite::Result<Vec<String>> {
+    let p = scope.params(pr_id);
     let mut stmt =
         conn.prepare(&format!("SELECT review_md FROM review_runs WHERE {MEMORY_SCOPE} ORDER BY created_at DESC"))?;
-    let rows = stmt.query_map(params![project_id, pr_id, repo_key], |row| row.get::<_, String>(0))?;
+    let rows = stmt.query_map(params![p.0, p.1, p.2, p.3], |row| row.get::<_, String>(0))?;
     rows.collect()
 }
 
 /// The head commit SHA of this PR's most recent run (from its `meta` JSON), if any — used to
 /// detect "nothing changed since last review" and to diff which files changed since.
-pub fn latest_review_head(
-    conn: &Connection,
-    project_id: &str,
-    pr_id: i64,
-    repo_key: &str,
-) -> rusqlite::Result<Option<String>> {
+pub fn latest_review_head(conn: &Connection, scope: &MemoryScope, pr_id: i64) -> rusqlite::Result<Option<String>> {
+    let p = scope.params(pr_id);
     conn.query_row(
         &format!(
             "SELECT json_extract(meta, '$.head_sha') FROM review_runs
              WHERE {MEMORY_SCOPE} ORDER BY created_at DESC LIMIT 1"
         ),
-        params![project_id, pr_id, repo_key],
+        params![p.0, p.1, p.2, p.3],
         |row| row.get::<_, Option<String>>(0),
     )
     .optional()
@@ -178,18 +185,14 @@ pub fn latest_review_head(
 ///
 /// What lets "same commit, nothing new" stop skipping when there *is* something new to do: a deeper
 /// level than last time, or a run that lost part of its review.
-pub fn latest_review_depth(
-    conn: &Connection,
-    project_id: &str,
-    pr_id: i64,
-    repo_key: &str,
-) -> rusqlite::Result<Option<(String, bool)>> {
+pub fn latest_review_depth(conn: &Connection, scope: &MemoryScope, pr_id: i64) -> rusqlite::Result<Option<(String, bool)>> {
+    let p = scope.params(pr_id);
     conn.query_row(
         &format!(
             "SELECT level, COALESCE(json_extract(meta, '$.incomplete'), 0) FROM review_runs
              WHERE {MEMORY_SCOPE} ORDER BY created_at DESC LIMIT 1"
         ),
-        params![project_id, pr_id, repo_key],
+        params![p.0, p.1, p.2, p.3],
         |row| Ok((row.get::<_, Option<String>>(0)?.unwrap_or_default(), row.get::<_, i64>(1)? != 0)),
     )
     .optional()
@@ -200,15 +203,11 @@ pub fn latest_review_depth(
 /// Used to tell a re-review what has happened *on the pull request* since — a comment written after
 /// this instant is one the last run never saw, and so a reason to review again even when the code
 /// hasn't moved.
-pub fn latest_review_run_at(
-    conn: &Connection,
-    project_id: &str,
-    pr_id: i64,
-    repo_key: &str,
-) -> rusqlite::Result<Option<String>> {
+pub fn latest_review_run_at(conn: &Connection, scope: &MemoryScope, pr_id: i64) -> rusqlite::Result<Option<String>> {
+    let p = scope.params(pr_id);
     conn.query_row(
         &format!("SELECT created_at FROM review_runs WHERE {MEMORY_SCOPE} ORDER BY created_at DESC LIMIT 1"),
-        params![project_id, pr_id, repo_key],
+        params![p.0, p.1, p.2, p.3],
         |row| row.get::<_, String>(0),
     )
     .optional()
@@ -216,12 +215,16 @@ pub fn latest_review_run_at(
 
 /// Records one completed review run. `id` reuses the job id so the run and its `job_history` row
 /// share identity. `meta`/`findings` are JSON blobs authored by the caller.
+///
+/// `project_id` is `None` for a review reached by link; `repo_key` is stored case-folded, since it is
+/// only ever compared for equality.
 #[allow(clippy::too_many_arguments)]
 pub fn add_review_run(
     conn: &Connection,
     id: &str,
-    project_id: &str,
+    project_id: Option<&str>,
     workspace_id: &str,
+    repo_key: &str,
     pr_id: i64,
     iter: i64,
     level: &str,
@@ -232,10 +235,23 @@ pub fn add_review_run(
 ) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO review_runs
-            (id, project_id, workspace_id, pr_id, iter, level, meta, review_md, diff, findings, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            (id, project_id, workspace_id, repo_key, pr_id, iter, level, meta, review_md, diff, findings, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(id) DO NOTHING",
-        params![id, project_id, workspace_id, pr_id, iter, level, meta, review_md, diff, findings, now()],
+        params![
+            id,
+            project_id.filter(|p| !p.is_empty()),
+            workspace_id,
+            repo_key.trim().to_lowercase(),
+            pr_id,
+            iter,
+            level,
+            meta,
+            review_md,
+            diff,
+            findings,
+            now()
+        ],
     )?;
     Ok(())
 }
@@ -244,12 +260,16 @@ pub fn add_review_run(
 /// `pr_title` comes from the run's own `meta` JSON (json_extract); `findings_count` from the
 /// length of the `findings` JSON array.
 pub fn list_review_runs(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<ReviewRunSummary>> {
+    // A link review's run has no project: it is named by the repository label its meta carries.
     let mut stmt = conn.prepare(
-        "SELECT r.id, r.project_id, COALESCE(p.name, '—'), r.pr_id,
+        "SELECT r.id, COALESCE(r.project_id, ''),
+                COALESCE(p.name, NULLIF(json_extract(r.meta, '$.project_name'), ''), NULLIF(r.repo_key, ''), '—'),
+                r.pr_id,
                 COALESCE(json_extract(r.meta, '$.pr_title'), ''),
                 r.iter, r.level,
                 COALESCE(json_array_length(r.findings), 0),
-                r.created_at
+                r.created_at,
+                r.repo_key
          FROM review_runs r
          LEFT JOIN projects p ON p.id = r.project_id
          WHERE r.workspace_id = ?1
@@ -266,6 +286,7 @@ pub fn list_review_runs(conn: &Connection, workspace_id: &str) -> rusqlite::Resu
             level: row.get(6)?,
             findings_count: row.get(7)?,
             created_at: row.get(8)?,
+            repo_key: row.get(9)?,
         })
     })?;
     rows.collect()
@@ -283,9 +304,20 @@ pub fn latest_review_run_id(conn: &Connection, project_id: &str, pr_id: i64) -> 
     .optional()
 }
 
+/// [`latest_review_run_id`] by memory scope — what finds a link review's run, which no project owns.
+pub fn latest_review_run_id_in(conn: &Connection, scope: &MemoryScope, pr_id: i64) -> rusqlite::Result<Option<String>> {
+    let p = scope.params(pr_id);
+    conn.query_row(
+        &format!("SELECT id FROM review_runs WHERE {MEMORY_SCOPE} ORDER BY iter DESC, created_at DESC LIMIT 1"),
+        params![p.0, p.1, p.2, p.3],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 pub fn get_review_run(conn: &Connection, id: &str) -> rusqlite::Result<Option<ReviewRunDetail>> {
     conn.query_row(
-        "SELECT id, project_id, pr_id, iter, level, meta, review_md, diff, findings, created_at
+        "SELECT id, COALESCE(project_id, ''), pr_id, iter, level, meta, review_md, diff, findings, created_at
          FROM review_runs WHERE id = ?1",
         params![id],
         |row| {
@@ -313,6 +345,20 @@ pub fn set_review_run_findings(conn: &Connection, id: &str, findings: &str) -> r
     Ok(())
 }
 
+/// Overwrites a run's `meta` JSON — used to record a human's approval of the pull request on the
+/// run that informed it (see `review_approval::with_approval`). Whether a row was there to update.
+pub fn set_review_run_meta(conn: &Connection, id: &str, meta: &str) -> rusqlite::Result<bool> {
+    Ok(conn.execute("UPDATE review_runs SET meta = ?2 WHERE id = ?1", params![id, meta])? > 0)
+}
+
+/// A run's `meta` and `findings` JSON, without the review text and diff `get_review_run` carries.
+pub fn review_run_meta_findings(conn: &Connection, id: &str) -> rusqlite::Result<Option<(String, String)>> {
+    conn.query_row("SELECT meta, findings FROM review_runs WHERE id = ?1", params![id], |row| {
+        Ok((row.get::<_, Option<String>>(0)?.unwrap_or_default(), row.get::<_, Option<String>>(1)?.unwrap_or_default()))
+    })
+    .optional()
+}
+
 /// Whether a run with this id is already stored. Its own query rather than a `get_review_run` that
 /// is thrown away: an import asks this once per folder, and the row it would otherwise load carries
 /// the whole review and its diff.
@@ -332,6 +378,21 @@ pub fn delete_review_runs_for_pr(conn: &Connection, project_id: &str, pr_id: i64
     conn.execute(
         "DELETE FROM review_runs WHERE project_id = ?1 AND pr_id = ?2",
         params![project_id, pr_id],
+    )?;
+    Ok(())
+}
+
+/// Deletes every repository-only run (a link review's) of one PR of one repository in a workspace —
+/// [`delete_review_runs_for_pr`] for runs no project owns.
+pub fn delete_repo_review_runs_for_pr(
+    conn: &Connection,
+    workspace_id: &str,
+    repo_key: &str,
+    pr_id: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM review_runs WHERE project_id IS NULL AND workspace_id = ?1 AND repo_key = ?2 AND pr_id = ?3",
+        params![workspace_id, repo_key.to_lowercase(), pr_id],
     )?;
     Ok(())
 }
@@ -390,6 +451,10 @@ pub fn set_review_engine_config(
 /// Only the newest run per pull request: an older iteration's findings were superseded by the run
 /// that came after it, and carrying all of them would make one long-lived pull request drown out
 /// every other. Newest first, which is what makes the first hint seen the most recent one.
+///
+/// Keyed by the run's `repo_key` column (case-folded on write, backfilled from `meta` for older
+/// runs), never by the project — so the runs of a review by link, which have no project, count
+/// exactly like a clone's: a link review reads the same calibration and hints a project review does.
 pub fn review_runs_for_repo(
     conn: &Connection,
     workspace_id: &str,
@@ -400,22 +465,73 @@ pub fn review_runs_for_repo(
     let mut stmt = conn.prepare(
         "SELECT pr_id, created_at, findings FROM review_runs r
          WHERE workspace_id = ?1
-           AND COALESCE(json_extract(meta, '$.repo_key'), '') = ?2
+           AND repo_key = ?2
            AND pr_id != ?3
            AND created_at = (
                SELECT MAX(created_at) FROM review_runs x
-               WHERE x.workspace_id = r.workspace_id AND x.pr_id = r.pr_id
-                 AND COALESCE(json_extract(x.meta, '$.repo_key'), '') = ?2
+               WHERE x.workspace_id = r.workspace_id AND x.repo_key = r.repo_key AND x.pr_id = r.pr_id
            )
          ORDER BY created_at DESC
          LIMIT ?4",
     )?;
-    let rows = stmt.query_map(params![workspace_id, repo_key, exclude_pr, limit], |row| {
+    let rows = stmt.query_map(params![workspace_id, repo_key.trim().to_lowercase(), exclude_pr, limit], |row| {
         Ok(crate::review::hints::PastRun {
             pr_id: row.get(0)?,
             created_at: row.get(1)?,
             findings_json: row.get(2)?,
         })
+    })?;
+    rows.collect()
+}
+
+#[cfg(test)]
+mod review_runs_for_repo_tests {
+    use super::*;
+
+    /// A link review's run (no project) and a clone's run of the same repository both count, by the
+    /// repository key whatever its case; the newest run per PR only, and never the PR asking.
+    #[test]
+    fn link_runs_count_for_the_repository_like_a_clones() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let insert = |id: &str, pr: i64, key: &str, at: &str| {
+            conn.execute(
+                "INSERT INTO review_runs (id, project_id, workspace_id, repo_key, pr_id, iter, level, meta, review_md, findings, created_at)
+                 VALUES (?1, NULL, 'w', ?2, ?3, 1, 'completo', '{}', 'md', ?4, ?5)",
+                params![id, key, pr, format!("[\"{id}\"]"), at],
+            )
+            .unwrap();
+        };
+        insert("link-old", 1, "github:github.com/acme/app", "2026-01-01");
+        insert("link-new", 1, "github:github.com/acme/app", "2026-01-03");
+        insert("other-repo", 2, "github:github.com/acme/web", "2026-01-04");
+        insert("self", 9, "github:github.com/acme/app", "2026-01-05");
+        assert!(add_review_run(&conn, "clone", None, "w", "GitHub:github.com/Acme/App", 3, 1, "completo", "{}", "md", "", "[\"clone\"]").is_ok());
+        let runs = review_runs_for_repo(&conn, "w", "GitHub:github.com/Acme/App", 9, 10).unwrap();
+        let found: Vec<(i64, &str)> = runs.iter().map(|r| (r.pr_id, r.findings_json.as_str())).collect();
+        assert_eq!(found, vec![(3, "[\"clone\"]"), (1, "[\"link-new\"]")]);
+    }
+}
+
+/// The newest run of every **other** pull request of one repository in a workspace, with its id —
+/// what the debt scan reads accepted debt from and writes a settled one back to.
+pub fn latest_runs_of_other_prs(
+    conn: &Connection,
+    workspace_id: &str,
+    repo_key: &str,
+    exclude_pr: i64,
+) -> rusqlite::Result<Vec<(String, i64, i64, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, pr_id, iter, findings FROM review_runs r
+         WHERE workspace_id = ?1 AND repo_key = ?2 AND pr_id != ?3
+           AND created_at = (
+               SELECT MAX(created_at) FROM review_runs x
+               WHERE x.workspace_id = r.workspace_id AND x.repo_key = r.repo_key AND x.pr_id = r.pr_id
+           )
+         ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map(params![workspace_id, repo_key.to_lowercase(), exclude_pr], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
     })?;
     rows.collect()
 }

@@ -53,6 +53,12 @@ jobs:
           # generator handles by walking the whole history.
           PREV=$(git tag --list 'v*' --sort=-v:refname | head -n1)
           echo "Previous tag: ${PREV:-<none>}"
+          # The notes come from CHANGELOG.md's section for this version; without one they fall back
+          # to commit subjects, which users read as noise. Said loudly, but not fatal — a release
+          # with commit-subject notes still beats a fix nobody can install.
+          if ! grep -qE "^##[[:space:]]+\[?v?${VERSION//./\\.}\]?([[:space:]]|$)" CHANGELOG.md 2>/dev/null; then
+            echo "::warning title=Sin notas de versión::CHANGELOG.md no tiene una sección '## $VERSION'; las notas se arman con los mensajes de commit."
+          fi
           {
             echo "notes<<CF_RELEASE_NOTES_EOF"
             PREV="$PREV" node .github/scripts/release-notes.cjs

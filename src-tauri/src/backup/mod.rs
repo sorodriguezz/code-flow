@@ -288,6 +288,8 @@ pub struct BackupContents {
     pub secrets: i64,
     pub tables: i64,
     pub repositories: usize,
+    /// Projects whose folder was left out by choice — they restore as a pointer to clone again.
+    pub skipped_repositories: usize,
     /// Size of the sealed file, so "1.2 MB in Drive" is answerable without stat-ing it.
     pub bytes: u64,
 }
@@ -315,18 +317,23 @@ pub fn collect_snapshot(conn: &Connection) -> Result<Snapshot, String> {
     // machine unable to authenticate anywhere — and it looks identical to an install that had no
     // credentials to begin with. Better to fail the run and say so.
     let secrets = if selection.credentials { vault::collect(conn)? } else { Vec::new() };
-    Ok(Snapshot { tables, secrets, repositories: Vec::new() })
+    Ok(Snapshot { tables, secrets, repositories: Vec::new(), skipped_repositories: Vec::new(), selection })
 }
 
 /// Reads repository files after the database lock has been released. Both manual and automatic
 /// backups use the same collector and include repository changes in their unchanged-data digest.
+/// Which folders go in is the persisted selection's call (`include.repositories` and its per-project
+/// exclusions); the ones left out travel as a [`repositories::RepositoryRef`] instead.
 pub fn build_payload(mut snapshot: Snapshot) -> Result<Payload, String> {
-    snapshot.repositories = repositories::collect(&snapshot.tables)?;
+    let collected = repositories::collect(&snapshot.tables, &snapshot.selection)?;
+    snapshot.repositories = collected.archives;
+    snapshot.skipped_repositories = collected.skipped;
     let contents = BackupContents {
         rows: snapshot.tables.iter().map(|t| t.rows.len() as i64).sum(),
         secrets: snapshot.secrets.len() as i64,
         tables: snapshot.tables.len() as i64,
         repositories: snapshot.repositories.len(),
+        skipped_repositories: snapshot.skipped_repositories.len(),
         bytes: 0,
     };
     let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
@@ -362,14 +369,29 @@ pub struct RestoreReport {
     pub secrets: i64,
     pub tables: Vec<TableCount>,
     pub repositories: usize,
-    /// Projects whose folder isn't on this machine — the expected consequence of moving computers.
+    /// Projects whose folder isn't on this machine and that cannot be cloned back (no remote URL).
     pub missing_project_paths: Vec<String>,
+    /// Projects whose folder was left out of the file but which have a remote: offered to clone,
+    /// each into the folder its project now points at.
+    pub clonable_repositories: Vec<CloneCandidate>,
     /// Credentials the OS store refused. On macOS this is usually a dismissed Keychain prompt.
     pub failed_secrets: Vec<String>,
     pub dangling_rows: i64,
     pub created_at: String,
     pub from_os: String,
     pub app_version: String,
+}
+
+/// A repository a restore can bring back by cloning, rather than from the file.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloneCandidate {
+    pub name: String,
+    /// Where the project now points, and so where the clone goes.
+    pub path: String,
+    pub remote_url: String,
+    /// The branch it was on when backed up; empty when unknown or detached.
+    pub branch: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -389,6 +411,7 @@ fn report(summary: RestoreSummary, header: &envelope::BackupHeader) -> RestoreRe
             .map(|(name, rows)| TableCount { name, rows })
             .collect(),
         missing_project_paths: summary.missing_project_paths,
+        clonable_repositories: Vec::new(),
         repositories: 0,
         failed_secrets: Vec::new(),
         dangling_rows: summary.dangling_rows,
@@ -418,7 +441,21 @@ pub fn restore(
         .filter(|path| path.is_absolute())
         .unwrap_or_else(crate::paths::clone_root);
     let restored = repositories::restore(&snapshot.repositories, &clone_root)?;
-    repositories::remap_tables(&mut snapshot.tables, &restored.mappings, &clone_root);
+    // Folders the user left out of the file: each project is pointed at where its folder would
+    // have been extracted, so cloning it there afterwards lands it exactly where a full backup
+    // would have. Empty for files written before the choice existed — they carry every folder.
+    let extracted: Vec<std::path::PathBuf> =
+        restored.mappings.iter().map(|(_, destination)| destination.clone()).collect();
+    let placed = repositories::place_skipped(&snapshot.skipped_repositories, &clone_root, &extracted);
+    let mut mappings = restored.mappings.clone();
+    mappings.extend(
+        placed
+            .iter()
+            .filter(|placement| placement.moved)
+            .map(|placement| (placement.reference.source_path.clone(), placement.destination.clone())),
+    );
+    mappings.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    repositories::remap_tables(&mut snapshot.tables, &mappings, &clone_root);
     let summary = snapshot::apply(conn, &snapshot.tables, mode).map_err(|e| e.to_string())?;
     let repository_count = restored.commit();
 
@@ -447,6 +484,10 @@ pub fn restore(
 
     let mut report = report(summary, &header);
     report.repositories = repository_count;
+    report.clonable_repositories = clone_candidates(&placed);
+    report
+        .missing_project_paths
+        .retain(|path| !report.clonable_repositories.iter().any(|candidate| candidate.path == *path));
 
     // The cookie jar's key, as it was before the credentials land — only when the file carries one,
     // so a backup without credentials costs no credential-store read. See `reseal_cookie_jar`.
@@ -462,6 +503,23 @@ pub fn restore(
     report.failed_secrets = failed;
     reseal_cookie_jar(conn, jar_key_before);
     Ok(report)
+}
+
+/// The left-out repositories that are not here and can be cloned back. One without a remote stays
+/// in `missing_project_paths`, which is where a folder nobody can fetch belongs.
+fn clone_candidates(placed: &[repositories::Placement]) -> Vec<CloneCandidate> {
+    placed
+        .iter()
+        .filter(|placement| {
+            !placement.destination.exists() && !placement.reference.remote_url.trim().is_empty()
+        })
+        .map(|placement| CloneCandidate {
+            name: placement.reference.name.clone(),
+            path: placement.destination.to_string_lossy().into_owned(),
+            remote_url: placement.reference.remote_url.clone(),
+            branch: placement.reference.branch.clone(),
+        })
+        .collect()
 }
 
 /// Moves the cookies this machine already had onto the key the backup brought, when it brought a
@@ -509,6 +567,7 @@ pub fn inspect(bytes: &[u8], path: &str) -> Result<BackupInfo, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 
     fn create(
         conn: &Connection,
@@ -598,6 +657,154 @@ mod tests {
         assert_eq!(seconds, 120);
         drop(repo);
         drop(original);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    fn committed_repo(folder: &std::path::Path, remote: Option<&str>) -> git2::Repository {
+        let repo = git2::Repository::init(folder).unwrap();
+        std::fs::write(folder.join("README.md"), "work").unwrap();
+        {
+            let mut index = repo.index().unwrap();
+            index.add_path(std::path::Path::new("README.md")).unwrap();
+            index.write().unwrap();
+            let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+            let signature = git2::Signature::now("Backup", "backup@example.com").unwrap();
+            repo.commit(Some("HEAD"), &signature, &signature, "one", &tree, &[]).unwrap();
+        }
+        if let Some(remote) = remote {
+            repo.remote("origin", remote).unwrap();
+        }
+        repo
+    }
+
+    /// The light backup: no folders in the file, every project still restored — pointing where its
+    /// folder would have been extracted, offered for cloning when it has a remote and reported
+    /// missing when it does not.
+    #[test]
+    fn a_backup_without_repository_folders_restores_projects_ready_to_clone() {
+        let temp = std::env::temp_dir().join(format!("codeflow-backup-light-{}", uuid::Uuid::new_v4()));
+        let with_remote = temp.join("original/RulesEngine");
+        let _a = committed_repo(&with_remote, Some("https://example.com/team/rules-engine.git"));
+        let local_only = temp.join("original/Scratch");
+        let _b = committed_repo(&local_only, None);
+        let source = seeded();
+        source.execute(
+            "INSERT INTO projects (id, workspace_id, name, local_path, sort_order, created_at) VALUES ('p1', 'w1', 'RulesEngine', ?1, 0, '2026-11-06'), ('p2', 'w1', 'Scratch', ?2, 1, '2026-11-06')",
+            [with_remote.to_string_lossy().as_ref(), local_only.to_string_lossy().as_ref()],
+        ).unwrap();
+        save_settings(
+            &source,
+            &BackupSettings {
+                include: snapshot::Selection { repositories: false, ..Default::default() },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (file, contents, _) = create(&source, "a-long-enough-password", "2.9.3").unwrap();
+        assert_eq!(contents.repositories, 0);
+        assert_eq!(contents.skipped_repositories, 2);
+
+        let branch = _a.head().unwrap().shorthand().unwrap().to_string();
+        // Restored as if onto another machine: the original folders are gone.
+        std::fs::remove_dir_all(temp.join("original")).unwrap();
+        let mut target = seeded();
+        let destination = temp.join("destination");
+        queries::set_setting(&target, "clone_root", destination.to_string_lossy().as_ref()).unwrap();
+        let report = restore(&mut target, &file, "a-long-enough-password", RestoreMode::Replace).unwrap();
+        assert_eq!(report.repositories, 0);
+        let path_of = |id: &str| -> String {
+            target.query_row("SELECT local_path FROM projects WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(std::path::Path::new(&path_of("p1")), destination.join("RulesEngine"));
+        assert_eq!(std::path::Path::new(&path_of("p2")), destination.join("Scratch"));
+        assert!(!destination.join("RulesEngine").exists(), "nothing is extracted or cloned unasked");
+        assert_eq!(
+            report.clonable_repositories,
+            vec![CloneCandidate {
+                name: "RulesEngine".into(),
+                path: path_of("p1"),
+                remote_url: "https://example.com/team/rules-engine.git".into(),
+                branch,
+            }]
+        );
+        assert_eq!(report.missing_project_paths, vec![path_of("p2")]);
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// Only some folders: the chosen one is extracted, the other is left to clone.
+    #[test]
+    fn a_partial_selection_carries_only_the_chosen_folders() {
+        let temp = std::env::temp_dir().join(format!("codeflow-backup-partial-{}", uuid::Uuid::new_v4()));
+        let kept = temp.join("original/Kept");
+        let _a = committed_repo(&kept, Some("https://example.com/team/kept.git"));
+        let left = temp.join("original/Left");
+        let _b = committed_repo(&left, Some("https://example.com/team/left.git"));
+        let source = seeded();
+        source.execute(
+            "INSERT INTO projects (id, workspace_id, name, local_path, sort_order, created_at) VALUES ('p1', 'w1', 'Kept', ?1, 0, '2026-11-06'), ('p2', 'w1', 'Left', ?2, 1, '2026-11-06')",
+            [kept.to_string_lossy().as_ref(), left.to_string_lossy().as_ref()],
+        ).unwrap();
+        save_settings(
+            &source,
+            &BackupSettings {
+                include: snapshot::Selection { excluded_repositories: vec!["p2".into()], ..Default::default() },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (file, contents, _) = create(&source, "a-long-enough-password", "2.9.3").unwrap();
+        assert_eq!((contents.repositories, contents.skipped_repositories), (1, 1));
+        std::fs::remove_dir_all(temp.join("original")).unwrap();
+        let mut target = seeded();
+        let destination = temp.join("destination");
+        queries::set_setting(&target, "clone_root", destination.to_string_lossy().as_ref()).unwrap();
+        let report = restore(&mut target, &file, "a-long-enough-password", RestoreMode::Replace).unwrap();
+        assert_eq!(report.repositories, 1);
+        assert!(destination.join("Kept/README.md").is_file());
+        assert_eq!(report.clonable_repositories.len(), 1);
+        assert_eq!(report.clonable_repositories[0].name, "Left");
+        assert!(report.missing_project_paths.is_empty());
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    /// A file written before folders were optional has no `skipped_repositories` and carries every
+    /// folder — and restores exactly as it always did.
+    #[test]
+    fn an_old_format_backup_restores_its_repositories_as_before() {
+        let temp = std::env::temp_dir().join(format!("codeflow-backup-old-{}", uuid::Uuid::new_v4()));
+        let folder = temp.join("original/RulesEngine");
+        let _repo = committed_repo(&folder, Some("https://example.com/team/rules-engine.git"));
+        let source = seeded();
+        source.execute(
+            "INSERT INTO projects (id, workspace_id, name, local_path, sort_order, created_at) VALUES ('p1', 'w1', 'RulesEngine', ?1, 0, '2026-11-06')",
+            [folder.to_string_lossy().as_ref()],
+        ).unwrap();
+        let payload = build_payload(collect_snapshot(&source).unwrap()).unwrap();
+        let mut json: serde_json::Value = serde_json::from_slice(&payload.bytes).unwrap();
+        let object = json.as_object_mut().unwrap();
+        assert!(object.remove("skipped_repositories").is_some());
+        assert_eq!(object.keys().cloned().collect::<Vec<_>>().len(), 3, "tables, secrets, repositories");
+        // Before compression a working copy was a bare tar, with no `compression` field at all.
+        for repository in object["repositories"].as_array_mut().unwrap() {
+            let repository = repository.as_object_mut().unwrap();
+            assert_eq!(repository.remove("compression").unwrap(), repositories::BROTLI);
+            let packed = B64.decode(repository["archive"].as_str().unwrap()).unwrap();
+            let mut tar = Vec::new();
+            std::io::Read::read_to_end(&mut brotli::Decompressor::new(&packed[..], 4096), &mut tar).unwrap();
+            repository.insert("archive".into(), B64.encode(tar).into());
+        }
+        let file = envelope::seal(serde_json::to_vec(&json).unwrap(), "a-long-enough-password", "2.9.2").unwrap();
+
+        let mut target = seeded();
+        let destination = temp.join("destination");
+        queries::set_setting(&target, "clone_root", destination.to_string_lossy().as_ref()).unwrap();
+        let report = restore(&mut target, &file, "a-long-enough-password", RestoreMode::Replace).unwrap();
+        assert_eq!(report.repositories, 1);
+        assert!(report.clonable_repositories.is_empty());
+        assert!(report.missing_project_paths.is_empty());
+        let restored: String = target.query_row("SELECT local_path FROM projects WHERE id = 'p1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(std::path::Path::new(&restored), destination.join("RulesEngine"));
+        assert_eq!(std::fs::read_to_string(destination.join("RulesEngine/README.md")).unwrap(), "work");
         std::fs::remove_dir_all(temp).unwrap();
     }
 

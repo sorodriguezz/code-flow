@@ -118,6 +118,32 @@ export async function actOnPr(
   return api.actOnPullRequest(target.projectId, prId, action);
 }
 
+/** The account an approval would be cast as, for the confirmation to name — `null` when the host
+ * cannot say. */
+export function approvalAccount(target: PrTarget): Promise<string | null> {
+  return target.kind === "project" ? api.prApprovalAccount({ projectId: target.projectId }) : api.prApprovalAccount({ url: target.url });
+}
+
+/**
+ * Approves because a review passed — the same host call as {@link actOnPr}'s approve, plus the
+ * backend's re-check of the run's gate and the record of who approved in that run's memory. Settles
+ * the same way: the PR as the host reports it and the Activity row it was filed under.
+ */
+export async function approveFromReview(
+  target: PrTarget,
+  prId: number,
+  runId: string | null,
+  account: string | null,
+): Promise<{ pr: PullRequestSummary; activity: JobHistoryEntry | WorkspaceActivityEntry }> {
+  const outcome =
+    target.kind === "project"
+      ? await api.approvePrFromReview({ projectId: target.projectId, prId, runId, account })
+      : await api.approvePrFromReview({ url: target.url, workspaceId: target.workspaceId, prId, runId, account });
+  // The run's meta changed (it now names who approved), so a phone showing it is stale.
+  if (target.kind === "project" && outcome.recorded) api.notifyStateChange("reviews", target.projectId);
+  return outcome;
+}
+
 /** Re-reads the PR itself, so a header settles onto the host's answer rather than a guess. Read
  * directly by number: the project's list is one page of open pull requests, and the one on screen
  * may be closed, merged or simply older than that page. */
@@ -139,10 +165,13 @@ export function postFindings(
   postSummary: boolean,
   summary: string | null,
   /** Close the threads of the run's resolved findings too — the panel's publish does; a decision
-   * note does not. A link review has no memory of what was resolved, so it is ignored there. */
+   * note does not. */
   closeResolved = false,
 ): Promise<PublishOutcome> {
-  if (target.kind !== "project") return api.postPrLinkReviewComment(target.url, items, postSummary, summary);
+  // A link review keeps its memory by repository now: the run is reconciled against exactly like a
+  // project's (a run saved before that has no memory, and the backend publishes it the old way).
+  if (target.kind !== "project")
+    return api.postPrLinkReviewComment(target.url, items, postSummary, summary, runId || null, closeResolved);
   const projectId = target.projectId;
   const notify = () => api.notifyStateChange("reviews", projectId);
   return api.publishPrReview(projectId, prId, runId, items, postSummary, summary, closeResolved).then(
@@ -182,9 +211,9 @@ export function checks(target: PrTarget, prId: number): Promise<PrChecks> {
 }
 
 /**
- * Runs the review. The project-backed one diffs the local clone and remembers the run; the
- * link-backed one reads the diff from the host's API and doesn't — a weaker review, on purpose,
- * and the panel says so.
+ * Runs the review. The project-backed one diffs the local clone; the link-backed one reads the diff
+ * from the host's API — a weaker review, on purpose, and the panel says so. Both remember the run:
+ * a link review's memory is kept by repository, and the project picks it up once the repo is cloned.
  */
 export function review(
   target: PrTarget,
@@ -194,10 +223,11 @@ export function review(
   force = false,
   engine: { provider: string; model: string; account?: string | null } | null = null,
 ): Promise<string> {
-  // A review with no clone builds no plan, so nothing there can decide to stop and ask — and saves
-  // no run for another client to go stale on, which is why only the project half emits.
+  // A review with no clone builds no plan, but its first run asks the same promotion question a
+  // project's does (answered with `force`, like a project's "review anyway"). Only the project half
+  // emits: a phone lists a project's reviews, not the workspace's link ones.
   const agent = engine ? { ...engine, prompt: "" } : null;
-  if (target.kind !== "project") return api.reviewPrFromLink(target.url, jobId, level, target.workspaceId, agent);
+  if (target.kind !== "project") return api.reviewPrFromLink(target.url, jobId, level, target.workspaceId, agent, force);
   const projectId = target.projectId;
   return api.reviewPullRequest(projectId, prId, jobId, level, force, agent).then(
     (result) => {

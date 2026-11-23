@@ -53,8 +53,10 @@ export function destinationReady(
  * What goes into the file, group by group. Mirrors `snapshot::Selection` in Rust, and the keys
  * double as translation keys (`backup.include.<key>` / `.hint`).
  *
- * The setup itself — workspaces, repositories, prompts, agents, MCP servers and every setting — has
- * no switch: everything below hangs off it, and a backup without it restores into nothing.
+ * The setup itself — workspaces, the projects' entries (remote URL and branch included), prompts,
+ * agents, MCP servers and every setting — has no switch: everything below hangs off it, and a
+ * backup without it restores into nothing. The repositories' *folders* are a switch of their own
+ * (`repositories`), with a per-project exclusion list beside it.
  */
 export interface BackupInclude {
   /** Every token, key and password from the OS credential store. */
@@ -92,10 +94,20 @@ export interface BackupInclude {
   /** Memories, knowledge folders, experiences and bench reports — the local AI platform's own
    *  record, which is what makes a second machine (or a reinstall) start already knowing. */
   aiLearning: boolean;
+  /** The repositories' folders — working tree, `.git` and uncommitted changes. Off, a restore
+   *  points each project where its folder would go and offers to clone it from its remote. */
+  repositories: boolean;
+  /** Project ids whose folder stays out while `repositories` is on. An exclusion list, so a project
+   *  added later is backed up by default. */
+  excludedRepositories: string[];
 }
 
-/** The order the panel lists the switches in — matches `GROUPS` in `snapshot.rs`. */
-export const INCLUDE_KEYS: readonly (keyof BackupInclude)[] = [
+/** The plain on/off groups — every field of `BackupInclude` except the exclusion list. */
+export type IncludeSwitch = Exclude<keyof BackupInclude, "excludedRepositories">;
+
+/** The order the panel lists the switches in — matches `GROUPS` in `snapshot.rs`. `repositories`
+ * is listed apart, first after the core, because its row carries the per-project choice. */
+export const INCLUDE_KEYS: readonly Exclude<IncludeSwitch, "repositories">[] = [
   "credentials",
   "apiClient",
   "databases",
@@ -179,7 +191,29 @@ export interface BackupContents {
   secrets: number;
   tables: number;
   repositories: number;
+  /** Projects whose folder was left out by choice. */
+  skippedRepositories: number;
   bytes: number;
+}
+
+/** One project's folder with roughly what it adds to a backup (same exclusions as the backup). */
+export interface RepositorySize {
+  id: string;
+  name: string;
+  path: string;
+  /** `null` when the folder could not be measured — `error` says why. */
+  bytes: number | null;
+  error: string;
+}
+
+/** A repository left out of a restored file that can be cloned back from its remote. */
+export interface CloneCandidate {
+  name: string;
+  /** Where the project now points — and so where the clone goes. */
+  path: string;
+  remoteUrl: string;
+  /** The branch it was on when backed up; empty when unknown. */
+  branch: string;
 }
 
 /** What a file says about itself, read without the password. */
@@ -197,8 +231,10 @@ export interface RestoreReport {
   secrets: number;
   tables: { name: string; rows: number }[];
   repositories: number;
-  /** Projects whose folder isn't on this machine — expected after moving computers. */
+  /** Projects whose folder isn't on this machine and that have no remote to clone from. */
   missingProjectPaths: string[];
+  /** Projects whose folder was left out of the file but can be cloned from their remote. */
+  clonableRepositories: CloneCandidate[];
   /** Credentials the OS store refused; on macOS, usually a dismissed Keychain prompt. */
   failedSecrets: string[];
   danglingRows: number;
@@ -239,6 +275,10 @@ export const backupState = () => invoke<BackupState>("backup_state");
 
 export const backupSaveSettings = (settings: BackupSettings) =>
   invoke<void>("backup_save_settings", { settings });
+
+/** Every project's folder with its approximate size. Walks the disk, so asked for only when the
+ * repositories row is opened. */
+export const backupRepositorySizes = () => invoke<RepositorySize[]>("backup_repository_sizes");
 
 /** Stops the schedule and forgets what the step-by-step setup was told, so it asks again. The
  * backups already written are left where they are; the Drive and OneDrive connections are not —
@@ -330,7 +370,42 @@ export function formatBytes(bytes: number): string {
   if (bytes <= 0) return "0 KB";
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+/** Whether a project's folder goes into the file under this selection. */
+export function repositoryIncluded(include: BackupInclude, projectId: string): boolean {
+  return include.repositories && !(include.excludedRepositories ?? []).includes(projectId);
+}
+
+/** The selection with one project's folder switched in or out. Turning one on while the whole
+ * section is off switches the section on with only that one — the obvious reading of the click. */
+export function toggleRepository(
+  include: BackupInclude,
+  projectId: string,
+  on: boolean,
+  allIds: readonly string[],
+): BackupInclude {
+  // Ids of projects deleted since are dropped on the way past, so they cannot keep the row
+  // looking partially selected forever.
+  const excluded = new Set((include.excludedRepositories ?? []).filter((id) => allIds.includes(id)));
+  if (!include.repositories) {
+    if (!on) return include;
+    return {
+      ...include,
+      repositories: true,
+      excludedRepositories: allIds.filter((id) => id !== projectId),
+    };
+  }
+  if (on) excluded.delete(projectId);
+  else excluded.add(projectId);
+  return { ...include, excludedRepositories: [...excluded] };
+}
+
+/** A remote URL fit to show: any credentials written into it are dropped. */
+export function displayRemote(url: string): string {
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/@]*@/i, "$1");
 }
 
 /**

@@ -153,6 +153,11 @@ mod tests {
             comentario_md: String::new(),
             publicado_en_iter: None,
             hilo_general: false,
+            resolucion: None,
+            resolucion_archivo: None,
+            resolucion_lineas: None,
+            tardio: false,
+            hilo_pr: Default::default(),
         }
     }
 

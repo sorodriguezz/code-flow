@@ -819,6 +819,7 @@ async fn pr_review(host: &AppHost, args: &Value, cancel: CancellationToken) -> R
                 model.clone(),
                 None,
                 None,
+                Some(force),
             )
             .await
         } else {

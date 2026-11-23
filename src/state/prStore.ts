@@ -10,6 +10,7 @@ import { translations } from "../lib/i18n/translations";
 import * as prTarget from "../lib/prTarget";
 import { targetKey, targetPrKey, type PrTarget } from "../lib/prTarget";
 import { parseMergeRefusal } from "../lib/prOutcomes";
+import { describeApprovalError } from "../lib/prApproval";
 import type { MergeChoice, PrDecision, PrListScope, PublishOutcome, PullRequestSummary } from "../types/domain";
 import type { PrAction, PostFindingItem } from "../lib/tauri/commands";
 
@@ -263,7 +264,11 @@ interface PrState {
     prId: number,
     action: PrAction,
     note?: { runId: string; body: string } | null,
-  ) => Promise<void>;
+    /** Set for an approval taken *because a review passed*: goes through `approve_pr_from_review`,
+     * which re-checks that run's gate and records in its memory who approved (`account`, as the
+     * confirmation named it). Ignored for any other action. */
+    fromReview?: { runId: string | null; account: string | null } | null,
+  ) => Promise<boolean>;
   /** Opens a PR on the project's linked host and refreshes the list, resolving to the new PR (the
    * caller puts it on screen). Throws on failure so the modal can keep itself open and say why. */
   createPr: (
@@ -438,7 +443,7 @@ export const usePrStore = create<PrState>((set, get) => ({
     }
   },
 
-  actOnPr: async (target, prId, action, note) => {
+  actOnPr: async (target, prId, action, note, fromReview) => {
     const key = targetKey(target);
     // The pull request this is busy on, not "the app is busy". Everything below reads it back the
     // same way, including the `finally` — so an action on one PR leaves every other PR's buttons
@@ -450,7 +455,10 @@ export const usePrStore = create<PrState>((set, get) => ({
     const watchWorkspaceId = watchWorkspace(target);
     set((s) => ({ prActionBusy: { ...s.prActionBusy, [busyKey]: action } }));
     try {
-      const { pr, activity } = await prTarget.actOnPr(target, prId, action);
+      const { pr, activity } =
+        fromReview && action === "approve"
+          ? await prTarget.approveFromReview(target, prId, fromReview.runId, fromReview.account)
+          : await prTarget.actOnPr(target, prId, action);
       // The decision is now on the record: remember it so the button that produced it is retired,
       // and file the action in Activity so "what happened to this PR" has an answer.
       const decision: PrDecision =
@@ -491,8 +499,12 @@ export const usePrStore = create<PrState>((set, get) => ({
         const fresh = get().prsByProject[target.projectId]?.find((p) => p.id === prId);
         if (fresh) useAiPanelStore.getState().updatePr(target, fresh);
       }
+      return true;
     } catch (e) {
-      pushErrorToast(String(e));
+      // An approval refused by the host (the author approving their own PR, a token without the
+      // scope) is said in words, with the host's own message after them.
+      pushErrorToast(fromReview && action === "approve" ? describeApprovalError(String(e), translate) : String(e));
+      return false;
     } finally {
       set((s) => {
         // Only this PR's entry — clearing the whole record would un-busy a decision taken on a

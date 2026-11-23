@@ -32,8 +32,11 @@ pub struct MemoryFinding {
     pub lineas: Option<String>,
     pub confianza: Option<i64>,
     /// Lifecycle state, carried across runs: `abierto` (new, not posted) · `posteado` (has a
-    /// thread, still present) · `resuelto` (no longer in the code) · `falso_positivo` /
-    /// `ignorado` (human-marked). Defaults to `abierto`.
+    /// thread, still present) — the two *active* ones — · `deuda_tecnica` (real, accepted and
+    /// still in the code: out of the gate but carried visibly and re-judged when its file changes,
+    /// which is how it gets paid) · `resuelto` (a reviewer judged it fixed) · `falso_positivo` /
+    /// `ignorado` (human-marked). Defaults to `abierto`. See [`set_finding_state`] for the one way
+    /// code outside reconciliation should move it.
     #[serde(default = "default_estado")]
     pub estado: String,
     /// The PR comment thread this finding was posted to, if any — kept even once resolved so a
@@ -46,9 +49,26 @@ pub struct MemoryFinding {
     /// Iteration it was detected as resolved in (only when `estado = resuelto`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resuelto_en_iter: Option<usize>,
-    /// Why it was marked `falso_positivo`/`ignorado` (human-supplied); absent otherwise.
+    /// Why it was marked `falso_positivo`/`ignorado`/`deuda_tecnica` (human-supplied); absent
+    /// otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub motivo_descarte: Option<String>,
+    /// What fixed it, in the reviewer's words (1–2 sentences) — only on a `resuelto` the reviewer
+    /// judged. Published on its thread and kept in the report's history, because "resuelto" alone
+    /// asks the author to take the tool's word for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolucion: Option<String>,
+    /// The file the fix landed in, when it is not the finding's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolucion_archivo: Option<String>,
+    /// The lines of the fix — what the "📄 Código que lo resuelve" snippet is cut from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolucion_lineas: Option<String>,
+    /// A re-review's new finding on code that did not change since the previously reviewed
+    /// iteration: it should have been caught then. Said on the finding so the team can tell a
+    /// regression from a miss, never used to drop it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tardio: bool,
     /// Only set on a re-review: `nuevo` | `persiste` | `resuelto` relative to the previous run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<String>,
@@ -82,6 +102,52 @@ pub struct MemoryFinding {
     /// comment naming the finding instead of a reply that is certain to fail.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hilo_general: bool,
+    /// What the pull request's own threads said about this finding — see [`crate::review::threads`].
+    /// Flattened, so the stored JSON reads `sincronizado_desde_hilo`, `veredicto_pr`, … beside the
+    /// rest, and a run written before this existed reads back as "the PR said nothing".
+    #[serde(flatten, default)]
+    pub hilo_pr: HiloPr,
+}
+
+/// The pull request's word on one finding, as the last re-review read it from the PR's threads.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct HiloPr {
+    /// The current `estado` came from the PR — a thread the team closed, or a reply that opened with
+    /// the verdict — rather than from a click in this app. A human verdict all the same: it feeds the
+    /// "don't raise this again" block and the calibration exactly like one marked here.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sincronizado_desde_hilo: bool,
+    /// How: `status` (the thread's status on the host) · `texto` (a reply on the finding's own
+    /// thread) · `resumen` (its block in a reply to this app's summary comment).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sincronizado_via: Option<String>,
+    /// The iteration whose re-review applied it — what the report of that run lists as synced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sincronizado_en_iter: Option<usize>,
+    /// A verdict the PR gave that did **not** apply on its own: the phrase sat past the comment's
+    /// opening, or the finding's file changed since (the code moved, so it is re-judged instead).
+    /// The finding card offers it as one click; it is recomputed on every re-review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub veredicto_pr: Option<VeredictoPr>,
+    /// When a human reopened it here (RFC 3339). A verdict on the PR older than this is the one they
+    /// overrode — re-applying it would make reopening impossible while the thread stays closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reabierto_en: Option<String>,
+}
+
+/// A verdict read from the pull request, kept for a human to apply.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VeredictoPr {
+    /// `falso_positivo` · `ignorado` · `deuda_tecnica`.
+    pub estado: String,
+    /// The human's words — what becomes `motivo_descarte` once applied.
+    pub motivo: String,
+    /// `status` · `texto` · `resumen`, as in [`HiloPr::sincronizado_via`].
+    pub via: String,
+    #[serde(default)]
+    pub autor: String,
+    #[serde(default)]
+    pub fecha: String,
 }
 
 fn default_estado() -> String {
@@ -90,10 +156,92 @@ fn default_estado() -> String {
 
 impl MemoryFinding {
     /// Active = counts toward the Quality Gate / severity buckets. Resolved and human-discarded
-    /// findings are carried for traceability but excluded from the active view.
+    /// findings are carried for traceability but excluded from the active view — and so is
+    /// accepted technical debt, which is real but was knowingly deferred.
     pub fn is_active(&self) -> bool {
         matches!(self.estado.as_str(), "abierto" | "posteado")
     }
+
+    /// Accepted technical debt: out of the gate, but not closed — see [`MemoryFinding::needs_judgement`].
+    pub fn is_debt(&self) -> bool {
+        self.estado == ESTADO_DEUDA
+    }
+
+    /// What a re-review must hand back to a reviewer when its file is re-read: everything still in
+    /// the code. Debt included — re-judging it is the only way it ever becomes `resuelto` (paid).
+    pub fn needs_judgement(&self) -> bool {
+        self.is_active() || self.is_debt()
+    }
+
+    /// The finding's "why", for re-judging it. The memory keeps no `por_que` of its own — it lives
+    /// in the stored comment body — so it is read back out of that, cut short: the reviewer needs
+    /// the mechanism, not the essay. `None` on runs saved before comment bodies were kept.
+    pub fn por_que_breve(&self) -> Option<String> {
+        const MAX: usize = 400;
+        let (_, rest) = self.comentario_md.split_once("💭 **Por qué:**")?;
+        let why = rest.split("\n\n").next().unwrap_or("").trim();
+        if why.is_empty() {
+            return None;
+        }
+        let mut out: String = why.chars().take(MAX).collect();
+        if why.chars().count() > MAX {
+            out.push('…');
+        }
+        Some(out.replace('\n', " "))
+    }
+}
+
+/// The accepted-technical-debt state.
+pub const ESTADO_DEUDA: &str = "deuda_tecnica";
+
+/// Moves one finding to `estado`, with the reason it needs — the single way anything outside
+/// reconciliation changes a finding's lifecycle (the human's mark, an import, a sync from the
+/// pull request's own threads), so every caller agrees on what each state requires:
+///
+/// - `falso_positivo` · `ignorado` · `deuda_tecnica` take `motivo`; debt **requires** one, because
+///   "accepted" with no reason is a decision nobody can revisit.
+/// - `resuelto` takes `motivo` as its `resolucion` and stamps `iter` as the iteration it was fixed in.
+/// - `abierto` (or `posteado`) reopens: back to active — `posteado` when it still owns a thread —
+///   with the discard reason cleared.
+///
+/// Clears the fields the previous state carried and this one does not, so a reopened finding
+/// doesn't keep announcing a fix, and a fix doesn't keep a discard reason.
+pub fn set_finding_state(f: &mut MemoryFinding, estado: &str, motivo: Option<String>, iter: usize) -> Result<(), String> {
+    let motivo = motivo.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
+    let was_active = f.is_active();
+    match estado {
+        "falso_positivo" | "ignorado" | ESTADO_DEUDA => {
+            if estado == ESTADO_DEUDA && motivo.is_none() {
+                return Err("Marking a finding as technical debt needs a reason".to_string());
+            }
+            f.estado = estado.to_string();
+            f.motivo_descarte = motivo;
+        }
+        "resuelto" => {
+            f.estado = estado.to_string();
+            f.resuelto_en_iter = Some(iter.max(1));
+            f.resolucion = motivo;
+        }
+        "abierto" | "posteado" => {
+            f.estado = if f.thread_id.is_some() { "posteado" } else { "abierto" }.to_string();
+            f.motivo_descarte = None;
+            f.resuelto_en_iter = None;
+            f.resolucion = None;
+            f.resolucion_archivo = None;
+            f.resolucion_lineas = None;
+            // Taking back a ruling (the team's, synced, or one made here): stamped, so the PR's
+            // older word on it does not simply come back on the next re-review.
+            if !was_active {
+                f.hilo_pr.reabierto_en = Some(chrono::Utc::now().to_rfc3339());
+            }
+        }
+        other => return Err(format!("Unknown finding state: {other}")),
+    }
+    // Whatever moved it now is the new word: a pending PR verdict is answered, and a sync is no
+    // longer what the state says — the caller that syncs sets those back right after.
+    let reabierto_en = f.hilo_pr.reabierto_en.take();
+    f.hilo_pr = HiloPr { reabierto_en, ..HiloPr::default() };
+    Ok(())
 }
 
 /// The reconciliation result of a re-review against the immediately previous run.
@@ -173,6 +321,14 @@ pub struct ReviewMeta {
     /// What the run spent, summed over its passes. Absent on runs recorded before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<RunCost>,
+    /// The repository calibration this run was held to — the categories and the bar — frozen for the
+    /// same reason as the contract: the history that raised it keeps moving. Absent when none applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<crate::review::calibration::Applied>,
+    /// The deterministic rules that ran on this run, and the ones that could not be evaluated and
+    /// why. Empty when none ran (or on runs recorded before they were kept).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<crate::review::deterministic::RuleRecord>,
 }
 
 /// What one review spent: every pass's tokens summed, and the price when the engines said one.
@@ -426,20 +582,71 @@ fn file_in_changed(finding_file: &str, changed: &[String]) -> bool {
     changed.iter().any(|c| crate::review::outline::same_path(c, finding_file))
 }
 
+/// One reviewer's ruling on a previous finding it was handed back to re-judge (see
+/// [`reevaluate_block`]): still there, or fixed — and where.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PriorVerdict {
+    pub resolved: bool,
+    /// Persists: where the finding now is. Resolved: the file of the fix, when the reviewer named one.
+    pub archivo: Option<String>,
+    /// Persists: its current lines. Resolved: the lines of the fix.
+    pub lineas: Option<String>,
+    /// Resolved: what fixes it, 1–2 sentences.
+    pub resolucion: Option<String>,
+}
+
+/// Lines a re-review's delta touched, per file — the new-side line numbers added (or where
+/// something was deleted) between the previously reviewed iteration and this one.
+pub type DeltaLines = std::collections::HashMap<String, Vec<(u32, u32)>>;
+
+/// What a re-review knows besides the findings it reported — every field optional, and absent
+/// meaning "this run cannot say", which is always read in the direction that changes nothing on
+/// the pull request.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Rereview<'a> {
+    /// The files that changed since the previous run (an efficient re-review); `None` on a full one.
+    pub changed_files: Option<&'a [String]>,
+    /// What the run did not actually re-read.
+    pub unread: Unread<'a>,
+    /// The reviewers' rulings on the previous findings they were handed, by id.
+    pub verdicts: Option<&'a std::collections::HashMap<String, PriorVerdict>>,
+    /// The delta's lines, for telling a late finding from a new one. `None` when there is no delta
+    /// (a first review, a full one, a review with no clone).
+    pub delta_lines: Option<&'a DeltaLines>,
+}
+
+/// Whether a finding at `lineas` of `file` sits on anything the delta touched. A file the delta
+/// never touched is untouched whatever the lines; a finding with no lines in a touched file can't
+/// be placed, and is given the benefit of the doubt.
+fn touches_delta(file: &str, lineas: Option<&str>, delta: &DeltaLines) -> bool {
+    let Some((_, spans)) = delta.iter().find(|(path, _)| crate::review::outline::same_path(path, file)) else {
+        return false;
+    };
+    match line_span(lineas) {
+        Some(here) => spans.iter().any(|span| span_distance(Some(here), Some(*span)) == 0),
+        None => true,
+    }
+}
+
 /// Reconciles a fresh parse (`current`) against the previous run (`prev`) and returns the full,
 /// merged finding set for this run plus the delta counts.
 ///
-/// Rules (mirroring WF-PR-REVIEWER `re-review.md`): a current finding that continues an active prev
-/// one (see [`pair_up`]) **persists** (keeps its stable id, `estado`, `thread_id`,
-/// `introducido_en_iter`); one continuing a human-discarded prev keeps that mark; an unmatched
-/// current one is **new**. A prev active finding nothing continues is **resolved** (carried forward,
-/// thread kept). Findings already resolved/discarded are always carried forward untouched — they're
-/// never deleted, which is what gives the PR its cumulative traceability.
+/// Rules (mirroring WF-PR-REVIEWER `re-review.md`): a current finding that continues a prev one
+/// (see [`pair_up`]) **persists** — keeps its stable id, `estado` (a human's discard or accepted
+/// debt included), `thread_id`, `introducido_en_iter`; an unmatched current one is **new** (and
+/// `tardio` when none of its lines is one the delta touched). Findings already resolved/discarded
+/// are always carried forward untouched — they're never deleted, which is what gives the PR its
+/// cumulative traceability.
 ///
-/// `changed_files`, when provided (an efficient re-review), is the set of files that changed since
-/// the last run: a previous active finding on a file that did NOT change auto-persists (its code
-/// wasn't touched), rather than looking resolved just because this run didn't re-surface it. `None`
-/// means a full review, where any unmatched active finding is treated as resolved.
+/// **A previous finding is only `resuelto` when a reviewer judged it so.** It used to be inferred:
+/// its file was re-read and it simply didn't reappear. That inference closed threads on the pull
+/// request — an outward-facing claim — every time a model merely forgot to repeat itself. Now every
+/// previous finding still in the code (active, or accepted debt) whose file is re-read is handed to
+/// the reviewer that reads it, which must return a verdict ([`PriorVerdict`]): persists, or resolved
+/// with what fixed it. One with **no verdict and no current finding continuing it persists** — the
+/// conservative direction, because a wrongly-open thread costs a click and a wrongly-closed one
+/// hides a defect. A verdict is only honoured for a file this run actually re-read (in the delta,
+/// and not among the [`Unread`]).
 ///
 /// **The result is positional**: `merged[i]` is `current[i]` for every `i < current.len()`, and
 /// the carried-forward history follows. The caller carries ids back onto the full findings by that
@@ -455,17 +662,15 @@ pub fn reconcile(
     prev_iter: usize,
     changed_files: Option<&[String]>,
 ) -> (Vec<MemoryFinding>, ReviewDelta) {
-    reconcile_with(prev, current, prev_iter, changed_files, Unread::default())
+    reconcile_with(prev, current, prev_iter, Rereview { changed_files, ..Default::default() })
 }
 
-/// [`reconcile`], told what the run did not re-read — see [`Unread`]. A finding there persists
-/// exactly as one on a file the re-review never touched does.
+/// [`reconcile`], with everything the re-review knows — see [`Rereview`].
 pub fn reconcile_with(
     prev: &[MemoryFinding],
     current: &[MemoryFinding],
     prev_iter: usize,
-    changed_files: Option<&[String]>,
-    unread: Unread<'_>,
+    re: Rereview<'_>,
 ) -> (Vec<MemoryFinding>, ReviewDelta) {
     let iter_actual = prev_iter + 1;
     let mut next_id = max_id_num(prev).max(max_id_num(current)) + 1;
@@ -473,6 +678,10 @@ pub fn reconcile_with(
         let id = format!("F-{next_id:03}");
         next_id += 1;
         id
+    };
+    let late = |f: &MemoryFinding| match (re.delta_lines, &f.archivo) {
+        (Some(delta), Some(file)) => !touches_delta(file, f.lineas.as_deref(), delta),
+        _ => false,
     };
 
     let pairs = pair_up(prev, current);
@@ -492,9 +701,10 @@ pub fn reconcile_with(
                 f.estado = "abierto".to_string();
                 f.introducido_en_iter = iter_actual;
                 f.delta = Some("nuevo".to_string());
+                f.tardio = late(&f);
                 nuevos += 1;
             }
-            // Still present and previously seen (active or human-discarded) → persists.
+            // Still present and previously seen (active, debt or human-discarded) → persists.
             Some(j) => {
                 let p = &prev[j];
                 continued[j] = true;
@@ -505,6 +715,8 @@ pub fn reconcile_with(
                 f.publicado_en_iter = p.publicado_en_iter;
                 f.introducido_en_iter = if p.introducido_en_iter == 0 { prev_iter.max(1) } else { p.introducido_en_iter };
                 f.motivo_descarte = p.motivo_descarte.clone();
+                f.hilo_pr = p.hilo_pr.clone();
+                f.tardio = p.tardio;
                 f.delta = Some("persiste".to_string());
                 if f.is_active() {
                     persisten += 1;
@@ -516,6 +728,7 @@ pub fn reconcile_with(
                 f.estado = "abierto".to_string();
                 f.introducido_en_iter = iter_actual;
                 f.delta = Some("nuevo".to_string());
+                f.tardio = late(&f);
                 nuevos += 1;
             }
         }
@@ -533,38 +746,102 @@ pub fn reconcile_with(
             f.id = fresh_id();
         }
         used_ids.insert(f.id.clone());
-        if p.is_active() {
-            // On an efficient re-review, a finding whose file wasn't touched can't have been fixed —
-            // its code wasn't re-analyzed, so auto-persist instead of declaring it resolved.
-            let file_touched = match (changed_files, &p.archivo) {
-                (Some(changed), Some(file)) => file_in_changed(file, changed),
-                // No changed-file info (full review) or no location → treat as re-analyzed.
-                _ => true,
-            };
-            // …unless the run never actually read it: a failed reviewer is not evidence of a fix.
+        f.delta = Some("persiste".to_string());
+        if p.needs_judgement() {
+            // A verdict counts only for code this run read again: a file in the delta (or any file,
+            // on a full review) whose reviewer did not fail and whose content reached it.
             let reread = match &p.archivo {
-                Some(file) => !file_in_changed(file, unread.files),
-                None => !unread.unlocated,
+                Some(file) => {
+                    re.changed_files.is_none_or(|changed| file_in_changed(file, changed))
+                        && !file_in_changed(file, re.unread.files)
+                }
+                None => !re.unread.unlocated,
             };
-            let file_touched = file_touched && reread;
-            if file_touched {
-                // Its file was re-reviewed and it's gone → resolved (thread kept for the reply).
-                f.estado = "resuelto".to_string();
-                f.resuelto_en_iter = Some(iter_actual);
-                f.delta = Some("resuelto".to_string());
-                resueltos += 1;
-            } else {
-                f.delta = Some("persiste".to_string());
-                persisten += 1;
+            let verdict = re.verdicts.filter(|_| reread).and_then(|v| v.get(&p.id.to_uppercase()));
+            match verdict {
+                Some(v) if v.resolved => {
+                    f.estado = "resuelto".to_string();
+                    f.resuelto_en_iter = Some(iter_actual);
+                    f.resolucion = v.resolucion.clone();
+                    f.resolucion_archivo = v
+                        .archivo
+                        .clone()
+                        .filter(|file| !p.archivo.as_deref().is_some_and(|own| crate::review::outline::same_path(own, file)));
+                    f.resolucion_lineas = v.lineas.clone();
+                    f.delta = Some("resuelto".to_string());
+                    // Fixed: whatever the PR proposed calling it no longer needs an answer.
+                    f.hilo_pr.veredicto_pr = None;
+                    resueltos += 1;
+                }
+                Some(v) => {
+                    // Still there: it may have moved.
+                    let same_file = match (&v.archivo, &p.archivo) {
+                        (Some(a), Some(b)) => crate::review::outline::same_path(a, b),
+                        _ => true,
+                    };
+                    if same_file && v.lineas.is_some() {
+                        f.lineas = v.lineas.clone();
+                    }
+                    if p.is_active() {
+                        persisten += 1;
+                    }
+                }
+                // No verdict: conservative — it persists, thread untouched.
+                None => {
+                    if p.is_active() {
+                        persisten += 1;
+                    }
+                }
             }
-        } else {
-            // Already resolved/discarded → carried untouched (traceability).
-            f.delta = Some("persiste".to_string());
         }
         merged.push(f);
     }
 
     (merged, ReviewDelta { iter_previa: prev_iter, iter_actual, nuevos, persisten, resueltos })
+}
+
+/// The previous findings a reviewer must re-judge, as one prompt block — and the exact verdict
+/// lines it must answer with ([`crate::review::merge::parse_prior_verdicts`] reads them back).
+///
+/// Handed to whoever reads the finding's file (the group that owns it, or the single reviewer),
+/// because only that reader can tell whether the code still has the defect. Without a verdict a
+/// finding persists — so the block asks for one per finding, explicitly, rather than relying on the
+/// model to *not* repeat what was fixed (which is what used to be read as "resolved").
+///
+/// Returns `None` when there is nothing to re-judge.
+pub fn reevaluate_block(findings: &[MemoryFinding]) -> Option<String> {
+    let due: Vec<&MemoryFinding> = findings.iter().filter(|f| f.needs_judgement()).collect();
+    if due.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "\nEstos hallazgos de iteraciones anteriores de este PR siguen abiertos (o fueron aceptados como \
+         deuda técnica) y su código está en lo que revisas ahora. Re-evalúa CADA UNO sobre el código \
+         actual y NO los vuelvas a reportar como hallazgo nuevo. Responde con UNA línea por hallazgo, \
+         exactamente así (al final de tu respuesta, fuera de cualquier hallazgo):\n\
+         PREVIO F-003: PERSISTE @ ruta/archivo.ts:42-50\n\
+         PREVIO F-004: RESUELTO @ ruta/archivo.ts:60-64 — <qué lo corrige, 1–2 frases en español>\n\n\
+         En PERSISTE, `@` lleva su ubicación actual (las líneas pueden haberse movido). En RESUELTO, `@` \
+         lleva las líneas del código que lo corrige (con su archivo si la corrección está en otro). \
+         Marca RESUELTO solo si el código actual demuestra que ya no ocurre; si dudas, es PERSISTE.\n\n",
+    );
+    for f in due {
+        let loc = match (&f.archivo, &f.lineas) {
+            (Some(file), Some(lines)) => format!("`{file}:{lines}`"),
+            (Some(file), None) => format!("`{file}`"),
+            _ => "sin ubicación".to_string(),
+        };
+        let deuda = if f.is_debt() { " · deuda técnica aceptada" } else { "" };
+        let severidad = if f.severidad.is_empty() { f.severity.as_str() } else { f.severidad.as_str() };
+        out.push_str(&format!(
+            "- **{}** · {} · categoría `{}` · {}{} — {}\n",
+            f.id, severidad, f.categoria, loc, deuda, f.subtitulo
+        ));
+        if let Some(why) = f.por_que_breve() {
+            out.push_str(&format!("  - Por qué: {why}\n"));
+        }
+    }
+    Some(out)
 }
 
 /// One item of a publish, as much of it as matching it to its stored finding needs.
@@ -727,31 +1004,54 @@ pub fn discarded_block(findings: &[MemoryFinding]) -> Option<String> {
     Some(out)
 }
 
-/// The cumulative "resolved / discarded findings" traceability appended to a re-review's body —
-/// every finding resolved or human-discarded over the PR's life, with the iteration it entered and
-/// (for resolved) left. Returns `None` when there's nothing to show, so first reviews stay clean.
+/// The cumulative "resolved / debt / discarded findings" traceability appended to a review's body —
+/// every finding resolved, accepted as technical debt or human-discarded over the PR's life, with
+/// the iteration it entered and (for resolved) left, and what fixed it. Returns `None` when there's
+/// nothing to show, so first reviews stay clean.
+///
+/// Debt is its own section, between the two, because it is neither history nor a rejection: it is
+/// still in the code, and the report keeps saying so until somebody pays it.
 pub fn resolved_history_section(findings: &[MemoryFinding]) -> Option<String> {
     let resolved: Vec<&MemoryFinding> = findings.iter().filter(|f| f.estado == "resuelto").collect();
+    let debt: Vec<&MemoryFinding> = findings.iter().filter(|f| f.is_debt()).collect();
     let discarded: Vec<&MemoryFinding> = findings
         .iter()
         .filter(|f| matches!(f.estado.as_str(), "falso_positivo" | "ignorado"))
         .collect();
-    if resolved.is_empty() && discarded.is_empty() {
+    if resolved.is_empty() && debt.is_empty() && discarded.is_empty() {
         return None;
     }
 
-    let mut s = String::new();
+    let mut s = String::from("\n\n---\n");
+    if !debt.is_empty() {
+        s.push_str("\n### 🧾 Deuda técnica\n\n");
+        for f in debt {
+            let loc = location_label(f);
+            let severidad = if f.severidad.is_empty() { f.severity.as_str() } else { f.severidad.as_str() };
+            s.push_str(&format!(
+                "- **{}** · {} · `{}` · {} — {} _(introducido iter {})_\n",
+                f.id, severidad, f.categoria, loc, f.subtitulo, f.introducido_en_iter
+            ));
+            if let Some(m) = f.motivo_descarte.as_deref().filter(|m| !m.trim().is_empty()) {
+                s.push_str(&format!("  - Aceptada: {}\n", m.trim()));
+            }
+        }
+    }
     if !resolved.is_empty() {
-        s.push_str("\n\n---\n\n### 🕘 Historial de hallazgos resueltos (trazabilidad)\n\n");
+        s.push_str("\n### 🕘 Historial de hallazgos resueltos (trazabilidad)\n\n");
         for f in resolved {
             let file = f.archivo.clone().unwrap_or_else(|| "—".to_string());
             s.push_str(&format!(
-                "- `{}` · {} — introducido iter {} · resuelto iter {}\n",
+                "- **{}** · `{}` · {} — introducido iter {} · resuelto iter {}\n",
+                f.id,
                 f.categoria,
                 file,
                 f.introducido_en_iter,
                 f.resuelto_en_iter.unwrap_or(0),
             ));
+            if let Some(r) = f.resolucion.as_deref().filter(|r| !r.trim().is_empty()) {
+                s.push_str(&format!("  - 🛠️ {}\n", r.trim()));
+            }
         }
     }
     if !discarded.is_empty() {
@@ -764,6 +1064,219 @@ pub fn resolved_history_section(findings: &[MemoryFinding]) -> Option<String> {
         }
     }
     Some(s)
+}
+
+/// `file:lines`, `file`, or `—`.
+fn location_label(f: &MemoryFinding) -> String {
+    match (&f.archivo, &f.lineas) {
+        (Some(file), Some(lines)) => format!("`{file}:{lines}`"),
+        (Some(file), None) => format!("`{file}`"),
+        _ => "—".to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The debt scan: accepted debt from other pull requests of the same repository
+// ---------------------------------------------------------------------------
+
+/// Debt accepted in **another** pull request of this repository, on a file this one touches —
+/// carried into this review so it is seen, re-judged on the code this PR is changing anyway, and
+/// settled in the run it came from when the reviewer finds it paid. Only files the PR already
+/// touches: re-judging debt elsewhere would cost a download per file, and the scan is meant to be
+/// free.
+#[derive(Debug, Clone)]
+pub struct ForeignDebt {
+    /// What this review calls it (`D-001`…): its own id belongs to the other PR's numbering and
+    /// would collide with this one's.
+    pub alias: String,
+    /// The run it lives in — the other PR's newest — and that PR.
+    pub run_id: String,
+    pub pr_id: i64,
+    pub iter: usize,
+    pub finding: MemoryFinding,
+}
+
+/// The accepted debt in `runs` (`(run id, pr, iter, findings JSON)`, newest run of each other PR)
+/// whose file is one of `touched`.
+pub fn foreign_debt(runs: &[(String, i64, i64, String)], touched: &[String]) -> Vec<ForeignDebt> {
+    let mut out: Vec<ForeignDebt> = Vec::new();
+    for (run_id, pr_id, iter, json) in runs {
+        let findings: Vec<MemoryFinding> = serde_json::from_str(json).unwrap_or_default();
+        for f in findings.into_iter().filter(|f| f.is_debt()) {
+            let Some(file) = f.archivo.as_deref() else { continue };
+            if !file_in_changed(file, touched) {
+                continue;
+            }
+            out.push(ForeignDebt {
+                alias: format!("D-{:03}", out.len() + 1),
+                run_id: run_id.clone(),
+                pr_id: *pr_id,
+                iter: (*iter).max(1) as usize,
+                finding: f,
+            });
+        }
+    }
+    out
+}
+
+impl ForeignDebt {
+    /// The debt as this review's reviewer is handed it: under its alias, saying where it came from.
+    pub fn for_review(&self) -> MemoryFinding {
+        MemoryFinding {
+            id: self.alias.clone(),
+            subtitulo: format!("{} (deuda aceptada en el PR #{}, {})", self.finding.subtitulo, self.pr_id, self.finding.id),
+            ..self.finding.clone()
+        }
+    }
+}
+
+/// Settles a debt the reviewer judged paid, in its own run's findings: `resuelto`, with what fixed
+/// it and which pull request did. Returns whether anything changed.
+pub fn settle_foreign_debt(findings: &mut [MemoryFinding], debt: &ForeignDebt, verdict: &PriorVerdict, by_pr: i64) -> bool {
+    let Some(f) = findings.iter_mut().find(|f| f.id == debt.finding.id && f.is_debt()) else {
+        return false;
+    };
+    let how = verdict.resolucion.clone().unwrap_or_else(|| "Corregido".to_string());
+    if set_finding_state(f, "resuelto", Some(format!("Saldada en el PR #{by_pr}: {how}")), debt.iter).is_err() {
+        return false;
+    }
+    f.resolucion_archivo = verdict.archivo.clone();
+    f.resolucion_lineas = verdict.lineas.clone();
+    true
+}
+
+/// "Deuda técnica de otros PRs" — what this review carried in and what became of it.
+pub fn foreign_debt_section(debts: &[ForeignDebt], verdicts: &std::collections::HashMap<String, PriorVerdict>) -> Option<String> {
+    if debts.is_empty() {
+        return None;
+    }
+    let mut s = String::from("\n\n---\n\n### 🧾 Deuda técnica de otros PRs\n\n");
+    for d in debts {
+        let f = &d.finding;
+        let severidad = if f.severidad.is_empty() { f.severity.as_str() } else { f.severidad.as_str() };
+        s.push_str(&format!(
+            "- **{}** (PR #{} · {}) · {} · `{}` · {} — {}\n",
+            d.alias, d.pr_id, f.id, severidad, f.categoria, location_label(f), f.subtitulo
+        ));
+        match verdicts.get(&d.alias) {
+            Some(v) if v.resolved => {
+                s.push_str(&format!("  - ✔️ Saldada en este PR{}\n", v.resolucion.as_deref().map(|r| format!(": {r}")).unwrap_or_default()));
+            }
+            _ => {
+                if let Some(m) = f.motivo_descarte.as_deref().filter(|m| !m.trim().is_empty()) {
+                    s.push_str(&format!("  - Sigue presente · aceptada: {}\n", m.trim()));
+                } else {
+                    s.push_str("  - Sigue presente\n");
+                }
+            }
+        }
+    }
+    Some(s)
+}
+
+// ---------------------------------------------------------------------------
+// What a resolved thread is told
+// ---------------------------------------------------------------------------
+
+/// Lines `span` of `file` out of a diff — the unified diff a host's API returns
+/// (`+++ b/<path>`) or the one a project run stores (`--- <path> (<status>)`) — from the new side:
+/// added and context lines, never removed ones. `None` when the diff does not hold any of them.
+///
+/// What lets a review with no clone show the code that fixed a finding: the fix is, by definition,
+/// something this pull request wrote, and so it is usually in the diff.
+pub fn snippet_from_diff(diff: &str, file: &str, span: (u32, u32)) -> Option<String> {
+    let mut in_file = false;
+    let mut line_no: u32 = 0;
+    let mut picked: Vec<(u32, &str)> = Vec::new();
+    for line in diff.lines() {
+        if let Some(path) = line.strip_prefix("+++ ") {
+            let path = path.trim().trim_start_matches("b/");
+            in_file = crate::review::outline::same_path(path, file);
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("--- ") {
+            // A stored project diff names the file here (`--- src/a.ts (modified)`); a unified
+            // diff's `--- a/…` is followed by its `+++` line, which decides.
+            let path = rest.rsplit_once(" (").map(|(p, _)| p).unwrap_or(rest).trim().trim_start_matches("a/");
+            in_file = crate::review::outline::same_path(path, file);
+            continue;
+        }
+        if line.starts_with("diff --git ") {
+            in_file = false;
+            continue;
+        }
+        if let Some(header) = line.strip_prefix("@@") {
+            // `@@ -12,7 +14,9 @@` → the new side starts at 14.
+            line_no = header
+                .split_whitespace()
+                .find_map(|part| part.strip_prefix('+'))
+                .and_then(|range| range.split(',').next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0);
+            continue;
+        }
+        if !in_file || line_no == 0 {
+            continue;
+        }
+        match line.chars().next() {
+            Some('-') => {}
+            Some('+') | Some(' ') => {
+                if line_no >= span.0 && line_no <= span.1 {
+                    picked.push((line_no, &line[1..]));
+                }
+                line_no += 1;
+            }
+            // `\ No newline at end of file`, or a blank context line some renderers strip the space of.
+            None => line_no += 1,
+            _ => {}
+        }
+    }
+    (!picked.is_empty()).then(|| picked.iter().map(|(_, l)| *l).collect::<Vec<_>>().join("\n"))
+}
+
+/// Lines `span` (1-based, inclusive) of a file's whole content.
+pub fn snippet_from_content(content: &str, span: (u32, u32)) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let (start, end) = (span.0.max(1) as usize, (span.1 as usize).min(lines.len()));
+    (start <= end).then(|| lines[start - 1..end].join("\n"))
+}
+
+/// The repository a saved run reviewed, from its `meta` — empty when the run predates the key.
+pub fn run_repo_key(meta: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(meta)
+        .ok()
+        .and_then(|m| m.get("repo_key").and_then(serde_json::Value::as_str).map(str::to_lowercase))
+        .unwrap_or_default()
+}
+
+/// The longest snippet a resolved thread is shown — enough for a guard or a call, not a file.
+const MAX_SNIPPET_LINES: u32 = 15;
+
+/// The span of a finding's fix, capped to what a comment can show.
+pub fn resolution_span(f: &MemoryFinding) -> Option<(u32, u32)> {
+    let (start, end) = line_span(f.resolucion_lineas.as_deref())?;
+    Some((start, end.min(start + MAX_SNIPPET_LINES - 1)))
+}
+
+/// The file a finding's fix lives in: its own unless the verdict named another.
+pub fn resolution_file(f: &MemoryFinding) -> Option<&str> {
+    f.resolucion_archivo.as_deref().or(f.archivo.as_deref())
+}
+
+/// What a resolved finding's thread gets under the "resuelto en la iteración N" line: what fixed it,
+/// and — when the lines are known and the code could be read — the code itself. Empty for a finding
+/// nobody explained, which then reads exactly as it did before verdicts existed.
+pub fn resolution_note(f: &MemoryFinding, code: Option<&str>) -> String {
+    let mut out = String::new();
+    if let Some(r) = f.resolucion.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+        out.push_str(&format!("\n\n🛠️ **Resolución:** {r}"));
+    }
+    if let (Some(code), Some(file), Some((start, end))) = (code.filter(|c| !c.trim().is_empty()), resolution_file(f), resolution_span(f)) {
+        let lines = if end > start { format!("{start}-{end}") } else { start.to_string() };
+        let lang = file.rsplit_once('.').map(|(_, ext)| ext).filter(|ext| ext.len() <= 6).unwrap_or("");
+        out.push_str(&format!("\n\n📄 **Código que lo resuelve** (`{file}:{lines}`):\n```{lang}\n{code}\n```"));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -936,6 +1449,11 @@ mod tests {
             comentario_md: String::new(),
             publicado_en_iter: None,
             hilo_general: false,
+            resolucion: None,
+            resolucion_archivo: None,
+            resolucion_lineas: None,
+            tardio: false,
+            hilo_pr: HiloPr::default(),
         }
     }
 
@@ -1009,8 +1527,16 @@ mod tests {
         assert_eq!(ids(&merged), vec!["F-001", "F-002"]);
     }
 
-    /// One of two same-category findings fixed: the other persists and the fixed one is resolved with
-    /// its thread kept for the "resuelto" reply — it used to vanish from the memory instead.
+    fn resolved_verdict(resolucion: &str) -> PriorVerdict {
+        PriorVerdict { resolved: true, archivo: None, lineas: Some("12-14".into()), resolucion: Some(resolucion.into()) }
+    }
+
+    fn verdicts(pairs: &[(&str, PriorVerdict)]) -> std::collections::HashMap<String, PriorVerdict> {
+        pairs.iter().map(|(id, v)| (id.to_string(), v.clone())).collect()
+    }
+
+    /// One of two same-category findings judged fixed: the other persists and the fixed one is
+    /// resolved with its thread kept for the "resuelto" reply — it used to vanish from the memory.
     #[test]
     fn the_one_that_is_gone_is_resolved_not_lost() {
         let prev = vec![
@@ -1018,7 +1544,8 @@ mod tests {
             remembered("F-002", "posteado", "npe", "a.ts", "480", Some(2)),
         ];
         let current = vec![reported("npe", "a.ts", "478-481")];
-        let (merged, delta) = reconcile(&prev, &current, 2, None);
+        let v = verdicts(&[("F-001", resolved_verdict("Se agregó la guarda."))]);
+        let (merged, delta) = reconcile_with(&prev, &current, 2, Rereview { verdicts: Some(&v), ..Default::default() });
         assert_eq!(merged.len(), 2);
         assert_eq!(merged[0].id, "F-002");
         let gone = &merged[1];
@@ -1077,7 +1604,10 @@ mod tests {
             remembered("F-002", "posteado", "npe", "src/changed.ts", "10", Some(2)),
         ];
         let changed = vec!["src/changed.ts".to_string()];
-        let (merged, delta) = reconcile(&prev, &[], 1, Some(&changed));
+        // Both judged fixed — but only the one whose file was re-read can be.
+        let v = verdicts(&[("F-001", resolved_verdict("x")), ("F-002", resolved_verdict("y"))]);
+        let (merged, delta) =
+            reconcile_with(&prev, &[], 1, Rereview { changed_files: Some(&changed), verdicts: Some(&v), ..Default::default() });
         assert_eq!(merged[0].estado, "posteado");
         assert_eq!(merged[1].estado, "resuelto");
         assert_eq!((delta.persisten, delta.resueltos), (1, 1));
@@ -1402,7 +1932,9 @@ mod tests {
         }];
         let (merged, delta) = reconcile(&prev, &current, 1, None);
         assert_ne!(merged[0].id, "F-004");
-        assert_eq!((delta.nuevos, delta.resueltos), (1, 1));
+        // The earlier one is not continued, and nobody judged it fixed: it persists.
+        assert_eq!((delta.nuevos, delta.resueltos), (1, 0));
+        assert_eq!(merged[1].estado, "posteado");
     }
 
     /// A reviewer that failed is not evidence of a fix: its files' findings persist.
@@ -1414,8 +1946,13 @@ mod tests {
             MemoryFinding { archivo: None, lineas: None, ..remembered("F-003", "abierto", "breaking-change", "x", "1", None) },
         ];
         let unread_files = vec!["src/a.ts".to_string()];
-        let (merged, delta) =
-            reconcile_with(&prev, &[], 1, None, Unread { files: &unread_files, unlocated: true });
+        let v = verdicts(&[("F-001", resolved_verdict("x")), ("F-002", resolved_verdict("y")), ("F-003", resolved_verdict("z"))]);
+        let (merged, delta) = reconcile_with(
+            &prev,
+            &[],
+            1,
+            Rereview { unread: Unread { files: &unread_files, unlocated: true }, verdicts: Some(&v), ..Default::default() },
+        );
         let state = |id: &str| merged.iter().find(|f| f.id == id).map(|f| f.estado.clone()).unwrap();
         assert_eq!(state("F-001"), "posteado", "its reviewer failed");
         assert_eq!(state("F-002"), "resuelto", "its file was re-read and it is gone");
@@ -1428,5 +1965,212 @@ mod tests {
         let r = rule("Null dereference", Some("app/Seguimiento.tsx"));
         assert!(r.matches("null-dereference", Some("src/app/Seguimiento.tsx")));
         assert!(!r.matches("null-dereference", Some("src/myapp/Seguimiento.tsx")), "a path boundary, not a raw suffix");
+    }
+
+    // ---------------------------------------------------------------------
+    // Judged resolution, debt and late findings
+    // ---------------------------------------------------------------------
+
+    /// The conservative default: re-read, not re-reported, but nobody said it was fixed — it
+    /// persists, and its thread is not closed as fixed.
+    #[test]
+    fn a_finding_nobody_judged_persists_even_when_its_file_was_reread() {
+        let prev = vec![remembered("F-001", "posteado", "npe", "a.ts", "10", Some(1))];
+        let changed = vec!["a.ts".to_string()];
+        let (merged, delta) = reconcile(&prev, &[], 1, Some(&changed));
+        assert_eq!(merged[0].estado, "posteado");
+        assert_eq!(merged[0].resuelto_en_iter, None);
+        assert_eq!((delta.persisten, delta.resueltos), (1, 0));
+    }
+
+    /// A judged fix carries what fixed it and where; the fix's file is kept only when it is not the
+    /// finding's own.
+    #[test]
+    fn a_resolved_verdict_records_the_resolution_and_where_the_fix_is() {
+        let prev = vec![
+            remembered("F-001", "posteado", "npe", "src/a.ts", "10", Some(1)),
+            remembered("F-002", "abierto", "sqli", "src/b.ts", "5", None),
+        ];
+        let v = verdicts(&[
+            ("F-001", PriorVerdict { archivo: Some("src/a.ts".into()), ..resolved_verdict("Guarda temprana.") }),
+            ("F-002", PriorVerdict { archivo: Some("src/db.ts".into()), ..resolved_verdict("Consulta parametrizada.") }),
+        ]);
+        let (merged, delta) = reconcile_with(&prev, &[], 3, Rereview { verdicts: Some(&v), ..Default::default() });
+        assert_eq!(delta.resueltos, 2);
+        assert_eq!(merged[0].estado, "resuelto");
+        assert_eq!(merged[0].resuelto_en_iter, Some(4));
+        assert_eq!(merged[0].resolucion.as_deref(), Some("Guarda temprana."));
+        assert_eq!(merged[0].resolucion_archivo, None, "same file: nothing to add");
+        assert_eq!(merged[0].resolucion_lineas.as_deref(), Some("12-14"));
+        assert_eq!(merged[1].resolucion_archivo.as_deref(), Some("src/db.ts"));
+    }
+
+    /// "Persists" may come with the lines it moved to.
+    #[test]
+    fn a_persists_verdict_moves_the_lines() {
+        let prev = vec![remembered("F-001", "posteado", "npe", "a.ts", "10", Some(1))];
+        let v = verdicts(&[("F-001", PriorVerdict { resolved: false, archivo: None, lineas: Some("30-32".into()), resolucion: None })]);
+        let (merged, delta) = reconcile_with(&prev, &[], 1, Rereview { verdicts: Some(&v), ..Default::default() });
+        assert_eq!((merged[0].estado.as_str(), merged[0].lineas.as_deref()), ("posteado", Some("30-32")));
+        assert_eq!(delta.persisten, 1);
+    }
+
+    /// A finding the model re-reported and also called fixed is still there: the report wins over
+    /// the verdict, because closing the thread is the outward-facing mistake.
+    #[test]
+    fn a_reported_finding_is_not_closed_by_a_contradicting_verdict() {
+        let prev = vec![remembered("F-001", "posteado", "npe", "a.ts", "10", Some(1))];
+        let v = verdicts(&[("F-001", resolved_verdict("x"))]);
+        let (merged, delta) =
+            reconcile_with(&prev, &[reported("npe", "a.ts", "11")], 1, Rereview { verdicts: Some(&v), ..Default::default() });
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].estado, "posteado");
+        assert_eq!(delta.resueltos, 0);
+    }
+
+    /// Accepted debt is out of the active counts, stays debt while it is there, and is paid when a
+    /// reviewer judges it fixed.
+    #[test]
+    fn debt_stays_out_of_the_counts_until_it_is_paid() {
+        let debt = MemoryFinding { motivo_descarte: Some("se migra en Q3".into()), ..remembered("F-001", ESTADO_DEUDA, "npe", "a.ts", "10", Some(4)) };
+        let (merged, delta) = reconcile(&[debt.clone()], &[], 1, None);
+        assert_eq!(merged[0].estado, ESTADO_DEUDA);
+        assert_eq!(delta.persisten, 0, "debt is not active");
+
+        // Re-reported: still debt, reason kept.
+        let (merged, _) = reconcile(&[debt.clone()], &[reported("npe", "a.ts", "10")], 1, None);
+        assert_eq!((merged[0].estado.as_str(), merged[0].motivo_descarte.as_deref()), (ESTADO_DEUDA, Some("se migra en Q3")));
+
+        let v = verdicts(&[("F-001", resolved_verdict("Se migró al cliente nuevo."))]);
+        let (merged, delta) = reconcile_with(&[debt], &[], 1, Rereview { verdicts: Some(&v), ..Default::default() });
+        assert_eq!(merged[0].estado, "resuelto");
+        assert_eq!(delta.resueltos, 1);
+    }
+
+    /// Terminal states never come back for judgement, whatever a verdict says.
+    #[test]
+    fn a_verdict_never_touches_a_terminal_finding() {
+        let prev = vec![remembered("F-001", "falso_positivo", "npe", "a.ts", "10", None)];
+        let v = verdicts(&[("F-001", resolved_verdict("x"))]);
+        let (merged, _) = reconcile_with(&prev, &[], 1, Rereview { verdicts: Some(&v), ..Default::default() });
+        assert_eq!(merged[0].estado, "falso_positivo");
+    }
+
+    /// A new finding on lines the delta never touched should have been found the iteration before.
+    #[test]
+    fn a_new_finding_outside_the_delta_is_late() {
+        let mut delta_lines = DeltaLines::new();
+        delta_lines.insert("src/a.ts".into(), vec![(40, 45)]);
+        let current = vec![
+            reported("npe", "src/a.ts", "42"),
+            reported("sqli", "src/a.ts", "100-102"),
+            reported("leak", "src/untouched.ts", "3"),
+        ];
+        let (merged, _) = reconcile_with(&[], &current, 1, Rereview { delta_lines: Some(&delta_lines), ..Default::default() });
+        assert_eq!(merged.iter().map(|f| f.tardio).collect::<Vec<_>>(), vec![false, true, true]);
+        // No delta, no claim.
+        let (merged, _) = reconcile(&[], &current, 1, None);
+        assert!(merged.iter().all(|f| !f.tardio));
+    }
+
+    #[test]
+    fn set_finding_state_requires_a_reason_for_debt_and_reopen_clears_the_rest() {
+        let mut f = remembered("F-001", "posteado", "npe", "a.ts", "10", Some(9));
+        assert!(set_finding_state(&mut f, ESTADO_DEUDA, Some("  ".into()), 2).is_err());
+        set_finding_state(&mut f, ESTADO_DEUDA, Some("Aceptado por el equipo".into()), 2).unwrap();
+        assert_eq!((f.estado.as_str(), f.motivo_descarte.as_deref()), (ESTADO_DEUDA, Some("Aceptado por el equipo")));
+        assert!(!f.is_active() && f.needs_judgement());
+
+        set_finding_state(&mut f, "resuelto", Some("Pagada".into()), 3).unwrap();
+        assert_eq!((f.resuelto_en_iter, f.resolucion.as_deref()), (Some(3), Some("Pagada")));
+
+        set_finding_state(&mut f, "abierto", None, 4).unwrap();
+        assert_eq!(f.estado, "posteado", "it still owns a thread");
+        assert!(f.motivo_descarte.is_none() && f.resolucion.is_none() && f.resuelto_en_iter.is_none());
+        assert!(set_finding_state(&mut f, "whatever", None, 1).is_err());
+    }
+
+    #[test]
+    fn the_reevaluate_block_lists_what_is_still_in_the_code_with_its_why() {
+        let open = MemoryFinding {
+            comentario_md: "### 🚨 [Bug] npe · F-001\n\nsub\n\n💭 **Por qué:** `x` puede ser null.\n\n💡 **Sugerencia:** s".into(),
+            ..remembered("F-001", "posteado", "npe", "a.ts", "10", Some(1))
+        };
+        let debt = remembered("F-002", ESTADO_DEUDA, "n-plus-one", "b.ts", "5", None);
+        let gone = remembered("F-003", "resuelto", "naming", "c.ts", "1", None);
+        let block = reevaluate_block(&[open, debt, gone]).expect("two to judge");
+        assert!(block.contains("F-001") && block.contains("`a.ts:10`") && block.contains("`x` puede ser null."));
+        assert!(block.contains("F-002") && block.contains("deuda técnica aceptada"));
+        assert!(!block.contains("**F-003**"), "a resolved finding is not re-judged");
+        assert!(block.contains("PREVIO F-003: PERSISTE @"), "the format is spelled out");
+        assert!(reevaluate_block(&[remembered("F-009", "ignorado", "x", "a.ts", "1", None)]).is_none());
+    }
+
+    /// The scan carries only debt, only on files this PR touches, under aliases of its own — and a
+    /// judged fix settles it in the run it came from.
+    #[test]
+    fn the_debt_scan_carries_debt_on_touched_files_and_settles_it_where_it_lives() {
+        let other = vec![
+            MemoryFinding { motivo_descarte: Some("en Q3".into()), ..remembered("F-002", ESTADO_DEUDA, "dup", "src/a.ts", "4", None) },
+            remembered("F-003", ESTADO_DEUDA, "dup", "src/elsewhere.ts", "4", None),
+            remembered("F-004", "posteado", "npe", "src/a.ts", "9", Some(1)),
+        ];
+        let runs = vec![("run-42".to_string(), 42, 3, serde_json::to_string(&other).unwrap())];
+        let debts = foreign_debt(&runs, &["src/a.ts".to_string()]);
+        assert_eq!(debts.len(), 1);
+        assert_eq!((debts[0].alias.as_str(), debts[0].finding.id.as_str(), debts[0].pr_id), ("D-001", "F-002", 42));
+        assert!(debts[0].for_review().subtitulo.contains("PR #42"));
+
+        let verdict = resolved_verdict("Se extrajo el helper.");
+        let mut stored = other.clone();
+        assert!(settle_foreign_debt(&mut stored, &debts[0], &verdict, 77));
+        assert_eq!(stored[0].estado, "resuelto");
+        assert_eq!(stored[0].resuelto_en_iter, Some(3));
+        assert!(stored[0].resolucion.as_deref().unwrap().starts_with("Saldada en el PR #77"));
+
+        let v: std::collections::HashMap<String, PriorVerdict> = [("D-001".to_string(), verdict)].into_iter().collect();
+        let section = foreign_debt_section(&debts, &v).unwrap();
+        assert!(section.contains("Deuda técnica de otros PRs") && section.contains("Saldada en este PR"));
+        let section = foreign_debt_section(&debts, &Default::default()).unwrap();
+        assert!(section.contains("Sigue presente · aceptada: en Q3"));
+    }
+
+    #[test]
+    fn a_fix_is_cut_from_either_diff_shape() {
+        let unified = "diff --git a/src/a.ts b/src/a.ts\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -10,3 +10,5 @@ fn\n ctx10\n-old11\n+if (!cuenta) return 404;\n+const s = cuenta.saldo;\n ctx13\n";
+        assert_eq!(snippet_from_diff(unified, "src/a.ts", (11, 12)).as_deref(), Some("if (!cuenta) return 404;\nconst s = cuenta.saldo;"));
+        assert_eq!(snippet_from_diff(unified, "src/other.ts", (11, 12)), None);
+        let stored = "--- src/a.ts (modified)\n@@ -1,2 +1,3 @@\n uno\n+dos\n tres\n\n--- src/b.ts (added)\n@@ -0,0 +1 @@\n+b\n";
+        assert_eq!(snippet_from_diff(stored, "src/a.ts", (2, 3)).as_deref(), Some("dos\ntres"));
+        assert_eq!(snippet_from_content("a\nb\nc\nd", (2, 3)).as_deref(), Some("b\nc"));
+        assert_eq!(snippet_from_content("a", (5, 9)), None);
+    }
+
+    #[test]
+    fn a_resolution_note_carries_the_reason_and_the_code() {
+        let f = MemoryFinding {
+            resolucion: Some("Se agregó la guarda temprana.".into()),
+            resolucion_lineas: Some("11-12".into()),
+            ..remembered("F-001", "resuelto", "npe", "src/a.ts", "10", Some(1))
+        };
+        let note = resolution_note(&f, Some("if (!x) return;"));
+        assert!(note.contains("🛠️ **Resolución:** Se agregó la guarda temprana."));
+        assert!(note.contains("📄 **Código que lo resuelve** (`src/a.ts:11-12`):\n```ts\nif (!x) return;\n```"));
+        assert_eq!(resolution_note(&remembered("F-002", "resuelto", "npe", "a.ts", "1", None), None), "");
+    }
+
+    #[test]
+    fn the_history_shows_the_resolution_and_the_debt() {
+        let fixed = MemoryFinding {
+            resuelto_en_iter: Some(3),
+            resolucion: Some("Se validó la entrada.".into()),
+            ..remembered("F-001", "resuelto", "npe", "a.ts", "10", Some(1))
+        };
+        let debt = MemoryFinding { motivo_descarte: Some("Se paga en el sprint 12".into()), ..remembered("F-002", ESTADO_DEUDA, "dup", "b.ts", "4", None) };
+        let section = resolved_history_section(&[fixed, debt]).unwrap();
+        assert!(section.contains("introducido iter 1 · resuelto iter 3"));
+        assert!(section.contains("🛠️ Se validó la entrada."));
+        assert!(section.contains("### 🧾 Deuda técnica"));
+        assert!(section.contains("Aceptada: Se paga en el sprint 12"));
     }
 }

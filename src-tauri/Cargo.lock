@@ -1320,6 +1320,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "block2",
+ "brotli",
  "bytes",
  "bzip2",
  "calamine",

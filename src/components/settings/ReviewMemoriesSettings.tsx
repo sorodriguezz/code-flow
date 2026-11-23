@@ -9,7 +9,9 @@ import {
   Download,
   Eye,
   EyeOff,
+  Receipt,
   MessageSquare,
+  ShieldCheck,
   ShieldOff,
   Trash2,
   Upload,
@@ -21,6 +23,8 @@ import {
   exportReviewRuns,
   getReviewRun,
   importReviewRuns,
+  getReviewDebtScan,
+  setReviewDebtScan,
   listFpSuppressions,
   listReviewRuns,
   markReviewFinding,
@@ -29,16 +33,20 @@ import {
 } from "../../lib/tauri/commands";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { confirmAction } from "../../state/confirmStore";
+import { promptAction } from "../../state/promptStore";
 import { useToastStore } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import { Markdown } from "../common/Markdown";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { FpSuppression, ReviewRunDetail, ReviewRunSummary, SavedFinding } from "../../types/domain";
 import { Skeleton } from "../common/Skeleton";
+import { Checkbox } from "../common/Checkbox";
 import { EmptyState } from "../common/EmptyState";
 import { buttonClass, iconButtonClass } from "../common/Button";
 import { chipClass } from "../common/recipes";
 import { riseDelay } from "../../lib/rise";
+import { recordedApproval } from "../../lib/prApproval";
+import { runShaping } from "../../lib/reviewRunMeta";
 
 /** Lifecycle state of a saved finding, as an icon rather than an emoji so it matches the icon
  * language of the rest of the app (and renders at a predictable size across platforms). */
@@ -48,7 +56,14 @@ const ESTADOS: Record<string, { icon: LucideIcon; color: string; labelKey: Trans
   resuelto: { icon: CircleCheckBig, color: "text-[var(--cf-success)]", labelKey: "settings.memoryEstadoResolved" },
   falso_positivo: { icon: Ban, color: "text-[var(--cf-text-muted)]", labelKey: "settings.memoryEstadoFalse" },
   ignorado: { icon: EyeOff, color: "text-[var(--cf-text-muted)]", labelKey: "settings.memoryEstadoIgnored" },
+  deuda_tecnica: { icon: Receipt, color: "text-[var(--cf-warning)]", labelKey: "settings.memoryEstadoDebt" },
 };
+
+/** Where a run's memory is grouped: its project, or — for a review reached by link, which has none
+ * — its repository (`repo:<key>`), the scope it is read back under until the repo is cloned. */
+function ownerKey(run: ReviewRunSummary): string {
+  return run.project_id || `repo:${run.repo_key ?? ""}`;
+}
 
 /** A `repo_key` (`github:host/owner/repo`, `azure:org/project/repoId`) as something a human reads.
  * The provider prefix is dropped and, for GitHub, the host too — what identifies the repository in
@@ -147,8 +162,11 @@ const DANGER_ICON_BUTTON =
 
 /** One PR's group of saved runs (newest first). */
 interface PrGroup {
+  /** The project id, or `repo:<key>` for a link review's repository-only runs (see [`ownerKey`]). */
   projectId: string;
   projectName: string;
+  /** Set for repository-only runs: what deleting the group addresses. */
+  repoKey?: string;
   prId: number;
   prTitle: string;
   runs: ReviewRunSummary[];
@@ -191,20 +209,21 @@ export function ReviewMemoriesSettings() {
     if (!runs) return [];
     const byPr = new Map<string, PrGroup>();
     for (const run of runs) {
-      const key = `${run.project_id}:${run.pr_id}`;
+      const key = `${ownerKey(run)}:${run.pr_id}`;
       const existing = byPr.get(key);
       if (existing) existing.runs.push(run);
       else
         byPr.set(key, {
-          projectId: run.project_id,
-          projectName: run.project_name,
+          projectId: ownerKey(run),
+          repoKey: run.project_id ? undefined : run.repo_key,
+          projectName: run.project_id ? run.project_name : `${run.project_name} · ${t("settings.memoryNoClone")}`,
           prId: run.pr_id,
           prTitle: run.pr_title,
           runs: [run],
         });
     }
     return [...byPr.values()];
-  }, [runs]);
+  }, [runs, t]);
 
   /** One entry per repository with saved memory, for the filter row. */
   const repos = useMemo(() => {
@@ -258,7 +277,11 @@ export function ReviewMemoriesSettings() {
 
   const removePr = async (group: PrGroup) => {
     if (!(await confirmAction(t("settings.memoryDeletePrConfirm", { pr: group.prId, n: group.runs.length }), true))) return;
-    await deleteReviewRunsForPr(group.projectId, group.prId);
+    await deleteReviewRunsForPr(
+      group.repoKey !== undefined ? "" : group.projectId,
+      group.prId,
+      group.repoKey !== undefined ? { workspaceId, repoKey: group.repoKey } : undefined,
+    );
     await reload(workspaceId);
   };
 
@@ -323,6 +346,9 @@ export function ReviewMemoriesSettings() {
           "info",
         );
       }
+      if ((outcome.repoOnly?.length ?? 0) > 0) {
+        pushToast(t("settings.memoryImportRepoOnly", { repos: (outcome.repoOnly ?? []).map(repoLabel).join(", ") }), "info");
+      }
       if (outcome.unreadable > 0) {
         pushToast(t("settings.memoryImportUnreadable", { n: outcome.unreadable }), "info");
       }
@@ -340,6 +366,7 @@ export function ReviewMemoriesSettings() {
     return (
       <div className="space-y-3">
         <FpSuppressionsSection workspaceId={workspaceId} />
+        <DebtScanToggle workspaceId={workspaceId} />
         {/* The button rides in the empty state's own column, so the two arrive as one group. */}
         <EmptyState
           icon={Database}
@@ -362,6 +389,7 @@ export function ReviewMemoriesSettings() {
   return (
     <div className="space-y-3">
       <FpSuppressionsSection workspaceId={workspaceId} />
+      <DebtScanToggle workspaceId={workspaceId} />
       {/* Actions are real bordered buttons pinned to the top of the row: as bare icon+label pairs
           centred against a two-line paragraph they wrapped ("Exportar / todo") and read as loose
           floating icons rather than controls. */}
@@ -488,6 +516,8 @@ export function ReviewMemoriesSettings() {
                       <Skeleton className="h-24 w-full" />
                     ) : (
                       <>
+                        <RunApproval meta={detail.meta} />
+                        <RunShapingNote meta={detail.meta} />
                         <RunFindings detail={detail} onMarked={() => void refreshDetail(detail.id)} />
                         <Markdown
                           source={detail.review_md}
@@ -502,6 +532,71 @@ export function ReviewMemoriesSettings() {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * Who approved the pull request from CodeFlow on the strength of this run, when, and under which
+ * gate — written by `approve_pr_from_review`. Shown so the memory answers "who let this through"
+ * with a person: the review informed the approval, it never cast it.
+ */
+function RunApproval({ meta }: { meta: string }) {
+  const t = useT();
+  const approval = useMemo(() => {
+    try {
+      return recordedApproval(JSON.parse(meta) as Record<string, unknown>);
+    } catch {
+      return null;
+    }
+  }, [meta]);
+  if (!approval) return null;
+  const who = approval.account ?? t("pr.approveAccountUnknown");
+  return (
+    <p className="flex items-center gap-1.5 text-[12px] text-[var(--cf-success)]">
+      <ShieldCheck size={13} className="shrink-0" />
+      {t("pr.approvalRecordedHint", { account: who, date: approval.approvedAt.slice(0, 16).replace("T", " ") })}
+    </p>
+  );
+}
+
+/**
+ * The calibration this run was held to and the deterministic rules that ran on it, as its meta froze
+ * them — so a run read later still says why a category needed more confidence, or why a rule said
+ * nothing. Nothing for a run saved before either was kept.
+ */
+function RunShapingNote({ meta }: { meta: string }) {
+  const t = useT();
+  const shaping = useMemo(() => {
+    try {
+      return runShaping(JSON.parse(meta) as Record<string, unknown>);
+    } catch {
+      return runShaping(null);
+    }
+  }, [meta]);
+  const { calibration, rules } = shaping;
+  if (!calibration && rules.length === 0) return null;
+  const ruleText = rules
+    .map((r) =>
+      r.status === "facts"
+        ? t("settings.memoryRuleFacts", { id: r.id })
+        : r.status === "not_applicable"
+          ? t("settings.memoryRuleNotApplicable", { id: r.id })
+          : t("settings.memoryRuleNotEvaluated", { id: r.id, reason: r.reason ?? "?" }),
+    )
+    .join(" · ");
+  return (
+    <div className="space-y-0.5 text-[12px] text-[var(--cf-text-muted)]">
+      {calibration && (
+        <p className="break-words">
+          {t("settings.memoryCalibration", {
+            bar: String(calibration.minConfidence),
+            categories: calibration.categories.join(", "),
+          })}
+          {calibration.heldBack > 0 && ` · ${t("settings.memoryCalibrationHeldBack", { n: String(calibration.heldBack) })}`}
+        </p>
+      )}
+      {rules.length > 0 && <p className="break-words">{t("settings.memoryRules", { rules: ruleText })}</p>}
     </div>
   );
 }
@@ -563,14 +658,21 @@ function RunFindings({ detail, onMarked }: { detail: ReviewRunDetail; onMarked: 
   }
 
   const mark = async (f: SavedFinding, estado: string) => {
-    await markReviewFinding(detail.id, f.id, estado);
+    // Accepted debt needs its reason: it is what keeps the decision revisitable.
+    let motivo: string | undefined;
+    if (estado === "deuda_tecnica") {
+      const answer = await promptAction(t("settings.memoryDebtPrompt"), { confirmLabel: t("settings.memoryMarkDebt") });
+      if (!answer?.trim()) return;
+      motivo = answer.trim();
+    }
+    await markReviewFinding(detail.id, f.id, estado, motivo);
     onMarked();
   };
 
   return (
     <div className="space-y-0.5">
       {findings.map((f) => {
-        const discarded = f.estado === "falso_positivo" || f.estado === "ignorado";
+        const discarded = f.estado === "falso_positivo" || f.estado === "ignorado" || f.estado === "deuda_tecnica";
         const estado = ESTADOS[f.estado];
         const EstadoIcon = estado?.icon;
         return (
@@ -597,6 +699,7 @@ function RunFindings({ detail, onMarked }: { detail: ReviewRunDetail; onMarked: 
                   <>
                     <MarkButton label={t("settings.memoryMarkIgnored")} onClick={() => void mark(f, "ignorado")} />
                     <MarkButton label={t("settings.memoryMarkFalse")} onClick={() => void mark(f, "falso_positivo")} />
+                    <MarkButton label={t("settings.memoryMarkDebt")} onClick={() => void mark(f, "deuda_tecnica")} />
                   </>
                 )
               )}
@@ -605,6 +708,46 @@ function RunFindings({ detail, onMarked }: { detail: ReviewRunDetail; onMarked: 
         );
       })}
     </div>
+  );
+}
+
+/**
+ * The debt scan switch. Off by default because it adds context to every review that touches
+ * accepted debt; on, a review carries the debt other PRs of the repository accepted on the files it
+ * touches (no extra downloads), and settles it in its own run when it is found fixed.
+ */
+function DebtScanToggle({ workspaceId }: { workspaceId: string }) {
+  const t = useT();
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  useEffect(() => {
+    let live = true;
+    setEnabled(null);
+    getReviewDebtScan(workspaceId)
+      .then((on) => live && setEnabled(on))
+      .catch(() => live && setEnabled(false));
+    return () => {
+      live = false;
+    };
+  }, [workspaceId]);
+  const change = async (next: boolean) => {
+    setEnabled(next);
+    try {
+      await setReviewDebtScan(workspaceId, next);
+    } catch (e) {
+      setEnabled(!next);
+      useToastStore.getState().pushToast(String(e), "error");
+    }
+  };
+  return (
+    <label className="flex items-start gap-2 rounded-lg border border-[var(--cf-border)] px-3 py-2 text-[12px]">
+      <span className="mt-0.5">
+        <Checkbox checked={enabled === true} onChange={(v) => void change(v)} />
+      </span>
+      <span className="min-w-0">
+        <span className="font-medium text-[var(--cf-text)]">{t("settings.debtScanTitle")}</span>
+        <span className="block leading-relaxed text-[var(--cf-text-muted)]">{t("settings.debtScanHint")}</span>
+      </span>
+    </label>
   );
 }
 

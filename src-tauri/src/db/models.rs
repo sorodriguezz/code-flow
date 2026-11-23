@@ -91,6 +91,10 @@ pub struct ReviewRunSummary {
     pub level: String,
     pub findings_count: i64,
     pub created_at: String,
+    /// The repository the run reviewed (`provider:host/owner/repo`). With an empty `project_id` it
+    /// is all there is: a review reached by link, kept by repository until the repo is cloned.
+    #[serde(default)]
+    pub repo_key: String,
 }
 
 /// The full content of one saved review run, for the in-app viewer / export.

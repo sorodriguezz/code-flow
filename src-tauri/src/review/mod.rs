@@ -18,10 +18,13 @@
 //! | [`bundle`] | The reading bundle each worker gets: whole methods, numbered, `>` on what changed. |
 //! | [`graph`] | Blast radius — who else in the repository calls the symbols this PR touched. |
 //! | [`hints`] | What the saved review memory already settled about these same files, in other PRs. |
+//! | [`calibration`] | The categories this repository keeps dismissing — a higher confidence bar, never a filter. |
 //! | [`context`] | Cutting all of that (and the PR's conversation) down to what each reviewer's files need. |
 //! | [`merge`] | Parsing the workers' findings, deduping, filtering by contract, numbering. |
 //! | [`verify`] | Grounding each finding in the code it names, and the level's refutation pass. |
 //! | [`render`] | Findings back to the canonical review Markdown the whole frontend already reads. |
+//! | [`threads`] | What the PR's own threads decided about the findings published there — synced into the memory, or offered. |
+//! | [`prescan`] · [`rules`] · [`deterministic`] | What a regex or a tool settles before the model reads: pre-marked secrets, debug leftovers, dependencies and `.env` files, and the deterministic rules' facts. |
 //!
 //! **The output format is not this module's to change.** `render` emits exactly the shape
 //! `src/lib/parseAnalysis.ts` parses and `review::merge::parse` reads back — the leading
@@ -30,13 +33,18 @@
 //! cards, or a single saved review.
 
 pub mod bundle;
+pub mod calibration;
 pub mod checkout;
 pub mod context;
 pub mod contract;
+pub mod deterministic;
 pub mod graph;
 pub mod hints;
 pub mod merge;
 pub mod outline;
 pub mod plan;
+pub mod prescan;
 pub mod render;
+pub mod rules;
+pub mod threads;
 pub mod verify;

@@ -960,6 +960,33 @@ struct LinkPr {
     diff: String,
     repo_label: String,
     clone_url: String,
+    /// The repository's memory key — the same one its project would have (see [`link_repo_key`]).
+    repo_key: String,
+}
+
+/// The repository a pull-request link points at, as the [`LinkedRepo`] its project would hold once
+/// cloned and linked — and so [`repo_key`] gives both the same memory key. That equality is the
+/// whole contract: a link review's runs are found again by the project's review of the same PR
+/// because both name the repository identically (provider, host, owner/group/org and project, repo;
+/// case-folded). `canonical` is Azure's own project/repo names: a link may address them by GUID, and
+/// a clone's remote never does.
+fn link_repo_key(target: &crate::pr_link::PrLinkTarget, canonical: Option<(&str, &str)>) -> String {
+    let link = match target {
+        crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, .. } => {
+            LinkedRepo::GitHub { host: host.clone(), owner: owner.clone(), repo: repo.clone() }
+        }
+        crate::pr_link::PrLinkTarget::GitLab { host, project, .. } => {
+            LinkedRepo::GitLab { host: host.clone(), project: project.clone() }
+        }
+        crate::pr_link::PrLinkTarget::Bitbucket { workspace, repo, .. } => {
+            LinkedRepo::Bitbucket { workspace: workspace.clone(), repo: repo.clone() }
+        }
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, .. } => {
+            let (project, repo) = canonical.unwrap_or((project, repo));
+            LinkedRepo::Azure { org: org.clone(), project: project.to_string(), repo_id: repo.to_string() }
+        }
+    };
+    repo_key(&link)
 }
 
 /// Reads a pull request and its diff from the host's API alone — no clone, no `projects` row.
@@ -972,29 +999,30 @@ async fn fetch_pr_and_diff(
             let pr = github::get_pull_request(host, owner, repo, *number, credential).await?;
             let diff = github::pull_request_diff(host, owner, repo, *number, credential).await?;
             let (repo_label, clone_url) = link_repo_coords(target, None);
-            Ok(LinkPr { pr, diff, repo_label, clone_url })
+            Ok(LinkPr { pr, diff, repo_label, clone_url, repo_key: link_repo_key(target, None) })
         }
         crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
             let pr = gitlab::get_merge_request(host, project, *number, credential).await?;
             let diff = gitlab::merge_request_diff(host, project, *number, credential).await?;
             let (repo_label, clone_url) = link_repo_coords(target, None);
-            Ok(LinkPr { pr, diff, repo_label, clone_url })
+            Ok(LinkPr { pr, diff, repo_label, clone_url, repo_key: link_repo_key(target, None) })
         }
         crate::pr_link::PrLinkTarget::Bitbucket { workspace, repo, number } => {
             let auth = bitbucket_link_auth(credential);
             let pr = bitbucket::get_pull_request(workspace, repo, *number, &auth).await?;
             let diff = bitbucket::pull_request_diff(workspace, repo, *number, &auth).await?;
             let (repo_label, clone_url) = link_repo_coords(target, None);
-            Ok(LinkPr { pr, diff, repo_label, clone_url })
+            Ok(LinkPr { pr, diff, repo_label, clone_url, repo_key: link_repo_key(target, None) })
         }
         crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
             // Canonical names, so a link carrying GUIDs still addresses the blobs endpoint.
             let detail = ado::get_pull_request(org, project, repo, *number, credential).await?;
             let diff =
                 ado::pull_request_diff(org, &detail.project_name, &detail.repo_name, *number, credential).await?;
-            let (repo_label, clone_url) =
-                link_repo_coords(target, Some((&detail.project_name, &detail.repo_name)));
-            Ok(LinkPr { pr: detail.summary, diff, repo_label, clone_url })
+            let canonical = Some((detail.project_name.as_str(), detail.repo_name.as_str()));
+            let (repo_label, clone_url) = link_repo_coords(target, canonical);
+            let repo_key = link_repo_key(target, canonical);
+            Ok(LinkPr { pr: detail.summary, diff, repo_label, clone_url, repo_key })
         }
     }
 }
@@ -1108,7 +1136,10 @@ pub async fn review_pr_from_link(
     agent_prompt: Option<String>,
     // The account to run under when the review names its own engine; `None` resolves it as usual.
     agent_account: Option<String>,
+    // The human already said "review it anyway" to a question the review asked (a promotion).
+    force: Option<bool>,
 ) -> Result<String, String> {
+    let force = force.unwrap_or(false);
     let (target, credential) = link_credentials(&db, &url)?;
 
     let (contexts, skills, config, review_prompt) = {
@@ -1123,13 +1154,28 @@ pub async fn review_pr_from_link(
         };
         // The same methodology and the same level directive the project-backed pipeline uses — a
         // review with no clone is shallower in what it can *read*, not in the rules it is held to.
-        let (_, contract) = review_pipeline::contract_for(&conn, &workspace_id, &level);
+        let (engine_config, contract) = review_pipeline::contract_for(&conn, &workspace_id, &level);
         let prompts = review_pipeline::ReviewPrompts::load(&conn, &workspace_id, &contract)?;
-        (contexts, skills, config, (prompts.for_role(None), contract.effort))
+        // The single reviewer writes the report's prose, so it is asked for what is right too.
+        let prompt = format!("{}{}", prompts.for_role(None), ai::REVIEW_POSITIVES_NOTE);
+        (contexts, skills, config, (prompt, contract.effort.clone(), engine_config, contract))
     };
-    let (review_prompt, effort) = review_prompt;
+    let (review_prompt, effort, engine_config, contract) = review_prompt;
+    let blocking = crate::review::contract::blocking_severities(&engine_config);
 
-    let LinkPr { pr, diff: diff_text, repo_label, clone_url } = fetch_pr_and_diff(&target, &credential).await?;
+    let LinkPr { pr, diff: diff_text, repo_label, clone_url, repo_key: repo } = fetch_pr_and_diff(&target, &credential).await?;
+    // A promotion asks before its first review, the same question a project's plan asks — and, like
+    // there, costs nothing and records nothing; the panel offers "review anyway" (`force`).
+    if !force {
+        let first = {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            let scope = queries::MemoryScope { project_id: None, workspace_id: &workspace_id, repo_key: &repo };
+            queries::count_review_runs(&conn, &scope, pr.id).unwrap_or(0) == 0
+        };
+        if let Some(skip) = review_pipeline::link_promotion_skip(&diff_text, &engine_config, &pr.source_branch, &pr.target_branch, first) {
+            return Ok(format!("{}{}", review_pipeline::SKIP_MARKER, skip.reason));
+        }
+    }
     let cwd = link_review_workspace(&target, &pr, &diff_text)?;
     // Best-effort, same as the project-backed review: skills are a nice-to-have, not a
     // precondition.
@@ -1145,8 +1191,47 @@ pub async fn review_pr_from_link(
         enabled_contexts.insert(0, ("Agent".to_string(), prompt.to_string()));
     }
 
-    // The conversation already open on the PR, same as the project-backed review — minus the
-    // memory half, which a link session never has (nothing is saved for a PR with no project).
+    // This pull request's memory, kept by repository: what earlier link reviews (or a clone of the
+    // same repository in this workspace) left — the findings to re-judge, the ones a human ruled on,
+    // and when it was last looked at.
+    let scope = queries::MemoryScope { project_id: None, workspace_id: &workspace_id, repo_key: &repo };
+    let (remembered, last_run_at, repo_rules) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let remembered: Vec<crate::review_memory::MemoryFinding> = queries::latest_review_findings(&conn, &scope, pr.id)
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+        let rules: Vec<crate::review_memory::FpSuppression> =
+            crate::commands::settings::load_fp_suppressions(&conn, &workspace_id)
+                .into_iter()
+                .filter(|r| r.repo_key.eq_ignore_ascii_case(&repo))
+                .collect();
+        (remembered, queries::latest_review_run_at(&conn, &scope, pr.id).ok().flatten(), rules)
+    };
+    // What this repository keeps dismissing, by category — read by its repository key, so a link
+    // review and a clone's share one history: a raised confidence bar for those (never a filter).
+    let calibration = match db.0.lock() {
+        Ok(conn) => review_pipeline::calibration_for(&conn, &workspace_id, &repo, pr.id, &engine_config.calibration),
+        Err(_) => Vec::new(),
+    };
+    let calibration_min_confidence = engine_config.calibration.min_confidence;
+    // The reviewer reads the whole diff every time — there is no clone to bound a delta with — so
+    // every previous finding still in the code comes back for a verdict.
+    let mut reevaluate: Vec<crate::review_memory::MemoryFinding> =
+        remembered.iter().filter(|f| f.needs_judgement()).cloned().collect();
+    // The debt scan, on the files the host's diff names.
+    let touched: Vec<String> = diff_text
+        .lines()
+        .filter_map(|l| l.strip_prefix("+++ b/").map(|p| p.trim().to_string()))
+        .collect();
+    let foreign_debt = match db.0.lock() {
+        Ok(conn) => foreign_debt_for(&conn, &workspace_id, &repo, pr.id, &touched),
+        Err(_) => Vec::new(),
+    };
+    reevaluate.extend(foreign_debt.iter().map(|d| d.for_review()));
+
+    // The conversation already open on the PR, same as the project-backed review.
     let mut open_threads = match &target {
         crate::pr_link::PrLinkTarget::GitHub { host, owner, repo, number } => {
             github::list_pr_comment_threads(host, owner, repo, *number, &credential).await.unwrap_or_default()
@@ -1163,36 +1248,168 @@ pub async fn review_pr_from_link(
             ado::list_pr_comment_threads(org, project, repo, *number, &credential).await.unwrap_or_default()
         }
     };
+    // What the PR's own threads decided about the findings this app published, into the memory (and
+    // its newest run) before the reviewer is told anything — same as the project-backed review. No
+    // clone means no delta, so nothing counts as "the code moved" here.
+    let azure = match &target {
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, .. } => {
+            Some((org.clone(), project.clone(), repo.clone(), credential.clone()))
+        }
+        _ => None,
+    };
+    let pr_threads = verdict_threads(azure, pr.id, &open_threads, &remembered).await;
+    let pr_readings = crate::review::threads::read(
+        &remembered,
+        &pr_threads,
+        matches!(target, crate::pr_link::PrLinkTarget::GitHub { .. }),
+    );
+    let mut remembered = remembered;
+    let pr_sync = match db.0.lock() {
+        Ok(conn) => sync_memory_from_pr(&conn, &scope, pr.id, &mut remembered, &pr_readings, None),
+        Err(_) => Default::default(),
+    };
+    // A finding the team just ruled out is not handed back for a verdict; accepted debt still is.
+    reevaluate.retain_mut(|f| match remembered.iter().find(|r| r.id == f.id && pr_sync.applied.iter().any(|s| s.id == r.id)) {
+        Some(synced) => {
+            *f = synced.clone();
+            synced.needs_judgement()
+        }
+        None => true,
+    });
     // A conversation somebody already resolved is not pending: handed over, it gets answered again.
     open_threads.retain(|thread| !thread.resolved);
-    // A link session keeps no memory, so there is no "last run" to mark comments as newer than.
-    if let Some(block) = crate::review::context::pending_comments_block(&[], &open_threads, None, crate::review::context::Audience::All) {
-        enabled_contexts.push(("Conversación abierta en el PR".to_string(), block));
-    }
+    // The same blocks the project pipeline cuts per reviewer, for the one reviewer that reads it all.
+    let inputs = crate::review::context::ReviewInputs {
+        remembered: remembered.clone(),
+        reevaluate: reevaluate.clone(),
+        threads: open_threads,
+        since: last_run_at,
+        rules: repo_rules.clone(),
+        calibration: calibration.clone(),
+        calibration_min_confidence,
+        ..Default::default()
+    };
+    enabled_contexts.extend(
+        crate::review::context::contexts_for(&inputs, &[], crate::review::context::Audience::All),
+    );
 
 
+    // The CI's line coverage, read beside the review — and only when this level would say something.
+    let coverage_threshold = contract.warn_code_coverage_below_pct;
     let result = crate::ai_runs::scoped(app.clone(), Some(job_id.clone()), async {
-        ai::review_pull_request(
-            &*config.engine,
-            &config.binary,
-            &config.model,
-            &pr.title,
-            &pr.description,
-            &enabled_contexts,
-            &diff_text,
-            &config.tools,
-            &cwd,
-            &review_prompt,
-            Some(effort.as_str()),
-        )
-        .await
+        let coverage = async {
+            if coverage_threshold == 0 {
+                return None;
+            }
+            coverage_on_link(&target, &credential).await
+        };
+        let review = async {
+            if !calibration.is_empty() {
+                if let Some(ctx) = crate::ai_runs::current() {
+                    crate::ai_runs::emit_line(
+                        &ctx,
+                        "stdout",
+                        &format!(
+                            "  calibración: {} categoría(s) que este repo viene descartando piden confianza ≥ {}",
+                            calibration.len(),
+                            calibration_min_confidence
+                        ),
+                    );
+                }
+            }
+            // The pre-scan and the deterministic rules, reading the files through the host's API —
+            // inside the run, so the job's log shows them and a cancel stops them too.
+            let deterministic = crate::review::deterministic::for_link(
+                &engine_config.deterministic,
+                &contract.level,
+                &target,
+                &credential,
+                &pr.source_branch,
+                &diff_text,
+            )
+            .await;
+            if let Some(ctx) = crate::ai_runs::current() {
+                for line in deterministic.log_lines() {
+                    crate::ai_runs::emit_line(&ctx, "stdout", &line);
+                }
+            }
+            let mut contexts = enabled_contexts.clone();
+            contexts.extend(deterministic.contexts());
+            ai::review_pull_request(
+                &*config.engine,
+                &config.binary,
+                &config.model,
+                &pr.title,
+                &pr.description,
+                &contexts,
+                &diff_text,
+                &config.tools,
+                &cwd,
+                &review_prompt,
+                Some(effort.as_str()),
+            )
+            .await
+            .map(|text| (text, deterministic))
+        };
+        let (reviewed, pct) = tokio::join!(review, coverage);
+        reviewed.map(|(text, deterministic)| (text, deterministic, pct))
     })
     .await;
+    let (result, deterministic, coverage_pct) = match result {
+        Ok((text, deterministic, pct)) => (Ok(text), deterministic, pct),
+        Err(e) => (Err(e), Default::default(), None),
+    };
 
     // A stopped run leaves nothing behind, same as the project-backed review.
     if matches!(&result, Err(e) if e.starts_with(crate::ai_runs::CANCELLED_MARKER)) {
         return result;
     }
+
+    // Reconciled against this PR's memory and saved as a run — the same as a project's review, so
+    // its findings keep their ids across iterations, a re-publish replies on their threads, and the
+    // day the repository is cloned its project picks the memory up (see `link_repo_key`).
+    let result = match result {
+        Ok(text) => match db.0.lock() {
+            Ok(conn) => {
+                let mut outcome = review_pipeline::link_outcome(
+                    &text,
+                    &contract,
+                    &repo_rules,
+                    &reevaluate,
+                    &diff_text,
+                    &calibration,
+                    calibration_min_confidence,
+                    &deterministic,
+                );
+                // Non-blocking, and only when the CI published a number below the level's line.
+                if let Some(note) = crate::review::context::coverage_note(coverage_pct, coverage_threshold) {
+                    outcome.notes.push(note);
+                }
+                Ok(finalize_review(
+                    &conn,
+                    &job_id,
+                    None,
+                    &repo_label,
+                    &repo,
+                    &workspace_id,
+                    &pr,
+                    &level,
+                    config.engine.label(),
+                    &config.model,
+                    &diff_text,
+                    "",
+                    None,
+                    None,
+                    &foreign_debt,
+                    outcome,
+                    &contract,
+                    &blocking,
+                ))
+            }
+            Err(_) => Ok(text),
+        },
+        Err(e) => Err(e),
+    };
 
     let label = link_activity_label(&pr, &repo_label);
     let meta = link_activity_meta(
@@ -1389,22 +1606,71 @@ pub async fn act_on_pr_link(
 
 /// Posts the selected findings of a repo-less review onto the pull request, addressed by link.
 ///
-/// Unlike [`publish_pr_review`] there is no saved run to reconcile against — a review with no
-/// project has nowhere to keep its memory — so every finding opens a fresh thread instead of
-/// continuing the one it opened last time. Every item is attempted even if one fails, and the
-/// outcome says which landed (the panel keeps those out of a retry).
+/// With `run_id` it is [`publish_pr_review`] by link: the run's memory (kept by repository, see
+/// `link_repo_key`) is reconciled against, so a finding continues the thread it opened last time.
+/// Without one — a review saved before link reviews kept memory — every finding opens a fresh
+/// thread. Every item is attempted even if one fails, and the outcome says which landed.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn post_pr_link_review_comment(
     db: State<'_, Db>,
     url: String,
     items: Vec<PostFindingItem>,
     post_summary: bool,
     summary: Option<String>,
+    // The saved run being published, and whether to close the threads of its resolved findings —
+    // the project publish's two arguments, for a link review now that it keeps memory.
+    run_id: Option<String>,
+    close_resolved: Option<bool>,
 ) -> Result<PublishOutcome, String> {
     let (target, credential) = link_credentials(&db, &url)?;
     let (host, number) = link_host(&target, &credential);
+    // The run this review saved, when it is one: since link reviews keep memory, the same
+    // reconciling publish a project gets — one thread per finding for the PR's whole life,
+    // "sigue presente" on the ones still there, and the resolved ones closed as fixed.
+    let stored = match run_id.as_deref().map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            queries::get_review_run(&conn, id).map_err(|e| e.to_string())?
+        }
+        None => None,
+    };
     // The link may carry GUIDs on Azure; the thread endpoints take either, so they're used as-is.
-    Ok(publish_to_host(&host, number, &items, &mut [], None, post_summary, summary.as_deref()).await)
+    let Some(run) = stored else {
+        // No memory to reconcile against (a review saved before link reviews kept one): every
+        // finding opens a fresh thread, and what is already on the PR is skipped by its text.
+        let none = |_: &crate::review_memory::MemoryFinding| -> Option<String> { None };
+        return Ok(publish_to_host(&host, number, &items, &mut [], None, post_summary, summary.as_deref(), &none).await);
+    };
+    let mut findings: Vec<crate::review_memory::MemoryFinding> = serde_json::from_str(&run.findings).unwrap_or_default();
+    let iter = run.iter.max(1) as usize;
+    let all: Vec<PostFindingItem> = if close_resolved.unwrap_or(false) {
+        items.iter().cloned().chain(resolved_closures(&findings, iter, &items)).collect()
+    } else {
+        items
+    };
+    // No clone to read the fix from: the diff the run kept is the code there is.
+    let diff = run.diff.clone();
+    let code = move |f: &crate::review_memory::MemoryFinding| -> Option<String> {
+        let (file, span) = (crate::review_memory::resolution_file(f)?, crate::review_memory::resolution_span(f)?);
+        crate::review_memory::snippet_from_diff(&diff, file, span)
+    };
+    let outcome = publish_to_host(&host, number, &all, &mut findings, Some(iter), post_summary, summary.as_deref(), &code).await;
+    {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        let json = serde_json::to_string(&findings).unwrap_or_else(|_| "[]".to_string());
+        let _ = queries::set_review_run_findings(&conn, &run.id, &json);
+    }
+    Ok(outcome)
+}
+
+/// The head commit a saved run reviewed, from its `meta` — empty for a run with no clone, or one
+/// saved before heads were recorded.
+fn run_head_sha(meta: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(meta)
+        .ok()
+        .and_then(|m| m.get("head_sha").and_then(serde_json::Value::as_str).map(str::to_string))
+        .unwrap_or_default()
 }
 
 /// A drafted PR title + body, produced by the AI from the branch diff. The frontend fills the
@@ -1799,7 +2065,10 @@ pub struct DiscardOutcome {
 /// 1. **The mark**, always. The finding turns `falso_positivo` / `ignorado` in the run's memory,
 ///    which drops it out of the active set (and so out of the Quality Gate), carries it forward
 ///    through every later re-review of this PR, and hands it back to the model as "don't raise
-///    this" (see `review_memory::discarded_block`). Passing `abierto` undoes all of that.
+///    this" (see `review_memory::discarded_block`). Or `deuda_tecnica` (a reason is required):
+///    real and accepted, so also out of the gate — but carried visibly in the report and re-judged
+///    whenever its file changes, which is how it ends up `resuelto` (paid). Passing `abierto`
+///    reopens any of them.
 /// 2. **The reply on the host** (`notify_host`), when the finding was published and has a thread:
 ///    the reason is posted to that thread and the thread is closed as *won't fix*. Without it the
 ///    rejection only exists on one machine, and the PR keeps showing an open comment nobody intends
@@ -1826,120 +2095,159 @@ pub async fn discard_pr_finding(
     let project = load_project(&db, &project_id)?;
     let link = linked_repo(&project)?;
     let repo = repo_key(&link);
-    let motivo = motivo.map(|m| m.trim().to_string()).filter(|m| !m.is_empty());
-    let discarding = matches!(estado.as_str(), "falso_positivo" | "ignorado");
 
     // Everything touching the database happens inside this scope: the guard cannot be held across
     // the host `.await` below, and the mark must be durable before the PR is told about it.
     let (thread_id, rule_added) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
-        let run = queries::get_review_run(&conn, &run_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "Review run not found".to_string())?;
-        let mut findings: Vec<crate::review_memory::MemoryFinding> =
-            serde_json::from_str(&run.findings).map_err(|e| e.to_string())?;
-        let f = findings
-            .iter_mut()
-            .find(|f| f.id == finding_id)
-            .ok_or_else(|| "Finding not found in this run".to_string())?;
-
-        if discarding {
-            f.estado = estado.clone();
-            f.motivo_descarte = motivo.clone();
-        } else {
-            // Un-mark: back to open, or posted when the finding still owns a thread.
-            f.estado = if f.thread_id.is_some() { "posteado".to_string() } else { "abierto".to_string() };
-            f.motivo_descarte = None;
-        }
-        let (thread_id, categoria, archivo) = (f.thread_id, f.categoria.clone(), f.archivo.clone());
-
-        let json = serde_json::to_string(&findings).map_err(|e| e.to_string())?;
-        queries::set_review_run_findings(&conn, &run_id, &json).map_err(|e| e.to_string())?;
-
-        // A repository rule only makes sense for a rejection, and only for a false positive:
-        // "ignorado" says *not now*, which is a call about this pull request, not about the code.
-        let rule_added = if scope_repo && estado == "falso_positivo" {
-            let mut rules = crate::commands::settings::load_fp_suppressions(&conn, &project.workspace_id);
-            // Re-marking the same finding must not stack duplicate rules onto every review's prompt.
-            let already = rules
-                .iter()
-                .any(|r| r.repo_key == repo && r.matches(&categoria, archivo.as_deref()));
-            if already {
-                false
-            } else {
-                rules.insert(
-                    0,
-                    crate::review_memory::FpSuppression {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        repo_key: repo.clone(),
-                        categoria,
-                        archivo,
-                        motivo: motivo.clone().unwrap_or_else(|| "Descartado por la persona revisora".to_string()),
-                        pr_id,
-                        created_at: chrono::Utc::now().to_rfc3339(),
-                    },
-                );
-                crate::commands::settings::save_fp_suppressions(&conn, &project.workspace_id, &rules)?;
-                true
-            }
-        } else {
-            false
-        };
-
-        (thread_id, rule_added)
+        mark_finding_locally(&conn, &project.workspace_id, &repo, pr_id, &run_id, &finding_id, &estado, motivo.clone(), scope_repo)?
     };
-
     let mut outcome = DiscardOutcome { host_notified: false, host_error: None, rule_added };
-
-    let Some(thread_id) = thread_id.filter(|_| notify_host && discarding) else {
+    let (Some(thread_id), Some(body)) = (thread_id.filter(|_| notify_host), mark_reply_body(&estado, motivo.as_deref())) else {
         return Ok(outcome);
     };
-
-    let etiqueta = if estado == "falso_positivo" { "Falso positivo" } else { "Ignorado" };
-    let cuerpo = match &motivo {
-        Some(m) => format!(
-            "🚫 **{etiqueta}** — descartado por la persona revisora.\n\n> {m}\n\n_Marcado desde CodeFlow. \
-             Este hallazgo no se volverá a reportar en las próximas revisiones._"
-        ),
-        None => format!(
-            "🚫 **{etiqueta}** — descartado por la persona revisora.\n\n_Marcado desde CodeFlow. \
-             Este hallazgo no se volverá a reportar en las próximas revisiones._"
-        ),
-    };
-
-    // Reply first, close second: a closed thread with no explanation on it is worse for the author
-    // than an open one, so the sentence has to land before the conversation is shut.
-    let host = async {
-        match &link {
-            LinkedRepo::Azure { org, project: ado_project, repo_id } => {
-                let pat = pat_for_org(org)?;
-                ado::reply_pr_thread(org, ado_project, repo_id, pr_id, thread_id, &cuerpo, &pat).await?;
-                ado::set_pr_thread_status(org, ado_project, repo_id, pr_id, thread_id, THREAD_WONT_FIX, &pat).await
-            }
-            LinkedRepo::GitHub { host, owner, repo } => {
-                let token = github_token(host)?;
-                github::reply_pr_review_comment(host, owner, repo, pr_id, thread_id, &cuerpo, &token).await?;
-                github::resolve_review_thread_for_comment(host, owner, repo, pr_id, thread_id, &token).await
-            }
-            LinkedRepo::GitLab { host, project: path } => {
-                let token = gitlab_token(host)?;
-                gitlab::reply_pr_comment(host, path, pr_id, thread_id, &cuerpo, &token).await?;
-                gitlab::resolve_discussion_for_note(host, path, pr_id, thread_id, &token).await
-            }
-            LinkedRepo::Bitbucket { workspace, repo } => {
-                let auth = bitbucket_auth(workspace)?;
-                bitbucket::reply_pr_comment(workspace, repo, pr_id, thread_id, &cuerpo, &auth).await?;
-                bitbucket::resolve_comment_thread(workspace, repo, pr_id, thread_id, &auth).await
-            }
+    let credential = match link_credential(&link) {
+        Ok(c) => c,
+        Err(e) => {
+            outcome.host_error = Some(e);
+            return Ok(outcome);
         }
-    }
-    .await;
+    };
+    notify_mark(linked_host(&link, &credential), pr_id, thread_id, &body, &mut outcome).await;
+    Ok(outcome)
+}
 
-    match host {
-        Ok(()) => outcome.host_notified = true,
-        Err(e) => outcome.host_error = Some(e),
+/// [`discard_pr_finding`] for a review reached by link: same marks, same reply on the host, the
+/// pull request addressed by its URL and the rule (if any) filed under the run's repository.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn discard_pr_link_finding(
+    db: State<'_, Db>,
+    url: String,
+    workspace_id: String,
+    run_id: String,
+    finding_id: String,
+    estado: String,
+    motivo: Option<String>,
+    scope_repo: bool,
+    notify_host: bool,
+) -> Result<DiscardOutcome, String> {
+    let (target, credential) = link_credentials(&db, &url)?;
+    let (_, number) = link_host(&target, &credential);
+    let (thread_id, rule_added) = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        // The run already knows which repository it reviewed — with Azure's canonical names, which
+        // the link itself may not carry.
+        let repo = queries::get_review_run(&conn, &run_id)
+            .ok()
+            .flatten()
+            .map(|r| crate::review_memory::run_repo_key(&r.meta))
+            .filter(|k| !k.is_empty())
+            .unwrap_or_else(|| link_repo_key(&target, None));
+        mark_finding_locally(&conn, &workspace_id, &repo, number, &run_id, &finding_id, &estado, motivo.clone(), scope_repo)?
+    };
+    let mut outcome = DiscardOutcome { host_notified: false, host_error: None, rule_added };
+    if let (Some(thread_id), Some(body)) = (thread_id.filter(|_| notify_host), mark_reply_body(&estado, motivo.as_deref())) {
+        let (host, _) = link_host(&target, &credential);
+        notify_mark(host, number, thread_id, &body, &mut outcome).await;
     }
     Ok(outcome)
+}
+
+/// The local half of marking a finding — always first, always durable before the host hears of it.
+///
+/// Moves it through [`crate::review_memory::set_finding_state`] (so a debt without a reason is
+/// refused here, like everywhere else), and for a false positive with `scope_repo` files the
+/// standing repository rule. Returns the finding's thread and whether a rule was added.
+#[allow(clippy::too_many_arguments)]
+fn mark_finding_locally(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    repo: &str,
+    pr_id: i64,
+    run_id: &str,
+    finding_id: &str,
+    estado: &str,
+    motivo: Option<String>,
+    scope_repo: bool,
+) -> Result<(Option<i64>, bool), String> {
+    let run = queries::get_review_run(conn, run_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Review run not found".to_string())?;
+    let mut findings: Vec<crate::review_memory::MemoryFinding> =
+        serde_json::from_str(&run.findings).map_err(|e| e.to_string())?;
+    let f = findings
+        .iter_mut()
+        .find(|f| f.id == finding_id)
+        .ok_or_else(|| "Finding not found in this run".to_string())?;
+    // Anything that is not a discard or a debt is a reopen: back to active.
+    let target = if matches!(estado, "falso_positivo" | "ignorado" | crate::review_memory::ESTADO_DEUDA) { estado } else { "abierto" };
+    crate::review_memory::set_finding_state(f, target, motivo.clone(), run.iter.max(1) as usize)?;
+    let (thread_id, categoria, archivo) = (f.thread_id, f.categoria.clone(), f.archivo.clone());
+
+    let json = serde_json::to_string(&findings).map_err(|e| e.to_string())?;
+    queries::set_review_run_findings(conn, run_id, &json).map_err(|e| e.to_string())?;
+
+    // A repository rule only makes sense for a rejection, and only for a false positive:
+    // "ignorado" says *not now*, and debt says *real, later* — calls about this PR, not the code.
+    if !(scope_repo && estado == "falso_positivo") {
+        return Ok((thread_id, false));
+    }
+    let mut rules = crate::commands::settings::load_fp_suppressions(conn, workspace_id);
+    // Re-marking the same finding must not stack duplicate rules onto every review's prompt.
+    if rules.iter().any(|r| r.repo_key == repo && r.matches(&categoria, archivo.as_deref())) {
+        return Ok((thread_id, false));
+    }
+    rules.insert(
+        0,
+        crate::review_memory::FpSuppression {
+            id: uuid::Uuid::new_v4().to_string(),
+            repo_key: repo.to_string(),
+            categoria,
+            archivo,
+            motivo: motivo.unwrap_or_else(|| "Descartado por la persona revisora".to_string()),
+            pr_id,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        },
+    );
+    crate::commands::settings::save_fp_suppressions(conn, workspace_id, &rules)?;
+    Ok((thread_id, true))
+}
+
+/// What a mark says on the finding's thread before closing it — `None` for a reopen, which says
+/// nothing (the thread is the team's, and reopening a finding here is a note to this reviewer).
+fn mark_reply_body(estado: &str, motivo: Option<&str>) -> Option<String> {
+    let motivo = motivo.map(str::trim).filter(|m| !m.is_empty());
+    match estado {
+        crate::review_memory::ESTADO_DEUDA => Some(format!(
+            "🧾 **Deuda técnica aceptada:** {}\n\n_Marcado desde CodeFlow. Sigue en el código: se mostrará en las \
+             próximas revisiones como deuda y se dará por saldada cuando se corrija._",
+            motivo.unwrap_or("aceptada por el equipo")
+        )),
+        "falso_positivo" | "ignorado" => {
+            let etiqueta = if estado == "falso_positivo" { "Falso positivo" } else { "Ignorado" };
+            let razon = motivo.map(|m| format!("\n\n> {m}")).unwrap_or_default();
+            Some(format!(
+                "🚫 **{etiqueta}** — descartado por la persona revisora.{razon}\n\n_Marcado desde CodeFlow. \
+                 Este hallazgo no se volverá a reportar en las próximas revisiones._"
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The host half of a mark: the reply, then the thread closed as *won't fix* where the host tells
+/// that apart from *fixed* (Azure) — a debt or a rejection is not a fix, and the record must not say
+/// it was. Reply first, close second: a closed thread with no explanation on it is worse for the
+/// author than an open one. Failures land in `outcome`; the mark stands either way.
+async fn notify_mark(host: ThreadHost<'_>, pr_id: i64, thread_id: i64, body: &str, outcome: &mut DiscardOutcome) {
+    match reply_and_close_thread(host, pr_id, thread_id, Some(body), true).await {
+        Ok(done) => {
+            outcome.host_notified = done.replied && done.resolved;
+            outcome.host_error = done.error;
+        }
+        Err(e) => outcome.host_error = Some(e),
+    }
 }
 
 /// What reviewing this PR at `level` would read and roughly cost, without running it.
@@ -1968,7 +2276,8 @@ pub async fn preview_pr_review(
             .filter(|c| c.enabled)
             .map(|c| c.name.len() + c.content.len() + 4)
             .sum();
-        let prev = queries::latest_review_head(&conn, &project_id, pr_id, &repo).ok().flatten();
+        let scope = queries::MemoryScope { project_id: Some(&project_id), workspace_id: &workspace_id, repo_key: &repo };
+        let prev = queries::latest_review_head(&conn, &scope, pr_id).ok().flatten();
         (engine_config, contract, prompts, context_chars, prev)
     };
     let pr = fetch_linked_pull_request(&link, pr_id).await?;
@@ -1996,6 +2305,7 @@ pub async fn preview_pr_review(
             &pr.status,
             changed.as_deref(),
             preamble_chars,
+            Some((pr.source_branch.as_str(), pr.target_branch.as_str())),
         ))
     })
     .await
@@ -2096,10 +2406,13 @@ pub async fn review_pull_request(
     // because the *ids of the threads this app opened* are part of the skip decision: CodeFlow's own
     // published findings are comments on the PR too, and they must not read as somebody answering.
     let head_sha = git::diff::resolve_sha(&project.local_path, &head_ref).unwrap_or_default();
+    // By repository, not only by project: a review of this PR reached earlier by its link, before
+    // the repository was cloned here, is this PR's memory too.
+    let scope = queries::MemoryScope { project_id: Some(&project_id), workspace_id: &workspace_id, repo_key: &repo };
     let (prev_head, prev_run, last_run_at, remembered, repo_rules) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let remembered: Vec<crate::review_memory::MemoryFinding> =
-            queries::latest_review_findings(&conn, &project_id, pr_id, &repo)
+            queries::latest_review_findings(&conn, &scope, pr_id)
                 .ok()
                 .flatten()
                 .and_then(|json| serde_json::from_str(&json).ok())
@@ -2112,9 +2425,9 @@ pub async fn review_pull_request(
                 .filter(|r| r.repo_key == repo)
                 .collect();
         (
-            queries::latest_review_head(&conn, &project_id, pr_id, &repo).ok().flatten(),
-            queries::latest_review_depth(&conn, &project_id, pr_id, &repo).ok().flatten(),
-            queries::latest_review_run_at(&conn, &project_id, pr_id, &repo).ok().flatten(),
+            queries::latest_review_head(&conn, &scope, pr_id).ok().flatten(),
+            queries::latest_review_depth(&conn, &scope, pr_id).ok().flatten(),
+            queries::latest_review_run_at(&conn, &scope, pr_id).ok().flatten(),
             remembered,
             repo_rules,
         )
@@ -2161,12 +2474,25 @@ pub async fn review_pull_request(
             Err(_) => (Vec::new(), None),
         },
     };
+    // What the PR's own threads decided about the findings this app published — read from every
+    // thread, resolved and closed ones included, since that is where a dismissal lives. Applied to
+    // the memory below, once the delta is known (a text-only verdict on code that moved is re-judged).
+    let azure = match &link {
+        LinkedRepo::Azure { org, project: ado_project, repo_id } => {
+            pat_for_org(org).ok().map(|pat| (org.clone(), ado_project.clone(), repo_id.clone(), pat))
+        }
+        _ => None,
+    };
+    let pr_threads = verdict_threads(azure, pr_id, &open_threads, &remembered).await;
+    let pr_readings = crate::review::threads::read(&remembered, &pr_threads, matches!(link, LinkedRepo::GitHub { .. }));
     // What the PR still has open. Azure and Bitbucket never list a resolved thread; GitHub and GitLab
     // do, and a conversation somebody resolved — handed to the reviewers as pending — got answered
     // again, and a reply in it counted as "something new to review".
     open_threads.retain(|thread| !thread.resolved);
     let ours: std::collections::HashSet<i64> = remembered.iter().filter_map(|f| f.thread_id).collect();
     let new_comments = comments_since(&open_threads, last_run_at.as_deref(), &ours, me.as_deref());
+    // A verdict to sync, or a fix claimed since the last run, is new input even on the same commit.
+    let pr_spoke = crate::review::threads::worth_a_rerun(&pr_readings, last_run_at.as_deref());
 
     // Same head *and* nothing new said on the PR — skip the whole (costly) analysis. Unless there is
     // something the last run did not do: it was shallower than what is asked for now, or it lost a
@@ -2174,7 +2500,7 @@ pub async fn review_pull_request(
     if let Some(prev) = &prev_head {
         let (prev_level, prev_incomplete) = prev_run.clone().unwrap_or_default();
         let deeper = level_rank(&level) > level_rank(&prev_level);
-        if !force && !deeper && !prev_incomplete && !head_sha.is_empty() && prev == &head_sha && new_comments == 0 {
+        if !force && !deeper && !prev_incomplete && !head_sha.is_empty() && prev == &head_sha && new_comments == 0 && !pr_spoke {
             let short = &head_sha[..head_sha.len().min(8)];
             return Ok(format!(
                 "🔁 Sin cambios desde la última revisión (mismo commit `{short}`, nivel {prev_level}). No se volvió a analizar."
@@ -2187,6 +2513,33 @@ pub async fn review_pull_request(
         Some(prev) if !prev.is_empty() => git::diff::changed_files_between(&project.local_path, prev, &head_ref).ok(),
         _ => None,
     };
+    // …and which lines, so a new finding on code that was already there last time is called late.
+    let delta_lines = match &prev_head {
+        Some(prev) if !prev.is_empty() && changed_files.is_some() => {
+            git::diff::get_branch_diff(&project.local_path, prev, &head_ref).ok().map(|files| delta_lines_of(&files))
+        }
+        _ => None,
+    };
+    // The team's verdicts, into the memory (and its newest run) before anything is handed out: a
+    // finding they dismissed is not re-judged and joins the "don't raise these" block; one they say
+    // is fixed is re-read even if its file did not move.
+    let mut remembered = remembered;
+    let pr_sync = match db.0.lock() {
+        Ok(conn) => sync_memory_from_pr(&conn, &scope, pr_id, &mut remembered, &pr_readings, changed_files.as_deref()),
+        Err(_) => Default::default(),
+    };
+    let changed_files = with_rejudged(changed_files, &remembered, &pr_sync.rejudge);
+    // Every previous finding still in the code whose file this run re-reads goes back to the
+    // reviewer that reads it, for a verdict — the only way one becomes `resuelto`.
+    let mut reevaluate: Vec<crate::review_memory::MemoryFinding> = remembered
+        .iter()
+        .filter(|f| f.needs_judgement())
+        .filter(|f| match (&changed_files, &f.archivo) {
+            (Some(changed), Some(file)) => changed.iter().any(|c| crate::review::outline::same_path(c, file)),
+            _ => true,
+        })
+        .cloned()
+        .collect();
 
     // Also best-effort: skills are a nice-to-have for the review, not a precondition —
     // don't block the review if e.g. the project directory is read-only.
@@ -2204,6 +2557,26 @@ pub async fn review_pull_request(
         .collect();
     let hints = match db.0.lock() {
         Ok(conn) => review_pipeline::hints_for(&conn, &workspace_id, &repo, pr_id, &touched),
+        Err(_) => Vec::new(),
+    };
+    // The debt scan (opt-in): debt accepted in other PRs of this repository, on files this one
+    // touches — and, on a re-review, re-reads — comes back for a verdict like this PR's own.
+    let foreign_debt = match db.0.lock() {
+        Ok(conn) => foreign_debt_for(&conn, &workspace_id, &repo, pr_id, &touched),
+        Err(_) => Vec::new(),
+    };
+    reevaluate.extend(
+        foreign_debt
+            .iter()
+            .filter(|d| match (&changed_files, &d.finding.archivo) {
+                (Some(changed), Some(file)) => changed.iter().any(|c| crate::review::outline::same_path(c, file)),
+                _ => true,
+            })
+            .map(|d| d.for_review()),
+    );
+    // And what it keeps dismissing, by category: a raised confidence bar for those (never a filter).
+    let calibration = match db.0.lock() {
+        Ok(conn) => review_pipeline::calibration_for(&conn, &workspace_id, &repo, pr_id, &engine_config.calibration),
         Err(_) => Vec::new(),
     };
     // The reference repositories the workspace switched on: where the blast radius also looks for
@@ -2244,16 +2617,23 @@ pub async fn review_pull_request(
     let mut inputs = Some(crate::review::context::ReviewInputs {
         contexts: enabled_contexts,
         remembered: remembered.clone(),
+        reevaluate,
         threads: open_threads,
         since: last_run_at.clone(),
         rules: repo_rules,
         hints,
+        calibration,
+        calibration_min_confidence: engine_config.calibration.min_confidence,
         checks: None,
         conventions,
         references,
         references_reachable,
     });
     let credential = link_credential(&link).ok();
+    // The CI's line coverage, read beside the review rather than before it — the reviewers do not
+    // wait on it — and only when this level would say something about it.
+    let mut coverage_pct: Option<f64> = None;
+    let coverage_threshold = contract.warn_code_coverage_below_pct;
 
     // Everything from here is the pipeline's: the plan, the bundles, the reviewers and the merge.
     // Same identity for the job row and the run, so the row can stream its own output and stop it.
@@ -2297,6 +2677,7 @@ pub async fn review_pull_request(
             tools_cwd: &tools_cwd,
             head_ref: &head_ref,
             target_ref: &pr.target_branch,
+            source_branch: &pr.source_branch,
             pr_title: &pr.title,
             pr_description: &pr.description,
             pr_status: &pr.status,
@@ -2308,7 +2689,15 @@ pub async fn review_pull_request(
             force,
             cost: Default::default(),
         };
-        review_pipeline::run(request, &diff_files).await
+        let coverage = async {
+            if coverage_threshold == 0 {
+                return None;
+            }
+            coverage_on(&link, credential.as_deref(), pr_id, checks.as_ref()).await
+        };
+        let (result, pct) = tokio::join!(review_pipeline::run(request, &diff_files), coverage);
+        coverage_pct = pct;
+        result
     })
     .await;
 
@@ -2327,7 +2716,13 @@ pub async fn review_pull_request(
                 false => format!("⏭️ {}", skip.reason),
             })
         }
-        Ok(review_pipeline::Pipeline::Reviewed(outcome)) => Ok(outcome),
+        Ok(review_pipeline::Pipeline::Reviewed(mut outcome)) => {
+            // Non-blocking, and only when the CI published a number below the level's line.
+            if let Some(note) = crate::review::context::coverage_note(coverage_pct, coverage_threshold) {
+                outcome.notes.push(note);
+            }
+            Ok(outcome)
+        }
         Err(e) => Err(e),
     };
 
@@ -2343,7 +2738,8 @@ pub async fn review_pull_request(
             let text = finalize_review(
                 &conn,
                 &job_id,
-                &project,
+                Some(project.id.as_str()),
+                &project.name,
                 &repo,
                 &workspace_id,
                 &pr,
@@ -2353,6 +2749,8 @@ pub async fn review_pull_request(
                 &diff_text,
                 &head_sha,
                 changed_files.as_deref(),
+                delta_lines.as_ref(),
+                &foreign_debt,
                 *outcome,
                 &contract,
                 &blocking,
@@ -2379,6 +2777,74 @@ pub async fn review_pull_request(
         );
     }
     result
+}
+
+/// The debt scan's input: accepted debt from the newest run of every other PR of this repository, on
+/// the files this one touches. Empty when the workspace has not switched the scan on.
+fn foreign_debt_for(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    repo: &str,
+    pr_id: i64,
+    touched: &[String],
+) -> Vec<crate::review_memory::ForeignDebt> {
+    if !crate::commands::settings::debt_scan_enabled(conn, workspace_id) || touched.is_empty() {
+        return Vec::new();
+    }
+    let runs = queries::latest_runs_of_other_prs(conn, workspace_id, repo, pr_id).unwrap_or_default();
+    crate::review_memory::foreign_debt(&runs, touched)
+}
+
+/// Settles, in the run each one came from, the carried-in debt this review's reviewer judged paid —
+/// so no later review of either PR pays to look at it again. Best-effort, like the run's own save.
+fn settle_foreign_debt(
+    conn: &rusqlite::Connection,
+    debts: &[crate::review_memory::ForeignDebt],
+    verdicts: &std::collections::HashMap<String, crate::review_memory::PriorVerdict>,
+    by_pr: i64,
+) {
+    for debt in debts {
+        let Some(verdict) = verdicts.get(&debt.alias).filter(|v| v.resolved) else { continue };
+        let Ok(Some(run)) = queries::get_review_run(conn, &debt.run_id) else { continue };
+        let mut findings: Vec<crate::review_memory::MemoryFinding> = serde_json::from_str(&run.findings).unwrap_or_default();
+        if crate::review_memory::settle_foreign_debt(&mut findings, debt, verdict, by_pr) {
+            if let Ok(json) = serde_json::to_string(&findings) {
+                let _ = queries::set_review_run_findings(conn, &debt.run_id, &json);
+            }
+        }
+    }
+}
+
+/// The new-side lines a diff added, and where it deleted — per file, as ranges — for telling a late
+/// finding (on code the delta never touched) from a new one.
+fn delta_lines_of(files: &[git::diff::FileDiffInfo]) -> crate::review_memory::DeltaLines {
+    let mut out = crate::review_memory::DeltaLines::new();
+    for file in files {
+        let Some(path) = file.new_path.clone().or_else(|| file.old_path.clone()) else { continue };
+        let mut spans: Vec<(u32, u32)> = Vec::new();
+        for hunk in &file.hunks {
+            let mut last_new: u32 = 0;
+            for line in &hunk.lines {
+                let at = match line.origin.as_str() {
+                    "+" => line.new_lineno,
+                    // A deletion sits right after the last new-side line seen.
+                    "-" => Some(last_new + 1),
+                    _ => None,
+                };
+                if let Some(n) = line.new_lineno {
+                    last_new = n;
+                }
+                if let Some(n) = at {
+                    match spans.last_mut() {
+                        Some(span) if n <= span.1 + 1 => span.1 = span.1.max(n),
+                        _ => spans.push((n, n)),
+                    }
+                }
+            }
+        }
+        out.insert(path, spans);
+    }
+    out
 }
 
 /// How many comments *somebody else* wrote on this pull request after the last review ran.
@@ -2412,6 +2878,76 @@ fn comments_since(
         .count()
 }
 
+/// Every thread of the PR as `review::threads` reads them for verdicts. On Azure they are fetched
+/// again *with their status* — the listing a review gets drops closed threads, and a thread closed
+/// as won't fix or by design is exactly where a dismissal lives. Elsewhere the listing already holds
+/// resolved conversations, which is all those hosts can say. Best-effort, and skipped when nothing
+/// remembered is active: then there is nothing a verdict could move.
+async fn verdict_threads(
+    // Azure's org, project, repository and PAT, when the PR is there.
+    azure: Option<(String, String, String, String)>,
+    pr_id: i64,
+    listed: &[ado::PrCommentThread],
+    remembered: &[crate::review_memory::MemoryFinding],
+) -> Vec<crate::review::threads::HostThread> {
+    use crate::review::threads::HostThread;
+    if !remembered.iter().any(|f| f.is_active()) {
+        return Vec::new();
+    }
+    match azure {
+        Some((org, project, repo, pat)) => ado::list_pr_thread_states(&org, &project, &repo, pr_id, &pat)
+            .await
+            .map(|threads| threads.iter().map(HostThread::from_azure).collect())
+            .unwrap_or_else(|_| listed.iter().map(HostThread::from_listed).collect()),
+        None => listed.iter().map(HostThread::from_listed).collect(),
+    }
+}
+
+/// Applies what the PR's threads decided (`review::threads::apply`) to this PR's memory before a
+/// re-review, and writes it back to the newest run — the same row a mark made in the app writes to —
+/// so the reviewers' context, the reconciliation that reads the previous run back, and any other
+/// client all see the team's verdict. `changed_files` is what decides whether a text-only dismissal
+/// may apply (the delta beats words).
+fn sync_memory_from_pr(
+    conn: &rusqlite::Connection,
+    scope: &queries::MemoryScope,
+    pr_id: i64,
+    remembered: &mut [crate::review_memory::MemoryFinding],
+    readings: &[(String, crate::review::threads::FindingReading)],
+    changed_files: Option<&[String]>,
+) -> crate::review::threads::SyncOutcome {
+    // Nothing read must still clear stale offers — but only when there were readings to compare to,
+    // or a lost thread list would wipe every pending verdict.
+    if readings.is_empty() && !remembered.iter().any(|f| f.is_active() && f.hilo_pr.veredicto_pr.is_some()) {
+        return Default::default();
+    }
+    let iter = queries::count_review_runs(conn, scope, pr_id).unwrap_or(0) as usize + 1;
+    let outcome = crate::review::threads::apply(remembered, readings, changed_files, iter);
+    if outcome.changed {
+        if let (Ok(Some(run_id)), Ok(json)) = (queries::latest_review_run_id_in(conn, scope, pr_id), serde_json::to_string(&remembered)) {
+            let _ = queries::set_review_run_findings(conn, &run_id, &json);
+        }
+    }
+    outcome
+}
+
+/// The delta a re-review reads, widened by the files of the findings the PR asked to re-judge ("Corregido
+/// en …") — so their reviewer reads them and its verdict counts even though the code did not move.
+/// `None` stays `None`: a full review reads everything already.
+fn with_rejudged(
+    changed: Option<Vec<String>>,
+    remembered: &[crate::review_memory::MemoryFinding],
+    ids: &[String],
+) -> Option<Vec<String>> {
+    let mut changed = changed?;
+    for file in remembered.iter().filter(|f| ids.contains(&f.id)).filter_map(|f| f.archivo.as_ref()) {
+        if !changed.iter().any(|c| crate::review::outline::same_path(c, file)) {
+            changed.push(file.clone());
+        }
+    }
+    Some(changed)
+}
+
 /// Turns one finished pipeline run into the review the user reads, and saves it.
 ///
 /// The order here is the whole point, and it is why rendering does not happen inside the pipeline.
@@ -2427,7 +2963,10 @@ fn comments_since(
 fn finalize_review(
     conn: &rusqlite::Connection,
     job_id: &str,
-    project: &Project,
+    // The local project that ran it — `None` for a review reached by link — and the name the run
+    // goes by (the project's, or the repository label of a link review).
+    project_id: Option<&str>,
+    project_name: &str,
     // The repository this run reviewed (see `repo_key`) — both the scope its memory is read back
     // under and what gets stored, so the two can never disagree.
     repo: &str,
@@ -2439,6 +2978,10 @@ fn finalize_review(
     diff_text: &str,
     head_sha: &str,
     changed_files: Option<&[String]>,
+    // The lines that changed since the previous run, for marking late findings (see `Rereview`).
+    delta_lines: Option<&crate::review_memory::DeltaLines>,
+    // Debt from other PRs this run carried in (the debt scan) — reported, and settled when paid.
+    foreign_debt: &[crate::review_memory::ForeignDebt],
     mut outcome: review_pipeline::PipelineOutcome,
     contract: &crate::review::contract::LevelContract,
     blocking: &[crate::review::contract::Severity],
@@ -2446,12 +2989,13 @@ fn finalize_review(
     use crate::review::render;
     use crate::review_memory as mem;
 
-    let prior = queries::count_review_runs(conn, &project.id, pr.id, repo).unwrap_or(0) as usize;
+    let scope = queries::MemoryScope { project_id, workspace_id, repo_key: repo };
+    let prior = queries::count_review_runs(conn, &scope, pr.id).unwrap_or(0) as usize;
     let mut findings = std::mem::take(&mut outcome.findings);
     let projected: Vec<mem::MemoryFinding> = findings.iter().map(|f| f.to_memory()).collect();
 
     let (mut remembered, delta) = if prior > 0 {
-        let prev: Vec<mem::MemoryFinding> = queries::latest_review_findings(conn, &project.id, pr.id, repo)
+        let prev: Vec<mem::MemoryFinding> = queries::latest_review_findings(conn, &scope, pr.id)
             .ok()
             .flatten()
             .and_then(|json| serde_json::from_str(&json).ok())
@@ -2460,7 +3004,13 @@ fn finalize_review(
         // their bundles — must not read as fixed just because nobody re-reported them.
         let unread_files: Vec<String> = outcome.unreviewed.iter().chain(outcome.degraded.iter()).cloned().collect();
         let unread = mem::Unread { files: &unread_files, unlocated: outcome.unlocated_unread };
-        let (merged, d) = mem::reconcile_with(&prev, &projected, prior, changed_files, unread);
+        let rereview = mem::Rereview {
+            changed_files,
+            unread,
+            verdicts: Some(&outcome.prior_verdicts),
+            delta_lines,
+        };
+        let (merged, d) = mem::reconcile_with(&prev, &projected, prior, rereview);
         (merged, Some(d))
     } else {
         let mut first = projected;
@@ -2490,6 +3040,7 @@ fn finalize_review(
         finding.resuelto_en_iter = stored.resuelto_en_iter;
         finding.motivo_descarte = stored.motivo_descarte.clone();
         finding.delta = stored.delta.clone();
+        finding.tardio = stored.tardio;
         stored.comentario_md = render::comment_markdown(finding, &pr.provider);
     }
 
@@ -2501,7 +3052,7 @@ fn finalize_review(
     let carried: Vec<usize> = (carried_from..remembered.len()).filter(|&i| remembered[i].is_active()).collect();
     if !carried.is_empty() {
         let earlier: Vec<Vec<crate::review::merge::Finding>> =
-            queries::review_reports_for_pr(conn, &project.id, pr.id, repo)
+            queries::review_reports_for_pr(conn, &scope, pr.id)
                 .unwrap_or_default()
                 .iter()
                 .map(|md| crate::review::merge::parse(md))
@@ -2536,6 +3087,7 @@ fn finalize_review(
             failed_passes: &outcome.failed_passes,
             checking: outcome.checking,
             carried: carried_count,
+            notes: &outcome.notes,
         },
     );
 
@@ -2545,6 +3097,14 @@ fn finalize_review(
         Some(section) => format!("{body}{section}"),
         None => body,
     };
+    if let Some(section) = mem::foreign_debt_section(foreign_debt, &outcome.prior_verdicts) {
+        text.push_str(&section);
+    }
+    // What this re-review took from the PR's own threads, said up front: the reader must be able to
+    // tell a state the team decided on the PR from one this app decided.
+    if let Some(lines) = crate::review::threads::report_lines(&remembered, prior + 1) {
+        text = format!("{lines}{text}");
+    }
     if let Some(d) = &delta {
         text = format!("{}{}", mem::delta_banner(d), text);
     }
@@ -2565,8 +3125,8 @@ fn finalize_review(
         level: level.to_string(),
         engine: engine_label.to_string(),
         model: model.to_string(),
-        project_id: project.id.clone(),
-        project_name: project.name.clone(),
+        project_id: project_id.unwrap_or_default().to_string(),
+        project_name: project_name.to_string(),
         repo_key: repo.to_string(),
         workspace_id: workspace_id.to_string(),
         timestamp: chrono::Local::now().to_rfc3339(),
@@ -2586,15 +3146,19 @@ fn finalize_review(
         incomplete: !outcome.unreviewed.is_empty() || !outcome.failed_passes.is_empty(),
         // Nothing to say for a run whose passes never reached an engine.
         cost: (outcome.cost.passes > 0).then(|| outcome.cost.clone()),
+        // What calibration and which deterministic rules shaped this run, as they were then.
+        calibration: outcome.calibration.take(),
+        rules: std::mem::take(&mut outcome.rules),
     };
 
     let meta_json = serde_json::to_string(&meta).unwrap_or_else(|_| "{}".to_string());
     let findings_json = serde_json::to_string(&remembered).unwrap_or_else(|_| "[]".to_string());
     if let Err(e) = queries::add_review_run(
-        conn, job_id, &project.id, workspace_id, pr.id, iter as i64, level, &meta_json, &text, diff_text, &findings_json,
+        conn, job_id, project_id, workspace_id, repo, pr.id, iter as i64, level, &meta_json, &text, diff_text, &findings_json,
     ) {
         eprintln!("failed to save review memory: {e}");
     }
+    settle_foreign_debt(conn, foreign_debt, &outcome.prior_verdicts, pr.id);
 
     text
 }
@@ -2828,11 +3392,16 @@ async fn publish_project_review(
     let link = linked_repo(&project)?;
 
     // Stored findings are the source of truth for existing thread ids / state.
-    let (mut findings, iter): (Vec<crate::review_memory::MemoryFinding>, usize) = {
+    let (mut findings, iter, head, diff): (Vec<crate::review_memory::MemoryFinding>, usize, String, String) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         match queries::get_review_run(&conn, run_id).map_err(|e| e.to_string())? {
-            Some(r) => (serde_json::from_str(&r.findings).unwrap_or_default(), r.iter.max(1) as usize),
-            None => (Vec::new(), 1),
+            Some(r) => (
+                serde_json::from_str(&r.findings).unwrap_or_default(),
+                r.iter.max(1) as usize,
+                run_head_sha(&r.meta),
+                r.diff,
+            ),
+            None => (Vec::new(), 1, String::new(), String::new()),
         }
     };
 
@@ -2846,7 +3415,18 @@ async fn publish_project_review(
     } else {
         items
     };
-    let outcome = publish_to_host(&host, pr_id, items, &mut findings, Some(iter), post_summary, summary).await;
+    // The code that fixed a resolved finding, from the commit the run reviewed — or, when that is
+    // not in the clone any more, from the diff the run kept.
+    let local_path = project.local_path.clone();
+    let code = move |f: &crate::review_memory::MemoryFinding| -> Option<String> {
+        let (file, span) = (crate::review_memory::resolution_file(f)?, crate::review_memory::resolution_span(f)?);
+        let from_clone = (!head.is_empty())
+            .then(|| git::diff::file_at_ref(&local_path, &head, file).ok())
+            .flatten()
+            .and_then(|content| crate::review_memory::snippet_from_content(&content, span));
+        from_clone.or_else(|| crate::review_memory::snippet_from_diff(&diff, file, span))
+    };
+    let outcome = publish_to_host(&host, pr_id, items, &mut findings, Some(iter), post_summary, summary, &code).await;
 
     // Write back the thread ids / states just changed — before anything else can fail: a thread that
     // exists on the pull request and not in the memory is how the next publish opens a duplicate.
@@ -3096,6 +3676,7 @@ enum Step {
 /// could not: GitHub's new inline comments go out as **one review** (one notification for the
 /// author, not one per finding), a review with no memory skips what is already on the PR, and the
 /// summary **edits** the one this user left last time instead of piling up a new one per publish.
+#[allow(clippy::too_many_arguments)]
 async fn publish_to_host(
     host: &ThreadHost<'_>,
     pr_id: i64,
@@ -3104,6 +3685,9 @@ async fn publish_to_host(
     iter: Option<usize>,
     post_summary: bool,
     summary: Option<&str>,
+    // The code that fixed a resolved finding, when it can be read — shown on its thread under the
+    // resolution (`review_memory::resolution_note`).
+    code: &(dyn Fn(&crate::review_memory::MemoryFinding) -> Option<String> + Send + Sync),
 ) -> PublishOutcome {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let azure = matches!(host, ThreadHost::Azure { .. });
@@ -3229,7 +3813,13 @@ async fn publish_to_host(
                 let about = (*general && !azure).then_some(findings[k].id.as_str());
                 // A fix announced a run late still names the iteration that fixed it.
                 let when = if resolved { findings[k].resuelto_en_iter.or(iter) } else { iter };
-                let text = follow_up_text(azure, resolved, when.unwrap_or(1), &today, about);
+                let mut text = follow_up_text(azure, resolved, when.unwrap_or(1), &today, about);
+                if resolved {
+                    // What fixed it, and the code that does — "resuelto" alone asks the author to
+                    // take the tool's word for it.
+                    let snippet = code(&findings[k]);
+                    text.push_str(&crate::review_memory::resolution_note(&findings[k], snippet.as_deref()));
+                }
                 match host.follow_up(pr_id, *thread, &text, *general).await {
                     Ok(()) => {
                         record_published(&mut findings[k], iter, None);
@@ -3432,6 +4022,139 @@ pub async fn act_on_pull_request(
     Ok(PrActionOutcome { pr, activity })
 }
 
+// ---------------------------------------------------------------------------
+// Approving on the strength of a review
+// ---------------------------------------------------------------------------
+
+/// Who the host will record a decision taken from here as — the account behind the credential.
+///
+/// What the approval's confirmation names before anything is sent: approving is an act in someone's
+/// name, and "approve as whoever this token happens to be" is not a question a person can answer
+/// yes to. `None` only on Bitbucket, whose access tokens are not a person and cannot say who they
+/// are; every other host failing to answer is an error, since the approval would fail the same way.
+async fn approver_on(host: &ThreadHost<'_>) -> Result<Option<String>, String> {
+    match host {
+        ThreadHost::Azure { org, pat, .. } => ado::authenticated_identity(org, pat).await.map(Some),
+        ThreadHost::GitHub { host, token, .. } => {
+            github::get_authenticated_user(host, token).await.map(|login| Some(format!("@{login}")))
+        }
+        ThreadHost::GitLab { host, token, .. } => {
+            gitlab::get_authenticated_user(host, token).await.map(|user| Some(format!("@{user}")))
+        }
+        ThreadHost::Bitbucket { auth, .. } => Ok(bitbucket::get_authenticated_user(auth)
+            .await
+            .ok()
+            .map(|user| user.display_name)
+            .filter(|name| !name.trim().is_empty())),
+    }
+}
+
+/// The account an approval of this pull request would be cast as — a project's PR by
+/// `project_id`, a PR reached by link by `url`. Asked by the approval's confirmation, right before
+/// it is shown.
+#[tauri::command]
+pub async fn pr_approval_account(
+    db: State<'_, Db>,
+    project_id: Option<String>,
+    url: Option<String>,
+) -> Result<Option<String>, String> {
+    if let Some(project_id) = project_id.filter(|id| !id.is_empty()) {
+        let project = load_project(&db, &project_id)?;
+        let link = linked_repo(&project)?;
+        let credential = link_credential(&link)?;
+        return approver_on(&linked_host(&link, &credential)).await;
+    }
+    let url = url.filter(|u| !u.is_empty()).ok_or_else(|| "no pull request to approve".to_string())?;
+    let (target, credential) = link_credentials(&db, &url)?;
+    let (host, _) = link_host(&target, &credential);
+    approver_on(&host).await
+}
+
+/// What approving from a review left behind: the PR as the host reports it now, the Activity row
+/// the decision was filed as (a project's `job_history` row or a workspace's — the two decision
+/// commands' own), the account it was cast as, and whether the run's memory now records it.
+#[derive(Serialize)]
+pub struct PrApprovalOutcome {
+    pub pr: ado::PullRequestSummary,
+    pub activity: serde_json::Value,
+    pub account: Option<String>,
+    /// False when there was no saved run to write it to (a review reached by link keeps none).
+    pub recorded: bool,
+}
+
+/// Approves the pull request because a review of it passed — and writes into that run's memory who
+/// approved, when, and under which gate.
+///
+/// The same host call as the decision menu's approve (`act_on_pull_request` / `act_on_pr_link`), so
+/// the per-host mapping lives in one place: Azure's reviewer vote 10, GitHub's APPROVE review,
+/// GitLab's `/approve`, Bitbucket's `/approve`. What this adds is the two ends around it:
+///
+/// - **a guard**: when the run is saved, its gate is re-derived from its findings as they stand now
+///   (a human may have rejected the one that failed it) and the approval is refused unless it passed,
+///   conclusively, on a complete review. The panel only offers the action then; this is what keeps a
+///   stale screen from approving on a gate that no longer holds.
+/// - **the record**: `meta.approval` on the run. The memory has to say that a person approved this
+///   pull request — the reviewer only informed the decision.
+///
+/// `account` is the account the confirmation named, recorded as the person agreed to it.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn approve_pr_from_review(
+    db: State<'_, Db>,
+    project_id: Option<String>,
+    url: Option<String>,
+    workspace_id: Option<String>,
+    pr_id: i64,
+    run_id: Option<String>,
+    account: Option<String>,
+) -> Result<PrApprovalOutcome, String> {
+    // The saved run the approval rests on: the one on screen when it is a run, otherwise this PR's
+    // newest run in its memory scope — a link review's, which no project owns, included.
+    let run_id = approval_run_id(&db, project_id.as_deref(), url.as_deref(), workspace_id.as_deref(), pr_id, run_id).await?;
+    let stored = match &run_id {
+        Some(id) => {
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            queries::review_run_meta_findings(&conn, id).map_err(|e| e.to_string())?
+        }
+        None => None,
+    };
+    let verdict = stored.as_ref().map(|(meta, findings)| {
+        let meta: serde_json::Value = serde_json::from_str(meta).unwrap_or(serde_json::Value::Null);
+        let findings: Vec<crate::review_memory::MemoryFinding> = serde_json::from_str(findings).unwrap_or_default();
+        crate::review_approval::gate_verdict(&meta, &findings)
+    });
+    if let Some(verdict) = verdict.as_ref().filter(|v| !v.approvable()) {
+        return Err(format!("No se aprobó el PR: {}.", verdict.refusal().unwrap_or_default()));
+    }
+
+    let (pr, activity) = match project_id.filter(|id| !id.is_empty()) {
+        Some(project_id) => {
+            let done = act_on_pull_request(db.clone(), project_id, pr_id, "approve".to_string(), None).await?;
+            (done.pr, serde_json::to_value(done.activity).unwrap_or_default())
+        }
+        None => {
+            let url = url.filter(|u| !u.is_empty()).ok_or_else(|| "no pull request to approve".to_string())?;
+            let workspace_id = workspace_id.unwrap_or_default();
+            let done = act_on_pr_link(db.clone(), url, workspace_id, "approve".to_string(), None).await?;
+            (done.pr, serde_json::to_value(done.activity).unwrap_or_default())
+        }
+    };
+
+    // The approval is on the host by now and cannot be taken back from here, so failing to write
+    // the record is reported as "not recorded", never as a failed approval.
+    let recorded = match (&run_id, &stored, &verdict) {
+        (Some(id), Some((meta, _)), Some(verdict)) => {
+            let at = chrono::Utc::now().to_rfc3339();
+            let next = crate::review_approval::with_approval(meta, account.as_deref(), &pr.provider, &at, verdict);
+            let conn = db.0.lock().map_err(|e| e.to_string())?;
+            queries::set_review_run_meta(&conn, id, &next).unwrap_or(false)
+        }
+        _ => false,
+    };
+
+    Ok(PrApprovalOutcome { pr, activity, account, recorded })
+}
+
 
 // ---------------------------------------------------------------------------
 // Merging and checks
@@ -3525,6 +4248,86 @@ async fn merge_on(host: &ThreadHost<'_>, pr_id: i64, choice: &MergeChoice) -> Re
                     .await?;
             Ok(HostMerge { pr: done.summary, merged: done.merged, warning: None })
         }
+    }
+}
+
+/// Which saved run an approval from a review is recorded on. The id the panel sent when it names a
+/// run of this pull request; otherwise the newest run of the PR in its memory scope — by project,
+/// or, for a review by link, by the repository key the link review saved its runs under (Azure's
+/// canonical project/repo names read back from the host, as the review itself does). `None` when the
+/// PR has no saved run at all.
+async fn approval_run_id(
+    db: &State<'_, Db>,
+    project_id: Option<&str>,
+    url: Option<&str>,
+    workspace_id: Option<&str>,
+    pr_id: i64,
+    run_id: Option<String>,
+) -> Result<Option<String>, String> {
+    let named = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        run_id
+            .filter(|id| !id.is_empty())
+            .filter(|id| queries::get_review_run(&conn, id).ok().flatten().is_some_and(|run| run.pr_id == pr_id))
+    };
+    if named.is_some() {
+        return Ok(named);
+    }
+    if let Some(project_id) = project_id.filter(|p| !p.is_empty()) {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        return Ok(queries::latest_review_run_id(&conn, project_id, pr_id).ok().flatten());
+    }
+    let (Some(url), Some(workspace_id)) = (url.filter(|u| !u.is_empty()), workspace_id.filter(|w| !w.is_empty())) else {
+        return Ok(None);
+    };
+    let Ok((target, credential)) = link_credentials(db, url) else { return Ok(None) };
+    let repo_key = match &target {
+        crate::pr_link::PrLinkTarget::Azure { org, project, repo, number } => {
+            match ado::get_pull_request(org, project, repo, *number, &credential).await {
+                Ok(detail) => link_repo_key(&target, Some((detail.project_name.as_str(), detail.repo_name.as_str()))),
+                Err(_) => link_repo_key(&target, None),
+            }
+        }
+        _ => link_repo_key(&target, None),
+    };
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let scope = queries::MemoryScope { project_id: None, workspace_id, repo_key: &repo_key };
+    Ok(queries::latest_review_run_id_in(&conn, &scope, pr_id).ok().flatten())
+}
+
+/// The line coverage the pull request's CI published, as a percentage — `None` when its host has
+/// none to give, which the review reads as "say nothing".
+///
+/// Azure DevOps: the coverage summary of the builds the PR's checks point at (its latest iteration's
+/// policy builds). GitLab: the head pipeline's parsed coverage, which its own MR widget shows.
+/// GitHub and Bitbucket publish no coverage of their own — it lives in third-party services — so
+/// they are not asked.
+async fn coverage_on(link: &LinkedRepo, credential: Option<&str>, pr_id: i64, checks: Option<&ado::PrChecks>) -> Option<f64> {
+    let credential = credential?;
+    match link {
+        LinkedRepo::Azure { org, project, .. } => {
+            let builds: Vec<String> = checks?.checks.iter().filter_map(|c| c.pipeline_run_id.clone()).collect();
+            ado::pr_code_coverage(org, project, &builds, credential).await.map(|c| c.pct())
+        }
+        LinkedRepo::GitLab { host, project } => gitlab::pr_code_coverage(host, project, pr_id, credential).await,
+        _ => None,
+    }
+}
+
+/// [`coverage_on`] for a pull request reached by link: the same host numbers, read through the link's
+/// own coordinates (Azure DevOps' via the PR's checks, GitLab's head pipeline).
+async fn coverage_on_link(target: &crate::pr_link::PrLinkTarget, credential: &str) -> Option<f64> {
+    match target {
+        crate::pr_link::PrLinkTarget::Azure { org, project, .. } => {
+            let (host, number) = link_host(target, credential);
+            let checks = checks_on(&host, number).await.ok()?;
+            let builds: Vec<String> = checks.checks.iter().filter_map(|c| c.pipeline_run_id.clone()).collect();
+            ado::pr_code_coverage(org, project, &builds, credential).await.map(|c| c.pct())
+        }
+        crate::pr_link::PrLinkTarget::GitLab { host, project, number } => {
+            gitlab::pr_code_coverage(host, project, *number, credential).await
+        }
+        _ => None,
     }
 }
 

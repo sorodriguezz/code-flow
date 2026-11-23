@@ -107,10 +107,13 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         -- reviewed, run metadata and the parsed findings (JSON), which is what a re-review reads
         -- back to reconcile new/still-present/resolved. Timestamped rows, never overwritten, so the
         -- code a finding referred to stays recoverable even after the branch is gone.
+        -- `project_id` is NULL for a review reached by link with no local clone; `repo_key` (see
+        -- `allow_repo_only_review_runs`) is what every run is read back by.
         CREATE TABLE IF NOT EXISTS review_runs (
             id           TEXT PRIMARY KEY,
-            project_id   TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            project_id   TEXT REFERENCES projects(id) ON DELETE CASCADE,
             workspace_id TEXT NOT NULL,
+            repo_key     TEXT NOT NULL DEFAULT '',
             pr_id        INTEGER NOT NULL,
             iter         INTEGER NOT NULL,
             level        TEXT NOT NULL,
@@ -2073,6 +2076,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_effort_to_agents(conn)?;
     add_identity_to_agents(conn)?;
     add_roster_to_meetings(conn)?;
+    allow_repo_only_review_runs(conn)?;
     // «Equipo»: teams, their runs, items and channel (`team`).
     crate::team::migrate(conn)?;
     // The agent library, the local backlog and the decision log of the Agents view (`crew`).
@@ -2193,6 +2197,53 @@ pub(crate) fn add_api_mocks(conn: &Connection) -> rusqlite::Result<()> {
             config        TEXT NOT NULL DEFAULT '{}',
             updated_at    TEXT NOT NULL
         );",
+    )
+}
+
+/// Review memory for pull requests reached by link, with no clone on this machine.
+///
+/// A run used to need a project (`project_id NOT NULL`, a foreign key), so a review opened from a
+/// PR link kept no memory at all: every re-review started from F-001, nothing was reconciled, and
+/// nothing could reply "sigue presente" on the thread it opened. Runs are now keyed by the
+/// repository itself — `repo_key`, the normalized `provider:host/owner/repo` every run's `meta`
+/// already carried — with the project optional, so the day the repository is cloned and linked its
+/// project's review finds the link-review runs of the same PR by that key and continues them.
+///
+/// SQLite cannot drop a NOT NULL constraint in place, so the table is rebuilt once: same rows,
+/// `repo_key` backfilled from `meta`. A run whose project row is gone keeps its memory as a
+/// repository-only run instead of failing the foreign key on the copy.
+fn allow_repo_only_review_runs(conn: &Connection) -> rusqlite::Result<()> {
+    if !has_column(conn, "review_runs", "repo_key")? {
+        conn.execute_batch(
+            "CREATE TABLE review_runs_v2 (
+                id           TEXT PRIMARY KEY,
+                project_id   TEXT REFERENCES projects(id) ON DELETE CASCADE,
+                workspace_id TEXT NOT NULL,
+                repo_key     TEXT NOT NULL DEFAULT '',
+                pr_id        INTEGER NOT NULL,
+                iter         INTEGER NOT NULL,
+                level        TEXT NOT NULL,
+                meta         TEXT NOT NULL DEFAULT '{}',
+                review_md    TEXT NOT NULL,
+                diff         TEXT NOT NULL DEFAULT '',
+                findings     TEXT NOT NULL DEFAULT '[]',
+                created_at   TEXT NOT NULL
+            );
+            INSERT INTO review_runs_v2
+                (id, project_id, workspace_id, repo_key, pr_id, iter, level, meta, review_md, diff, findings, created_at)
+            SELECT r.id,
+                   CASE WHEN EXISTS (SELECT 1 FROM projects p WHERE p.id = r.project_id) THEN r.project_id END,
+                   r.workspace_id,
+                   LOWER(COALESCE(CASE WHEN json_valid(r.meta) THEN json_extract(r.meta, '$.repo_key') END, '')),
+                   r.pr_id, r.iter, r.level, r.meta, r.review_md, r.diff, r.findings, r.created_at
+            FROM review_runs r;
+            DROP TABLE review_runs;
+            ALTER TABLE review_runs_v2 RENAME TO review_runs;
+            CREATE INDEX IF NOT EXISTS idx_review_runs_pr ON review_runs (project_id, pr_id, created_at);",
+        )?;
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_review_runs_repo ON review_runs (workspace_id, repo_key, pr_id, created_at);",
     )
 }
 
@@ -5591,3 +5642,52 @@ pub(crate) fn add_ai_platform_tables(conn: &Connection) -> rusqlite::Result<()> 
     Ok(())
 }
 
+
+#[cfg(test)]
+mod review_runs_migration_tests {
+    use super::*;
+
+    /// The rebuild keeps every row, backfills the repository key from `meta` (case-folded), turns a
+    /// run whose project is gone into a repository-only one instead of failing, and runs once.
+    #[test]
+    fn review_runs_become_repo_keyed_and_keep_every_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"PRAGMA foreign_keys = ON;
+            CREATE TABLE projects (id TEXT PRIMARY KEY);
+            CREATE TABLE review_runs (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                workspace_id TEXT NOT NULL, pr_id INTEGER NOT NULL, iter INTEGER NOT NULL,
+                level TEXT NOT NULL, meta TEXT NOT NULL DEFAULT '{}', review_md TEXT NOT NULL,
+                diff TEXT NOT NULL DEFAULT '', findings TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL);
+            INSERT INTO projects VALUES ('p1');
+            INSERT INTO review_runs VALUES ('r1','p1','w',7,1,'completo','{"repo_key":"GitHub:github.com/Acme/App"}','md','','[]','t1');
+            PRAGMA foreign_keys = OFF;
+            INSERT INTO review_runs VALUES ('r2','gone','w',8,1,'completo','not json','md','','[]','t2');
+            PRAGMA foreign_keys = ON;"#,
+        )
+        .unwrap();
+
+        allow_repo_only_review_runs(&conn).unwrap();
+        allow_repo_only_review_runs(&conn).unwrap();
+
+        let row = |id: &str| -> (Option<String>, String) {
+            conn.query_row("SELECT project_id, repo_key FROM review_runs WHERE id = ?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+        };
+        assert_eq!(row("r1"), (Some("p1".into()), "github:github.com/acme/app".into()));
+        assert_eq!(row("r2"), (None, String::new()));
+        // A link review's run: no project at all.
+        conn.execute(
+            "INSERT INTO review_runs (id, project_id, workspace_id, repo_key, pr_id, iter, level, review_md, created_at)
+             VALUES ('r3', NULL, 'w', 'github:github.com/acme/app', 7, 2, 'completo', 'md', 't3')",
+            [],
+        )
+        .unwrap();
+        // The cascade still holds for project-backed runs.
+        conn.execute("DELETE FROM projects WHERE id = 'p1'", []).unwrap();
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM review_runs", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 2);
+    }
+}

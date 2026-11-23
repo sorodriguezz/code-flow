@@ -8,7 +8,7 @@
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-use super::contract::{LevelContract, ScopeConfig};
+use super::contract::{LevelContract, PromotionConfig, ScopeConfig};
 use super::outline::ChangedFile;
 
 /// Extensions that do not count as code when deciding whether a pull request is trivial.
@@ -178,7 +178,17 @@ fn partition(files: &[ChangedFile], max_groups: usize, per_group: usize) -> Vec<
 ///
 /// `pr_status` is the bucketed status the VCS layer already produces (`open` · `draft` · `merged` ·
 /// `closed`), so this never has to know one host's raw status from another's.
-fn triage(pr_status: &str, files: &[ChangedFile], additions: usize, deletions: usize) -> Option<Skip> {
+///
+/// `promotion` is the question to ask when the pull request moves work between long-lived branches
+/// (see [`promotion_skip`]): it comes after the silent skips — an empty or trivial promotion has
+/// nothing to ask about — and before the size one, which it subsumes.
+fn triage(
+    pr_status: &str,
+    files: &[ChangedFile],
+    additions: usize,
+    deletions: usize,
+    promotion: Option<Skip>,
+) -> Option<Skip> {
     match pr_status.to_lowercase().as_str() {
         "draft" => {
             return Some(Skip {
@@ -218,6 +228,10 @@ fn triage(pr_status: &str, files: &[ChangedFile], additions: usize, deletions: u
         });
     }
 
+    if promotion.is_some() {
+        return promotion;
+    }
+
     // Enormous: still reviewable, but the human decides whether it is worth what it costs — and is
     // told that most of it will be read in fragments, which a "reviewed ✅" on 300 files would hide.
     let to_read: usize = files.iter().filter(|f| f.is_readable()).map(ChangedFile::weight).sum();
@@ -240,12 +254,78 @@ fn triage(pr_status: &str, files: &[ChangedFile], additions: usize, deletions: u
 /// `changed_since` bounds a re-review to the files that moved since the previous run. `None` means
 /// a first review (or one whose previous head could not be resolved — a rebase, a force-push),
 /// where the conservative answer is to review everything.
+///
+/// Without the branches, so it never asks about a promotion: the shape the tests hold the triage
+/// to. Every caller in the app goes through [`build_with`].
+#[cfg(test)]
 pub fn build(
     files: Vec<ChangedFile>,
     contract: LevelContract,
     scope: &ScopeConfig,
     pr_status: &str,
     changed_since: Option<&[String]>,
+) -> ReviewPlan {
+    build_with(files, contract, scope, pr_status, changed_since, None, &PromotionConfig::default())
+}
+
+/// A branch name as the promotion globs read it: `refs/heads/` and a remote prefix taken off, so
+/// `refs/heads/release/2.1`, `origin/release/2.1` and `release/2.1` are one branch.
+pub fn bare_branch(name: &str) -> &str {
+    let name = name.trim();
+    let name = name.strip_prefix("refs/heads/").unwrap_or(name);
+    let name = name.strip_prefix("refs/remotes/origin/").unwrap_or(name);
+    name.strip_prefix("origin/").unwrap_or(name)
+}
+
+/// Whether `source → target` moves work between long-lived branches, by the workspace's globs.
+/// `*` spans `/` (so `release/*` takes `release/2026/q4`), as the reference tool's `fnmatch` does.
+pub fn is_promotion(source: &str, target: &str, policy: &PromotionConfig) -> bool {
+    if !policy.enabled {
+        return false;
+    }
+    let (source, target) = (bare_branch(source), bare_branch(target));
+    if source.is_empty() || target.is_empty() {
+        return false;
+    }
+    let matches = |name: &str, globs: &[String]| {
+        globs.iter().map(|g| g.trim()).filter(|g| !g.is_empty()).any(|g| {
+            Glob::new(g).map(|glob| glob.compile_matcher().is_match(name)).unwrap_or(false)
+        })
+    };
+    matches(source, &policy.source) && matches(target, &policy.target)
+}
+
+/// The question a promotion pull request gets: asked, never skipped silently, because a promotion
+/// that also carries a hotfix nobody reviewed is exactly the case a human has to call.
+pub fn promotion_skip(source: &str, target: &str, policy: &PromotionConfig, files: usize) -> Option<Skip> {
+    is_promotion(source, target, policy).then(|| Skip {
+        reason: format!(
+            "PR de promoción ({} → {}, {files} archivo(s) en alcance): el código ya se revisó en sus PRs de origen. \
+             Revísalo solo si trae cambios que no pasaron por un PR revisado.",
+            bare_branch(source),
+            bare_branch(target),
+        ),
+        requires_confirmation: true,
+    })
+}
+
+/// How many of `paths` the workspace's scope keeps — what [`promotion_skip`] counts for a review
+/// that builds no plan (one by link, reading the host's diff).
+pub fn count_in_scope<'a>(paths: impl IntoIterator<Item = &'a str>, scope: &ScopeConfig) -> usize {
+    let (include, exclude) = (build_globs(&scope.include), build_globs(&scope.exclude));
+    paths.into_iter().filter(|p| matches_scope(p, &include, &exclude)).count()
+}
+
+/// [`build`], with the pull request's branches so a promotion can be recognised (`None` when they
+/// are not known, which simply never asks).
+pub fn build_with(
+    files: Vec<ChangedFile>,
+    contract: LevelContract,
+    scope: &ScopeConfig,
+    pr_status: &str,
+    changed_since: Option<&[String]>,
+    branches: Option<(&str, &str)>,
+    promotion: &PromotionConfig,
 ) -> ReviewPlan {
     let include = build_globs(&scope.include);
     let exclude = build_globs(&scope.exclude);
@@ -284,7 +364,13 @@ pub fn build(
         }
     }
 
-    let skip = triage(pr_status, &in_scope_files, additions, deletions);
+    // Only on a first review: a re-review's delta is new work, and the human already chose to review
+    // this pull request once.
+    let promotion = match branches {
+        Some((source, target)) if mode == PlanMode::First => promotion_skip(source, target, promotion, in_scope_files.len()),
+        _ => None,
+    };
+    let skip = triage(pr_status, &in_scope_files, additions, deletions, promotion);
 
     // Only files with content to show can be handed to a worker; a deletion is reported in the
     // scope and reasoned about from what it removed, not opened.
@@ -472,6 +558,43 @@ mod tests {
         let plan = build(files, contract("basico"), &ScopeConfig::default(), "open", None);
         assert!(plan.groups.len() > 1, "the split still happens");
         assert!(!plan.parallel(), "but the level says one pass");
+    }
+
+    /// A promotion asks first, in the team's own words — on a first review only, and never for a
+    /// feature branch or a hotfix.
+    #[test]
+    fn a_promotion_pr_asks_before_it_is_reviewed() {
+        let policy = PromotionConfig::default();
+        let promo = |source: &str, target: &str, since: Option<&[String]>| {
+            build_with(vec![file("src/a.ts", 200, 40)], contract("completo"), &ScopeConfig::default(), "open", since, Some((source, target)), &policy).skip
+        };
+        let skip = promo("refs/heads/develop", "refs/heads/main", None).expect("develop → main asks");
+        assert!(skip.requires_confirmation);
+        assert!(skip.reason.starts_with("PR de promoción (develop → main"));
+        assert!(skip.reason.contains("el código ya se revisó en sus PRs de origen"));
+        assert!(promo("release/2026.11", "master", None).is_some());
+        assert!(promo("develop", "release/2026.11", None).is_some());
+        assert!(promo("feature/login", "main", None).is_none());
+        assert!(promo("hotfix/urgent", "main", None).is_none(), "a hotfix is new code");
+        assert!(promo("develop", "feature/x", None).is_none());
+        assert!(promo("develop", "main", Some(&["src/a.ts".to_string()])).is_none(), "a re-review is new work");
+        let off = PromotionConfig { enabled: false, ..Default::default() };
+        assert!(!is_promotion("develop", "main", &off));
+        let custom = PromotionConfig { enabled: true, source: vec!["dev".into()], target: vec!["prod".into()] };
+        assert!(is_promotion("origin/dev", "prod", &custom));
+        assert!(!is_promotion("develop", "main", &custom));
+    }
+
+    /// A draft is still a draft first, and a two-line doc change still skips without asking.
+    #[test]
+    fn a_promotion_does_not_hide_the_other_skips() {
+        let policy = PromotionConfig::default();
+        let draft = build_with(vec![file("src/a.ts", 50, 5)], contract("completo"), &ScopeConfig::default(), "draft", None, Some(("develop", "main")), &policy);
+        assert!(draft.skip.unwrap().reason.contains("draft"));
+        let mut readme = file("README.md", 20, 3);
+        readme.changed = (1..=3).collect();
+        let trivial = build_with(vec![readme], contract("completo"), &ScopeConfig::default(), "open", None, Some(("develop", "main")), &policy);
+        assert!(!trivial.skip.unwrap().requires_confirmation);
     }
 
     /// An enormous PR asks before spending — answered like a draft, with "review anyway".

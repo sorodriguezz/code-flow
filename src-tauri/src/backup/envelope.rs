@@ -48,7 +48,10 @@ pub const FORMAT: &str = "codeflow-full-backup";
 /// is refused outright rather than half-read: a partial restore of a configuration is worse than
 /// none, because the user believes it worked.
 // Version 2 carries working copies. Older readers must refuse it rather than silently discard them.
-pub const FORMAT_VERSION: u32 = 2;
+// Version 3 compresses each working copy's tar with brotli (`backup::repositories`): a version-2
+// reader would take it for a damaged tar and fail the restore halfway, so it must refuse it upfront.
+// Versions 1 and 2 are still read.
+pub const FORMAT_VERSION: u32 = 3;
 
 /// Deliberately not `.json` or `.zip` — the file is opaque, and an extension suggesting otherwise
 /// invites someone to try opening it in a text editor and conclude it is corrupt.

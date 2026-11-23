@@ -20,6 +20,7 @@
 
 import {
   AlignLeft,
+  BarChart3,
   Monitor,
   AppWindow,
   AudioLines,
@@ -601,6 +602,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "engine", labelKey: "settings.reviewTabEngine", icon: SlidersHorizontal, searchKey: "settings.searchTermsReviewEngine" },
       { id: "context", labelKey: "settings.reviewTabContext", icon: MessageSquareText },
       { id: "memories", labelKey: "settings.reviewTabMemories", icon: History },
+      { id: "metrics", labelKey: "settings.reviewTabMetrics", icon: BarChart3, searchKey: "settings.searchTermsReviewMetrics" },
     ],
     searchKey: "settings.searchTermsReview",
   },

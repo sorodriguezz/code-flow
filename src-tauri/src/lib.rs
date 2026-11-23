@@ -128,7 +128,9 @@ mod tool_setup;
 mod usage_stats;
 mod reset;
 mod review;
+mod review_approval;
 mod review_memory;
+mod review_metrics;
 mod reviewer;
 mod search;
 mod secret_clipboard;
@@ -1189,6 +1191,7 @@ sharded_invoke_handler! {
         commands::app_cmd::acknowledge_shared_root,
         commands::backup_cmd::backup_state,
         commands::backup_cmd::backup_save_settings,
+        commands::backup_cmd::backup_repository_sizes,
         commands::backup_cmd::backup_reset_auto,
         commands::backup_cmd::backup_save_drive,
         commands::backup_cmd::backup_save_onedrive,
@@ -1697,8 +1700,11 @@ sharded_invoke_handler! {
         commands::agents_cmd::set_chain_pinned,
         commands::agents_cmd::list_workspace_chain_steps,
         commands::settings::list_review_runs,
+        commands::review_metrics_cmd::review_metrics,
         commands::settings::get_review_run,
         commands::settings::mark_review_finding,
+        commands::settings::get_review_debt_scan,
+        commands::settings::set_review_debt_scan,
         commands::settings::list_fp_suppressions,
         commands::settings::remove_fp_suppression,
         commands::settings::delete_review_run,
@@ -1836,10 +1842,13 @@ sharded_invoke_handler! {
         commands::ado_cmd::list_pr_comment_threads,
         commands::ado_cmd::resolve_pr_comment_thread,
         commands::ado_cmd::discard_pr_finding,
+        commands::ado_cmd::discard_pr_link_finding,
         commands::ado_cmd::review_pull_request,
         commands::ado_cmd::preview_pr_review,
         commands::ado_cmd::post_pr_review_comment,
         commands::ado_cmd::act_on_pull_request,
+        commands::ado_cmd::pr_approval_account,
+        commands::ado_cmd::approve_pr_from_review,
         commands::ado_cmd::pr_review_decision,
         commands::ado_cmd::list_pull_requests_page,
         commands::ado_cmd::get_pull_request,

@@ -1923,6 +1923,115 @@ pub async fn pr_checks(org: &str, project: &str, repo_id: &str, pr_id: i64, pat:
     })
 }
 
+/// Line coverage a CI run published, as `(covered, total)` lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LineCoverage {
+    pub covered: u64,
+    pub total: u64,
+}
+
+impl LineCoverage {
+    pub fn pct(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.covered as f64 * 100.0 / self.total as f64
+        }
+    }
+}
+
+/// The lines a build's code coverage summary (`_apis/test/codecoverage?buildId=`) says it covered,
+/// over every module/platform it lists. `Lines` when the summary has it (Cobertura, JaCoCo, .NET all
+/// publish it); otherwise the first statistic that counted anything — older .NET runs publish only
+/// `Blocks`, and a block percentage is still the build's own number. `None` when it measured nothing.
+pub fn coverage_from_summary(summary: &serde_json::Value) -> Option<LineCoverage> {
+    let stats: Vec<&serde_json::Value> = summary
+        .get("coverageData")?
+        .as_array()?
+        .iter()
+        .filter_map(|data| data.get("coverageStats").and_then(|s| s.as_array()))
+        .flatten()
+        .collect();
+    let count = |stat: &serde_json::Value, key: &str| stat.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+    let label = |stat: &serde_json::Value| stat.get("label").and_then(|l| l.as_str()).unwrap_or("").to_lowercase();
+    let sum = |pick: &dyn Fn(&str) -> bool| {
+        let picked: Vec<&&serde_json::Value> = stats.iter().filter(|s| pick(&label(s))).collect();
+        let total: u64 = picked.iter().map(|s| count(s, "total")).sum();
+        (total > 0).then(|| LineCoverage { covered: picked.iter().map(|s| count(s, "covered")).sum(), total })
+    };
+    sum(&|l: &str| l.starts_with("line")).or_else(|| {
+        let first = stats.iter().find(|s| count(s, "total") > 0)?;
+        let wanted = label(first);
+        sum(&|l: &str| l == wanted)
+    })
+}
+
+/// The line coverage the pull request's builds published, summed over one build per pipeline
+/// definition (its newest) — so a pipeline re-run three times counts once, and a PR checked by a
+/// backend and a frontend pipeline counts both.
+///
+/// `build_ids` are the builds the PR's checks point at (`PrCheck::pipeline_run_id`) — the policy
+/// builds of its latest iteration, plus any build status posted to it. Best-effort throughout: a
+/// build that published no coverage, or an API this organization does not answer, is simply left
+/// out, and `None` (no coverage anywhere) means the review says nothing about it.
+pub async fn pr_code_coverage(org: &str, project: &str, build_ids: &[String], pat: &str) -> Option<LineCoverage> {
+    #[derive(Deserialize)]
+    struct RawBuildRef {
+        id: i64,
+        #[serde(default)]
+        definition: Option<RawDefinitionRef>,
+    }
+    #[derive(Deserialize)]
+    struct RawDefinitionRef {
+        id: i64,
+    }
+    let mut ids: Vec<i64> = build_ids.iter().filter_map(|id| id.trim().parse::<i64>().ok()).collect();
+    ids.sort_unstable_by(|a, b| b.cmp(a));
+    ids.dedup();
+    ids.truncate(12);
+    if ids.is_empty() {
+        return None;
+    }
+    let org_enc = encode_segment(&normalize_org(org));
+    let project_enc = encode_segment(project);
+    // Newest build per definition. When the build list itself cannot be read, every build counts —
+    // an over-count of a re-run is a better answer than no answer.
+    let list = ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",");
+    let builds_url = format!("https://dev.azure.com/{org_enc}/{project_enc}/_apis/build/builds?buildIds={list}&api-version={API_VERSION}");
+    if let Ok(builds) = get_json::<ListResponse<RawBuildRef>>(&builds_url, pat).await {
+        let mut newest: std::collections::BTreeMap<i64, i64> = std::collections::BTreeMap::new();
+        for build in builds.value {
+            let definition = build.definition.map(|d| d.id).unwrap_or(-build.id);
+            let entry = newest.entry(definition).or_insert(build.id);
+            *entry = (*entry).max(build.id);
+        }
+        if !newest.is_empty() {
+            ids = newest.into_values().collect();
+        }
+    }
+    ids.truncate(4);
+    let summaries = futures_util::future::join_all(ids.iter().map(|id| {
+        let primary = format!(
+            "https://dev.azure.com/{org_enc}/{project_enc}/_apis/test/codecoverage?buildId={id}&api-version={PREVIEW_API_VERSION}.1"
+        );
+        let fallback = format!(
+            "https://vstmr.dev.azure.com/{org_enc}/{project_enc}/_apis/testresults/codecoverage?buildId={id}&api-version={PREVIEW_API_VERSION}.1"
+        );
+        async move {
+            match get_json::<serde_json::Value>(&primary, pat).await {
+                Ok(v) => Some(v),
+                Err(_) => get_json::<serde_json::Value>(&fallback, pat).await.ok(),
+            }
+        }
+    }))
+    .await;
+    let found: Vec<LineCoverage> = summaries.iter().flatten().filter_map(coverage_from_summary).collect();
+    if found.is_empty() {
+        return None;
+    }
+    Some(LineCoverage { covered: found.iter().map(|c| c.covered).sum(), total: found.iter().map(|c| c.total).sum() })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PrThreadComment {
     pub author: String,
@@ -1978,6 +2087,10 @@ struct RawThread {
     comments: Vec<RawThreadComment>,
     #[serde(rename = "threadContext", default)]
     thread_context: Option<RawThreadContext>,
+    /// Moves with a status change too — when a thread was closed with no comment, the only date
+    /// that says when the team decided.
+    #[serde(rename = "lastUpdatedDate", default)]
+    last_updated_date: Option<String>,
 }
 
 /// Fetches the PR's still-open comment threads — e.g. from a human reviewer (a tech lead
@@ -2030,6 +2143,65 @@ pub async fn list_pr_comment_threads(
                 None => (None, None, None),
             };
             Some(PrCommentThread { id: t.id, file_path, start_line, end_line, comments, resolved: false })
+        })
+        .collect())
+}
+
+/// One thread with its status, whatever it is — what [`list_pr_thread_states`] returns.
+#[derive(Debug, Clone)]
+pub struct PrThreadState {
+    pub id: i64,
+    /// Azure's status as sent (`active`, `fixed`, `wontFix`, `closed`, `byDesign`, `pending`), empty
+    /// when the thread carries none.
+    pub status: String,
+    pub file_path: Option<String>,
+    pub last_updated: Option<String>,
+    pub comments: Vec<PrThreadComment>,
+}
+
+/// Every comment thread on the PR **with its status**, closed ones included.
+///
+/// [`list_pr_comment_threads`] leaves out whatever is no longer active, which is right for "what is
+/// still pending" and wrong for "what did the team decide": a thread closed as *won't fix* or *by
+/// design* is exactly where a dismissal of a finding lives (see `review::threads`). Same filtering of
+/// system comments, so a vote or an iteration notice never reads as somebody's verdict.
+pub async fn list_pr_thread_states(
+    org: &str,
+    project: &str,
+    repo_id: &str,
+    pr_id: i64,
+    pat: &str,
+) -> Result<Vec<PrThreadState>, String> {
+    let org = encode_segment(&normalize_org(org));
+    let project = encode_segment(project);
+    let url = format!(
+        "https://dev.azure.com/{org}/{project}/_apis/git/repositories/{repo_id}/pullRequests/{pr_id}/threads\
+         ?api-version={API_VERSION}"
+    );
+    let parsed: ListResponse<RawThread> = get_json(&url, pat).await?;
+    Ok(parsed
+        .value
+        .into_iter()
+        .filter_map(|t| {
+            let comments: Vec<PrThreadComment> = t
+                .comments
+                .into_iter()
+                .filter(|c| c.comment_type.as_deref().unwrap_or("text") == "text")
+                .filter_map(|c| {
+                    let content = c.content?.trim().to_string();
+                    (!content.is_empty()).then(|| PrThreadComment { author: c.author.display_name, content, published_date: c.published_date })
+                })
+                .collect();
+            if comments.is_empty() {
+                return None;
+            }
+            Some(PrThreadState {
+                id: t.id,
+                status: t.status.unwrap_or_default(),
+                file_path: t.thread_context.and_then(|ctx| ctx.file_path),
+                last_updated: t.last_updated_date,
+                comments,
+            })
         })
         .collect())
 }
@@ -2244,6 +2416,23 @@ mod tests {
         assert_eq!(checks[1].name, "sonar");
         assert_eq!(checks[1].state, crate::ci::status::RUNNING);
         assert_eq!(checks[1].description.as_deref(), Some("Analyzing"));
+    }
+
+    /// Lines over every module the summary lists; blocks only when no line count exists; nothing
+    /// when nothing was measured.
+    #[test]
+    fn a_coverage_summary_reads_as_lines_covered() {
+        let summary = serde_json::json!({ "coverageData": [
+            { "coverageStats": [ { "label": "Lines", "covered": 600, "total": 1000 }, { "label": "Branches", "covered": 1, "total": 9 } ] },
+            { "coverageStats": [ { "label": "Lines", "covered": 120, "total": 0 } ] },
+        ] });
+        let c = coverage_from_summary(&summary).unwrap();
+        assert_eq!((c.covered, c.total), (720, 1000));
+        assert!((c.pct() - 72.0).abs() < 1e-9);
+        let blocks = serde_json::json!({ "coverageData": [ { "coverageStats": [ { "label": "Blocks", "covered": 3, "total": 4 } ] } ] });
+        assert_eq!(coverage_from_summary(&blocks), Some(LineCoverage { covered: 3, total: 4 }));
+        assert_eq!(coverage_from_summary(&serde_json::json!({ "coverageData": [] })), None);
+        assert_eq!(coverage_from_summary(&serde_json::json!({ "status": "inProgress" })), None);
     }
 
     #[test]

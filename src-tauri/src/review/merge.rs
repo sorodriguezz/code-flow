@@ -16,6 +16,7 @@ use std::sync::OnceLock;
 
 use regex::Regex;
 
+use super::calibration::CalibratedCategory;
 use super::contract::{FindingType, LevelContract, Severity};
 use super::outline::normalize_path;
 use crate::review_memory::MemoryFinding;
@@ -57,6 +58,9 @@ pub struct Finding {
     pub resuelto_en_iter: Option<usize>,
     pub motivo_descarte: Option<String>,
     pub delta: Option<String>,
+    /// A re-review's new finding on code that did not change since the iteration before — see
+    /// `MemoryFinding::tardio`. Decided by reconciliation, never by the reviewer.
+    pub tardio: bool,
 }
 
 /// The exact new text for lines `start..=end` of the finding's file.
@@ -100,6 +104,13 @@ impl Finding {
             // over from the earlier finding this one continues.
             publicado_en_iter: None,
             hilo_general: false,
+            // Lifecycle fields reconciliation fills in.
+            resolucion: None,
+            resolucion_archivo: None,
+            resolucion_lineas: None,
+            tardio: self.tardio,
+            // The PR's word on it is the memory's, carried by reconciliation like its thread.
+            hilo_pr: Default::default(),
         }
     }
 
@@ -150,6 +161,7 @@ impl Finding {
                 resuelto_en_iter: None,
                 motivo_descarte: None,
                 delta: None,
+                tardio: false,
             },
         };
         finding.id = memory.id.clone();
@@ -161,6 +173,7 @@ impl Finding {
         finding.resuelto_en_iter = memory.resuelto_en_iter;
         finding.motivo_descarte = memory.motivo_descarte.clone();
         finding.delta = memory.delta.clone();
+        finding.tardio = memory.tardio;
         finding
     }
 }
@@ -192,8 +205,9 @@ fn code_re() -> &'static Regex {
 
 /// The field markers, by their base codepoint — the variation selector that may follow is left to
 /// the value and trimmed with the label.
-const MARKERS: [(char, &str); 7] = [
+const MARKERS: [(char, &str); 8] = [
     ('📍', "location"),
+    ('⏳', "late"),
     ('💭', "why"),
     ('💡', "suggestion"),
     ('🛠', "example"),
@@ -387,9 +401,59 @@ pub fn parse(markdown: &str) -> Vec<Finding> {
             resuelto_en_iter: None,
             motivo_descarte: None,
             delta: None,
+            // Read back from a rendered report (see `render::late_note`); a worker never writes it.
+            tardio: field_of(&parsed, "late").is_some(),
         });
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Verdicts on previous findings
+// ---------------------------------------------------------------------------
+
+/// `PREVIO F-003: PERSISTE @ src/a.ts:42-50` · `PREVIO F-004: RESUELTO @ 60-64 — <resolución>` —
+/// the line format `review_memory::reevaluate_block` asks for (`D-NNN` for debt carried in from
+/// another pull request by the debt scan). Tolerant of what models do to a line
+/// they were told to write verbatim: a bullet or bold around it, either dash, a missing `@`.
+fn prior_verdict_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?mi)^[ \t>*_-]*PREVIO\s+\**([FD]-\d+)\**\s*:\s*\**(PERSISTE|RESUELTO)\**[ \t]*(?:@[ \t]*([^—–\n]*?))?[ \t]*(?:(?:—|–|[ \t]-[ \t])[ \t]*(.*?))?[ \t*_]*$",
+        )
+        .expect("valid prior verdict regex")
+    })
+}
+
+/// Every verdict a reviewer returned on the previous findings it was handed, by id (upper-cased).
+/// A later line for the same id wins — a model that corrects itself says so last.
+pub fn parse_prior_verdicts(text: &str) -> std::collections::HashMap<String, crate::review_memory::PriorVerdict> {
+    let mut out = std::collections::HashMap::new();
+    for caps in prior_verdict_re().captures_iter(text) {
+        let Some(id) = caps.get(1).map(|m| m.as_str().to_uppercase()) else { continue };
+        let resolved = caps.get(2).is_some_and(|m| m.as_str().eq_ignore_ascii_case("resuelto"));
+        let (archivo, lineas) = match caps.get(3).map(|m| m.as_str().trim()).filter(|l| !l.is_empty()) {
+            // A bare range keeps the finding's own file; `file:range` names another.
+            Some(loc) if loc.trim_matches('`').chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | ',' | ' ')) => {
+                (None, Some(loc.trim_matches('`').trim().to_string()))
+            }
+            Some(loc) => parse_location(loc),
+            None => (None, None),
+        };
+        let resolucion = caps
+            .get(4)
+            .map(|m| m.as_str().trim().trim_matches('*').trim().to_string())
+            .filter(|r| !r.is_empty());
+        out.insert(id, crate::review_memory::PriorVerdict { resolved, archivo, lineas, resolucion });
+    }
+    out
+}
+
+/// The reply without its verdict lines, so neither the findings parser (which would read them as
+/// part of the finding above) nor the narrative ever sees them.
+pub fn strip_prior_verdicts(text: &str) -> String {
+    prior_verdict_re().replace_all(text, "").to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +588,10 @@ pub struct Discarded {
 /// itself flagged as uncertain, and a worker that never wrote the line has flagged nothing — losing
 /// a real defect to a missing field would be the one failure mode this pipeline must not add.
 fn passes(finding: &Finding, contract: &LevelContract) -> Result<(), String> {
-    if !contract.reports(finding.severity) {
+    // A deterministic rule's finding carries the severity its rule declares (often `Info`) and is
+    // reported at every level the rule runs at: the rule already decided it is worth saying, and the
+    // gate only blocks on what the workspace policy names.
+    if !contract.reports(finding.severity) && rule_id(finding).is_none() {
         return Err(format!(
             "severidad {} no se reporta en nivel {} (permitidas: {})",
             finding.severity.label(),
@@ -544,12 +611,70 @@ fn passes(finding: &Finding, contract: &LevelContract) -> Result<(), String> {
     Ok(())
 }
 
+/// The deterministic rule a finding comes from — the `[R-NNNN]` its why starts with, as the rules
+/// block asks the reviewer to write it (see `rules::block`). Tolerant of the subtitle carrying it
+/// instead, and of markdown emphasis around it.
+pub fn rule_id(finding: &Finding) -> Option<String> {
+    fn re() -> &'static Regex {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        RE.get_or_init(|| Regex::new(r"^[\s*_`]*\[(R-\d{4})\]").expect("static regex"))
+    }
+    [&finding.por_que, &finding.subtitulo]
+        .iter()
+        .find_map(|text| re().captures(text).and_then(|c| c.get(1)).map(|m| m.as_str().to_string()))
+}
+
+/// The repository's calibration (see [`super::calibration`]) as the merge applies it: the
+/// categories the team keeps dismissing, and the confidence a finding of one of them needs.
+#[derive(Debug, Clone, Copy)]
+pub struct Calibration<'a> {
+    pub categories: &'a [CalibratedCategory],
+    pub min_confidence: u8,
+}
+
+impl Calibration<'_> {
+    // Every caller in the app now passes the repository's calibration; [`filter`] is the tests' shape.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const NONE: Calibration<'static> = Calibration { categories: &[], min_confidence: 0 };
+}
+
+/// The raised bar, checked after the level's own — never instead of it, and never lower than it.
+///
+/// A bar, not a filter: a finding of a calibrated category that is *sure* still gets through. And,
+/// like the level threshold, one with no stated confidence is not held back — it never said it was
+/// unsure, and a missing field must not be what loses a real defect.
+fn clears_calibration(finding: &Finding, contract: &LevelContract, calibration: &Calibration) -> Result<(), String> {
+    let Some(category) = super::calibration::bar_for(calibration.categories, &finding.categoria) else { return Ok(()) };
+    let Some(confidence) = finding.confianza else { return Ok(()) };
+    let minimum = calibration.min_confidence.max(contract.threshold_for(finding.severity));
+    if confidence < minimum {
+        return Err(format!(
+            "{CALIBRATION_PREFIX} este repo descarta a menudo `{}` ({} de {}) — confianza {confidence} < {minimum}",
+            category.categoria, category.dismissed, category.total
+        ));
+    }
+    Ok(())
+}
+
+/// How a discard by calibration starts, so the pipeline can count them without a second channel.
+pub const CALIBRATION_PREFIX: &str = "calibración:";
+
 /// Applies the contract, returning `(survivors, discards)`.
 ///
 /// A finding that is already closed (`resuelto` / `falso_positivo` / `ignorado`) is **not**
 /// re-filtered: it comes from a previous run, possibly at another level, and traceability requires
 /// keeping it in this review and every later one.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn filter(findings: Vec<Finding>, contract: &LevelContract) -> (Vec<Finding>, Vec<Discarded>) {
+    filter_calibrated(findings, contract, &Calibration::NONE)
+}
+
+/// [`filter`], with the repository's calibration applied on top of the level's thresholds.
+pub fn filter_calibrated(
+    findings: Vec<Finding>,
+    contract: &LevelContract,
+    calibration: &Calibration,
+) -> (Vec<Finding>, Vec<Discarded>) {
     let mut survivors = Vec::new();
     let mut discarded = Vec::new();
     for finding in findings {
@@ -557,7 +682,7 @@ pub fn filter(findings: Vec<Finding>, contract: &LevelContract) -> (Vec<Finding>
             survivors.push(finding);
             continue;
         }
-        match passes(&finding, contract) {
+        match passes(&finding, contract).and_then(|()| clears_calibration(&finding, contract, calibration)) {
             Ok(()) => survivors.push(finding),
             Err(reason) => discarded.push(Discarded { finding, reason }),
         }
@@ -755,6 +880,32 @@ if (!cuenta) return res.status(404).end();
         assert!(dropped[1].reason.contains("no se reporta en nivel basico"));
     }
 
+    /// A deterministic rule's `Info` finding is reported at completo (which reports no `Info`) and at
+    /// ultra; the confidence threshold still applies to it, and a plain `Info` is still dropped.
+    #[test]
+    fn a_rule_finding_is_exempt_from_the_reported_severities() {
+        let rule = "### ℹ️ [Info · Code Smell] outdated-dependency · F-001\n\ns\n\n📍 Ubicación: package.json:3\n\n💭 Por qué: [R-0004] axios puede subir a 1.7.9.\n\n🎯 Confianza: 80";
+        let unsure = "### ℹ️ [Info · Code Smell] outdated-dependency · F-002\n\ns\n\n📍 Ubicación: package.json:4\n\n💭 Por qué: [R-0004] no se pudo leer el registry.\n\n🎯 Confianza: 40";
+        let plain = "### ℹ️ [Info · Code Smell] naming · F-003\n\ns\n\n📍 Ubicación: a.ts:1\n\n💭 Por qué: el nombre confunde.\n\n🎯 Confianza: 90";
+        assert_eq!(rule_id(&parse(rule)[0]).as_deref(), Some("R-0004"));
+        assert_eq!(rule_id(&parse(plain)[0]), None);
+        for level in ["completo", "ultra"] {
+            let (kept, dropped) = filter([parse(rule), parse(unsure), parse(plain)].concat(), &contract(level));
+            let kept: Vec<&str> = kept.iter().map(|f| f.lineas.as_deref().unwrap()).collect();
+            if level == "completo" {
+                assert_eq!(kept, vec!["3"], "{level}");
+                assert_eq!(dropped.len(), 2);
+                assert!(dropped[1].reason.contains("no se reporta en nivel completo"));
+            } else {
+                assert_eq!(kept, vec!["3", "1"], "{level}");
+            }
+            assert!(dropped[0].reason.contains("confianza 40"), "{level}: the threshold still applies");
+        }
+        // An Info finding does not fail a gate that blocks on Menor and up.
+        let found = filter(parse(rule), &contract("completo")).0;
+        assert!(crate::review::render::passes_gate(&found, &[Severity::Blocker, Severity::Critico, Severity::Mayor, Severity::Menor]));
+    }
+
     /// Severity and threshold are independent gates — a perfect-confidence Minor still does not
     /// survive `basico`.
     #[test]
@@ -766,6 +917,32 @@ if (!cuenta) return res.status(404).end();
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].severity, Severity::Blocker);
         assert_eq!(dropped.len(), 1);
+    }
+
+    /// Calibration raises the bar for its category only, and a sure finding still clears it — a bar,
+    /// never a filter.
+    #[test]
+    fn calibration_raises_the_bar_without_suppressing_the_category() {
+        let cats = vec![CalibratedCategory {
+            categoria: "missing-validation".into(),
+            slug: "missing-validation".into(),
+            dismissed: 3,
+            total: 4,
+            motivo: None,
+        }];
+        let cal = Calibration { categories: &cats, min_confidence: 85 };
+        let unsure = "### ⚠️ [Mayor · Bug] Missing Validation · F-001\n\ns\n\n📍 Ubicación: a.ts:1\n\n🎯 Confianza: 70";
+        let sure = "### ⚠️ [Mayor · Bug] missing-validation · F-002\n\ns\n\n📍 Ubicación: b.ts:1\n\n🎯 Confianza: 90";
+        let other = "### ⚠️ [Mayor · Bug] npe · F-003\n\ns\n\n📍 Ubicación: c.ts:1\n\n🎯 Confianza: 70";
+        let silent = "### ⚠️ [Mayor · Bug] missing-validation · F-004\n\ns\n\n📍 Ubicación: d.ts:1";
+        let (kept, dropped) =
+            filter_calibrated([parse(unsure), parse(sure), parse(other), parse(silent)].concat(), &contract("completo"), &cal);
+        assert_eq!(kept.iter().map(|f| f.archivo.as_deref().unwrap()).collect::<Vec<_>>(), vec!["b.ts", "c.ts", "d.ts"]);
+        assert_eq!(dropped.len(), 1);
+        assert!(dropped[0].reason.starts_with(CALIBRATION_PREFIX));
+        assert!(dropped[0].reason.contains("3 de 4") && dropped[0].reason.contains("70 < 85"));
+        // Without calibration the same finding passes the level's own 60.
+        assert_eq!(filter(parse(unsure), &contract("completo")).0.len(), 1);
     }
 
     /// A worker that omitted the confidence line has not flagged anything as uncertain.
@@ -844,5 +1021,36 @@ if (!cuenta) return res.status(404).end();
         assert!(findings.is_empty());
         assert!(discarded.is_empty());
         assert_eq!(merged, 0);
+    }
+
+    /// The verdict lines, in the shapes models actually write them.
+    #[test]
+    fn prior_verdicts_are_read_in_every_shape_and_stripped_from_the_findings() {
+        let reply = concat!(
+            "### 🚨 [Crítico · Bug] npe · F-001\n\nsub\n\n📍 Ubicación: a.ts:1\n\n💭 Por qué: p\n\n",
+            "PREVIO F-003: PERSISTE @ src/a.ts:42-50\n",
+            "- **PREVIO F-004: RESUELTO** @ 60-64 — Se agregó la guarda que retorna 404.\n",
+            "PREVIO f-007: resuelto @ `src/otro.ts:5-9` – Se movió la validación al servicio.\n",
+            "PREVIO F-008: RESUELTO — Se eliminó la llamada.\n",
+        );
+        let v = parse_prior_verdicts(reply);
+        assert_eq!(v.len(), 4);
+        let p3 = &v["F-003"];
+        assert!(!p3.resolved);
+        assert_eq!((p3.archivo.as_deref(), p3.lineas.as_deref()), (Some("src/a.ts"), Some("42-50")));
+        let p4 = &v["F-004"];
+        assert!(p4.resolved);
+        assert_eq!((p4.archivo.as_deref(), p4.lineas.as_deref()), (None, Some("60-64")));
+        assert_eq!(p4.resolucion.as_deref(), Some("Se agregó la guarda que retorna 404."));
+        let p7 = &v["F-007"];
+        assert_eq!((p7.archivo.as_deref(), p7.lineas.as_deref()), (Some("src/otro.ts"), Some("5-9")));
+        assert_eq!(p7.resolucion.as_deref(), Some("Se movió la validación al servicio."));
+        assert_eq!((v["F-008"].lineas.as_deref(), v["F-008"].resolucion.as_deref()), (None, Some("Se eliminó la llamada.")));
+
+        let cleaned = strip_prior_verdicts(reply);
+        assert!(!cleaned.contains("PREVIO"));
+        let findings = parse(&cleaned);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].por_que, "p", "the verdicts no longer trail the last field");
     }
 }

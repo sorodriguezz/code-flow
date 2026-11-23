@@ -5,6 +5,7 @@ import {
   ChevronDown,
   ChevronRight,
   CircleCheck,
+  Clock,
   CircleX,
   EyeOff,
   Info,
@@ -12,7 +13,9 @@ import {
   ListChecks,
   Loader2,
   MapPin,
+  MessagesSquare,
   PencilLine,
+  Receipt,
   MessageCircleQuestionMark,
   MessageSquarePlus,
   OctagonAlert,
@@ -27,6 +30,7 @@ import { chipClass, type ChipTone } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
 import { textAreaClass } from "./docParts";
 import type { TranslationKey } from "../../lib/i18n/translations";
+import type { PrVerdict } from "../../types/domain";
 import {
   computeQualityGatePassed,
   formatFindingAsFixPrompt,
@@ -529,9 +533,13 @@ export function ResolveWithAiButton({
  * later decided about them — so the verdict travels alongside rather than inside the finding.
  */
 export interface FindingMark {
-  /** `abierto` · `posteado` · `resuelto` · `falso_positivo` · `ignorado`. */
+  /** `abierto` · `posteado` · `resuelto` · `falso_positivo` · `ignorado` · `deuda_tecnica`. */
   estado: string;
   motivo?: string | null;
+  /** The state came from the PR's own threads, and how — `status` · `texto` · `resumen`. */
+  syncedVia?: "status" | "texto" | "resumen" | null;
+  /** A verdict the PR gave that did not apply on its own, offered as one click. */
+  prVerdict?: PrVerdict | null;
   /** Whether the finding was published to the PR — only then is there a thread to close. */
   posted: boolean;
   /** Published in the very iteration on screen: a second publish must leave it alone, or its
@@ -539,8 +547,10 @@ export interface FindingMark {
   publishedNow?: boolean;
 }
 
+/** Out of the active set by a human's ruling — rejected, or accepted as technical debt (real, but
+ * knowingly deferred: it stops counting toward the gate while it stays visible). */
 export function isDiscarded(mark?: FindingMark | null): boolean {
-  return mark?.estado === "falso_positivo" || mark?.estado === "ignorado";
+  return mark?.estado === "falso_positivo" || mark?.estado === "ignorado" || mark?.estado === "deuda_tecnica";
 }
 
 /** What a discard does beyond the local mark, chosen per finding rather than globally: promoting
@@ -551,8 +561,22 @@ export interface DiscardOptions {
   notifyHost: boolean;
 }
 
-/** The two ways of ruling a finding out. */
-type DiscardKind = "falso_positivo" | "ignorado";
+/** The ways of ruling a finding out of the active set: two rejections, and accepted debt. */
+type DiscardKind = "falso_positivo" | "ignorado" | "deuda_tecnica";
+
+const DISCARD_ICON: Record<DiscardKind, typeof Ban> = { falso_positivo: Ban, ignorado: EyeOff, deuda_tecnica: Receipt };
+const DISCARDED_LABEL: Record<DiscardKind, TranslationKey> = {
+  falso_positivo: "finding.discardedFalse",
+  ignorado: "finding.discardedIgnored",
+  deuda_tecnica: "finding.discardedDebt",
+};
+const MARK_LABEL: Record<DiscardKind, TranslationKey> = {
+  falso_positivo: "finding.markFalsePositive",
+  ignorado: "finding.markIgnored",
+  deuda_tecnica: "finding.markDebt",
+};
+const asKind = (estado?: string): DiscardKind =>
+  estado === "falso_positivo" || estado === "deuda_tecnica" ? estado : "ignorado";
 
 /**
  * "This isn't a real defect" — the control that was previously only reachable from the settings
@@ -598,21 +622,32 @@ function DiscardControls({
   const [notifyHost, setNotifyHost] = useState(true);
 
   if (isDiscarded(mark)) {
-    const falso = mark?.estado === "falso_positivo";
+    const kind = asKind(mark?.estado);
+    const Icon = DISCARD_ICON[kind];
     return (
       <div className="rounded-md bg-[var(--cf-hover)] px-2.5 py-2">
         <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-muted)]">
-          {falso ? <Ban size={12} /> : <EyeOff size={12} />}
-          {t(falso ? "finding.discardedFalse" : "finding.discardedIgnored")}
+          <Icon size={12} />
+          {t(DISCARDED_LABEL[kind])}
         </span>
         {mark?.motivo && <p className="mt-0.5 text-[12px] leading-relaxed text-[var(--cf-text)]">{mark.motivo}</p>}
+        {kind === "deuda_tecnica" && <p className="mt-0.5 text-[11px] text-[var(--cf-text-muted)]">{t("finding.debtHint")}</p>}
+        {/* Decided on the PR, not here: said so, since nobody clicked anything in this app. */}
+        {mark?.syncedVia && (
+          <p className="mt-0.5 flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)]">
+            <MessagesSquare size={11} />
+            {t("finding.syncedFromPr", { via: t(SYNCED_VIA_LABEL[mark.syncedVia]) })}
+          </p>
+        )}
+        {/* Debt is reopened, not undone: it was a decision about real code, and going back on it
+            makes the finding active again. */}
         <button
           onClick={() => onDiscard("abierto", { motivo: "", scopeRepo: false, notifyHost: false })}
           disabled={busy}
           className={buttonClass({ variant: "ghost", size: "sm", className: "-ml-2 mt-1" })}
         >
           {busy ? <Loader2 size={13} className="animate-spin" /> : <Undo2 size={13} />}
-          {t("finding.undoDiscard")}
+          {t(kind === "deuda_tecnica" ? "finding.reopen" : "finding.undoDiscard")}
         </button>
       </div>
     );
@@ -635,15 +670,13 @@ function DiscardControls({
 
   return (
     <div className="space-y-2 rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2.5 py-2">
-      <p className="text-[12px] font-medium text-[var(--cf-text)]">
-        {t(drafting === "falso_positivo" ? "finding.markFalsePositive" : "finding.markIgnored")}
-      </p>
+      <p className="text-[12px] font-medium text-[var(--cf-text)]">{t(MARK_LABEL[drafting])}</p>
       <textarea
         value={motivo}
         onChange={(e) => setMotivo(e.target.value)}
         rows={2}
         autoFocus
-        placeholder={t("finding.discardReasonPlaceholder")}
+        placeholder={t(drafting === "deuda_tecnica" ? "finding.debtReasonPlaceholder" : "finding.discardReasonPlaceholder")}
         className={textAreaClass}
       />
       {/* "Ignore" is a call about this pull request ("not now"), so it never becomes a standing
@@ -675,10 +708,58 @@ function DiscardControls({
             onDiscard(drafting, { motivo: motivo.trim(), scopeRepo, notifyHost });
             close();
           }}
+          // Accepted debt with no reason is a decision nobody can revisit — the backend refuses it.
+          disabled={busy || (drafting === "deuda_tecnica" && !motivo.trim())}
+          className={buttonClass({ variant: "primary", size: "sm" })}
+        >
+          {t(drafting === "deuda_tecnica" ? "finding.debtConfirm" : "finding.discardConfirm")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const SYNCED_VIA_LABEL: Record<"status" | "texto" | "resumen", TranslationKey> = {
+  status: "finding.syncedVia.status",
+  texto: "finding.syncedVia.texto",
+  resumen: "finding.syncedVia.resumen",
+};
+
+/**
+ * What the pull request said this finding is, when that did not apply on its own — said past the
+ * comment's opening, or about code that changed since. One click makes it the ruling, the PR's own
+ * words as the reason; the thread already says it, so only a verdict from the summary comment is
+ * also answered on the finding's thread.
+ */
+function PrVerdictOffer({
+  verdict,
+  onDiscard,
+  busy,
+}: {
+  verdict: PrVerdict;
+  onDiscard: (estado: string, opts: DiscardOptions) => void;
+  busy: boolean;
+}) {
+  const t = useT();
+  const kind = asKind(verdict.estado);
+  const Icon = DISCARD_ICON[kind];
+  return (
+    <div className="space-y-1 rounded-md border border-[var(--cf-border)] bg-[var(--cf-sunken)] px-2.5 py-2">
+      <span className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.06em] text-[var(--cf-text-muted)]">
+        <MessagesSquare size={12} />
+        {t("finding.prVerdictTitle", { verdict: t(DISCARDED_LABEL[kind]) })}
+      </span>
+      <p className="text-[12px] leading-relaxed text-[var(--cf-text)]">«{verdict.motivo}»</p>
+      {verdict.autor && <p className="text-[11px] text-[var(--cf-text-muted)]">{t("finding.prVerdictBy", { author: verdict.autor })}</p>}
+      <p className="text-[11px] text-[var(--cf-text-muted)]">{t("finding.prVerdictHint")}</p>
+      <div className="flex justify-end">
+        <button
+          onClick={() => onDiscard(kind, { motivo: verdict.motivo, scopeRepo: false, notifyHost: verdict.via === "resumen" })}
           disabled={busy}
           className={buttonClass({ variant: "primary", size: "sm" })}
         >
-          {t("finding.discardConfirm")}
+          {busy ? <Loader2 size={13} className="animate-spin" /> : <Icon size={13} />}
+          {t("finding.applyPrVerdict")}
         </button>
       </div>
     </div>
@@ -698,6 +779,10 @@ function DiscardButtons({ onPick }: { onPick: (kind: DiscardKind) => void }) {
         <EyeOff size={13} />
         {t("finding.markIgnored")}
       </button>
+      <button onClick={() => onPick("deuda_tecnica")} className={buttonClass({ variant: "ghost", size: "sm" })}>
+        <Receipt size={13} />
+        {t("finding.markDebt")}
+      </button>
     </span>
   );
 }
@@ -706,10 +791,11 @@ function DiscardButtons({ onPick }: { onPick: (kind: DiscardKind) => void }) {
  * inside the card, so a scan down the list shows what is still standing. */
 export function DiscardedChip({ estado }: { estado: string }) {
   const t = useT();
-  const falso = estado === "falso_positivo";
+  const kind = asKind(estado);
+  const Icon = DISCARD_ICON[kind];
   return (
-    <span title={t(falso ? "finding.discardedFalse" : "finding.discardedIgnored")} className={chipClass("neutral")}>
-      {falso ? <Ban size={12} /> : <EyeOff size={12} />}
+    <span title={t(DISCARDED_LABEL[kind])} className={chipClass("neutral")}>
+      <Icon size={12} />
     </span>
   );
 }
@@ -885,6 +971,14 @@ export function FindingCard({
           <p className="mt-1.5 text-[13px] font-semibold leading-snug text-[var(--cf-text)]">
             <InlineMarkdown text={finding.subtitle} className="cf-markdown-inline" />
           </p>
+          {/* A new finding on code the latest push did not touch: real, but one the review before
+              should have caught. */}
+          {finding.late && (
+            <p className="mt-1 flex items-center gap-1 text-[11px] text-[var(--cf-text-muted)]">
+              <Clock size={11} />
+              {t("finding.lateLabel", { n: finding.late.match(/\d+/)?.[0] ?? "?" })}
+            </p>
+          )}
           {finding.location &&
             (onOpenLocation ? (
               <button
@@ -980,6 +1074,9 @@ export function FindingCard({
               verifyProjectId={projectId}
               trailing={rulingsInRow ? <DiscardButtons onPick={setDrafting} /> : undefined}
             />
+          )}
+          {onDiscard && !discarded && drafting === null && mark?.prVerdict && (
+            <PrVerdictOffer verdict={mark.prVerdict} onDiscard={onDiscard} busy={discarding} />
           )}
           {onDiscard && !rulingsInRow && (
             <DiscardControls

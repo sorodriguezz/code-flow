@@ -240,6 +240,10 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 # Adoptium ships it as a `.zip` for Windows — the crate above — and a `.tar.gz` for macOS: this, over
 # `flate2`. Already in the lockfile, so it adds a name to the manifest rather than a build.
 tar = "0.4"
+# Compresses each repository's tar in a backup (`backup::repositories`). Pure Rust, and already in
+# the lockfile through reqwest's `brotli` feature and Tauri's asset embedding: no C library added.
+# Source code compresses markedly better than with deflate at a comparable speed.
+brotli = "8"
 # Flujos' data nodes (milestone 4), all pure Rust. Convert reads and writes YAML and turns Markdown into
 # HTML; XML goes through `quick-xml`, already in the lockfile. Spreadsheet reads XLSX/XLS/ODS
 # (`calamine`) and writes XLSX (`rust_xlsxwriter`). Email speaks SMTP over rustls — STARTTLS or
@@ -628,6 +632,14 @@ debug = 1
 opt-level = 3
 
 [profile.dev.package.rquickjs-core]
+opt-level = 3
+
+# Unoptimised, brotli compresses a repository in a debug build (and in `cargo test`) several times
+# slower than it does in a release; the backup tests pack real folders.
+[profile.dev.package.brotli]
+opt-level = 3
+
+[profile.dev.package.brotli-decompressor]
 opt-level = 3
 
 # `tauri::generate_context!` brotli-compresses the whole frontend (~115 MB of `dist/`, draw.io is 61

@@ -143,6 +143,16 @@ pub struct PipelineOutcome {
     pub checking: Checking,
     /// What the run spent, every pass summed.
     pub cost: crate::review_memory::RunCost,
+    /// The reviewers' verdicts on the previous findings they were handed (by id) — only from the
+    /// reader that was shown each one. What lets reconciliation call a finding `resuelto`.
+    pub prior_verdicts: std::collections::HashMap<String, crate::review_memory::PriorVerdict>,
+    /// Non-blocking lines the report states under its header — the calibration in force, and
+    /// whatever the caller adds once the run is back (the CI's code coverage).
+    pub notes: Vec<String>,
+    /// The calibration this run was held to, for its saved meta (`ReviewMeta::calibration`).
+    pub calibration: Option<crate::review::calibration::Applied>,
+    /// The deterministic rules that ran, for its saved meta (`ReviewMeta::rules`).
+    pub rules: Vec<crate::review::deterministic::RuleRecord>,
 }
 
 /// A review that stopped before spending anything, because the plan says it probably should not run.
@@ -164,6 +174,9 @@ pub struct ReviewRequest<'a> {
     /// The target branch, for the blast radius: a caller matters because it exists in the code this
     /// pull request is merging *into*.
     pub target_ref: &'a str,
+    /// The source branch by name (not the fetched head ref, which on GitHub is a synthetic
+    /// `codeflow-pr-N`) — with the target, what recognises a promotion pull request.
+    pub source_branch: &'a str,
     pub pr_title: &'a str,
     pub pr_description: &'a str,
     /// `open` · `draft` · `merged` · `closed`, as the VCS layer already buckets it.
@@ -328,12 +341,14 @@ pub async fn run(
     let files = outline::build(request.repo_path, request.head_ref, diff_files);
 
     // 2. Scope, triage and the split into groups.
-    let plan = plan::build(
+    let plan = plan::build_with(
         files,
         contract.clone(),
         &request.engine.scope,
         request.pr_status,
         request.changed_since.as_deref(),
+        Some((request.source_branch, request.target_ref)),
+        &request.engine.triage.promotion,
     );
 
     if let Some(skip) = &plan.skip {
@@ -375,6 +390,16 @@ pub async fn run(
         log("  los revisores leen una copia del commit del PR (solo lectura)");
     }
 
+    // 2b. The deterministic pass — the pre-scan of the added lines and the rules whose paths this PR
+    //     touches. Its own task, so it runs while the blast radius parses; it can never fail the run.
+    let deterministic = crate::review::deterministic::spawn_for_clone(
+        &request.engine.deterministic,
+        &contract.level,
+        request.repo_path,
+        request.head_ref,
+        diff_files,
+    );
+
     // 3. Who else calls the symbols being touched — deleted files included, whose every symbol is
     //    removed. Off the async worker: the first review of a branch parses its tree (`codemap`).
     let impacts = {
@@ -403,6 +428,18 @@ pub async fn run(
     }
     if !request.inputs.hints.is_empty() {
         log(&format!("  {} pista(s) históricas sobre estos archivos", request.inputs.hints.len()));
+    }
+    if !request.inputs.calibration.is_empty() {
+        log(&format!(
+            "  calibración: {} categoría(s) que este repo viene descartando piden confianza ≥ {}",
+            request.inputs.calibration.len(),
+            request.inputs.calibration_min_confidence
+        ));
+    }
+
+    let deterministic = deterministic.await.unwrap_or_default();
+    for line in deterministic.log_lines() {
+        log(&line);
     }
 
     // 4. One bundle per group.
@@ -433,8 +470,11 @@ pub async fn run(
     let effort = Some(contract.effort.as_str()).filter(|e| !e.is_empty());
     let review_model = PassModel { model: &request.config.model, effort };
     let reviewed: Vec<String> = plan.files.iter().map(|f| f.path.clone()).collect();
+    let deterministic_blocks = deterministic.group_blocks(&bundles.iter().map(|b| b.files.clone()).collect::<Vec<_>>());
 
     let mut replies: Vec<String> = Vec::new();
+    let mut prior_verdicts: std::collections::HashMap<String, crate::review_memory::PriorVerdict> =
+        std::collections::HashMap::new();
     let mut model: Option<String> = None;
     let mut unreviewed: Vec<String> = Vec::new();
     let mut failed_passes: Vec<String> = Vec::new();
@@ -468,7 +508,7 @@ pub async fn run(
                         let group_impacts = impacts_for(&impacts, &b.files, *i == 0 && !cross_file, &reviewed);
                         let contexts = context::contexts_for(&request_ref.inputs, &group_impacts, Audience::Group(&b.files));
                         let mut payload = ai::review_preamble(request_ref.pr_title, request_ref.pr_description, &contexts);
-                        payload.push_str(&b.text);
+                        payload.push_str(&crate::review::deterministic::into_header(&b.text, &b.body, &deterministic_blocks[*i]));
                         if *i == 0 && !cross_file {
                             if let Some(block) = bundle::deleted_block(&plan.deleted) {
                                 payload.push_str(&block);
@@ -510,7 +550,11 @@ pub async fn run(
                 continue;
             }
             model = model.or(reply.model);
-            replies.push(reply.text);
+            let audience = match &job {
+                Job::Group(i) => Audience::Group(&bundles[*i].files),
+                Job::CrossFile => Audience::CrossFile,
+            };
+            replies.push(take_prior_verdicts(&reply.text, &request.inputs, audience, &mut prior_verdicts));
         }
         // Nothing reviewed at all is a failed review, not an empty one. Returned as an error so no
         // run is saved — saving it would resolve every open finding of this PR.
@@ -529,6 +573,11 @@ pub async fn run(
         let contexts = context::contexts_for(&request.inputs, &impacts, Audience::All);
         let mut payload = ai::review_preamble(request.pr_title, request.pr_description, &contexts);
         payload.push_str(&bundle::header(1, 1, plan.files.len(), &contract, &request.prompts.lenses));
+        let block = deterministic.whole_block(&reviewed);
+        if !block.is_empty() {
+            payload.push_str(&block);
+            payload.push_str("#\n");
+        }
         for b in &bundles {
             payload.push_str(&b.body);
             payload.push('\n');
@@ -536,7 +585,9 @@ pub async fn run(
         if let Some(block) = bundle::deleted_block(&plan.deleted) {
             payload.push_str(&block);
         }
-        let prompt = request.prompts.for_role(None);
+        // The one reviewer also writes the report's prose, so it is asked for what the fan-out's
+        // closing pass is asked for: what the PR gets right, as well as what it gets wrong.
+        let prompt = format!("{}{}", request.prompts.for_role(None), ai::REVIEW_POSITIVES_NOTE);
         // A level that reviews in one pass but still looks across files (completo on a small PR):
         // the cross-file pass reads only the outline, so it runs beside the reviewer, not after it —
         // unless the workspace caps the parallelism at one.
@@ -574,7 +625,7 @@ pub async fn run(
             return Err(error.clone());
         }
         model = model.or(reply.model.clone());
-        replies.push(reply.text.clone());
+        replies.push(take_prior_verdicts(&reply.text, &request.inputs, Audience::All, &mut prior_verdicts));
         if let Some(cross) = cross_reply {
             let cross = cross?;
             workers += 1;
@@ -582,7 +633,7 @@ pub async fn run(
                 Some(_) => failed_passes.push("pase cruzado".to_string()),
                 None => {
                     model = model.or(cross.model);
-                    replies.push(cross.text);
+                    replies.push(take_prior_verdicts(&cross.text, &request.inputs, Audience::CrossFile, &mut prior_verdicts));
                 }
             }
         }
@@ -605,7 +656,23 @@ pub async fn run(
         log(&format!("  ubicación corregida por su evidencia: {what} {from} → {to}"));
     }
     let mut checking = Checking { ungrounded: grounding.discarded.len(), relocated: grounding.relocated.len(), ..Default::default() };
-    let (survivors, mut discarded) = merge::filter(grounding.findings, &contract);
+    // The level's thresholds, and on top of them the bar this repository's own history raised for
+    // the categories it keeps dismissing (`review::calibration`) — a bar, never a filter.
+    let calibration = merge::Calibration {
+        categories: &request.inputs.calibration,
+        min_confidence: request.inputs.calibration_min_confidence,
+    };
+    let (survivors, mut discarded) = merge::filter_calibrated(grounding.findings, &contract, &calibration);
+    let held_back = discarded.iter().filter(|d| d.reason.starts_with(merge::CALIBRATION_PREFIX)).count();
+    let applied_calibration =
+        crate::review::calibration::applied(&request.inputs.calibration, request.inputs.calibration_min_confidence, held_back);
+    let mut notes: Vec<String> = Vec::new();
+    if let Some(line) = deterministic.report_line() {
+        notes.push(line.trim_end().to_string());
+    }
+    if let Some(line) = crate::review::calibration::report_line(&request.inputs.calibration, request.inputs.calibration_min_confidence, held_back) {
+        notes.push(line.trim_end().to_string());
+    }
     discarded.extend(grounding.discarded);
 
     // The repository's standing false positives, enforced here rather than only asked for in the
@@ -636,7 +703,7 @@ pub async fn run(
             // nothing, and a model call to write it would.
             log("  sin hallazgos ni conversación: el cierre no necesita al modelo");
         } else {
-            let mut prompt = request.prompts.summary.clone();
+            let mut prompt = format!("{}{}", request.prompts.summary, ai::REVIEW_POSITIVES_NOTE);
             let mut payload = ai::review_preamble(request.pr_title, request.pr_description, &closing_contexts);
             payload.push_str(&findings_digest(&findings));
             // Judging needs the review model; summarising does not — the engine's fast model writes
@@ -670,7 +737,7 @@ pub async fn run(
         }
     } else {
         let reply = single_reply.expect("a single reviewer's reply");
-        narrative = crate::review::render::strip_grades(&merge::preamble(&reply.text));
+        narrative = crate::review::render::strip_grades(&merge::preamble(&merge::strip_prior_verdicts(&reply.text)));
         if !picks.is_empty() {
             let contexts = &request.inputs.contexts;
             let mut payload = ai::review_preamble(request.pr_title, request.pr_description, contexts);
@@ -721,7 +788,154 @@ pub async fn run(
         unlocated_unread,
         checking,
         cost,
+        notes,
+        prior_verdicts,
+        calibration: applied_calibration,
+        rules: deterministic.records(),
     })))
+}
+
+/// A reviewer's reply without its verdicts on the previous findings, which go into `into` — only
+/// for the findings this reader was actually handed (`context::reevaluate_for`): a ruling on code
+/// it never read is a guess, and a guess must not close a thread.
+fn take_prior_verdicts(
+    text: &str,
+    inputs: &context::ReviewInputs,
+    audience: Audience,
+    into: &mut std::collections::HashMap<String, crate::review_memory::PriorVerdict>,
+) -> String {
+    let offered: std::collections::HashSet<String> =
+        context::reevaluate_for(inputs, audience).iter().map(|f| f.id.to_uppercase()).collect();
+    for (id, verdict) in merge::parse_prior_verdicts(text) {
+        if offered.contains(&id) {
+            into.insert(id, verdict);
+        }
+    }
+    merge::strip_prior_verdicts(text)
+}
+
+/// A review written in one pass with no clone (a PR reached by link) as the same outcome the
+/// pipeline produces — so it is reconciled, rendered and saved exactly like a project's review, and
+/// gets stable ids, judged resolutions and its memory.
+///
+/// The text is the single reviewer's whole reply. Its verdicts on the previous findings are kept
+/// only for the ones it was handed (`reevaluate`); its findings go through the same dedupe, level
+/// filter and standing false positives the pipeline applies. What it cannot have is the grounding
+/// against the code (there is no checkout to ground against), and the report's scope is read off the
+/// diff the host returned.
+///
+/// `calibration` is the repository's (keyed by the link's repository, like a clone's): enforced by the
+/// same merge and said in the same report line. `deterministic` is the pass that ran beside the
+/// reviewer: its line leads the notes, as in the pipeline, and its rules are recorded in the run.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn link_outcome(
+    text: &str,
+    contract: &LevelContract,
+    rules: &[FpSuppression],
+    reevaluate: &[crate::review_memory::MemoryFinding],
+    diff: &str,
+    calibration: &[crate::review::calibration::CalibratedCategory],
+    calibration_min_confidence: u8,
+    deterministic: &crate::review::deterministic::Deterministic,
+) -> PipelineOutcome {
+    let offered: std::collections::HashSet<String> =
+        reevaluate.iter().filter(|f| f.needs_judgement()).map(|f| f.id.to_uppercase()).collect();
+    let prior_verdicts: std::collections::HashMap<String, crate::review_memory::PriorVerdict> =
+        merge::parse_prior_verdicts(text).into_iter().filter(|(id, _)| offered.contains(id)).collect();
+    let reply = merge::strip_prior_verdicts(text);
+
+    let mut all = merge::parse(&reply);
+    for finding in all.iter_mut() {
+        finding.id.clear();
+    }
+    let (deduped, _) = merge::dedupe(all);
+    let bar = merge::Calibration { categories: calibration, min_confidence: calibration_min_confidence };
+    let (survivors, discarded) = merge::filter_calibrated(deduped, contract, &bar);
+    let held_back = discarded.iter().filter(|d| d.reason.starts_with(merge::CALIBRATION_PREFIX)).count();
+    let mut notes: Vec<String> = Vec::new();
+    if let Some(line) = deterministic.report_line() {
+        notes.push(line.trim_end().to_string());
+    }
+    if let Some(line) = crate::review::calibration::report_line(calibration, calibration_min_confidence, held_back) {
+        notes.push(line.trim_end().to_string());
+    }
+    let mut findings: Vec<Finding> = survivors.into_iter().filter(|f| denied_by(f, rules).is_none()).collect();
+    merge::sort(&mut findings);
+    merge::number(&mut findings, 1);
+
+    let (files, additions, deletions) = diff_scope(diff);
+    PipelineOutcome {
+        findings,
+        narrative: crate::review::render::strip_grades(&merge::preamble(&reply)),
+        plan: ReviewPlan {
+            contract: contract.clone(),
+            mode: PlanMode::First,
+            files,
+            deleted: Vec::new(),
+            out_of_scope: Vec::new(),
+            outside_delta: Vec::new(),
+            groups: Vec::new(),
+            skip: None,
+            additions,
+            deletions,
+        },
+        degraded: Vec::new(),
+        workers: 1,
+        model: None,
+        unreviewed: Vec::new(),
+        failed_passes: Vec::new(),
+        unlocated_unread: false,
+        checking: Checking::default(),
+        cost: Default::default(),
+        notes,
+        prior_verdicts,
+        calibration: crate::review::calibration::applied(calibration, calibration_min_confidence, held_back),
+        rules: deterministic.records(),
+    }
+}
+
+/// The promotion question for a review by link, which builds no plan: asked before its **first**
+/// run only, with the same globs, the same words and the same in-scope file count the plan uses for
+/// a project's review (`plan::build_with`). A diff with nothing in scope asks nothing.
+pub(crate) fn link_promotion_skip(diff: &str, engine: &ReviewEngineConfig, source: &str, target: &str, first: bool) -> Option<Skip> {
+    if !first {
+        return None;
+    }
+    let (files, _, _) = diff_scope(diff);
+    let in_scope = plan::count_in_scope(files.iter().map(|f| f.path.as_str()), &engine.scope);
+    if in_scope == 0 {
+        return None;
+    }
+    plan::promotion_skip(source, target, &engine.triage.promotion, in_scope)
+}
+
+/// The files a unified diff touches, with what it added and removed — the "scope analysed" of a
+/// review that has only the host's diff to go by.
+fn diff_scope(diff: &str) -> (Vec<ChangedFile>, usize, usize) {
+    let mut files: Vec<ChangedFile> = Vec::new();
+    let (mut additions, mut deletions) = (0usize, 0usize);
+    let mut old_path: Option<String> = None;
+    for line in diff.lines() {
+        if let Some(path) = line.strip_prefix("--- ") {
+            old_path = Some(path.trim().trim_start_matches("a/").to_string());
+            continue;
+        }
+        if let Some(path) = line.strip_prefix("+++ ") {
+            let path = path.trim();
+            let path = if path == "/dev/null" { old_path.take().unwrap_or_default() } else { path.trim_start_matches("b/").to_string() };
+            files.push(ChangedFile { path, status: "modified".to_string(), ..Default::default() });
+            continue;
+        }
+        let Some(file) = files.last_mut() else { continue };
+        if line.starts_with('+') {
+            additions += 1;
+            file.changed.insert(file.changed.len() + 1);
+        } else if line.starts_with('-') {
+            deletions += 1;
+            file.deletions += 1;
+        }
+    }
+    (files, additions, deletions)
 }
 
 /// What a review would read and roughly cost, without running it — shown beside the level picker so
@@ -760,9 +974,11 @@ pub fn preview(
     pr_status: &str,
     changed_since: Option<&[String]>,
     preamble_chars: usize,
+    // `(source, target)` by name, so the preview asks the same promotion question the review would.
+    branches: Option<(&str, &str)>,
 ) -> ReviewPreview {
     let files = outline::build(repo_path, head_ref, diff_files);
-    let plan = plan::build(files, contract.clone(), &engine.scope, pr_status, changed_since);
+    let plan = plan::build_with(files, contract.clone(), &engine.scope, pr_status, changed_since, branches, &engine.triage.promotion);
     let bundles: Vec<bundle::Bundle> = plan
         .groups
         .iter()
@@ -825,6 +1041,22 @@ pub fn hints_for(
     let runs = queries::review_runs_for_repo(conn, workspace_id, repo_key, pr_id, HINT_RUN_LIMIT)
         .unwrap_or_default();
     hints::for_paths(&runs, paths)
+}
+
+/// The categories this repository keeps dismissing, from the same history the hints read: each
+/// other pull request's latest run, this one left out so its own rulings never raise its own bar.
+pub fn calibration_for(
+    conn: &rusqlite::Connection,
+    workspace_id: &str,
+    repo_key: &str,
+    pr_id: i64,
+    config: &crate::review::contract::CalibrationConfig,
+) -> Vec<crate::review::calibration::CalibratedCategory> {
+    if !config.enabled {
+        return Vec::new();
+    }
+    let runs = queries::review_runs_for_repo(conn, workspace_id, repo_key, pr_id, HINT_RUN_LIMIT).unwrap_or_default();
+    crate::review::calibration::from_runs(&runs, config)
 }
 
 #[cfg(test)]
@@ -933,6 +1165,60 @@ mod tests {
         assert!(denied_by(&parse_one("no valida el monto"), &rules).is_some());
         assert!(denied_by(&parse_one("A diferencia del descarte previo, aquí no pasa por el middleware"), &rules).is_none());
         assert!(denied_by(&parse_one("no valida el monto"), &[rule("sql-injection")]).is_none());
+    }
+
+    const LINK_DIFF: &str = "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+y\n--- a/docs/b.md\n+++ b/docs/b.md\n@@ -1 +1 @@\n-x\n+y\n";
+
+    /// A review by link asks the project's promotion question, in the same words, on its first run.
+    #[test]
+    fn a_first_link_review_of_a_promotion_asks_like_a_project_review() {
+        let engine = ReviewEngineConfig::default();
+        let skip = link_promotion_skip(LINK_DIFF, &engine, "develop", "main", true).expect("asks");
+        assert!(skip.requires_confirmation);
+        let project = plan::promotion_skip("develop", "main", &engine.triage.promotion, 2).unwrap();
+        assert_eq!(skip.reason, project.reason);
+        assert!(link_promotion_skip(LINK_DIFF, &engine, "develop", "main", false).is_none(), "a re-review is new work");
+        assert!(link_promotion_skip(LINK_DIFF, &engine, "feature/x", "main", true).is_none());
+        let mut scoped = ReviewEngineConfig::default();
+        scoped.scope.exclude = vec!["**/*.md".into()];
+        assert!(link_promotion_skip(LINK_DIFF, &scoped, "develop", "main", true).unwrap().reason.contains("1 archivo(s) en alcance"));
+    }
+
+    /// The link outcome is held to the repository's calibration and says so, after the deterministic
+    /// line — and both are recorded for the run's meta.
+    #[test]
+    fn a_link_outcome_applies_the_calibration_and_records_it() {
+        use crate::review::calibration::CalibratedCategory;
+        let cats = vec![CalibratedCategory { categoria: "missing-validation".into(), slug: "missing-validation".into(), dismissed: 3, total: 4, motivo: None }];
+        let text = "Resumen.\n\n### ⚠️ [Mayor · Bug] missing-validation · F-001\n\ns\n\n📍 Ubicación: src/a.ts:1\n\n🎯 Confianza: 70\n\n---\n\n### ⚠️ [Mayor · Bug] npe · F-002\n\ns\n\n📍 Ubicación: src/b.ts:40\n\n🎯 Confianza: 70\n";
+        let det = crate::review::deterministic::Deterministic {
+            rules_on: true,
+            runs: vec![crate::review::rules::RuleRun {
+                id: "R-0004".into(),
+                title: "t".into(),
+                severity: "Info".into(),
+                categories: vec![],
+                status: crate::review::rules::RunStatus::NotEvaluated,
+                reason: Some("sin red".into()),
+                facts: None,
+                matched: vec!["package.json".into()],
+                instruction: String::new(),
+                millis: 0,
+            }],
+            ..Default::default()
+        };
+        let outcome = link_outcome(text, &contract("completo"), &[], &[], LINK_DIFF, &cats, 85, &det);
+        assert_eq!(outcome.findings.iter().map(|f| f.categoria.as_str()).collect::<Vec<_>>(), vec!["npe"]);
+        assert_eq!(outcome.notes.len(), 2);
+        assert!(outcome.notes[0].starts_with("🧪 Determinista"));
+        assert!(outcome.notes[1].starts_with("🎯 Calibración (confianza ≥ 85)") && outcome.notes[1].contains("1 hallazgo(s)"));
+        let frozen = outcome.calibration.expect("recorded");
+        assert_eq!((frozen.min_confidence, frozen.held_back, frozen.categories.len()), (85, 1, 1));
+        assert_eq!(outcome.rules.len(), 1);
+        assert_eq!(outcome.rules[0].reason.as_deref(), Some("sin red"));
+        let plain = link_outcome(text, &contract("completo"), &[], &[], LINK_DIFF, &[], 85, &Default::default());
+        assert_eq!(plain.findings.len(), 2);
+        assert!(plain.notes.is_empty() && plain.calibration.is_none() && plain.rules.is_empty());
     }
 
     #[test]
@@ -1052,6 +1338,7 @@ mod pipeline_tests {
             tools_cwd: repo,
             head_ref: "HEAD",
             target_ref: "HEAD",
+            source_branch: "feature/pagos",
             pr_title: "Pagos",
             pr_description: "",
             pr_status: "open",

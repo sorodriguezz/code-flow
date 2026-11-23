@@ -278,6 +278,14 @@ pub struct LevelContract {
     /// findings, each a few dozen lines — rather than on every nitpick.
     #[serde(default)]
     pub verify: Vec<Severity>,
+    /// Below this share of lines covered by the PR's own CI, the report carries a non-blocking
+    /// warning. `0` is "never" — what `basico` ships with, since a triage that warns about coverage
+    /// is no longer a triage.
+    ///
+    /// Read from what the host's CI already measured, never estimated: no coverage published means
+    /// nothing is said, because "we could not find a number" is not a finding about the PR.
+    #[serde(default)]
+    pub warn_code_coverage_below_pct: u8,
 }
 
 impl LevelContract {
@@ -315,6 +323,7 @@ fn level_defaults(level: &str) -> LevelContract {
             cross_file: false,
             effort: "low".into(),
             verify: Vec::new(),
+            warn_code_coverage_below_pct: 0,
         },
         "ultra" => LevelContract {
             level: "ultra".into(),
@@ -331,6 +340,7 @@ fn level_defaults(level: &str) -> LevelContract {
             cross_file: true,
             effort: "high".into(),
             verify: vec![Severity::Blocker, Severity::Critico, Severity::Mayor],
+            warn_code_coverage_below_pct: 90,
         },
         _ => LevelContract {
             level: "completo".into(),
@@ -345,6 +355,7 @@ fn level_defaults(level: &str) -> LevelContract {
             cross_file: true,
             effort: "medium".into(),
             verify: vec![Severity::Blocker, Severity::Critico],
+            warn_code_coverage_below_pct: 80,
         },
     }
 }
@@ -366,6 +377,68 @@ pub struct LevelOverride {
     pub cross_file: Option<bool>,
     pub effort: Option<String>,
     pub verify: Option<Vec<String>>,
+    pub warn_code_coverage_below_pct: Option<u8>,
+}
+
+/// What this repository's own history says about a category, turned into a bar: a category the
+/// team keeps discarding has to clear a higher confidence to be reported.
+///
+/// **A bar, never a filter.** A category that was a false positive four times out of six is still
+/// a real defect the other two times, so nothing here can suppress a finding outright — it can only
+/// ask the model (and then the merge) for more certainty. That is also why it waits for
+/// `min_samples`: two dismissals are an anecdote, and an anecdote must not move a threshold.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CalibrationConfig {
+    pub enabled: bool,
+    /// Findings of the category (in other PRs of the repository) before its rate means anything.
+    pub min_samples: usize,
+    /// Share of those a human discarded (`falso_positivo` / `ignorado`) for the bar to rise.
+    pub min_rate: f64,
+    /// At most this many categories carry a bar — the worst ones. Past it the header is a list
+    /// nobody reads and the bar stops meaning "this one, specifically".
+    pub max_categories: usize,
+    /// The confidence a finding of a calibrated category needs.
+    pub min_confidence: u8,
+}
+
+impl Default for CalibrationConfig {
+    fn default() -> Self {
+        Self { enabled: true, min_samples: 4, min_rate: 0.5, max_categories: 8, min_confidence: 85 }
+    }
+}
+
+/// Which pull requests move already-reviewed work between long-lived branches.
+///
+/// A `develop → release/*` or `release/* → main` pull request is the sum of feature PRs that were
+/// each reviewed on their own: the most expensive review there is, with the least left to find. So
+/// it **asks** before spending — like a draft — and never skips on its own. `hotfix/*` is not a
+/// source by default: a hotfix carries new code, often reviewed for the first time right there.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PromotionConfig {
+    pub enabled: bool,
+    /// Globs on the bare source branch name (`refs/heads/` stripped).
+    pub source: Vec<String>,
+    /// Globs on the bare target branch name.
+    pub target: Vec<String>,
+}
+
+impl Default for PromotionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            source: vec!["develop".into(), "release/*".into()],
+            target: vec!["release/*".into(), "main".into(), "master".into()],
+        }
+    }
+}
+
+/// What is decided about a pull request before it is read, beyond what [`super::plan`] hardcodes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TriageConfig {
+    pub promotion: PromotionConfig,
 }
 
 /// Which severities make the Quality Gate `FAILED`.
@@ -487,6 +560,10 @@ pub struct ReviewEngineConfig {
     pub graph: GraphConfig,
     pub bundles: BundleConfig,
     pub workers: WorkersConfig,
+    pub calibration: CalibrationConfig,
+    pub triage: TriageConfig,
+    /// The pre-scan and the deterministic rules (see `review::deterministic`).
+    pub deterministic: super::deterministic::DeterministicConfig,
 }
 
 impl ReviewEngineConfig {
@@ -563,6 +640,9 @@ pub fn resolve_level_contract(level: &str, config: &ReviewEngineConfig) -> Level
         let parsed: Vec<Severity> = list.iter().filter_map(|s| Severity::parse(s)).collect();
         contract.verify = Severity::ALL.iter().copied().filter(|s| parsed.contains(s)).collect();
     }
+    if let Some(v) = over.warn_code_coverage_below_pct.filter(|v| *v <= 100) {
+        contract.warn_code_coverage_below_pct = v;
+    }
     contract
 }
 
@@ -595,6 +675,8 @@ pub struct LevelView {
     pub effort: String,
     #[serde(default)]
     pub verify: Vec<String>,
+    #[serde(default)]
+    pub warn_code_coverage_below_pct: u8,
 }
 
 impl From<&LevelContract> for LevelView {
@@ -612,6 +694,7 @@ impl From<&LevelContract> for LevelView {
             cross_file: c.cross_file,
             effort: c.effort.clone(),
             verify: c.verify.iter().map(|s| s.label().to_string()).collect(),
+            warn_code_coverage_below_pct: c.warn_code_coverage_below_pct,
         }
     }
 }
@@ -630,6 +713,7 @@ impl From<&LevelView> for LevelOverride {
             cross_file: Some(v.cross_file),
             effort: Some(v.effort.clone()),
             verify: Some(v.verify.clone()),
+            warn_code_coverage_below_pct: Some(v.warn_code_coverage_below_pct),
         }
     }
 }
@@ -644,6 +728,18 @@ pub struct ResolvedConfig {
     pub graph: GraphConfig,
     pub bundles: BundleConfig,
     pub workers: WorkersConfig,
+    /// Defaulted on the way in, so a screen that predates these sections saves without losing them
+    /// to a deserialisation error.
+    #[serde(default)]
+    pub calibration: CalibrationConfig,
+    #[serde(default)]
+    pub triage: TriageConfig,
+    #[serde(default)]
+    pub deterministic: super::deterministic::DeterministicConfig,
+    /// Every deterministic rule CodeFlow knows, so the screen can offer a switch per rule. Read-only:
+    /// ignored on the way back in.
+    #[serde(default)]
+    pub rule_catalog: Vec<super::deterministic::RuleInfo>,
     /// Every lens the catalog knows, so the level editor can offer them by name instead of by
     /// number. Filled from the workspace's editable `review_lenses` prompt.
     pub lens_catalog: Vec<(u8, String)>,
@@ -661,6 +757,10 @@ pub fn resolve_all(config: &ReviewEngineConfig, lenses_text: &str) -> ResolvedCo
         graph: config.graph.clone(),
         bundles: config.bundles.clone(),
         workers: config.workers.clone(),
+        calibration: config.calibration.clone(),
+        triage: config.triage.clone(),
+        deterministic: config.deterministic.clone(),
+        rule_catalog: super::deterministic::rule_catalog(),
         lens_catalog: parse_lenses(lenses_text).into_iter().collect(),
     }
 }
@@ -678,6 +778,9 @@ pub fn from_resolved(view: &ResolvedConfig) -> ReviewEngineConfig {
         graph: view.graph.clone(),
         bundles: view.bundles.clone(),
         workers: view.workers.clone(),
+        calibration: view.calibration.clone(),
+        triage: view.triage.clone(),
+        deterministic: view.deterministic.clone(),
     }
 }
 
@@ -850,6 +953,39 @@ mod tests {
         let partial = ReviewEngineConfig::load(Some(r#"{"workers":{"maxParallel":2}}"#));
         assert_eq!(partial.workers.max_parallel, 2);
         assert_eq!(partial.bundles.max_lines_per_file, 800);
+    }
+
+    /// A triage says nothing about coverage; the deeper levels warn, and a workspace can move or
+    /// silence the line — but not past 100.
+    #[test]
+    fn coverage_warnings_scale_with_the_level_and_can_be_overridden() {
+        let cfg = ReviewEngineConfig::default();
+        let pct = |l: &str, cfg: &ReviewEngineConfig| resolve_level_contract(l, cfg).warn_code_coverage_below_pct;
+        assert_eq!((pct("basico", &cfg), pct("completo", &cfg), pct("ultra", &cfg)), (0, 80, 90));
+        let mut cfg = ReviewEngineConfig::default();
+        cfg.levels.insert("completo".into(), LevelOverride { warn_code_coverage_below_pct: Some(70), ..Default::default() });
+        cfg.levels.insert("ultra".into(), LevelOverride { warn_code_coverage_below_pct: Some(140), ..Default::default() });
+        assert_eq!(pct("completo", &cfg), 70);
+        assert_eq!(pct("ultra", &cfg), 90, "an impossible percentage is ignored");
+    }
+
+    /// The new sections survive the settings screen's round trip, and a screen that predates them
+    /// still saves.
+    #[test]
+    fn calibration_and_triage_round_trip_through_the_settings_view() {
+        let mut cfg = ReviewEngineConfig::default();
+        cfg.calibration.min_samples = 6;
+        cfg.triage.promotion.source = vec!["develop".into()];
+        let back = from_resolved(&resolve_all(&cfg, DEFAULT_LENSES));
+        assert_eq!(back.calibration.min_samples, 6);
+        assert_eq!(back.triage.promotion.source, vec!["develop".to_string()]);
+        let defaults = ReviewEngineConfig::load(Some("{}"));
+        assert_eq!((defaults.calibration.min_samples, defaults.calibration.max_categories, defaults.calibration.min_confidence), (4, 8, 85));
+        assert!(defaults.triage.promotion.target.contains(&"main".to_string()));
+        let mut view = serde_json::to_value(resolve_all(&cfg, DEFAULT_LENSES)).unwrap();
+        view.as_object_mut().unwrap().remove("calibration");
+        view.as_object_mut().unwrap().remove("triage");
+        assert!(serde_json::from_value::<ResolvedConfig>(view).is_ok());
     }
 
     #[test]

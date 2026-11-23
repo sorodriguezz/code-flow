@@ -1,33 +1,68 @@
 #!/usr/bin/env node
 /**
- * Builds the body of a GitHub release from the commits since the previous tag.
+ * Builds the body of a GitHub release.
  *
  * This isn't only for people browsing the Releases page: the updater serves the release body as
  * the `notes` field of `latest.json`, and CodeFlow shows it verbatim in its "What's new" window
- * when it finds a newer version. So this output is user-facing product copy — which is why the
- * version-bump and CI plumbing commits are filtered out rather than listed as news.
+ * when it finds a newer version. So this output is user-facing product copy.
  *
- * Reads PREV (previous tag, may be empty on the very first release) and REPO (`owner/name`) from
- * the environment and writes markdown to stdout.
+ * The source is `CHANGELOG.md`'s section for this version (`## 2.9.4`, `## [2.9.4]` or
+ * `## v2.9.4`, optionally followed by ` — <date>`), written for users rather than developers.
+ * Only when that section is missing does it fall back to the commits since the previous tag —
+ * with the version-bump and CI plumbing filtered out — because a release that says something is
+ * better than one that says nothing. The workflow warns when that happens.
+ *
+ * Reads VERSION (the version being released), PREV (previous tag, may be empty on the very first
+ * release) and REPO (`owner/name`) from the environment and writes markdown to stdout.
  *
  * Run it locally to see what the next release would say:
- *   PREV=v1.6.0 REPO=sorodriguezz/code-flow node .github/scripts/release-notes.cjs
+ *   VERSION=2.9.4 PREV=v2.9.2 REPO=sorodriguezz/code-flow node .github/scripts/release-notes.cjs
  */
 const { execSync } = require("node:child_process");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const prev = process.env.PREV || "";
 const repo = process.env.REPO || "";
+const version = (process.env.VERSION || "").replace(/^v/, "");
+
+/** This version's section of CHANGELOG.md, without its heading; `null` when there is none (or it
+ * is empty — an empty heading is a forgotten entry, not a release with nothing to say). */
+function changelogSection() {
+  if (!version) return null;
+  const file = path.join(__dirname, "..", "..", "CHANGELOG.md");
+  if (!fs.existsSync(file)) return null;
+  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const heading = new RegExp(`^##\\s+\\[?v?${escaped}\\]?(\\s|$)`);
+  const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
+  const start = lines.findIndex((line) => heading.test(line));
+  if (start < 0) return null;
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((line) => /^##\s/.test(line));
+  const body = (end < 0 ? rest : rest.slice(0, end)).join("\n").trim();
+  return body || null;
+}
+
+const curated = changelogSection();
+if (curated !== null) {
+  const out = [curated];
+  if (prev && repo) {
+    out.push(`**Cambios completos:** [${prev}...v${version}](https://github.com/${repo}/compare/${prev}...v${version})`);
+  }
+  process.stdout.write(out.join("\n\n") + "\n");
+  process.exit(0);
+}
 
 /** Conventional-commit prefixes, in the order they're worth reading. Anything unrecognised —
  * including commits written without a prefix at all — lands in "Other changes" rather than
  * being dropped, because a silently missing change is worse than an unsorted one. */
 const GROUPS = [
-  { key: "feat", title: "✨ New" },
-  { key: "fix", title: "🐛 Fixes" },
-  { key: "perf", title: "⚡ Performance" },
-  { key: "refactor", title: "♻️ Under the hood" },
-  { key: "docs", title: "📝 Documentation" },
-  { key: "other", title: "🧹 Other changes" },
+  { key: "feat", title: "✨ Nuevo" },
+  { key: "fix", title: "🐛 Corregido" },
+  { key: "perf", title: "⚡ Rendimiento" },
+  { key: "refactor", title: "♻️ Mejoras internas" },
+  { key: "docs", title: "📝 Documentación" },
+  { key: "other", title: "🧹 Otros cambios" },
 ];
 
 /** Release plumbing: the version bump that triggers this very workflow, and CI edits. Nobody
@@ -65,10 +100,10 @@ const sections = GROUPS.filter((g) => buckets.get(g.key).length > 0).map(
 );
 
 const out = [];
-out.push(sections.length ? sections.join("\n\n") : "Maintenance release — no user-facing changes.");
+out.push(sections.length ? sections.join("\n\n") : "Versión de mantenimiento, sin cambios visibles.");
 if (prev && repo) {
-  const to = process.env.VERSION ? `v${process.env.VERSION}` : "HEAD";
-  out.push(`**Full changelog:** [${prev}...${to}](https://github.com/${repo}/compare/${prev}...${to})`);
+  const to = version ? `v${version}` : "HEAD";
+  out.push(`**Cambios completos:** [${prev}...${to}](https://github.com/${repo}/compare/${prev}...${to})`);
 }
 
 process.stdout.write(out.join("\n\n") + "\n");

@@ -5,6 +5,7 @@ import {
   formatFindingAsComment,
   formatFindingAsFixPrompt,
   formatFindingsAsFixPrompt,
+  extractPositives,
   formatSummaryComment,
   locationLabel,
   parseAnalysis,
@@ -288,5 +289,108 @@ describe("formatFindingsAsFixPrompt", () => {
     expect(prompt.split("\n")[0]).toContain("2 hallazgos (F-001, F-002)");
     expect(prompt).toContain(formatFindingAsFixPrompt(first));
     expect(prompt).toContain(formatFindingAsFixPrompt(second));
+  });
+});
+
+describe("the positives and the coverage warning in the summary comment", () => {
+  const report = `📈 CALIDAD: Fiabilidad=C Seguridad=A Mantenibilidad=A
+
+🚦 Quality Gate: ✅ PASSED
+⚠️ Cobertura de código 72 % (< 80 % del nivel)
+
+El PR agrega el cobro.
+
+👍 **Lo que está bien:**
+- Valida el monto en el borde
+- Tests del caso sin saldo
+
+### ⚠️ [Mayor · Bug] npe · F-001
+
+Se lee saldo sin validar.
+
+📍 Ubicación: src/a.ts:4-5
+
+🎯 Confianza: 80/100
+`;
+  const parsed = parseAnalysis(report);
+
+  it("reads every spelling of the section as a list", () => {
+    expect(extractPositives(parsed.summary).positives).toEqual(["Valida el monto en el borde", "Tests del caso sin saldo"]);
+    expect(extractPositives("Bien.\n**Lo que está bien:** a; b\n\n**Notas:** x")).toEqual({
+      rest: "Bien.\n\n**Notas:** x",
+      positives: ["a", "b"],
+    });
+    expect(extractPositives("## Lo que esta bien\n1. uno\n2) dos").positives).toEqual(["uno", "dos"]);
+    expect(extractPositives("Nada que destacar.").positives).toEqual([]);
+  });
+
+  it("prints them as 👍 bullets when findings are posted", () => {
+    const body = formatSummaryComment(parsed, "2026-11-23", parsed.findings);
+    expect(body).toContain("👍 **Lo que está bien:**\n- Valida el monto en el borde\n- Tests del caso sin saldo");
+    expect(body).toContain("⚠️ Cobertura de código 72 % (< 80 % del nivel)");
+    expect(body.match(/Lo que está bien/g)).toHaveLength(1);
+  });
+
+  it("keeps them, and the coverage warning, when nothing was posted", () => {
+    const body = formatSummaryComment(parsed, "2026-11-23", []);
+    expect(body).toContain("ninguno de los cuales se publicó");
+    expect(body).toContain("⚠️ Cobertura de código 72 %");
+    expect(body).toContain("- Valida el monto en el borde");
+  });
+});
+
+describe("judged resolutions, technical debt and late findings", () => {
+  const saved = (id: string, estado: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    severity: "info",
+    severidad: "Menor",
+    tipo: "Bug",
+    categoria: "npe",
+    subtitulo: `sub ${id}`,
+    archivo: "src/a.ts",
+    lineas: "10",
+    confianza: 80,
+    estado,
+    introducido_en_iter: 1,
+    ...extra,
+  });
+  const memory = (all: ReturnType<typeof saved>[]): SummaryMemory => ({
+    all,
+    resolved: all.filter((f) => f.estado === "resuelto"),
+    discarded: [],
+    debt: all.filter((f) => f.estado === "deuda_tecnica"),
+    iter: 3,
+    level: "completo",
+    engine: "",
+    model: "",
+    files: 0,
+    additions: 0,
+    deletions: 0,
+  });
+
+  it("lists every resolved finding with what fixed it, and says when nothing is left open", () => {
+    const clean = { findings: [], summary: "", footer: null, grades: null };
+    const body = formatSummaryComment(clean, "2026-11-23", [], memory([saved("F-001", "resuelto", { resolucion: "Se agregó la guarda." })]));
+    expect(body).toContain("✅ **Sin hallazgos activos** — Todos los hallazgos de la iteración previa fueron corregidos.");
+    expect(body).toContain("~~F-001~~");
+    expect(body).toContain("✔️ **1 hallazgos resueltos** (hilos individuales actualizados a `fixed`):");
+    expect(body).toContain("- F-001 (Menor) — src/a.ts — sub F-001");
+    expect(body).toContain("  - 🛠️ Se agregó la guarda.");
+  });
+
+  it("counts accepted debt apart from what is open", () => {
+    const parsed = parseAnalysis(REPORT);
+    const body = formatSummaryComment(parsed, "2026-11-23", parsed.findings, memory([saved("F-009", "deuda_tecnica", { motivo_descarte: "Q3" })]));
+    expect(body).toContain("🧾 1 deuda técnica");
+    expect(body).toContain("- F-009 (Menor) — src/a.ts — sub F-009 — _Q3_");
+    expect(body).not.toContain("Sin hallazgos activos");
+  });
+
+  it("reads a late finding's note and repeats it in its comment", () => {
+    const report = "### ⚠️ [Mayor · Bug] npe · F-004\n\nsub\n\n📍 Ubicación: a.ts:3\n\n⏳ Tardío: el código ya estaba en la iteración 2\n\n💭 Por qué: p\n\n💡 Sugerencia: s\n\n🎯 Confianza: 70/100\n\n---\n";
+    const [finding] = parseAnalysis(report).findings;
+    expect(finding.late).toBe("el código ya estaba en la iteración 2");
+    expect(finding.why).toBe("p");
+    expect(formatFindingAsComment(finding)).toContain("⏳ _(tardío: el código ya estaba en la iteración 2)_");
   });
 });

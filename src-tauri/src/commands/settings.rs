@@ -192,8 +192,9 @@ pub fn get_review_run(db: State<Db>, id: String) -> Result<Option<ReviewRunDetai
     queries::get_review_run(&conn, &id).map_err(|e| e.to_string())
 }
 
-/// Marks one finding in a saved run as `falso_positivo` / `ignorado` (with a reason), or clears it
-/// back to `abierto`. Provider-independent — pure DB — and carried forward on the next re-review.
+/// Marks one finding in a saved run as `falso_positivo` / `ignorado` / `deuda_tecnica` (with a
+/// reason — required for debt), or clears it back to `abierto`. Provider-independent — pure DB —
+/// and carried forward on the next re-review. See `review_memory::set_finding_state`.
 #[tauri::command]
 pub fn mark_review_finding(
     db: State<Db>,
@@ -212,19 +213,40 @@ pub fn mark_review_finding(
         .iter_mut()
         .find(|f| f.id == finding_id)
         .ok_or_else(|| "Finding not found in this run".to_string())?;
-    match estado.as_str() {
-        "falso_positivo" | "ignorado" => {
-            f.estado = estado;
-            f.motivo_descarte = motivo.filter(|m| !m.trim().is_empty());
-        }
-        // Un-mark: back to open (or posted if it still has a thread).
-        _ => {
-            f.estado = if f.thread_id.is_some() { "posteado".to_string() } else { "abierto".to_string() };
-            f.motivo_descarte = None;
-        }
-    }
+    // Anything that is not a discard or a debt un-marks: back to open (or posted if it still has a
+    // thread).
+    let target = match estado.as_str() {
+        "falso_positivo" | "ignorado" | crate::review_memory::ESTADO_DEUDA => estado.as_str(),
+        _ => "abierto",
+    };
+    crate::review_memory::set_finding_state(f, target, motivo, run.iter.max(1) as usize)?;
     let json = serde_json::to_string(&findings).map_err(|e| e.to_string())?;
     queries::set_review_run_findings(&conn, &run_id, &json).map_err(|e| e.to_string())
+}
+
+// ---------- the debt scan (per workspace, off by default) ----------
+
+fn debt_scan_key(workspace_id: &str) -> String {
+    format!("review_debt_scan:{workspace_id}")
+}
+
+/// Whether a review in this workspace also carries the technical debt accepted in *other* pull
+/// requests of the same repository, on the files it touches — and settles it when it is found
+/// fixed. Off unless switched on: it adds context (and so tokens) to every review that touches debt.
+pub fn debt_scan_enabled(conn: &rusqlite::Connection, workspace_id: &str) -> bool {
+    queries::get_setting(conn, &debt_scan_key(workspace_id)).ok().flatten().as_deref() == Some("1")
+}
+
+#[tauri::command]
+pub fn get_review_debt_scan(db: State<Db>, workspace_id: String) -> Result<bool, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    Ok(debt_scan_enabled(&conn, &workspace_id))
+}
+
+#[tauri::command]
+pub fn set_review_debt_scan(db: State<Db>, workspace_id: String, enabled: bool) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::set_setting(&conn, &debt_scan_key(&workspace_id), if enabled { "1" } else { "0" }).map_err(|e| e.to_string())
 }
 
 // ---------- known false positives (repository-scoped suppression rules) ----------
@@ -284,10 +306,24 @@ pub fn delete_review_run(db: State<Db>, id: String) -> Result<(), String> {
     queries::delete_review_run(&conn, &id).map_err(|e| e.to_string())
 }
 
+/// Deletes one PR's saved runs. With an empty `project_id` it is a link review's — runs no project
+/// owns — named by the workspace and repository they are kept under.
 #[tauri::command]
-pub fn delete_review_runs_for_pr(db: State<Db>, project_id: String, pr_id: i64) -> Result<(), String> {
+pub fn delete_review_runs_for_pr(
+    db: State<Db>,
+    project_id: String,
+    pr_id: i64,
+    workspace_id: Option<String>,
+    repo_key: Option<String>,
+) -> Result<(), String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
-    queries::delete_review_runs_for_pr(&conn, &project_id, pr_id).map_err(|e| e.to_string())
+    match (project_id.trim().is_empty(), workspace_id, repo_key) {
+        (true, Some(workspace_id), Some(repo_key)) if !repo_key.trim().is_empty() => {
+            queries::delete_repo_review_runs_for_pr(&conn, &workspace_id, &repo_key, pr_id).map_err(|e| e.to_string())
+        }
+        (true, _, _) => Err("Nothing names the runs to delete".to_string()),
+        _ => queries::delete_review_runs_for_pr(&conn, &project_id, pr_id).map_err(|e| e.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -354,6 +390,11 @@ fn export_into(
     let one_run = id.map(str::trim).filter(|s| !s.is_empty());
     let one_repo = project_id.map(str::trim).filter(|s| !s.is_empty());
 
+    // Which repository each run belongs to, for the identity written beside it. Read from the
+    // project rather than trusted from `meta`, so a run recorded before repository keys existed
+    // still exports with one and imports somewhere sensible.
+    let repo_keys = project_repo_keys(conn, workspace_id);
+
     let runs = match one_run {
         Some(id) => queries::get_review_run(conn, id)
             .map_err(|e| e.to_string())?
@@ -362,18 +403,24 @@ fn export_into(
         None => {
             let summaries =
                 queries::list_review_runs(conn, workspace_id).map_err(|e| e.to_string())?;
+            // A repository's export takes its link reviews too: runs no project owns, of the
+            // same repository — they are that repository's memory as much as the project's own.
+            // `repo:<key>` names such a repository directly, when no project here is it.
+            let wanted_key = one_repo
+                .and_then(|p| p.strip_prefix("repo:").map(str::to_string).or_else(|| repo_keys.get(p).cloned()))
+                .map(|k| k.to_lowercase());
             summaries
                 .into_iter()
-                .filter(|s| one_repo.is_none_or(|wanted| s.project_id == wanted))
+                .filter(|s| {
+                    one_repo.is_none_or(|wanted| {
+                        s.project_id == wanted
+                            || (s.project_id.is_empty() && wanted_key.as_deref().is_some_and(|k| s.repo_key == k))
+                    })
+                })
                 .filter_map(|s| queries::get_review_run(conn, &s.id).ok().flatten())
                 .collect()
         }
     };
-
-    // Which repository each run belongs to, for the identity written beside it. Read from the
-    // project rather than trusted from `meta`, so a run recorded before repository keys existed
-    // still exports with one and imports somewhere sensible.
-    let repo_keys = project_repo_keys(conn, workspace_id);
 
     // A single-run export carries no rules: it is one review being shared or read, not a memory
     // being moved, and silently attaching the repository's standing judgements to it would be a
@@ -382,8 +429,9 @@ fn export_into(
         Vec::new()
     } else {
         let all = load_fp_suppressions(conn, workspace_id);
-        match one_repo.and_then(|p| repo_keys.get(p)) {
-            Some(key) => all.into_iter().filter(|r| r.repo_key.eq_ignore_ascii_case(key)).collect(),
+        let scope_key = one_repo.and_then(|p| p.strip_prefix("repo:").map(str::to_string).or_else(|| repo_keys.get(p).cloned()));
+        match scope_key {
+            Some(key) => all.into_iter().filter(|r| r.repo_key.eq_ignore_ascii_case(&key)).collect(),
             None => all,
         }
     };
@@ -407,7 +455,11 @@ fn export_into(
             iter: run.iter,
             level: run.level.clone(),
             created_at: run.created_at.clone(),
-            repo_key: repo_keys.get(&run.project_id).cloned().unwrap_or_default(),
+            // A link review's run has no project to ask: its own `meta` names the repository.
+            repo_key: repo_keys
+                .get(&run.project_id)
+                .cloned()
+                .unwrap_or_else(|| crate::review_memory::run_repo_key(&run.meta)),
         };
         let json = serde_json::to_string_pretty(&identity).map_err(|e| e.to_string())?;
         std::fs::write(dir.join("run.json"), json).map_err(|e| e.to_string())?;
@@ -459,10 +511,13 @@ pub struct ImportOutcome {
     /// or two machines that have both seen the same review.
     pub already_present: usize,
     pub rules: usize,
-    /// Repositories named by runs in the folder that no project in this workspace is linked to.
-    /// Named rather than counted: the fix is to link that repository and import again, which the
-    /// user can only do if they are told which one it was.
+    /// Runs in the folder that name no repository and match no project here — only runs from
+    /// before repository keys existed. Named rather than counted: the fix is to link that project
+    /// and import again, which the user can only do if they are told which one it was.
     pub unmatched_repos: Vec<String>,
+    /// Repositories no project here is linked to, whose runs were imported by repository alone —
+    /// kept like a link review's, and picked up by the project the day it is linked.
+    pub repo_only: Vec<String>,
     /// Folders that looked like a run but couldn't be read back — a truncated copy, or a
     /// `meta.json` that isn't JSON.
     pub unreadable: usize,
@@ -516,22 +571,36 @@ fn import_from(
             out.unreadable += 1;
             continue;
         };
-        let Some(project) = crate::review_memory::resolve_project(&run.identity, &local) else {
+        // No local project is that repository: the run still lands, kept by repository alone —
+        // exactly like a link review's — so the day the repository is linked here its reviews find
+        // it (`queries::MemoryScope`). Only a run that names no repository at all cannot be placed.
+        let project = crate::review_memory::resolve_project(&run.identity, &local);
+        let repo_key = run.identity.repo_key.trim().to_lowercase();
+        if project.is_none() && repo_key.is_empty() {
             let named = unmatched_label(&run);
             if !out.unmatched_repos.contains(&named) {
                 out.unmatched_repos.push(named);
             }
             continue;
-        };
+        }
         if queries::review_run_exists(conn, &run.identity.id).map_err(|e| e.to_string())? {
             out.already_present += 1;
             continue;
         }
+        if project.is_none() && !out.repo_only.contains(&repo_key) {
+            out.repo_only.push(repo_key.clone());
+        }
+        let repo_key = if repo_key.is_empty() {
+            project.and_then(|p| p.repo_key.clone()).unwrap_or_default()
+        } else {
+            repo_key
+        };
         queries::add_review_run(
             conn,
             &run.identity.id,
-            &project.id,
+            project.map(|p| p.id.as_str()),
             workspace_id,
+            &repo_key,
             run.identity.pr_id,
             run.identity.iter,
             &run.identity.level,
@@ -823,8 +892,9 @@ mod tests {
         queries::add_review_run(
             conn,
             &format!("run-{repo}"),
-            project_id,
+            Some(project_id),
             "ws",
+            &format!("github:github.com/acme/{repo}"),
             pr_id,
             1,
             "deep",
@@ -913,11 +983,12 @@ mod tests {
         assert_eq!(import_from(&target, &target_ws, &dir).unwrap().already_present, 1);
     }
 
-    /// The dangerous one. A run whose repository isn't here must be reported by name, never filed
-    /// against whichever project happens to be around — that would hand one repository another's
-    /// findings, which is exactly what the memory scope exists to prevent.
+    /// The dangerous one. A run whose repository isn't here must never be filed against whichever
+    /// project happens to be around — that would hand one repository another's findings. It lands
+    /// by repository alone (like a link review's run) and is named, so nothing is lost and nothing
+    /// is misplaced.
     #[test]
-    fn a_run_for_an_absent_repository_is_reported_not_placed() {
+    fn a_run_for_an_absent_repository_lands_by_repository_not_in_a_project() {
         let dir = scratch("unmatched");
         let (source, ws, _) = install(&["app", "secret-service"]);
         export_into(&source, &ws, None, None, &dir).unwrap();
@@ -926,9 +997,28 @@ mod tests {
         queries::purge_workspace_review_runs(&target, &target_ws).unwrap();
 
         let out = import_from(&target, &target_ws, &dir).unwrap();
-        assert_eq!(out.imported, 1);
-        assert_eq!(out.unmatched_repos, vec!["github:github.com/acme/secret-service".to_string()]);
-        assert_eq!(queries::list_review_runs(&target, &target_ws).unwrap().len(), 1);
+        assert_eq!(out.imported, 2);
+        assert!(out.unmatched_repos.is_empty());
+        assert_eq!(out.repo_only, vec!["github:github.com/acme/secret-service".to_string()]);
+        let landed = queries::list_review_runs(&target, &target_ws).unwrap();
+        let orphan = landed.iter().find(|r| r.repo_key.ends_with("secret-service")).unwrap();
+        assert_eq!(orphan.project_id, "", "no project owns it");
+    }
+
+    /// A link review's run (no project) travels too, and a repository's export takes it along.
+    #[test]
+    fn a_link_review_run_is_exported_with_its_repository() {
+        let dir = scratch("link-run");
+        let (source, ws, ids) = install(&["app"]);
+        let meta = serde_json::json!({"pr_id": 9, "repo_key": "github:github.com/acme/app", "iter": 1, "timestamp": "t"}).to_string();
+        queries::add_review_run(&source, "link-run", None, &ws, "github:github.com/acme/app", 9, 1, "deep", &meta, "md", "", "[]").unwrap();
+
+        let written = export_into(&source, &ws, None, Some(&ids[0]), &dir).unwrap();
+        assert_eq!(written.runs, 2);
+
+        let (target, target_ws, _) = install(&["app"]);
+        queries::purge_workspace_review_runs(&target, &target_ws).unwrap();
+        assert_eq!(import_from(&target, &target_ws, &dir).unwrap().imported, 2);
     }
 
     #[test]

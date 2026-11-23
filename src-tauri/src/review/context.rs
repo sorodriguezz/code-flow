@@ -52,8 +52,13 @@ pub struct ReviewInputs {
     /// The workspace's review contexts and an agent's own prompt — rules for the whole repository,
     /// so every reader gets them.
     pub contexts: Vec<(String, String)>,
-    /// The previous run's findings for this PR (empty on a first review, and for a link review).
+    /// The previous run's findings for this PR (empty on a first review).
     pub remembered: Vec<MemoryFinding>,
+    /// The previous findings this run must re-judge — still in the code (active or accepted debt)
+    /// and on a file this run re-reads. Each reader gets the ones on its own files, and must answer
+    /// with a verdict per finding (see `review_memory::reevaluate_block`); without one a finding
+    /// persists.
+    pub reevaluate: Vec<MemoryFinding>,
     /// The PR's open threads on the host.
     pub threads: Vec<PrCommentThread>,
     /// When this PR was last reviewed, to mark what was written since.
@@ -62,6 +67,10 @@ pub struct ReviewInputs {
     pub rules: Vec<FpSuppression>,
     /// What other PRs already settled about these files.
     pub hints: Vec<Hint>,
+    /// The categories this repository keeps dismissing, and the confidence they need — told to
+    /// every reader that writes findings, and enforced again by the merge.
+    pub calibration: Vec<super::calibration::CalibratedCategory>,
+    pub calibration_min_confidence: u8,
     /// The PR's checks, already rendered — see [`checks_block`].
     pub checks: Option<String>,
     /// The repository's conventions, for an engine that will not read them itself — see
@@ -128,6 +137,10 @@ pub fn contexts_for(inputs: &ReviewInputs, impacts: &[Impact], audience: Audienc
         if let Some(block) = hints::block(&hints) {
             out.push(("Hallazgos ya evaluados en otros PRs de este repo".to_string(), block));
         }
+        // By category rather than by file, so every reader that writes findings gets all of it.
+        if let Some(block) = super::calibration::block(&inputs.calibration, inputs.calibration_min_confidence) {
+            out.push(("Calibración de este repositorio".to_string(), block));
+        }
         if let Some(block) = graph::block(impacts) {
             out.push(("Impacto fuera del PR (referencias)".to_string(), block));
         }
@@ -137,10 +150,18 @@ pub fn contexts_for(inputs: &ReviewInputs, impacts: &[Impact], audience: Audienc
             }
         }
     }
-    if let Some(block) = pending_comments_block(&inputs.remembered, &inputs.threads, inputs.since.as_deref(), audience) {
+    // The findings handed back for a verdict are left out of the conversation block: listed twice,
+    // the model is asked to both answer them there and rule on them here.
+    let judged = reevaluate_for(inputs, audience);
+    let skip: HashSet<String> = judged.iter().map(|f| f.id.clone()).collect();
+    if let Some(block) = pending_block_except(&inputs.remembered, &inputs.threads, inputs.since.as_deref(), audience, &skip) {
         out.push(("Conversación abierta en el PR".to_string(), block));
     }
     if !closing {
+        let judged: Vec<MemoryFinding> = judged.into_iter().cloned().collect();
+        if let Some(block) = review_memory::reevaluate_block(&judged) {
+            out.push(("Hallazgos previos a re-evaluar".to_string(), block));
+        }
         // Two "do not raise this" blocks, deliberately not folded into the one above: that block
         // asks the model to *answer* what is still open, and these ask it to stay off ground a human
         // already ruled on.
@@ -164,6 +185,18 @@ pub fn contexts_for(inputs: &ReviewInputs, impacts: &[Impact], audience: Audienc
         }
     }
     out
+}
+
+/// The previous findings `audience` must return a verdict on: the ones on its own files (a finding
+/// with no file goes to whoever reads across files). The closing pass judges none — it reads no code.
+///
+/// Public because the pipeline needs the same cut to know whose verdict to believe: a reviewer
+/// that rules on a finding it was never shown is guessing about code it did not read.
+pub fn reevaluate_for<'a>(inputs: &'a ReviewInputs, audience: Audience) -> Vec<&'a MemoryFinding> {
+    if matches!(audience, Audience::Closing) {
+        return Vec::new();
+    }
+    inputs.reevaluate.iter().filter(|f| f.needs_judgement() && audience.owns(f.archivo.as_deref())).collect()
 }
 
 /// The reference repositories, named for a reviewer that can consult them — and told what they are
@@ -198,8 +231,8 @@ pub fn references_block(references: &[graph::Reference]) -> Option<String> {
 /// reconciliation match the re-review's findings back to the threads already opened for them), and
 /// every other thread the host still shows open (a human reviewer's). The instructions matter as
 /// much as the list: a finding that persists must be re-reported *with the same file and category*
-/// or reconciliation reads it as fixed, and one that really was fixed must be left out and said so
-/// in the summary — that is exactly the signal that flips it to `resuelto`.
+/// so reconciliation recognises it, and one that looks fixed is said so in the summary. Only a
+/// verdict from the reviewer that re-read its file (see [`reevaluate_for`]) ever makes it `resuelto`.
 ///
 /// Returns `None` when nothing is pending for this reader: a first review has no conversation to
 /// carry, and an empty "still open" section only invites the model to invent one.
@@ -211,9 +244,23 @@ pub fn pending_comments_block(
     since: Option<&str>,
     audience: Audience,
 ) -> Option<String> {
+    pending_block_except(remembered, threads, since, audience, &HashSet::new())
+}
+
+/// [`pending_comments_block`] without the published findings in `skip` — the ones the same reader
+/// is already asked to rule on in "Hallazgos previos a re-evaluar". Their threads still count as
+/// ours, so they are not listed as somebody else's conversation either.
+pub fn pending_block_except(
+    remembered: &[MemoryFinding],
+    threads: &[PrCommentThread],
+    since: Option<&str>,
+    audience: Audience,
+    skip: &HashSet<String>,
+) -> Option<String> {
     let published: Vec<&MemoryFinding> = remembered
         .iter()
         .filter(|f| f.is_active() && f.thread_id.is_some())
+        .filter(|f| !skip.contains(&f.id))
         .filter(|f| audience.owns(f.archivo.as_deref()))
         .collect();
     // Threads CodeFlow opened are already described, in richer terms, by the memory above —
@@ -333,6 +380,23 @@ pub fn checks_block(checks: &PrChecks) -> Option<String> {
     Some(out)
 }
 
+/// The report's warning when the PR's CI measured less line coverage than the level asks for.
+///
+/// Non-blocking by design: it never touches the Quality Gate, because coverage is the team's own
+/// number from its own tooling, and a review that failed a PR over it would be second-guessing a
+/// policy the CI already enforces (or deliberately doesn't). `None` — nothing said — when the level
+/// sets no threshold, when no coverage was published, or when it clears the bar.
+pub fn coverage_note(pct: Option<f64>, threshold: u8) -> Option<String> {
+    let pct = pct.filter(|p| p.is_finite())?;
+    if threshold == 0 || pct >= f64::from(threshold) {
+        return None;
+    }
+    // Floored, so a 79.6 % never reads as a passing "80 %" next to a "< 80 %".
+    let shown = (pct * 10.0).floor() / 10.0;
+    let shown = if shown.fract() == 0.0 { format!("{shown:.0}") } else { format!("{shown:.1}") };
+    Some(format!("⚠️ Cobertura de código {shown} % (< {threshold} % del nivel)"))
+}
+
 /// The conventions files each engine reads by itself from its working directory. Checked so that
 /// one is only ever paid for twice when the engine would not read it at all.
 fn native_conventions(engine_id: &str) -> &'static [&'static str] {
@@ -427,6 +491,37 @@ mod tests {
         assert!(block.contains("1 check(s) en verde"));
         assert!(block.contains("✗ unit tests (failed)"));
         assert!(checks_block(&PrChecks { head_sha: None, checks: vec![] }).is_none());
+    }
+
+    #[test]
+    fn coverage_is_only_mentioned_when_measured_and_below_the_level() {
+        assert_eq!(coverage_note(Some(72.0), 80).as_deref(), Some("⚠️ Cobertura de código 72 % (< 80 % del nivel)"));
+        assert_eq!(coverage_note(Some(79.96), 80).as_deref(), Some("⚠️ Cobertura de código 79.9 % (< 80 % del nivel)"));
+        assert!(coverage_note(Some(80.0), 80).is_none());
+        assert!(coverage_note(None, 80).is_none(), "no coverage published: nothing said");
+        assert!(coverage_note(Some(10.0), 0).is_none(), "a level with no threshold never warns");
+    }
+
+    /// Calibration is by category, so every reader that writes findings hears it — and the closing
+    /// pass, which writes none, does not.
+    #[test]
+    fn calibration_reaches_every_reviewer_but_the_closing_pass() {
+        let inputs = ReviewInputs {
+            calibration: vec![crate::review::calibration::CalibratedCategory {
+                categoria: "missing-validation".into(),
+                slug: "missing-validation".into(),
+                dismissed: 4,
+                total: 5,
+                motivo: None,
+            }],
+            calibration_min_confidence: 85,
+            ..Default::default()
+        };
+        let text = |a: Audience| contexts_for(&inputs, &[], a).iter().map(|(n, c)| format!("{n}: {c}")).collect::<String>();
+        let mine = vec!["src/a.ts".to_string()];
+        assert!(text(Audience::Group(&mine)).contains("repórtalos solo con confianza ≥ 85"));
+        assert!(text(Audience::All).contains("`missing-validation` (4 de 5)"));
+        assert!(!text(Audience::Closing).contains("Calibración"));
     }
 
     #[test]

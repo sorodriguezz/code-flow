@@ -191,6 +191,9 @@ interface UiState {
    * and a shortcut, none of which own the modal, so it lives here and is rendered once at the app
    * root. */
   prLinkModalOpen: boolean;
+  /** The link the modal opens with — the PR already on screen when it was opened from that PR's
+   *  "clone it after all". `null` means the modal looks at the clipboard instead. */
+  prLinkModalUrl: string | null;
   /** "Clone a repository", lifted out of the sidebar's local state so the command palette can open
    *  it too — the sidebar still owns the modal and renders it. */
   cloneModalOpen: boolean;
@@ -272,7 +275,7 @@ interface UiState {
   closeShortcutsModal: () => void;
   toggleBranchSwitcher: () => void;
   closeBranchSwitcher: () => void;
-  openPrLinkModal: () => void;
+  openPrLinkModal: (url?: string) => void;
   openCloneModal: () => void;
   closeCloneModal: () => void;
   openProjectInit: () => void;
@@ -304,6 +307,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   shortcutsModalGroups: null,
   branchSwitcherOpen: false,
   prLinkModalOpen: false,
+  prLinkModalUrl: null,
   cloneModalOpen: false,
   projectInitOpen: false,
   setActiveView: (view) => set({ activeView: view, settingsOpen: false }),
@@ -372,13 +376,13 @@ export const useUiStore = create<UiState>((set, get) => ({
   closeShortcutsModal: () => set({ shortcutsModalOpen: false, shortcutsModalGroups: null }),
   toggleBranchSwitcher: () => set((s) => ({ branchSwitcherOpen: !s.branchSwitcherOpen })),
   closeBranchSwitcher: () => set({ branchSwitcherOpen: false }),
-  openPrLinkModal: () => set({ prLinkModalOpen: true }),
+  openPrLinkModal: (url) => set({ prLinkModalOpen: true, prLinkModalUrl: url?.trim() || null }),
   openCloneModal: () => set({ cloneModalOpen: true }),
   closeCloneModal: () => set({ cloneModalOpen: false }),
   openProjectInit: () => set({ projectInitOpen: true }),
   closeProjectInit: () => set({ projectInitOpen: false }),
-  togglePrLinkModal: () => set((s) => ({ prLinkModalOpen: !s.prLinkModalOpen })),
-  closePrLinkModal: () => set({ prLinkModalOpen: false }),
+  togglePrLinkModal: () => set((s) => ({ prLinkModalOpen: !s.prLinkModalOpen, prLinkModalUrl: null })),
+  closePrLinkModal: () => set({ prLinkModalOpen: false, prLinkModalUrl: null }),
 }));
 
 // Every way the view changes — an action, a shortcut, the tour's direct `setState` — passes here.

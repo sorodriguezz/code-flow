@@ -1,6 +1,7 @@
 import { ArrowRight } from "lucide-react";
 import { ReviewContextEditor } from "./ReviewContextEditor";
 import { ReviewMemoriesSettings } from "./ReviewMemoriesSettings";
+import { ReviewMetricsSettings } from "./ReviewMetricsSettings";
 import { ReviewEngineSettings } from "./ReviewEngineSettings";
 import { RailSection } from "./settingsNav";
 import { chipClass } from "../common/recipes";
@@ -46,6 +47,7 @@ export function ReviewSettings() {
           )}
           {tab === "context" && <ReviewContextEditor />}
           {tab === "memories" && <ReviewMemoriesSettings />}
+          {tab === "metrics" && <ReviewMetricsSettings />}
         </>
       )}
     </RailSection>
