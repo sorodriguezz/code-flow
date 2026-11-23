@@ -66,7 +66,12 @@ export const CSP_DIRECTIVES: Record<string, readonly string[]> = {
   "child-src": ["'self'", "blob:"],
   // The draw.io editor, served from this origin. The sandboxed `srcdoc` previews need no source —
   // and inherit this policy, which is why `https:` images are allowed above.
-  "frame-src": ["'self'"],
+  // Loopback, for the editor's page previews (`components/browser/WebPreview.tsx`): a repository's
+  // `.html`/`.pdf` served by `preview_server.rs` on `127.0.0.1`, and the user's dev server on
+  // `localhost`. Without it the iframe is refused before it asks for anything and stays blank — and
+  // only in a build, since the dev server writes no policy. Nothing beyond this machine is framed:
+  // the internet goes to «Navegador», a native webview of its own.
+  "frame-src": ["'self'", "http://127.0.0.1:*", "http://localhost:*"],
   "object-src": ["'none'"],
   "base-uri": ["'self'"],
   "form-action": ["'none'"],

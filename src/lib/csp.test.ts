@@ -23,6 +23,14 @@ describe("the app's Content-Security-Policy", () => {
     expect(CSP_DIRECTIVES["img-src"]).toEqual(expect.arrayContaining(["data:", "blob:", "https:"]));
     expect(CSP_DIRECTIVES["worker-src"]).toEqual(expect.arrayContaining(["'self'", "blob:"]));
     expect(CSP_DIRECTIVES["frame-src"]).toContain("'self'");
+    // The editor's page previews: `preview_server.rs` on 127.0.0.1 and dev servers on localhost.
+    expect(CSP_DIRECTIVES["frame-src"]).toEqual(expect.arrayContaining(["http://127.0.0.1:*", "http://localhost:*"]));
+  });
+
+  it("frames nothing beyond this machine", () => {
+    expect(CSP_DIRECTIVES["frame-src"].every((source) => source === "'self'" || /^http:\/\/(127\.0\.0\.1|localhost):\*$/.test(source))).toBe(
+      true,
+    );
   });
 
   it("sends nothing beyond this machine", () => {
