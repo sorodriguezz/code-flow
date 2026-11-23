@@ -27,7 +27,8 @@ import { useThemeStore } from "../../state/themeStore";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { resolveRequest } from "../../lib/api/send";
-import { resolveKeyValues } from "../../lib/api/variables";
+import { resolve, resolveKeyValues } from "../../lib/api/variables";
+import { useEditorVariables } from "./monacoVariables";
 import { apiCancelHttp, apiGrpcCall, apiGrpcDescribe, apiPickFile } from "../../lib/tauri/apiCommands";
 import type { GrpcCallKind, GrpcMethodInfo, GrpcResponse, GrpcSettings, KeyValue } from "../../types/api";
 
@@ -118,6 +119,7 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
     () => useApiStore.getState().variableContext(collectionId),
     [collectionId, collections, environments, activeEnvironmentId],
   );
+  const handleMessageMount = useEditorVariables(variableContext);
 
   const grpc = tab?.draft.grpc;
   const patch = (next: Partial<GrpcSettings>) => {
@@ -170,7 +172,7 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
     setGrpcCall(tabId, { callId, error: null });
     setSending(tabId, true);
     try {
-      const { endpoint, metadata, options } = await resolveTransport(tabId);
+      const { endpoint, metadata, options, ctx } = await resolveTransport(tabId);
       const result = await apiGrpcCall(callId, {
         source: grpc.source,
         proto_path: grpc.protoPath,
@@ -178,7 +180,9 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
         endpoint,
         service: grpc.service,
         method: grpc.method,
-        message_json: grpc.messageJson,
+        // Interpolated like every other part of the request — `{{variables}}` in the message used
+        // to reach the server verbatim.
+        message_json: resolve(grpc.messageJson, ctx),
         metadata,
         use_tls: grpc.useTls,
         authority: grpc.authority,
@@ -393,6 +397,7 @@ export function GrpcPanel({ tabId }: { tabId: string }) {
               language="json"
               value={grpc.messageJson}
               theme={monacoTheme}
+              onMount={handleMessageMount}
               onChange={(value) => patch({ messageJson: value ?? "" })}
               options={{
             ...OVERFLOW_SAFE_OPTIONS,
@@ -631,7 +636,7 @@ async function resolveTransport(tabId: string) {
       .filter((row) => row.enabled && row.key.trim() !== "")
       .map((row): [string, string] => [row.key, row.value]),
   ];
-  return { endpoint: resolved.url, metadata, options: resolved.options };
+  return { endpoint: resolved.url, metadata, options: resolved.options, ctx };
 }
 
 /** Formats a JSON string, and returns it untouched when it isn't JSON — a descriptor's example

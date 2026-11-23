@@ -9,6 +9,7 @@ import { buttonClass, iconButtonClass } from "../common/Button";
 import { Tooltip } from "../common/Tooltip";
 import { KeyValueTable } from "./KeyValueTable";
 import { GraphqlPanel } from "./GraphqlPanel";
+import { useEditorVariables } from "./monacoVariables";
 import { useApiStore } from "../../state/apiStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useT } from "../../state/languageStore";
@@ -158,6 +159,8 @@ function Body({
     () => useApiStore.getState().variableContext(collectionId),
     [collectionId, collections, environments, activeEnvironmentId],
   );
+  // The raw editor completes, tints and explains `{{variables}}` like every other field here.
+  const handleRawMount = useEditorVariables(variableContext);
 
   const patchBody = (patch: Partial<RequestBody>) =>
     updateDraft(tabId, { body: { ...body, ...patch } });
@@ -326,6 +329,7 @@ function Body({
                 language={body.rawLanguage}
                 value={body.raw}
                 theme={monacoTheme}
+                onMount={handleRawMount}
                 onChange={(value) => patchBody({ raw: value ?? "" })}
                 options={EDITOR_OPTIONS}
               />

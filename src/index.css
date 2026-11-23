@@ -3330,6 +3330,18 @@ body.cf-dragging * {
   color: var(--cf-accent) !important;
 }
 
+/* `{{variable}}` in the API client's Monaco editors (body, GraphQL, gRPC, streams) — the same tints
+ * `VariableInput` paints behind its tokens: accent when the scopes resolve it, danger when nothing
+ * does. Backgrounds only, so the language's own token colours stay readable on top. */
+.cf-api-var-resolved {
+  background: color-mix(in oklab, var(--cf-accent) 22%, transparent);
+  border-radius: 3px;
+}
+.cf-api-var-unresolved {
+  background: color-mix(in oklab, var(--cf-danger) 24%, transparent);
+  border-radius: 3px;
+}
+
 /* A fenced code block in a note's preview, and its copy button.
  *
  * The block is a positioned wrapper around the `<pre>` so the button can sit in its corner without

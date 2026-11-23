@@ -22,6 +22,7 @@ import {
   useApiRuntimeStore,
 } from "../../state/apiRuntimeStore";
 import { useThemeStore } from "../../state/themeStore";
+import { useEditorVariables, useVariableContext } from "./monacoVariables";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { monaco } from "../../lib/monacoSetup";
@@ -254,8 +255,18 @@ export function GraphqlPanel({ tabId }: { tabId: string }) {
     });
   };
 
-  const handleQueryMount: OnMount = (editor) => {
+  // Both editors complete, tint and explain `{{variables}}` — the query and the variables JSON are
+  // interpolated on send like the rest of the request.
+  const collectionId = useApiStore(
+    (s) => s.openTabs.find((tab) => tab.id === tabId)?.collectionId ?? null,
+  );
+  const variableContext = useVariableContext(collectionId);
+  const wireQueryVariables = useEditorVariables(variableContext);
+  const handleVariablesMount = useEditorVariables(variableContext);
+
+  const handleQueryMount: OnMount = (editor, monacoInstance) => {
     queryEditorRef.current = editor;
+    wireQueryVariables(editor, monacoInstance);
   };
 
   /**
@@ -419,6 +430,7 @@ export function GraphqlPanel({ tabId }: { tabId: string }) {
                 language="json"
                 value={graphql.variables}
                 theme={monacoTheme}
+                onMount={handleVariablesMount}
                 onChange={(value) => patchGraphql({ variables: value ?? "" })}
                 options={EDITOR_OPTIONS}
               />

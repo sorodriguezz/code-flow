@@ -41,6 +41,8 @@ import { useThemeStore } from "../../state/themeStore";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { resolveRequest } from "../../lib/api/send";
+import { resolve } from "../../lib/api/variables";
+import { useEditorVariables, useVariableContext } from "./monacoVariables";
 import {
   apiMqttConnect,
   apiMqttPublish,
@@ -650,6 +652,7 @@ function WebsocketComposer({ tabId, connectionId }: { tabId: string; connectionI
   const send = async (payload = settings.draftMessage) => {
     if (!connectionId) return;
     const binary = settings.messageFormat === "binary";
+    payload = expandForTab(tabId, payload);
     try {
       await apiWsSend(connectionId, payload, binary);
       // The transports only report what arrives; without a local echo the log would show half
@@ -709,6 +712,7 @@ function WebsocketComposer({ tabId, connectionId }: { tabId: string; connectionI
 
       {settings.messageFormat === "json" ? (
         <JsonEditor
+          tabId={tabId}
           value={settings.draftMessage}
           onChange={(value) => updateDraft(tabId, { websocket: { ...settings, draftMessage: value } })}
         />
@@ -862,6 +866,8 @@ function SocketIoComposer({ tabId, connectionId }: { tabId: string; connectionId
 
   const emit = async (event = settings.draftEvent, payload = settings.draftPayload) => {
     if (!connectionId) return;
+    event = expandForTab(tabId, event);
+    payload = expandForTab(tabId, payload);
     try {
       await apiSocketioEmit(connectionId, event, payload);
       appendMessage(tabId, {
@@ -907,6 +913,7 @@ function SocketIoComposer({ tabId, connectionId }: { tabId: string; connectionId
         </button>
       </div>
       <JsonEditor
+        tabId={tabId}
         value={settings.draftPayload}
         onChange={(value) => updateDraft(tabId, { socketio: { ...settings, draftPayload: value } })}
       />
@@ -1156,6 +1163,8 @@ function MqttComposer({ tabId, connectionId }: { tabId: string; connectionId: st
     retain = settings.publishRetain,
   ) => {
     if (!connectionId) return;
+    topic = expandForTab(tabId, topic);
+    payload = expandForTab(tabId, payload);
     try {
       await apiMqttPublish(connectionId, topic, payload, qos, retain);
       appendMessage(tabId, {
@@ -1330,8 +1339,29 @@ function InvalidJson({ t }: { t: Translate }) {
   );
 }
 
-function JsonEditor({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+/**
+ * `{{variables}}` resolved against the tab's scopes at send time — the handshake already goes
+ * through `resolveRequest`, and a message, event or topic typed into the composer used to be sent
+ * with its tokens verbatim.
+ */
+function expandForTab(tabId: string, text: string): string {
+  const store = useApiStore.getState();
+  const tab = store.openTabs.find((candidate) => candidate.id === tabId);
+  return resolve(text, store.variableContext(tab?.collectionId ?? null));
+}
+
+function JsonEditor({
+  tabId,
+  value,
+  onChange,
+}: {
+  tabId: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
   const monacoTheme = useThemeStore((s) => s.monacoTheme);
+  const collectionId = useApiStore((s) => s.openTabs.find((tab) => tab.id === tabId)?.collectionId ?? null);
+  const handleMount = useEditorVariables(useVariableContext(collectionId));
   return (
     <div className="overflow-hidden rounded-md border border-[var(--cf-field-border)]">
       <Editor
@@ -1339,6 +1369,7 @@ function JsonEditor({ value, onChange }: { value: string; onChange: (value: stri
         language="json"
         value={value}
         theme={monacoTheme}
+        onMount={handleMount}
         onChange={(next) => onChange(next ?? "")}
         options={{
           minimap: { enabled: false },
