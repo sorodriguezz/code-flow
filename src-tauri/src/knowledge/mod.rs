@@ -194,19 +194,35 @@ fn orphaned(key: &str, alive: &HashSet<String>) -> bool {
     }
 }
 
-/// Drops what nothing points at any more: the passages and vectors of a deleted project, folder or
-/// workspace, of a checkout indexed by path that is gone from disk, and the vectors of a bundled
-/// embedding model no longer downloaded (or whose file changed under the same id).
+/// Drops what nothing points at any more: the passages of a deleted project, folder or workspace,
+/// and of a checkout indexed by path that is gone from disk; and the vectors of a bundled embedding
+/// model this build no longer has (or whose weights changed under the same id).
+///
+/// An empty `alive` with collections in the index is read as the app's database not answering (a
+/// migration, a restore under way), not as every project gone: nothing is pruned then. The vectors
+/// of a pruned collection stay either way, kept by text ([`index::remove_collection`]).
 pub fn prune(index: &Connection, alive: &HashSet<String>) -> rusqlite::Result<Pruned> {
     let mut pruned = Pruned::default();
-    for key in index::collection_keys(index)? {
+    let keys = index::collection_keys(index)?;
+    if alive.is_empty() && !keys.is_empty() {
+        crate::applog::warn(&format!("knowledge: prune skipped — the app's database listed nothing alive while the index holds {} collections", keys.len()));
+        return Ok(pruned);
+    }
+    let mut gone = Vec::new();
+    for key in keys {
         if orphaned(&key, alive) {
             index::remove_collection(index, &key)?;
             pruned.collections += 1;
+            gone.push(key);
         }
     }
+    if !gone.is_empty() {
+        crate::applog::info(&format!("knowledge: pruned {} collections nothing points at ({}); their vectors are kept for reuse", gone.len(), gone.join(", ")));
+    }
     for space in embed::bundled_orphans(&index::spaces(index)?) {
-        pruned.vectors += index::remove_space_exact(index, &space)?;
+        let removed = index::remove_space_exact(index, &space)?;
+        crate::applog::info(&format!("knowledge: dropped {removed} vectors of {space}, a model this build no longer has"));
+        pruned.vectors += removed;
     }
     Ok(pruned)
 }
@@ -234,6 +250,11 @@ pub fn prune_in_background() {
         }
         tauri::async_runtime::spawn(async move {
             let Some(listed) = embed::ollama_models(&ollama_url).await else { return };
+            // An Ollama that lists no model at all is more likely pointed at another models folder
+            // (or still loading it) than emptied on purpose: its spaces are kept.
+            if listed.is_empty() {
+                return;
+            }
             let orphans = embed::ollama_orphans(&ollama_spaces, &listed);
             if orphans.is_empty() {
                 return;
@@ -241,7 +262,9 @@ pub fn prune_in_background() {
             let _ = tokio::task::spawn_blocking(move || {
                 if let Ok(index) = index::global() {
                     for space in orphans {
-                        let _ = index::remove_space_exact(&index, &space);
+                        if let Ok(removed) = index::remove_space_exact(&index, &space) {
+                            crate::applog::info(&format!("knowledge: dropped {removed} vectors of {space}, a model Ollama no longer has"));
+                        }
                     }
                     let _ = index::compact(&index);
                 }
@@ -252,15 +275,18 @@ pub fn prune_in_background() {
 }
 
 /// Empties a workspace's part of the index (its repositories, folders and documents) and whatever
-/// nothing points at; the next search rebuilds it. Returns how many collections went.
+/// nothing points at; the next search rebuilds it. The vectors stay: they are kept by text, so the
+/// rebuild finds them instead of embedding everything again — what made «Vaciar índice» cost hours
+/// (2026-11-23). Vectors whose text does not come back go after [`index::ORPHAN_KEEP_MS`]; a model's
+/// «Borrar» frees them at once. Returns how many collections went.
 pub fn clear(index: &Connection, scope: &Scope, alive: &HashSet<String>) -> rusqlite::Result<usize> {
     let keys = scope.keys();
     for key in &keys {
         index::remove_collection(index, key)?;
     }
     let pruned = prune(index, alive)?;
-    index::clear_vector_cache(index)?;
     index::compact(index)?;
+    crate::applog::info(&format!("knowledge: index emptied for {} collections (+{} orphaned); vectors kept for reuse", keys.len(), pruned.collections));
     Ok(keys.len() + pruned.collections)
 }
 
@@ -865,7 +891,11 @@ async fn vectorize_pass(scope: &Scope, space: &embed::Space) {
         let _ = tokio::task::spawn_blocking(move || rank_code(&ranking)).await;
     }
     if let Ok(index) = index::global() {
-        let _ = index::prune_vector_cache(&index, chrono::Utc::now().timestamp_millis());
+        match index::prune_orphan_vectors(&index, chrono::Utc::now().timestamp_millis()) {
+            Ok(0) => {}
+            Ok(gone) => crate::applog::info(&format!("knowledge: {gone} vectors no passage had pointed at for 30 days were let go")),
+            Err(error) => crate::applog::warn(&format!("knowledge: old vectors could not be let go ({error})")),
+        }
     }
     let started = std::time::Instant::now();
     let mut done = 0usize;
@@ -916,14 +946,8 @@ async fn vectorize_pass(scope: &Scope, space: &embed::Space) {
             return;
         }
         set_progress(Some(Vectorizing::now(scope.workspace_id.as_deref(), &space.name, done, done + left.saturating_sub(skipped.len()), started.elapsed())));
-        // Text the index had vectors for before (a branch switched back to): its vectors come back
-        // from the cache, and only the rest goes to the embedder.
-        let reused = index::global().and_then(|mut index| index::reuse_vectors(&mut index, &space.name, &pending).map_err(|e| e.to_string())).unwrap_or_default();
-        done += reused.len();
-        let pending: Vec<(i64, String)> = pending.into_iter().filter(|(id, _)| !reused.contains(id)).collect();
-        if pending.is_empty() {
-            continue;
-        }
+        // Text the index had a vector for before (a branch switched back to, a collection indexed
+        // again) is not pending at all: vectors are kept by text (`index`'s doc).
         let texts: Vec<String> = pending.iter().map(|(_, text)| text.clone()).collect();
         let items: Vec<(i64, Vec<f32>)> = match space.embed_documents(&texts).await {
             Ok(vectors) => {
@@ -2107,17 +2131,31 @@ mod tests {
         assert_eq!(need_of(false, Some(&fresh_meta), Some("abc"), false, false, false, now), Need::Skip);
     }
 
-    /// An index holding one file, one chunk and one vector in each of `keys`.
+    /// An index holding one file, one chunk (`texto <n>`) and one vector in each of `keys`.
     fn index_with(keys: &[&str]) -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         index::init(&conn).unwrap();
         for (i, key) in keys.iter().enumerate() {
-            conn.execute("INSERT INTO sources (id, collection, path) VALUES (?1, ?2, 'a.md')", rusqlite::params![i as i64 + 1, key]).unwrap();
-            conn.execute("INSERT INTO chunks (id, source_id, start_line, end_line, text) VALUES (?1, ?1, 1, 2, 'texto')", rusqlite::params![i as i64 + 1]).unwrap();
-            conn.execute("INSERT INTO vectors (chunk_id, space, data) VALUES (?1, 'ollama:qwen3_embed@abc', x'00')", rusqlite::params![i as i64 + 1]).unwrap();
+            let id = i as i64 + 1;
+            conn.execute("INSERT INTO sources (id, collection, path) VALUES (?1, ?2, 'a.md')", rusqlite::params![id, key]).unwrap();
+            conn.execute(
+                "INSERT INTO chunks (id, source_id, start_line, end_line, text, embed_hash) VALUES (?1, ?1, 1, 2, ?2, ?3)",
+                rusqlite::params![id, format!("texto {id}"), chunk_hash(id)],
+            )
+            .unwrap();
+            add_vector(&conn, id, "ollama:qwen3_embed@abc");
             conn.execute("INSERT INTO collections_meta (collection, root, refreshed_at) VALUES (?1, '/', 1)", rusqlite::params![key]).unwrap();
         }
         conn
+    }
+
+    /// The `embed_hash` of [`index_with`]'s chunk `id`.
+    fn chunk_hash(id: i64) -> String {
+        index::embed_hash_of("", &format!("texto {id}"))
+    }
+
+    fn add_vector(conn: &Connection, chunk: i64, space: &str) {
+        conn.execute("INSERT INTO embeddings (hash, space, data, used_at) VALUES (?1, ?2, x'00', 1)", rusqlite::params![chunk_hash(chunk), space]).unwrap();
     }
 
     fn count(conn: &Connection, table: &str) -> i64 {
@@ -2143,7 +2181,7 @@ mod tests {
             "commits:path:/nowhere/at/all",
         ]);
         // A model the catalogue no longer has: nothing can embed a question in its space.
-        conn.execute("INSERT INTO vectors (chunk_id, space, data) VALUES (1, 'retired-embedder@abc', x'00')", []).unwrap();
+        add_vector(&conn, 1, "retired-embedder@abc");
         let alive: HashSet<String> = ["p1", "f1", "w1"].iter().map(|s| s.to_string()).collect();
         let pruned = prune(&conn, &alive).unwrap();
         assert_eq!(pruned.collections, 6);
@@ -2154,16 +2192,16 @@ mod tests {
         want.sort();
         assert_eq!(left, want);
         assert_eq!(count(&conn, "chunks"), 6, "the cascade takes the chunks");
-        assert_eq!(count(&conn, "vectors"), 6, "and their vectors");
+        assert_eq!(count(&conn, "embeddings"), 12, "but not their vectors: they wait for the text to come back");
         assert_eq!(index::search_fts(&conn, &["repo:gone".to_string()], "texto", 5).unwrap().len(), 0);
     }
 
     #[test]
     fn a_space_is_removed_by_prefix_not_by_like() {
         let conn = index_with(&["repo:p1"]);
-        conn.execute("INSERT INTO vectors (chunk_id, space, data) VALUES (1, 'ollama:qwen3Xembed@abc', x'00')", []).unwrap();
+        add_vector(&conn, 1, "ollama:qwen3Xembed@abc");
         assert_eq!(index::remove_space(&conn, "ollama:qwen3_embed@").unwrap(), 1, "`_` is not a wildcard");
-        assert_eq!(count(&conn, "vectors"), 1);
+        assert_eq!(count(&conn, "embeddings"), 1);
     }
 
     #[test]
@@ -2173,6 +2211,18 @@ mod tests {
         let alive: HashSet<String> = ["p1", "f1", "other"].iter().map(|s| s.to_string()).collect();
         assert_eq!(clear(&conn, &scope, &alive).unwrap(), 4, "its repository, folder, commits and reviews");
         assert_eq!(index::collection_keys(&conn).unwrap(), vec!["repo:other".to_string()]);
+        assert_eq!(count(&conn, "embeddings"), 4, "every vector stays, to be found again by the rebuild");
+    }
+
+    /// The app's database answering nothing (a migration or a restore under way) is not every project
+    /// deleted: the index is left alone.
+    #[test]
+    fn prune_with_nothing_alive_touches_nothing() {
+        let conn = index_with(&["repo:p1", "folder:f1", "notes:w1"]);
+        let pruned = prune(&conn, &HashSet::new()).unwrap();
+        assert_eq!(pruned, Pruned::default());
+        assert_eq!(index::collection_keys(&conn).unwrap().len(), 3);
+        assert_eq!(count(&conn, "chunks"), 3);
     }
 
     /// The app's database: project `p1` (workspace `w1`) at `api`, `p2` in `w2`, and four folders —

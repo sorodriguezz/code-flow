@@ -193,7 +193,9 @@ pub async fn knowledge_set_code_vectors(db: State<'_, Db>, enabled: bool, worksp
     }
     tokio::task::spawn_blocking(|| -> Result<usize, String> {
         let index = index::global()?;
-        index::drop_code_vectors(&index).map_err(|e| e.to_string())
+        let removed = index::drop_code_vectors(&index).map_err(|e| e.to_string())?;
+        crate::applog::info(&format!("knowledge: code vectors switched off; {removed} code vectors dropped"));
+        Ok(removed)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -364,7 +366,9 @@ pub async fn knowledge_drop_vector_space(db: State<'_, Db>, space: String) -> Re
     }
     tokio::task::spawn_blocking(move || -> Result<usize, String> {
         let index = index::global()?;
-        index::drop_space(&index, &space).map_err(|e| e.to_string())
+        let removed = index::drop_space(&index, &space).map_err(|e| e.to_string())?;
+        crate::applog::info(&format!("knowledge: the user dropped {removed} vectors of {space}"));
+        Ok(removed)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -436,7 +440,9 @@ pub async fn knowledge_delete_model(registry: State<'_, LocalAiRegistry>, model_
     let id = model_id.clone();
     let _ = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let index = index::global()?;
-        if index::remove_space(&index, &format!("{id}@")).map_err(|e| e.to_string())? > 0 {
+        let removed = index::remove_space(&index, &format!("{id}@")).map_err(|e| e.to_string())?;
+        if removed > 0 {
+            crate::applog::info(&format!("knowledge: model {id} deleted with its {removed} vectors"));
             index::compact(&index).map_err(|e| e.to_string())?;
         }
         Ok(())

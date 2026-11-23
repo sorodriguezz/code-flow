@@ -335,6 +335,18 @@ pub fn models_dir() -> PathBuf {
     state_dir().join("models")
 }
 
+/// The knowledge index (`crate::knowledge::index`): passages, their full-text index and the vectors
+/// the embedder made of them.
+///
+/// **State and not cache**, though everything in it can be rebuilt: rebuilding the vectors of a large
+/// workspace is hours of embedder time, and a cache's contract is that deleting it is a no-op the
+/// user cannot notice. It lived under [`cache_dir`] through 2.9.2, where «Liberar caché» and the OS's
+/// own cleaners could take it — the user lost 46k vectors that way (2026-11-23). Never backed up (the
+/// backup is the database and the repositories, not this root) and taken by a reset like the rest.
+pub fn knowledge_dir() -> PathBuf {
+    state_dir().join("knowledge")
+}
+
 /// The Reviewer's own corner: the JDK, SonarQube and its scanner it downloads on demand, the local
 /// server's data and logs, and each project's last results. See `crate::reviewer`.
 ///
@@ -899,6 +911,7 @@ mod tests {
             db_path(),
             logs_dir(),
             models_dir(),
+            knowledge_dir(),
             reference_repos_dir(),
             workspace_skills_dir("w1"),
             chain_memory_dir("c1"),

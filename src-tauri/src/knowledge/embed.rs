@@ -266,8 +266,13 @@ pub fn ollama_orphans(spaces: &[String], listed: &[(String, Option<String>)]) ->
         .collect()
 }
 
-/// The bundled spaces of `spaces` nothing can query: a model no longer downloaded, or a file that
-/// changed under the same id (its digest moved).
+/// The bundled spaces of `spaces` nothing can ever query again: a model this build's catalogue no
+/// longer has, or one whose weights changed under the same id (its digest moved). Pruned at launch.
+///
+/// Not a model that merely looks not downloaded right now: that used to count, and a file being
+/// downloaded again, cut short, or on a volume not yet mounted at launch would take every vector of
+/// the model with it. Deleting a model on purpose drops its vectors where that happens
+/// (`knowledge_delete_model`).
 pub fn bundled_orphans(spaces: &[String]) -> Vec<String> {
     spaces
         .iter()
@@ -275,7 +280,7 @@ pub fn bundled_orphans(spaces: &[String]) -> Vec<String> {
         .filter(|space| {
             let Some((id, sha)) = space.rsplit_once('@') else { return false };
             match crate::localai::embedder::find(id) {
-                Some(entry) => !crate::localai::models::is_installed(&entry.spec) || !entry.spec.sha256.starts_with(sha),
+                Some(entry) => !entry.spec.sha256.starts_with(sha),
                 None => true,
             }
         })
@@ -311,6 +316,16 @@ mod tests {
             vec!["ollama:nomic-embed-text@ffffffffffff", "ollama:nomic-embed-text", "ollama:gone-model@0a109f422b47"],
             "a re-pull, the bare name of older builds and a removed model; bundled spaces are not Ollama's"
         );
+    }
+
+    /// Only a model gone from the catalogue or weights that changed make a bundled space an orphan —
+    /// never the file looking absent at launch.
+    #[test]
+    fn a_bundled_space_is_an_orphan_only_when_no_build_can_query_it() {
+        let entry = crate::localai::embedder::find("qwen3-embedding-0.6b").expect("in the catalogue");
+        let current = format!("qwen3-embedding-0.6b@{}", &entry.spec.sha256[..12]);
+        let spaces: Vec<String> = [current.as_str(), "qwen3-embedding-0.6b@000000000000", "retired-embedder@abc", "ollama:x@abc"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(bundled_orphans(&spaces), vec!["qwen3-embedding-0.6b@000000000000", "retired-embedder@abc"], "the current one stays, installed or not");
     }
 
     #[test]

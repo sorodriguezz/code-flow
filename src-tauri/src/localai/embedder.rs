@@ -203,23 +203,41 @@ impl Embedder {
         let _done = Done { count: self.in_flight.clone(), last_used: self.last_used.clone() };
         let mut out = Vec::with_capacity(texts.len());
         for batch in texts.chunks(BATCH) {
-            let vectors = match self.post(batch).await {
-                // A text longer than the context: the server refuses the whole batch. Chunks are cut
-                // by characters, and a line of base64 or escaped JSON (an SVG, a diagram embedded in
-                // an HTML page) is close to a token per character — 3,300 characters, 2,450 tokens
-                // against a context of 2,048. Those passages sat at the head of the backlog and
-                // every pass gave up on them, so nothing behind them got a vector (user, 2026-11-19:
-                // 59,479 «por procesar» that never moved). Cut to the context, by tokens, and again.
-                Err(refused) if refused.too_long => {
-                    let fitted = self.fit(batch).await?;
-                    self.post(&fitted).await.map_err(|refused| refused.message)?
-                }
-                Err(refused) => return Err(refused.message),
-                Ok(vectors) => vectors,
-            };
+            let vectors = self.send(batch, false).await?;
             out.extend(vectors);
         }
         Ok(out)
+    }
+
+    /// [`Embedder::post`], answering the two refusals that have an answer:
+    ///
+    /// - A text longer than the context: the server refuses the whole batch. Chunks are cut by
+    ///   characters, and a line of base64 or escaped JSON (an SVG, a diagram embedded in an HTML page)
+    ///   is close to a token per character — 3,300 characters, 2,450 tokens against a context of
+    ///   2,048. Those passages sat at the head of the backlog and every pass gave up on them, so
+    ///   nothing behind them got a vector (user, 2026-11-19: 59,479 «por procesar» that never moved).
+    ///   Cut to the context, by tokens, and again — once (`fitted`).
+    /// - Texts that fit one by one but not together («Context size has been exceeded»): the server
+    ///   shares one context among the texts it runs side by side. Sent again in halves, down to one
+    ///   text. The caller used to retry such a batch a passage at a time, a tokenize and detokenize
+    ///   per text — seconds a passage on the backlog of 2026-11-23.
+    fn send<'a>(&'a self, batch: &'a [String], fitted: bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<Vec<f32>>, String>> + Send + 'a>> {
+        Box::pin(async move {
+            match self.post(batch).await {
+                Ok(vectors) => Ok(vectors),
+                Err(refused) if refused.too_long && !fitted => {
+                    let cut = self.fit(batch).await?;
+                    self.send(&cut, true).await
+                }
+                Err(refused) if refused.crowded && batch.len() > 1 => {
+                    let (first, second) = batch.split_at(batch.len() / 2);
+                    let mut out = self.send(first, fitted).await?;
+                    out.extend(self.send(second, fitted).await?);
+                    Ok(out)
+                }
+                Err(refused) => Err(refused.message),
+            }
+        })
     }
 
     async fn post(&self, batch: &[String]) -> Result<Vec<Vec<f32>>, Refused> {
@@ -282,11 +300,14 @@ struct Refused {
     /// A text was longer than the context (`exceed_context_size_error`, or an older server's "too
     /// large to process"): cutting it to fit is the answer.
     too_long: bool,
+    /// The texts fit one by one but not together («Context size has been exceeded»): fewer at a time
+    /// is the answer ([`Embedder::send`]).
+    crowded: bool,
 }
 
 impl Refused {
     fn other(message: String) -> Self {
-        Refused { message, too_long: false }
+        Refused { message, too_long: false, crowded: false }
     }
 
     fn from_answer(status: reqwest::StatusCode, body: &str) -> Self {
@@ -295,9 +316,10 @@ impl Refused {
         let kind = error.and_then(|e| e.get("type")).and_then(|t| t.as_str()).unwrap_or_default();
         let said = error.and_then(|e| e.get("message")).and_then(|m| m.as_str()).unwrap_or_default();
         let too_long = kind == "exceed_context_size_error" || said.contains("exceeds the available context size") || said.contains("too large to process");
+        let crowded = !too_long && said.to_lowercase().contains("context size has been exceeded");
         let said: String = said.chars().take(200).collect();
         let message = if said.is_empty() { format!("the embedding server answered {status}") } else { format!("the embedding server answered {status}: {said}") };
-        Refused { message, too_long }
+        Refused { message, too_long, crowded }
     }
 }
 
@@ -506,8 +528,13 @@ mod tests {
         let older = r#"{"error":{"code":500,"message":"input is too large to process. increase the physical batch size","type":"server_error"}}"#;
         assert!(Refused::from_answer(reqwest::StatusCode::INTERNAL_SERVER_ERROR, older).too_long);
 
+        // What it answered for a batch of 32 passages that each fit, together (2026-11-23).
+        let crowded = r#"{"error":{"code":500,"message":"Context size has been exceeded.","type":"server_error"}}"#;
+        let crowded = Refused::from_answer(reqwest::StatusCode::INTERNAL_SERVER_ERROR, crowded);
+        assert!(crowded.crowded && !crowded.too_long, "fewer at a time, not shorter");
+
         let other = Refused::from_answer(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "Compute error");
-        assert!(!other.too_long);
+        assert!(!other.too_long && !other.crowded);
         assert_eq!(other.message, "the embedding server answered 500 Internal Server Error");
     }
 

@@ -1,18 +1,30 @@
-//! The knowledge index: a cache database of its own (`cache_dir()/knowledge/index.sqlite`) — chunks
-//! of every indexed file and document, an FTS5 index over them, and the vectors of the prose ones —
+//! The knowledge index: a database of its own (`paths::knowledge_dir()/index.sqlite`) — chunks of
+//! every indexed file and document, an FTS5 index over them, and the vectors of the prose ones —
 //! and of the code ones when the setting allows it ([`embeddable`]).
 //!
-//! A cache, not app data: everything in it is rebuilt from the files and the app's own rows, so it
-//! is never backed up and deleting it costs a re-index, not a loss. It is kept out of `codeflow.db`
-//! for the same reason — a repository's chunks would multiply the size of every backup for nothing.
+//! Rebuildable, but not a cache: the chunks come back from the files in seconds, the vectors only
+//! from hours of embedder time. So it lives under the state root (it was under the cache root
+//! through 2.9.2, where «Liberar caché» could take it — [`adopt_legacy`] moves it), is never backed
+//! up, and is kept out of `codeflow.db` so a repository's chunks do not multiply every backup.
+//!
+//! **Vectors belong to text, not to chunks** (`embeddings`, keyed by [`embed_hash`] of what was
+//! embedded, and model). A chunk has a vector when an embedding of its `embed_hash` exists in the
+//! space. Deleting chunks — a file changed, a branch switched, a collection pruned, «Vaciar índice»,
+//! a full re-index — never deletes a vector: the same text indexed again has its vector at once.
+//! Until 2.9.2 vectors were rows keyed by `chunk_id` and cascaded with their chunks, and one rebuild
+//! of the chunks cost every vector (user, 2026-11-23: 46k vectors, back to zero). A vector no chunk
+//! points at waits [`ORPHAN_KEEP_MS`] (at most [`ORPHAN_MAX_ROWS`] of them) in case its text comes
+//! back, then [`prune_orphan_vectors`] lets it go. Only deliberate actions drop live vectors: a
+//! model removed ([`drop_space`], [`remove_space`]) or code vectors switched off
+//! ([`drop_code_vectors`]).
 //!
 //! Two kinds of source share the tables. **Files** (repositories, folders) are incremental by stat:
 //! a file whose size and modification time match the stored ones is not read again; one whose
 //! content hash matches is not re-chunked. **Documents** (notes, meetings, generated wiki pages,
 //! story drafts, review findings, commit messages) are rows of the app's database or of git, kept by
 //! a version string the caller chooses (`updated_at`, a commit id): a document whose version matches
-//! is not loaded again. Either way what left the set is dropped with its chunks and vectors
-//! (cascades, and FTS triggers keep the index in step).
+//! is not loaded again. Either way what left the set is dropped with its chunks (cascades, and FTS
+//! triggers keep the index in step); their vectors stay, as above.
 //!
 //! **The lock is taken per batch, never for a whole index.** The first index of a large repository
 //! reads thousands of files; holding the index's one connection meanwhile kept every search waiting
@@ -30,7 +42,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 
 use super::chunker::{self, Kind};
@@ -49,15 +61,72 @@ pub fn default_path() -> PathBuf {
     if cfg!(test) {
         return std::env::temp_dir().join(format!("codeflow-test-knowledge-{}", std::process::id())).join("index.sqlite");
     }
+    crate::paths::knowledge_dir().join("index.sqlite")
+}
+
+/// Where the index lived through 2.9.2: the cache root.
+fn legacy_path() -> PathBuf {
+    if cfg!(test) {
+        return std::env::temp_dir().join(format!("codeflow-test-knowledge-legacy-{}", std::process::id())).join("index.sqlite");
+    }
     crate::paths::cache_dir().join("knowledge").join("index.sqlite")
+}
+
+/// Moves an index left at `legacy` (the cache root of 2.9.2 and before) to `target`, once: when
+/// `target` does not exist yet. Copied with `VACUUM INTO` rather than renamed — the database is three
+/// files (`-wal`, `-shm`) and a rename that moved one and failed on the next would leave neither copy
+/// whole; `VACUUM INTO` writes one consistent file with the WAL folded in, to a temporary name renamed
+/// into place, and only then is the old one removed. `Ok(true)` when it moved something.
+pub fn adopt_legacy(legacy: &Path, target: &Path) -> Result<bool, String> {
+    if target.exists() || !legacy.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let moving = target.with_extension("sqlite.moving");
+    let _ = std::fs::remove_file(&moving);
+    {
+        let old = Connection::open(legacy).map_err(|e| e.to_string())?;
+        old.execute("VACUUM INTO ?1", params![moving.to_string_lossy()]).map_err(|e| {
+            let _ = std::fs::remove_file(&moving);
+            e.to_string()
+        })?;
+    }
+    std::fs::rename(&moving, target).map_err(|e| e.to_string())?;
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", legacy.to_string_lossy()));
+    }
+    Ok(true)
 }
 
 static CONN: OnceLock<Mutex<Connection>> = OnceLock::new();
 
-/// The app's index connection, opened (and created) on first use.
+/// The app's index connection, opened (and created) on first use — after bringing over the one an
+/// older build left in the cache root. If that move fails, the old file is opened where it is:
+/// starting an empty index next to it would be the very loss the move exists to prevent.
 pub fn global() -> Result<MutexGuard<'static, Connection>, String> {
+    static OPENING: Mutex<()> = Mutex::new(());
     if CONN.get().is_none() {
-        let conn = open_at(&default_path())?;
+        // Two first callers must not both copy the old file.
+        let _opening = OPENING.lock().map_err(|e| e.to_string())?;
+        if let Some(conn) = CONN.get() {
+            return conn.lock().map_err(|e| e.to_string());
+        }
+        let target = default_path();
+        let path = match adopt_legacy(&legacy_path(), &target) {
+            Ok(moved) => {
+                if moved {
+                    crate::applog::info(&format!("knowledge: the index moved out of the cache to {}", target.display()));
+                }
+                target
+            }
+            Err(error) => {
+                crate::applog::warn(&format!("knowledge: the index could not be moved out of the cache ({error}); using it where it is"));
+                legacy_path()
+            }
+        };
+        let conn = open_at(&path)?;
         let _ = CONN.set(Mutex::new(conn));
     }
     CONN.get().ok_or("index unavailable")?.lock().map_err(|e| e.to_string())
@@ -107,12 +176,6 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
         CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
             INSERT INTO chunks_fts(chunks_fts, rowid, heading, text) VALUES ('delete', old.id, old.heading, old.text);
         END;
-        CREATE TABLE IF NOT EXISTS vectors (
-            chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
-            space    TEXT NOT NULL,
-            data     BLOB NOT NULL,
-            PRIMARY KEY (chunk_id, space)
-        );
         CREATE TABLE IF NOT EXISTS collections_meta (
             collection   TEXT PRIMARY KEY,
             root         TEXT NOT NULL,
@@ -133,20 +196,82 @@ pub fn init(conn: &Connection) -> rusqlite::Result<()> {
     // `rank`: how many files of its repository import a code file (the code map's), so the most
     // depended-on code gets its vectors first ([`pending_vectors`], [`set_ranks`]). 0 for the rest.
     add_column(conn, "sources", "rank", "INTEGER NOT NULL DEFAULT 0")?;
-    // The vectors of passages that left the index, by the text they were made from
-    // ([`keep_vectors`], [`reuse_vectors`]): a branch switched away from and back again finds its
-    // vectors here instead of embedding the same text twice (user, 2026-11-17).
+    // `embed_hash`: [`embed_hash`] of what the chunk is embedded as (heading, newline, text) — the key
+    // its vector is found by in `embeddings`.
+    add_column(conn, "chunks", "embed_hash", "TEXT NOT NULL DEFAULT ''")?;
+    // The vectors, by the text they were made from and the model that made them (see the module's
+    // doc). `code`: made of a code chunk, for [`drop_code_vectors`]. `used_at`: when a chunk last
+    // pointed at it — set when the vector is stored and when the chunks pointing at it are deleted, so
+    // an orphan's age counts from the moment it was left ([`prune_orphan_vectors`]).
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS vector_cache (
+        "CREATE INDEX IF NOT EXISTS idx_chunks_embed ON chunks(embed_hash);
+         CREATE TABLE IF NOT EXISTS embeddings (
              hash    TEXT NOT NULL,
              space   TEXT NOT NULL,
              data    BLOB NOT NULL,
              code    INTEGER NOT NULL DEFAULT 0,
-             kept_at INTEGER NOT NULL,
+             used_at INTEGER NOT NULL,
              PRIMARY KEY (hash, space)
          );
-         CREATE INDEX IF NOT EXISTS idx_vector_cache_kept ON vector_cache(kept_at);",
+         CREATE INDEX IF NOT EXISTS idx_embeddings_space ON embeddings(space);",
     )?;
+    migrate_vectors(conn)
+}
+
+fn table_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+    conn.query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)", params![name], |r| r.get(0))
+}
+
+/// Brings an index of 2.9.2 or before to vectors by text, in one transaction: every chunk gets its
+/// `embed_hash`, every vector of the old `vectors` table (by `chunk_id`) and of the old
+/// `vector_cache` (already by text) moves to `embeddings`, and the two old tables go. A failure rolls
+/// all of it back and the index stays as it was — never half moved, never emptied. Also fills the
+/// `embed_hash` of any chunk written without one, which on a current index is none (one indexed
+/// probe).
+fn migrate_vectors(conn: &Connection) -> rusqlite::Result<()> {
+    let old_vectors = table_exists(conn, "vectors")?;
+    let old_cache = table_exists(conn, "vector_cache")?;
+    let unhashed: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM chunks WHERE embed_hash = '')", [], |r| r.get(0))?;
+    if !old_vectors && !old_cache && !unhashed {
+        return Ok(());
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    let tx = conn.unchecked_transaction()?;
+    let hashes: Vec<(i64, String)> = {
+        let mut stmt = tx.prepare("SELECT id, heading, text FROM chunks WHERE embed_hash = ''")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))?;
+        rows.map(|row| row.map(|(id, heading, text)| (id, embed_hash_of(&heading, &text)))).collect::<rusqlite::Result<_>>()?
+    };
+    {
+        let mut update = tx.prepare("UPDATE chunks SET embed_hash = ?1 WHERE id = ?2")?;
+        for (id, hash) in &hashes {
+            update.execute(params![hash, id])?;
+        }
+    }
+    let mut moved = 0usize;
+    if old_vectors {
+        moved += tx.execute(
+            "INSERT OR IGNORE INTO embeddings (hash, space, data, code, used_at)
+             SELECT c.embed_hash, v.space, v.data, s.kind = 'code' AND c.prose = 0, ?1
+             FROM vectors v JOIN chunks c ON c.id = v.chunk_id JOIN sources s ON s.id = c.source_id",
+            params![now],
+        )?;
+        tx.execute_batch("DROP TABLE vectors;")?;
+    }
+    if old_cache {
+        moved += tx.execute(
+            "INSERT OR IGNORE INTO embeddings (hash, space, data, code, used_at) SELECT hash, space, data, code, kept_at FROM vector_cache",
+            [],
+        )?;
+        tx.execute_batch("DROP TABLE vector_cache;")?;
+    }
+    tx.commit()?;
+    if old_vectors || old_cache {
+        // Not in tests: the log is the app's, and a test's index is a temporary file.
+        if !cfg!(test) {
+            crate::applog::info(&format!("knowledge: {moved} vectors moved to vectors by text; {} passages hashed", hashes.len()));
+        }
+    }
     Ok(())
 }
 
@@ -306,6 +431,23 @@ fn changes_for(root: &Path, rels: &[&String], stored: &HashMap<String, Stored>, 
     out
 }
 
+/// Writes one chunk with the [`embed_hash`] of what it is embedded as — the key that finds a vector
+/// made of the same text before, whatever chunk it was made for.
+fn insert_chunk(conn: &Connection, source_id: i64, start_line: u32, end_line: u32, heading: &str, text: &str, prose: bool) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO chunks (source_id, start_line, end_line, heading, text, prose, embed_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![source_id, start_line, end_line, heading, text, prose, embed_hash_of(heading, text)],
+    )?;
+    Ok(())
+}
+
+/// Marks the vectors of `source_id`'s chunks as left now, before the chunks are deleted: the vectors
+/// stay (see the module's doc), and an orphan's wait ([`ORPHAN_KEEP_MS`]) counts from here.
+fn leave_vectors(conn: &Connection, source_id: i64, now: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE embeddings SET used_at = ?2 WHERE hash IN (SELECT embed_hash FROM chunks WHERE source_id = ?1)", params![source_id, now])?;
+    Ok(())
+}
+
 fn apply(conn: &mut Connection, collection: &str, changes: Vec<Change>, now: i64, done: &mut Refreshed) -> rusqlite::Result<()> {
     if changes.is_empty() {
         return Ok(());
@@ -315,7 +457,7 @@ fn apply(conn: &mut Connection, collection: &str, changes: Vec<Change>, now: i64
     for change in changes {
         match change {
             Change::Remove(id) => {
-                keep_vectors(&tx, id, now)?;
+                leave_vectors(&tx, id, now)?;
                 tx.execute("DELETE FROM sources WHERE id = ?1", params![id])?;
                 done.removed += 1;
                 dropped = true;
@@ -326,7 +468,7 @@ fn apply(conn: &mut Connection, collection: &str, changes: Vec<Change>, now: i64
             Change::Write { existing, path, size, mtime, hash, kind, pieces } => {
                 let source_id = match existing {
                     Some(id) => {
-                        keep_vectors(&tx, id, now)?;
+                        leave_vectors(&tx, id, now)?;
                         tx.execute("DELETE FROM chunks WHERE source_id = ?1", params![id])?;
                         tx.execute(
                             "UPDATE sources SET size = ?1, mtime = ?2, hash = ?3, kind = ?4, indexed_at = ?5 WHERE id = ?6",
@@ -346,10 +488,7 @@ fn apply(conn: &mut Connection, collection: &str, changes: Vec<Change>, now: i64
                     }
                 };
                 for piece in pieces {
-                    tx.execute(
-                        "INSERT INTO chunks (source_id, start_line, end_line, heading, text, prose) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![source_id, piece.start_line, piece.end_line, piece.heading, piece.text, kind != Kind::Code],
-                    )?;
+                    insert_chunk(&tx, source_id, piece.start_line, piece.end_line, &piece.heading, &piece.text, kind != Kind::Code)?;
                     done.chunks += 1;
                 }
             }
@@ -453,6 +592,7 @@ pub fn apply_docs(conn: &mut Connection, collection: &str, root: &str, stamps: &
     let tx = conn.transaction()?;
     for (path, k) in &known {
         if !wanted.contains(path.as_str()) {
+            leave_vectors(&tx, k.id, now)?;
             tx.execute("DELETE FROM sources WHERE id = ?1", params![k.id])?;
             done.removed += 1;
         }
@@ -475,6 +615,7 @@ pub fn apply_docs(conn: &mut Connection, collection: &str, root: &str, stamps: &
         let (clean, _) = crate::secret_scan::redact(&body.text);
         let source_id = match k {
             Some(k) => {
+                leave_vectors(&tx, k.id, now)?;
                 tx.execute("DELETE FROM chunks WHERE source_id = ?1", params![k.id])?;
                 tx.execute(
                     "UPDATE sources SET size = ?1, hash = ?2, kind = ?3, indexed_at = ?4, private = ?5, title = ?6, label = ?7 WHERE id = ?8",
@@ -501,10 +642,7 @@ pub fn apply_docs(conn: &mut Connection, collection: &str, root: &str, stamps: &
                 (title, section) if section == title => title.to_string(),
                 (title, section) => format!("{title} › {section}"),
             };
-            tx.execute(
-                "INSERT INTO chunks (source_id, start_line, end_line, heading, text, prose) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![source_id, piece.start_line, piece.end_line, heading, piece.text, body.prose],
-            )?;
+            insert_chunk(&tx, source_id, piece.start_line, piece.end_line, &heading, &piece.text, body.prose)?;
             done.chunks += 1;
         }
     }
@@ -526,7 +664,14 @@ pub fn meta(conn: &Connection, collection: &str) -> Option<(i64, String)> {
     conn.query_row("SELECT refreshed_at, head FROM collections_meta WHERE collection = ?1", params![collection], |r| Ok((r.get(0)?, r.get(1)?))).ok()
 }
 
+/// Drops `collection`'s sources and chunks. Their vectors stay, waiting for the same text to be
+/// indexed again ([`prune_orphan_vectors`]).
 pub fn remove_collection(conn: &Connection, collection: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE embeddings SET used_at = ?2 WHERE hash IN
+           (SELECT c.embed_hash FROM chunks c JOIN sources s ON s.id = c.source_id WHERE s.collection = ?1)",
+        params![collection, chrono::Utc::now().timestamp_millis()],
+    )?;
     conn.execute("DELETE FROM sources WHERE collection = ?1", params![collection])?;
     conn.execute("DELETE FROM collections_meta WHERE collection = ?1", params![collection])?;
     written();
@@ -543,23 +688,21 @@ pub fn collection_keys(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 /// Drops the vectors of every embedding space whose name starts with `prefix` — compared as text,
 /// not with `LIKE`, where the `_` of a model id would be a wildcard.
 pub fn remove_space(conn: &Connection, prefix: &str) -> rusqlite::Result<usize> {
-    let removed = conn.execute("DELETE FROM vectors WHERE substr(space, 1, length(?1)) = ?1", params![prefix])?;
-    conn.execute("DELETE FROM vector_cache WHERE substr(space, 1, length(?1)) = ?1", params![prefix])?;
+    let removed = conn.execute("DELETE FROM embeddings WHERE substr(space, 1, length(?1)) = ?1", params![prefix])?;
     written();
     Ok(removed)
 }
 
 /// Drops the vectors of exactly the space `space`.
 pub fn remove_space_exact(conn: &Connection, space: &str) -> rusqlite::Result<usize> {
-    let removed = conn.execute("DELETE FROM vectors WHERE space = ?1", params![space])?;
-    conn.execute("DELETE FROM vector_cache WHERE space = ?1", params![space])?;
+    let removed = conn.execute("DELETE FROM embeddings WHERE space = ?1", params![space])?;
     written();
     Ok(removed)
 }
 
 /// Every embedding space the index holds vectors of.
 pub fn spaces(conn: &Connection) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = conn.prepare("SELECT DISTINCT space FROM vectors")?;
+    let mut stmt = conn.prepare("SELECT DISTINCT space FROM embeddings")?;
     let spaces = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
     Ok(spaces)
 }
@@ -597,7 +740,8 @@ pub fn status(conn: &Connection, collection: &str, space: Option<&str>) -> rusql
     )?;
     let vectors: i64 = match space {
         Some(space) => conn.query_row(
-            "SELECT COUNT(*) FROM vectors v JOIN chunks c ON c.id = v.chunk_id JOIN sources s ON s.id = c.source_id WHERE s.collection = ?1 AND v.space = ?2",
+            "SELECT COUNT(*) FROM chunks c JOIN sources s ON s.id = c.source_id JOIN embeddings e ON e.hash = c.embed_hash AND e.space = ?2
+             WHERE s.collection = ?1",
             params![collection, space],
             |r| r.get(0),
         )?,
@@ -616,8 +760,8 @@ pub fn has_vectors(conn: &Connection, space: &str, collections: &[String]) -> ru
         return Ok(false);
     }
     let sql = format!(
-        "SELECT EXISTS (SELECT 1 FROM vectors v JOIN chunks c ON c.id = v.chunk_id JOIN sources s ON s.id = c.source_id
-         WHERE v.space = ?1 AND s.collection IN ({}))",
+        "SELECT EXISTS (SELECT 1 FROM chunks c JOIN sources s ON s.id = c.source_id JOIN embeddings e ON e.hash = c.embed_hash AND e.space = ?1
+         WHERE s.collection IN ({}))",
         placeholders(collections.len(), 2)
     );
     let mut values: Vec<&dyn rusqlite::ToSql> = vec![&space];
@@ -845,7 +989,7 @@ pub fn pending_vectors(conn: &Connection, space: &str, collections: &[String], l
     let sql = format!(
         "SELECT c.id, c.heading || char(10) || c.text FROM chunks c JOIN sources s ON s.id = c.source_id
          WHERE {} AND s.collection IN ({})
-           AND NOT EXISTS (SELECT 1 FROM vectors v WHERE v.chunk_id = c.id AND v.space = ?1)
+           AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.hash = c.embed_hash AND e.space = ?1)
          ORDER BY
            CASE WHEN s.collection LIKE 'notes:%' OR s.collection LIKE 'docs:%' OR s.collection LIKE 'folder:%' THEN 0
                 WHEN s.kind IN ('markdown', 'text') THEN 1
@@ -880,14 +1024,13 @@ pub struct SpaceUsage {
 
 /// Every embedding model with vectors in the index, the largest first. A model switched away from
 /// keeps its vectors (switching back reuses them), and this is how the settings pane can say what
-/// they cost and offer to let them go.
+/// they cost and offer to let them go. `vectors`: the ones a passage of the index points at; `bytes`:
+/// all of the model's, the ones waiting for their text to come back included — «Borrar» frees them
+/// with the rest.
 pub fn space_usage(conn: &Connection) -> rusqlite::Result<Vec<SpaceUsage>> {
-    // The cache's bytes count too: they are this model's, and «Borrar» frees them with the rest.
     let mut stmt = conn.prepare(
-        "SELECT space, SUM(live), COALESCE(SUM(bytes), 0) FROM (
-             SELECT space, 1 AS live, LENGTH(data) AS bytes FROM vectors
-             UNION ALL SELECT space, 0, LENGTH(data) FROM vector_cache
-         ) GROUP BY space ORDER BY 3 DESC",
+        "SELECT e.space, SUM(EXISTS (SELECT 1 FROM chunks c WHERE c.embed_hash = e.hash)), COALESCE(SUM(LENGTH(e.data)), 0)
+         FROM embeddings e GROUP BY e.space ORDER BY 3 DESC",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(SpaceUsage { space: r.get(0)?, vectors: r.get::<_, i64>(1)?.max(0) as usize, bytes: r.get::<_, i64>(2)?.max(0) as u64 })
@@ -895,11 +1038,10 @@ pub fn space_usage(conn: &Connection) -> rusqlite::Result<Vec<SpaceUsage>> {
     rows.collect()
 }
 
-/// Drops every vector of one embedding model. The chunks stay — choosing the model again embeds
-/// them anew.
+/// Drops every vector of one embedding model — the user's «Borrar» on it. The chunks stay; choosing
+/// the model again embeds them anew. Returns how many went.
 pub fn drop_space(conn: &Connection, space: &str) -> rusqlite::Result<usize> {
-    let removed = conn.execute("DELETE FROM vectors WHERE space = ?1", params![space])?;
-    conn.execute("DELETE FROM vector_cache WHERE space = ?1", params![space])?;
+    let removed = conn.execute("DELETE FROM embeddings WHERE space = ?1", params![space])?;
     written();
     Ok(removed)
 }
@@ -913,7 +1055,7 @@ pub fn count_pending_vectors(conn: &Connection, space: &str, collections: &[Stri
     let sql = format!(
         "SELECT COUNT(*) FROM chunks c JOIN sources s ON s.id = c.source_id
          WHERE {} AND s.collection IN ({})
-           AND NOT EXISTS (SELECT 1 FROM vectors v WHERE v.chunk_id = c.id AND v.space = ?1)",
+           AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.hash = c.embed_hash AND e.space = ?1)",
         embeddable(code),
         placeholders(collections.len(), 2),
     );
@@ -942,25 +1084,36 @@ pub fn set_ranks(conn: &mut Connection, collection: &str, ranks: &[(String, i64)
 }
 
 /// Drops the vectors of every code chunk, in every model — code vectors switched off. The chunks
-/// stay, lexical as before; switching back embeds them anew.
+/// stay, lexical as before; switching back embeds them anew. A vector a prose chunk shares (the same
+/// text in a Markdown file) stays. Returns how many live vectors went.
 pub fn drop_code_vectors(conn: &Connection) -> rusqlite::Result<usize> {
     let removed = conn.execute(
-        "DELETE FROM vectors WHERE chunk_id IN
-           (SELECT c.id FROM chunks c JOIN sources s ON s.id = c.source_id WHERE c.prose = 0 AND s.kind = 'code')",
+        "DELETE FROM embeddings WHERE hash IN
+           (SELECT c.embed_hash FROM chunks c JOIN sources s ON s.id = c.source_id WHERE c.prose = 0 AND s.kind = 'code')
+           AND hash NOT IN (SELECT embed_hash FROM chunks WHERE prose = 1)",
         [],
     )?;
-    conn.execute("DELETE FROM vector_cache WHERE code = 1", [])?;
+    conn.execute("DELETE FROM embeddings WHERE code = 1 AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.embed_hash = embeddings.hash)", [])?;
     written();
     Ok(removed)
 }
 
+/// Stores the vectors the embedder made for `items` (chunk id, vector), under the text each chunk
+/// holds — so every chunk with that text, now or later, has it. A chunk deleted while its vector was
+/// being made stores nothing, rather than failing the pass (it used to: «FOREIGN KEY constraint
+/// failed» stopped vectorizing, 2026-11-19).
 pub fn store_vectors(conn: &mut Connection, space: &str, items: &[(i64, Vec<f32>)]) -> rusqlite::Result<()> {
+    let now = chrono::Utc::now().timestamp_millis();
     let tx = conn.transaction()?;
-    for (chunk_id, vector) in items {
-        tx.execute(
-            "INSERT OR REPLACE INTO vectors (chunk_id, space, data) VALUES (?1, ?2, ?3)",
-            params![chunk_id, space, to_blob(vector)],
+    {
+        let mut stmt = tx.prepare(
+            "INSERT OR REPLACE INTO embeddings (hash, space, data, code, used_at)
+             SELECT c.embed_hash, ?2, ?3, s.kind = 'code' AND c.prose = 0, ?4 FROM chunks c JOIN sources s ON s.id = c.source_id
+             WHERE c.id = ?1 AND c.embed_hash != ''",
         )?;
+        for (chunk_id, vector) in items {
+            stmt.execute(params![chunk_id, space, to_blob(vector), now])?;
+        }
     }
     tx.commit()?;
     written();
@@ -968,73 +1121,34 @@ pub fn store_vectors(conn: &mut Connection, space: &str, items: &[(i64, Vec<f32>
 }
 
 /// What a vector is made from, as [`pending_vectors`] hands it to the embedder: the heading, a
-/// newline, the text. The cache's key.
+/// newline, the text — hashed. The key of `embeddings`.
+pub(crate) fn embed_hash_of(heading: &str, text: &str) -> String {
+    embed_hash(&format!("{heading}\n{text}"))
+}
+
 fn embed_hash(input: &str) -> String {
     format!("{:x}", Sha256::digest(input.as_bytes()))
 }
 
-/// How long a passage's vectors wait in the cache for its text to come back (a branch switched
-/// back to, a file reverted), and how many the cache holds at most — the oldest go first.
-const CACHE_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
-const CACHE_MAX_ROWS: i64 = 50_000;
+/// How long a vector no passage points at any more waits for its text to come back (a branch
+/// switched back to, a file reverted, a collection indexed again), and how many such vectors are kept
+/// at most — the longest-left go first. Vectors a passage points at are never let go by age or count.
+pub const ORPHAN_KEEP_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+pub const ORPHAN_MAX_ROWS: i64 = 100_000;
 
-/// Copies the vectors of `source_id`'s chunks into the cache before they are deleted with them.
-fn keep_vectors(conn: &Connection, source_id: i64, now: i64) -> rusqlite::Result<()> {
-    let mut stmt = conn.prepare(
-        "SELECT c.heading || char(10) || c.text, v.space, v.data, s.kind = 'code' AND c.prose = 0
-         FROM vectors v JOIN chunks c ON c.id = v.chunk_id JOIN sources s ON s.id = c.source_id
-         WHERE c.source_id = ?1",
+/// Lets go of the vectors no passage has pointed at for [`ORPHAN_KEEP_MS`], and of the longest-left
+/// past [`ORPHAN_MAX_ROWS`]. Returns how many went.
+pub fn prune_orphan_vectors(conn: &Connection, now: i64) -> rusqlite::Result<usize> {
+    let orphan = "NOT EXISTS (SELECT 1 FROM chunks c WHERE c.embed_hash = e.hash)";
+    let old = conn.execute(&format!("DELETE FROM embeddings AS e WHERE e.used_at < ?1 AND {orphan}"), params![now - ORPHAN_KEEP_MS])?;
+    let over = conn.execute(
+        &format!("DELETE FROM embeddings WHERE rowid IN (SELECT e.rowid FROM embeddings e WHERE {orphan} ORDER BY e.used_at DESC LIMIT -1 OFFSET ?1)"),
+        params![ORPHAN_MAX_ROWS],
     )?;
-    let rows = stmt
-        .query_map(params![source_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?, r.get::<_, bool>(3)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (input, space, data, code) in rows {
-        conn.execute(
-            "INSERT OR REPLACE INTO vector_cache (hash, space, data, code, kept_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![embed_hash(&input), space, data, code, now],
-        )?;
-    }
-    Ok(())
-}
-
-/// Gives `pending` chunks (id, embedding input) the cached vector of the same text in `space`,
-/// moving it out of the cache. Returns the ids that got one — the rest still need the embedder.
-pub fn reuse_vectors(conn: &mut Connection, space: &str, pending: &[(i64, String)]) -> rusqlite::Result<HashSet<i64>> {
-    let mut reused = HashSet::new();
-    if pending.is_empty() {
-        return Ok(reused);
-    }
-    let tx = conn.transaction()?;
-    for (chunk_id, input) in pending {
-        let hash = embed_hash(input);
-        let data: Option<Vec<u8>> = tx
-            .query_row("SELECT data FROM vector_cache WHERE hash = ?1 AND space = ?2", params![hash, space], |r| r.get(0))
-            .optional()?;
-        let Some(data) = data else { continue };
-        tx.execute("INSERT OR REPLACE INTO vectors (chunk_id, space, data) VALUES (?1, ?2, ?3)", params![chunk_id, space, data])?;
-        tx.execute("DELETE FROM vector_cache WHERE hash = ?1 AND space = ?2", params![hash, space])?;
-        reused.insert(*chunk_id);
-    }
-    tx.commit()?;
-    if !reused.is_empty() {
+    if old + over > 0 {
         written();
     }
-    Ok(reused)
-}
-
-/// Lets go of cached vectors kept too long, and of the oldest past [`CACHE_MAX_ROWS`].
-pub fn prune_vector_cache(conn: &Connection, now: i64) -> rusqlite::Result<usize> {
-    let old = conn.execute("DELETE FROM vector_cache WHERE kept_at < ?1", params![now - CACHE_KEEP_MS])?;
-    let over = conn.execute(
-        "DELETE FROM vector_cache WHERE rowid IN (SELECT rowid FROM vector_cache ORDER BY kept_at DESC LIMIT -1 OFFSET ?1)",
-        params![CACHE_MAX_ROWS],
-    )?;
     Ok(old + over)
-}
-
-/// Empties the cache — «Vaciar índice» gives the disk back.
-pub fn clear_vector_cache(conn: &Connection) -> rusqlite::Result<usize> {
-    conn.execute("DELETE FROM vector_cache", [])
 }
 
 /// One stored vector, normalised, with what a search filters it by.
@@ -1077,8 +1191,8 @@ fn normalised(mut vector: Vec<f32>) -> Vec<f32> {
 
 fn load_units(conn: &Connection, space: &str) -> rusqlite::Result<Vec<Unit>> {
     let mut stmt = conn.prepare(
-        "SELECT v.chunk_id, s.collection, s.private, v.data FROM vectors v JOIN chunks c ON c.id = v.chunk_id JOIN sources s ON s.id = c.source_id
-         WHERE v.space = ?1",
+        "SELECT c.id, s.collection, s.private, e.data FROM chunks c JOIN embeddings e ON e.hash = c.embed_hash AND e.space = ?1
+         JOIN sources s ON s.id = c.source_id",
     )?;
     let mut names: HashMap<String, Arc<str>> = HashMap::new();
     let rows = stmt
@@ -1236,10 +1350,10 @@ mod tests {
         assert!(search_fts(&conn, &["repo:p".to_string()], "sqlite", 5).unwrap().is_empty(), "the ignored file left the index");
     }
 
-    /// A branch switched away from and back: the passages that left keep their vectors in the cache,
-    /// and coming back takes them from there instead of the embedder.
+    /// A branch switched away from and back: the passages that left keep their vectors, and coming
+    /// back finds them at once — nothing is pending, nothing goes to the embedder.
     #[test]
-    fn vectors_of_text_that_comes_back_are_reused_from_the_cache() {
+    fn vectors_of_text_that_comes_back_are_there_at_once() {
         let (dir, mut conn) = fixture();
         let cols = vec!["repo:p".to_string()];
         refresh(&mut conn, "repo:p", &dir.0, &files()).unwrap();
@@ -1248,32 +1362,149 @@ mod tests {
         store_vectors(&mut conn, "s1", &items).unwrap();
         let original = std::fs::read_to_string(dir.0.join("docs/adr.md")).unwrap();
 
-        // The other branch: the document is different, its vectors leave with its chunks.
+        // The other branch: the document is different, its passages leave; their vectors wait.
         std::thread::sleep(std::time::Duration::from_millis(5));
         std::fs::write(dir.0.join("docs/adr.md"), "# Storage\n\nWe chose Postgres.\n").unwrap();
         refresh(&mut conn, "repo:p", &dir.0, &files()).unwrap();
         assert_eq!(status(&conn, "repo:p", Some("s1")).unwrap().vectors, 0);
-        assert_eq!(space_usage(&conn).unwrap()[0].vectors, 0, "kept in the cache, not counted as live");
+        assert_eq!(space_usage(&conn).unwrap()[0].vectors, 0, "kept, not counted as live");
         let other: Vec<(i64, Vec<f32>)> = pending_vectors(&conn, "s1", &cols, 100, false).unwrap().iter().map(|(id, _)| (*id, vec![0.1, 0.9])).collect();
         store_vectors(&mut conn, "s1", &other).unwrap();
 
-        // Back: the same text, new chunk ids, the old vectors.
+        // Back: the same text, new chunk ids, the old vectors — nothing pending.
         std::thread::sleep(std::time::Duration::from_millis(5));
         std::fs::write(dir.0.join("docs/adr.md"), &original).unwrap();
         refresh(&mut conn, "repo:p", &dir.0, &files()).unwrap();
-        let pending = pending_vectors(&conn, "s1", &cols, 100, false).unwrap();
-        assert_eq!(pending.len(), first.len());
-        let reused = reuse_vectors(&mut conn, "s1", &pending).unwrap();
-        assert_eq!(reused.len(), pending.len(), "every passage came back");
-        assert!(pending_vectors(&conn, "s1", &cols, 100, false).unwrap().is_empty());
-        assert!(reuse_vectors(&mut conn, "s2", &pending).unwrap().is_empty(), "another model's cache is its own");
-        let cached: i64 = conn.query_row("SELECT COUNT(*) FROM vector_cache", [], |r| r.get(0)).unwrap();
-        assert_eq!(cached, 1, "moved out of the cache, only the Postgres passage is left");
+        assert!(pending_vectors(&conn, "s1", &cols, 100, false).unwrap().is_empty(), "every passage came back with its vector");
+        assert_eq!(status(&conn, "repo:p", Some("s1")).unwrap().vectors as usize, first.len());
+        assert_eq!(pending_vectors(&conn, "s2", &cols, 100, false).unwrap().len(), first.len(), "another model's vectors are its own");
+        let best = search_vectors(&conn, "s1", &cols, &[2.0, 0.5], 1).unwrap();
+        assert_eq!(best[0].0.heading, "Retention", "the vector found is the one stored for that text");
 
-        // Dropping the model drops its cache too; a prune lets go of what waited too long.
-        assert_eq!(prune_vector_cache(&conn, chrono::Utc::now().timestamp_millis() + CACHE_KEEP_MS + 1).unwrap(), 1);
+        // Only the Postgres passage waits now; a prune lets it go once it has waited long enough.
+        let now = chrono::Utc::now().timestamp_millis();
+        assert_eq!(prune_orphan_vectors(&conn, now).unwrap(), 0, "not yet");
+        assert_eq!(prune_orphan_vectors(&conn, now + ORPHAN_KEEP_MS + 1).unwrap(), 1);
+        assert_eq!(status(&conn, "repo:p", Some("s1")).unwrap().vectors as usize, first.len(), "live vectors are never pruned");
         drop_space(&conn, "s1").unwrap();
         assert!(space_usage(&conn).unwrap().is_empty());
+    }
+
+    /// The loss of 2026-11-23: a collection emptied and indexed again from scratch (every chunk a new
+    /// id) has every vector it had.
+    #[test]
+    fn a_collection_emptied_and_indexed_again_keeps_every_vector() {
+        let (dir, mut conn) = fixture();
+        let cols = vec!["repo:p".to_string()];
+        refresh(&mut conn, "repo:p", &dir.0, &files()).unwrap();
+        let pending = pending_vectors(&conn, "s1", &cols, 100, true).unwrap();
+        let items: Vec<(i64, Vec<f32>)> = pending.iter().map(|(id, _)| (*id, vec![1.0, 0.0])).collect();
+        store_vectors(&mut conn, "s1", &items).unwrap();
+        let max_before: i64 = conn.query_row("SELECT MAX(id) FROM chunks", [], |r| r.get(0)).unwrap();
+
+        remove_collection(&conn, "repo:p").unwrap();
+        compact(&conn).unwrap();
+        assert_eq!(status(&conn, "repo:p", Some("s1")).unwrap().chunks, 0);
+        refresh(&mut conn, "repo:p", &dir.0, &files()).unwrap();
+
+        assert!(pending_vectors(&conn, "s1", &cols, 100, true).unwrap().is_empty(), "nothing to embed again");
+        assert_eq!(status(&conn, "repo:p", Some("s1")).unwrap().vectors as usize, items.len());
+        assert!(has_vectors(&conn, "s1", &cols).unwrap());
+        let min_after: i64 = conn.query_row("SELECT MIN(id) FROM chunks", [], |r| r.get(0)).unwrap();
+        assert!(min_after <= max_before, "the chunks really are new rows (ids reused from 1): {min_after} vs {max_before}");
+    }
+
+    /// A chunk deleted while its vector was being made: storing it is a no-op, not an error.
+    #[test]
+    fn a_vector_for_a_chunk_that_left_is_dropped_quietly() {
+        let (dir, mut conn) = fixture();
+        refresh(&mut conn, "repo:p", &dir.0, &files()).unwrap();
+        store_vectors(&mut conn, "s1", &[(987_654, vec![1.0, 0.0])]).unwrap();
+        assert!(space_usage(&conn).unwrap().is_empty());
+    }
+
+    /// An index of 2.9.2 (vectors by chunk id, a cache of left ones by text) is brought over whole:
+    /// every vector ends up by text and nothing is pending.
+    #[test]
+    fn an_index_of_2_9_2_keeps_every_vector_when_opened() {
+        let dir = tempdir::Dir::new();
+        let path = dir.0.join("old.sqlite");
+        {
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE sources (id INTEGER PRIMARY KEY, collection TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL DEFAULT 0,
+                     mtime INTEGER NOT NULL DEFAULT 0, hash TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'code', indexed_at INTEGER NOT NULL DEFAULT 0,
+                     private INTEGER NOT NULL DEFAULT 0, title TEXT NOT NULL DEFAULT '', label TEXT NOT NULL DEFAULT '', rank INTEGER NOT NULL DEFAULT 0,
+                     UNIQUE(collection, path));
+                 CREATE TABLE chunks (id INTEGER PRIMARY KEY, source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                     start_line INTEGER NOT NULL, end_line INTEGER NOT NULL, heading TEXT NOT NULL DEFAULT '', text TEXT NOT NULL, prose INTEGER NOT NULL DEFAULT 0);
+                 CREATE TABLE vectors (chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE, space TEXT NOT NULL, data BLOB NOT NULL,
+                     PRIMARY KEY (chunk_id, space));
+                 CREATE TABLE collections_meta (collection TEXT PRIMARY KEY, root TEXT NOT NULL, refreshed_at INTEGER NOT NULL, head TEXT NOT NULL DEFAULT '');
+                 CREATE TABLE vector_cache (hash TEXT NOT NULL, space TEXT NOT NULL, data BLOB NOT NULL, code INTEGER NOT NULL DEFAULT 0,
+                     kept_at INTEGER NOT NULL, PRIMARY KEY (hash, space));
+                 INSERT INTO sources (id, collection, path, kind) VALUES (1, 'notes:w', 'note:a', 'markdown'), (2, 'repo:p', 'a.ts', 'code');
+                 INSERT INTO chunks (id, source_id, start_line, end_line, heading, text, prose) VALUES
+                     (1, 1, 1, 2, 'Pedidos', 'Se guardan 90 días.', 1),
+                     (2, 1, 3, 4, 'Sueldos', 'Del almacén.', 1),
+                     (3, 2, 1, 3, '', 'export const total = 1;', 0);
+                 INSERT INTO vectors (chunk_id, space, data) VALUES (1, 's1', x'0000803f00000000'), (3, 's1', x'000000000000803f');",
+            )
+            .unwrap();
+            let left = embed_hash_of("Viejo", "Un pasaje que se fue.");
+            old.execute("INSERT INTO vector_cache (hash, space, data, code, kept_at) VALUES (?1, 's1', x'00', 0, 5)", params![left]).unwrap();
+        }
+        let conn = open_at(&path).unwrap();
+        assert!(!table_exists(&conn, "vectors").unwrap() && !table_exists(&conn, "vector_cache").unwrap());
+        let unhashed: i64 = conn.query_row("SELECT COUNT(*) FROM chunks WHERE embed_hash = ''", [], |r| r.get(0)).unwrap();
+        assert_eq!(unhashed, 0);
+        let cols = vec!["notes:w".to_string(), "repo:p".to_string()];
+        let pending = pending_vectors(&conn, "s1", &cols, 100, true).unwrap();
+        assert_eq!(pending.len(), 1, "only the chunk that never had a vector: {pending:?}");
+        assert!(pending[0].1.contains("almacén"));
+        assert_eq!(status(&conn, "notes:w", Some("s1")).unwrap().vectors, 1);
+        assert_eq!(status(&conn, "repo:p", Some("s1")).unwrap().vectors, 1);
+        let total: i64 = conn.query_row("SELECT COUNT(*) FROM embeddings", [], |r| r.get(0)).unwrap();
+        assert_eq!(total, 3, "two live and the one the cache held");
+        let best = search_vectors(&conn, "s1", &cols, &[1.0, 0.0], 1).unwrap();
+        assert_eq!(best[0].0.heading, "Pedidos", "the same vector, under its text");
+        // Opened again: nothing to do, nothing lost.
+        drop(conn);
+        let again = open_at(&path).unwrap();
+        assert_eq!(status(&again, "notes:w", Some("s1")).unwrap().vectors, 1);
+    }
+
+    /// The index of 2.9.2 in the cache root is moved, WAL and all, to the state root once; an index
+    /// already there is never overwritten.
+    #[test]
+    fn the_old_index_moves_out_of_the_cache_whole_and_once() {
+        let dir = tempdir::Dir::new();
+        let legacy = dir.0.join("cache/knowledge/index.sqlite");
+        let target = dir.0.join("state/knowledge/index.sqlite");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let fixture_dir = tempdir::Dir::new();
+        std::fs::write(fixture_dir.0.join("a.md"), "# Uno\n\nTexto del pasaje.\n").unwrap();
+        let held = {
+            let mut old = open_at(&legacy).unwrap();
+            // Kept open with its writes still in the WAL, as an app that crashed would leave it.
+            old.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+            refresh(&mut old, "repo:p", &fixture_dir.0, &["a.md".to_string()]).unwrap();
+            let pending = pending_vectors(&old, "s1", &["repo:p".to_string()], 10, false).unwrap();
+            store_vectors(&mut old, "s1", &[(pending[0].0, vec![1.0, 0.0])]).unwrap();
+            old
+        };
+        assert!(adopt_legacy(&legacy, &target).unwrap());
+        drop(held);
+        assert!(!legacy.exists(), "the old file goes once the copy is in place");
+        let conn = open_at(&target).unwrap();
+        assert_eq!(status(&conn, "repo:p", Some("s1")).unwrap().vectors, 1, "the vector in the WAL came too");
+        // A second launch: nothing to move, and an index already in place is never replaced.
+        assert!(!adopt_legacy(&legacy, &target).unwrap());
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"not an index").unwrap();
+        assert!(!adopt_legacy(&legacy, &target).unwrap());
+        assert_eq!(status(&conn, "repo:p", Some("s1")).unwrap().vectors, 1);
     }
 
     #[test]

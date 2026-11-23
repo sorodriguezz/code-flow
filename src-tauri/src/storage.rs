@@ -35,6 +35,9 @@ fn places() -> Vec<(&'static str, PathBuf, bool)> {
     vec![
         ("database", crate::paths::db_path(), false),
         ("cache", crate::paths::cache_dir(), true),
+        // Not clearable here: its vectors are hours of embedder time. A model's «Borrar» and
+        // «Vaciar índice» in the knowledge pane are the ways to free it.
+        ("knowledge", crate::paths::knowledge_dir(), false),
         ("logs", crate::paths::logs_dir(), true),
         ("models", crate::paths::models_dir(), false),
         ("referenceRepos", crate::paths::reference_repos_dir(), false),
