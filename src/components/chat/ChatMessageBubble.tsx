@@ -1,6 +1,6 @@
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { Check, Copy, FileText, GitBranch, ImageIcon, Pencil, Puzzle, RefreshCw, Square, Volume2, type LucideIcon } from "lucide-react";
+import { Check, ChevronDown, Copy, FileText, GitBranch, ImageIcon, Pencil, Puzzle, RefreshCw, Square, Volume2, type LucideIcon } from "lucide-react";
 import { speakNow } from "../../lib/speech/speakAnswer";
 import { useSpeechStore } from "../../state/speechStore";
 import { speakable } from "../../lib/speech/speakable";
@@ -42,6 +42,9 @@ import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { findTheme } from "../../lib/codeThemes";
 import { useThemeStore } from "../../state/themeStore";
 import { ImageChipHover } from "./ImageChipHover";
+import { ContextSources } from "../ai/ContextSources";
+import { TurnChangesCard, type TurnChangePart } from "../ai/TurnReview";
+import type { ContextSource } from "../../lib/editorContext";
 
 /**
  * What a bubble needs to know about a turn.
@@ -106,6 +109,9 @@ export interface ChatBubbleActions {
   /** Answers the questions this turn ends with (`lib/chatQuestions`) — sent as the next message.
    *  Only on the latest answer: an earlier one's card just shows what was asked. */
   onAnswer?: (text: string) => void;
+  /** The user's message after this answer, for an earlier question card to show which of its
+   *  options was chosen (`answersIn`). */
+  answeredWith?: string;
 }
 
 /**
@@ -167,6 +173,9 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   emptyText,
   codeTarget,
   sessionId,
+  context,
+  turnChanges,
+  turnProjectId,
 }: {
   message: ChatBubbleMessage;
   variant?: ChatBubbleVariant;
@@ -202,6 +211,21 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
   emptyText?: string;
   /** The editor a code block can be sent to — the repository chat's. See `CodeBlockTarget`. */
   codeTarget?: CodeBlockTarget;
+  /**
+   * What CodeFlow put in front of the engine for this answer besides the question («Contexto
+   * usado»). Drawn in the stamp row as one more fact about the turn — «2 fuentes ▾» — and opened
+   * into its chips on a click. It used to be a row of its own under the turn, outside the answer's
+   * column: it lined up with the avatar instead of the text, and two lines of metadata under every
+   * answer weighed nearly as much as the answer (user ask, 2026-11-23).
+   */
+  context?: ContextSource[];
+  /**
+   * What this turn changed in the repositories, one part per repository — drawn inside the answer,
+   * before its footer, as `TurnChangesCard`. It used to sit under the turn, outside its column.
+   */
+  turnChanges?: readonly TurnChangePart[];
+  /** The repository chat's project, where its files open. */
+  turnProjectId?: string;
 }) {
   const t = useT();
   const [copied, copy] = useCopy();
@@ -356,7 +380,18 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
     diagramFailed: t("chat.diagramFailed"),
   });
 
-  const stampRow = <ChatStamp message={message} detail={stamp} />;
+  const [sourcesOpen, setSourcesOpen] = useState(false);
+  const sources = context && context.length > 0 ? context : null;
+  const stampRow = (
+    <ChatStamp
+      message={message}
+      detail={stamp}
+      sources={sources}
+      sourcesOpen={sourcesOpen}
+      onToggleSources={() => setSourcesOpen((open) => !open)}
+    />
+  );
+  const sourcesRow = sources && sourcesOpen ? <ContextSources sources={sources} /> : null;
   const isUser = message.role === "user";
 
   // An answer still being written: the bare words and a caret. It is drawn inside the run card's
@@ -520,7 +555,9 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
 
   if (isUser) {
     return (
-      <div className="group space-y-1">
+      // `data-turn`: the transcripts leave more room above a question than between it and its
+      // answer, so each exchange reads as one (user ask, 2026-11-23).
+      <div data-turn="question" className="group space-y-1">
         <div
           // Selectable as a bubble: a user's own turn renders as a bare string, and would otherwise
           // be the one kind of message you couldn't quote back. `wrap-anywhere`: a pasted log or
@@ -553,7 +590,14 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
           )}
           {body}
         </div>
-        <div className={`flex items-center justify-end gap-1.5 ${reading ? "pt-0.5" : ""}`}>
+        {/* The time under your own question shows with its controls, on hover: you know what you
+            asked, and a stamp under every bubble was one more line between an answer and the next
+            question (user ask, 2026-11-23). */}
+        <div
+          className={`flex items-center justify-end gap-1.5 transition-opacity opacity-0 focus-within:opacity-100 group-hover:opacity-100 ${
+            reading ? "pt-0.5" : ""
+          }`}
+        >
           {controls}
           {stampRow}
         </div>
@@ -584,7 +628,7 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
       </div>
       {contextBreakdown && <ContextBars breakdown={contextBreakdown} />}
       {lifted && lifted.artifacts.length > 0 && <ArtifactCards artifacts={lifted.artifacts} projectId={codeTarget?.projectId ?? null} />}
-      {asked && asked.questions.length > 0 && <QuestionCard questions={asked.questions} onAnswer={actions?.onAnswer} />}
+      {asked && asked.questions.length > 0 && <QuestionCard questions={asked.questions} onAnswer={actions?.onAnswer} answeredWith={actions?.answeredWith} />}
       {/* The files the turn read or changed — its sources — then the files it wrote. Both are part
           of what this turn said; the row after them is what you *do* about it. */}
       {trace && trace.length > 0 && <RunFileChips lines={trace} density={variant} />}
@@ -595,10 +639,12 @@ export const ChatMessageBubble = memo(function ChatMessageBubble({
           <OutputBar conversationId={outputs.conversationId} files={outputs.files} label={false} />
         </div>
       )}
+      {turnChanges && turnChanges.length > 0 && <TurnChangesCard parts={turnChanges} projectId={turnProjectId} />}
       <div className="flex items-center gap-1.5">
         {stampRow}
         {controls}
       </div>
+      {sourcesRow}
     </>,
   );
 });
@@ -1094,32 +1140,52 @@ function onMarkupReplaced(host: HTMLElement, redraw: () => void): () => void {
  * this?"), not something the transcript should be announcing. Only the time is shown; the day is
  * carried by the divider between days, and the full date is on hover.
  */
-function ChatStamp({ message, detail }: { message: ChatBubbleMessage; detail: ChatStampDetail }) {
+/** One fact in the stamp row. `lazy` ones — the CLI's version, the tokens and the cost — show only
+ *  while the turn is hovered or focused: they are for whoever is checking, and at rest they made the
+ *  line under every answer read like a log entry (user ask, 2026-11-23). */
+type StampPart = { node: ReactNode; lazy?: boolean };
+
+function ChatStamp({
+  message,
+  detail,
+  sources,
+  sourcesOpen,
+  onToggleSources,
+}: {
+  message: ChatBubbleMessage;
+  detail: ChatStampDetail;
+  sources?: ContextSource[] | null;
+  sourcesOpen?: boolean;
+  onToggleSources?: () => void;
+}) {
   const t = useT();
   const locale = useLocale();
   const when = parseStamp(message.createdAt);
 
-  const parts: ReactNode[] = [];
+  const parts: StampPart[] = [];
+  const lazy: StampPart[] = [];
   if (message.role === "assistant") {
     // A turn with a trace or reasoning already says how long it took, in its "Thought for…" line.
     const saysDuration = (message.trace?.length ?? 0) > 0 || !!message.thinking?.trim() || !!message.traceId;
     if (detail === "full" && message.responseTimeMs !== undefined && !saysDuration) {
-      parts.push(`⏱ ${formatResponseTime(message.responseTimeMs)}`);
+      parts.push({ node: `⏱ ${formatResponseTime(message.responseTimeMs)}` });
     }
     // The engine's own mark before its name — the one the providers list and the model picker
     // draw — so "which engine wrote this?" is answered at a glance, not by reading the line.
     if (message.provider) {
-      parts.push(
-        <span className="inline-flex items-center gap-1">
-          <ProviderGlyph providerId={message.provider} size={11} />
-          {providerDisplayLabel(message.provider, t)}
-        </span>,
-      );
+      parts.push({
+        node: (
+          <span className="inline-flex items-center gap-1">
+            <ProviderGlyph providerId={message.provider} size={11} />
+            {providerDisplayLabel(message.provider, t)}
+          </span>
+        ),
+      });
     }
     // An empty provider still yields the raw model id, which is the honest answer for a turn
     // recorded before the provider was tracked.
-    if (message.model) parts.push(modelDisplayLabel(message.provider ?? "", message.model, t));
-    if (detail === "full" && message.engineVersion) parts.push(`v${message.engineVersion}`);
+    if (message.model) parts.push({ node: modelDisplayLabel(message.provider ?? "", message.model, t) });
+    if (detail === "full" && message.engineVersion) lazy.push({ node: `v${message.engineVersion}`, lazy: true });
     // ↑ the input this turn added (fresh input and what was written to the cache), ↓ what came back;
     // the cost only when the CLI put a number on it. Cache *reads* stay out of the figure and in the
     // tooltip: the CLI reports the turn's bill, which re-reads the whole conversation from cache on
@@ -1129,36 +1195,68 @@ function ChatStamp({ message, detail }: { message: ChatBubbleMessage; detail: Ch
       const u = message.usage;
       const fresh = u.input_tokens + u.cache_write_tokens;
       if (fresh + u.cache_read_tokens + u.output_tokens > 0 || u.cost_usd !== null) {
-        const tokens = (
-          <span
-            title={t("chat.usageTooltip", {
-              fresh: compactTokens(fresh),
-              cached: compactTokens(u.cache_read_tokens),
-              output: compactTokens(u.output_tokens),
-            })}
-          >
-            ↑{compactTokens(fresh)} ↓{compactTokens(u.output_tokens)}
-            {u.cost_usd !== null && ` · ${formatCost(u.cost_usd)}`}
-          </span>
-        );
-        parts.push(tokens);
+        lazy.push({
+          lazy: true,
+          node: (
+            <span
+              title={t("chat.usageTooltip", {
+                fresh: compactTokens(fresh),
+                cached: compactTokens(u.cache_read_tokens),
+                output: compactTokens(u.output_tokens),
+              })}
+            >
+              ↑{compactTokens(fresh)} ↓{compactTokens(u.output_tokens)}
+              {u.cost_usd !== null && ` · ${formatCost(u.cost_usd)}`}
+            </span>
+          ),
+        });
       }
     }
   }
-  if (when) parts.push(when.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }));
-  if (parts.length === 0) return null;
+  if (when) parts.push({ node: when.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }) });
+  // What went in with the question, as one more fact of the turn and in the same voice as the rest
+  // of the line — a bordered chip here stood apart from the plain text around it. A click opens
+  // the sources themselves under the row.
+  if (sources && sources.length > 0 && onToggleSources) {
+    const attached = sources.filter((source) => source.kind !== "withheld").length;
+    const label =
+      attached === 0 ? t("context.noneShort") : attached === 1 ? t("context.sourcesOne") : t("context.sourcesMany", { n: attached });
+    parts.push({
+      node: (
+        <button
+          type="button"
+          onClick={onToggleSources}
+          aria-expanded={sourcesOpen}
+          title={t("context.used")}
+          className="-mx-0.5 inline-flex items-center gap-0.5 rounded px-0.5 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        >
+          {label}
+          <ChevronDown size={10} className={`shrink-0 transition-transform ${sourcesOpen ? "rotate-180" : ""}`} />
+        </button>
+      ),
+    });
+  }
+  const all = [...parts, ...lazy];
+  if (all.length === 0) return null;
 
   return (
     <div
       title={when?.toLocaleString(locale)}
       className="flex min-w-0 flex-wrap items-center px-0.5 text-[10.5px] leading-tight text-[var(--cf-text-muted)]"
     >
-      {/* Each part keeps its separator *after* it, so a narrow panel breaks the line after a dot
-          rather than opening the next line with one. */}
-      {parts.map((part, index) => (
-        <span key={index} className="inline-flex items-center whitespace-nowrap">
-          {part}
-          {index < parts.length - 1 && <span className="px-1">·</span>}
+      {/* Each part at rest keeps its separator *after* it, so a narrow panel breaks the line after a
+          dot rather than opening the next line with one. The hover-only ones carry theirs *before*
+          them instead: a dot left trailing at rest would point at nothing. */}
+      {all.map((part, index) => (
+        <span
+          key={index}
+          className={`inline-flex items-center whitespace-nowrap ${
+            part.lazy ? "opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100" : ""
+          }`}
+        >
+          {part.lazy && <span className="px-1">·</span>}
+          {part.node}
+          {!part.lazy && index < parts.length - 1 && <span className="px-1">·</span>}
         </span>
       ))}
     </div>

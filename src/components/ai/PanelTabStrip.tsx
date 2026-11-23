@@ -1,3 +1,4 @@
+import { togglePanelMax, usePanelAtMax } from "./panelSize";
 import {
   useEffect,
   useId,
@@ -85,8 +86,9 @@ export function PanelTabStrip({
 }) {
   const t = useT();
   const chord = useShortcutChord();
-  const wide = useAiPanelStore((s) => s.wide);
-  const toggleWide = useAiPanelStore((s) => s.toggleWide);
+  // What the panel *is*, not which mode was last clicked: dragged to the edge (or squeezed there by
+  // a smaller window) it is maximized, and the button offers to restore it.
+  const wide = usePanelAtMax();
   const closePanel = useUiStore((s) => s.toggleAiPanel);
   const stripRef = useRef<HTMLDivElement>(null);
   const stripWidth = useElementWidth(stripRef);
@@ -174,7 +176,7 @@ export function PanelTabStrip({
       <HeaderButton
         icon={wide ? Minimize2 : Maximize2}
         label={wide ? t("assistant.narrow") : t("assistant.wide")}
-        onClick={toggleWide}
+        onClick={togglePanelMax}
       />
       <HeaderButton icon={X} label={t("assistant.closePanel")} onClick={closePanel} chord={chord("panel.ai")} />
     </div>
@@ -560,14 +562,6 @@ function NewMenu({ workspaceId, onOpenCheckpoints }: { workspaceId: string; onOp
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useDismiss(ref, open, () => setOpen(false));
-  const project = useWorkspaceStore((s) => s.activeProject());
-  const inWorkspace = useWorkspaceStore((s) => (project ? s.workspaceOfProject(project.id) === workspaceId : false));
-  const projectId = project && inWorkspace ? project.id : null;
-  const changes = useChangesToAnalyze(projectId);
-  const [chatScope, setChatScope] = useState(false);
-  useEffect(() => {
-    if (!open) setChatScope(false);
-  }, [open]);
   return (
     <div ref={ref} className="relative shrink-0">
       <Tooltip label={t("assistant.openNew")} side="bottom" disabled={open}>
@@ -586,56 +580,113 @@ function NewMenu({ workspaceId, onOpenCheckpoints }: { workspaceId: string; onOp
       </Tooltip>
       {open && (
         <div role="menu" className={`absolute right-0 top-full z-40 mt-1 w-72 ${popoverClass}`}>
-          {/* One "new chat" that asks where it goes — this repository or the whole workspace (user,
-              2026-10-15: "mezcla el botón de chat y el de workspace"). */}
-          <MenuItem
-            icon={MessageSquare}
-            label={t("assistant.newChat")}
-            onClick={() => setChatScope((v) => !v)}
-            trailing={<ChevronDown size={12} className={`text-[var(--cf-text-muted)] ${chatScope ? "rotate-180" : ""}`} />}
-          />
-          {chatScope && (
-            <div className="pl-4">
-              <ChatScopeOptions workspaceId={workspaceId} project={projectId ? project : null} onPicked={() => setOpen(false)} />
-            </div>
-          )}
-          <MenuItem
-            icon={ShieldCheck}
-            label={t("assistant.analyze")}
-            // In a menu the reason is read, not hovered for: it takes the repository's line.
-            detail={changes === 0 ? t("analyze.nothingToAnalyze") : project?.name}
-            disabled={!projectId || changes === 0}
-            onClick={() => {
-              setOpen(false);
-              if (projectId) openAnalysis(projectId, { run: true });
-            }}
-          />
-          <div className="mx-1 my-[5px] h-px bg-[var(--cf-border)]" />
-          {projectId && <PrPicker projectId={projectId} onPicked={() => setOpen(false)} />}
-          <MenuItem
-            icon={Link2}
-            label={t("assistant.reviewFromLink")}
-            onClick={() => {
-              setOpen(false);
-              useUiStore.getState().openPrLinkModal();
-            }}
-          />
-          {onOpenCheckpoints && (
-            <>
-              <div className="mx-1 my-[5px] h-px bg-[var(--cf-border)]" />
-              <MenuItem
-                icon={RotateCcw}
-                label={t("assistant.restorePoints")}
-                onClick={() => {
-                  setOpen(false);
-                  onOpenCheckpoints();
-                }}
-              />
-            </>
-          )}
+          <NewMenuItems workspaceId={workspaceId} onClose={() => setOpen(false)} onOpenCheckpoints={onOpenCheckpoints} />
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * «Nuevo ▾» at the head of the Inbox: the «+» menu's own items behind a worded button. It replaced
+ * the row of «Chat ▾», «Revisar PR ▾» and «Analizar cambios» buttons, which took a line of its own
+ * above the history (user ask, 2026-11-23). The analysis keeps its engine chevron beside this
+ * button, in the Inbox's header — see `AssistantInbox`.
+ */
+export function InboxNewMenu({ workspaceId }: { workspaceId: string }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useDismiss(ref, open, () => setOpen(false));
+  return (
+    <div ref={ref} className="relative flex shrink-0">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={t("assistant.openNew")}
+        className={buttonClass({ variant: "primary", size: "sm" })}
+      >
+        <Plus size={13} />
+        <span className="hidden @[26rem]:inline">{t("assistant.new")}</span>
+        <ChevronDown size={12} />
+      </button>
+      {open && (
+        <div role="menu" className={`absolute right-0 top-full z-40 mt-1 w-72 ${popoverClass}`}>
+          <NewMenuItems workspaceId={workspaceId} onClose={() => setOpen(false)} onOpenCheckpoints={null} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** What «+» and «Nuevo» offer: a chat (asking where), an analysis, a review — of the open pull
+ *  requests or from a link — and the restore points where there are some. */
+function NewMenuItems({
+  workspaceId,
+  onClose,
+  onOpenCheckpoints,
+}: {
+  workspaceId: string;
+  onClose: () => void;
+  onOpenCheckpoints: (() => void) | null;
+}) {
+  const t = useT();
+  const project = useWorkspaceStore((s) => s.activeProject());
+  const inWorkspace = useWorkspaceStore((s) => (project ? s.workspaceOfProject(project.id) === workspaceId : false));
+  const projectId = project && inWorkspace ? project.id : null;
+  const changes = useChangesToAnalyze(projectId);
+  const [chatScope, setChatScope] = useState(false);
+  return (
+    <>
+      {/* One "new chat" that asks where it goes — this repository or the whole workspace (user,
+          2026-10-15: "mezcla el botón de chat y el de workspace"). */}
+      <MenuItem
+        icon={MessageSquare}
+        label={t("assistant.newChat")}
+        onClick={() => setChatScope((v) => !v)}
+        trailing={<ChevronDown size={12} className={`text-[var(--cf-text-muted)] ${chatScope ? "rotate-180" : ""}`} />}
+      />
+      {chatScope && (
+        <div className="pl-4">
+          <ChatScopeOptions workspaceId={workspaceId} project={projectId ? project : null} onPicked={onClose} />
+        </div>
+      )}
+      <MenuItem
+        icon={ShieldCheck}
+        label={t("assistant.analyze")}
+        // In a menu the reason is read, not hovered for: it takes the repository's line.
+        detail={changes === 0 ? t("analyze.nothingToAnalyze") : project?.name}
+        disabled={!projectId || changes === 0}
+        onClick={() => {
+          onClose();
+          if (projectId) openAnalysis(projectId, { run: true });
+        }}
+      />
+      <div className="mx-1 my-[5px] h-px bg-[var(--cf-border)]" />
+      {projectId && <PrPicker projectId={projectId} onPicked={onClose} />}
+      <MenuItem
+        icon={Link2}
+        label={t("assistant.reviewFromLink")}
+        onClick={() => {
+          onClose();
+          useUiStore.getState().openPrLinkModal();
+        }}
+      />
+      {onOpenCheckpoints && (
+        <>
+          <div className="mx-1 my-[5px] h-px bg-[var(--cf-border)]" />
+          <MenuItem
+            icon={RotateCcw}
+            label={t("assistant.restorePoints")}
+            onClick={() => {
+              onClose();
+              onOpenCheckpoints();
+            }}
+          />
+        </>
+      )}
+    </>
   );
 }
 
@@ -786,42 +837,6 @@ function fold(text: string): string {
   return text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
 
-/** "Chat" as a button with its own menu — the Inbox's door to both chats, asking which one. */
-export function NewChatMenu({
-  workspaceId,
-  project,
-  disabled,
-}: {
-  workspaceId: string;
-  project: Project | null;
-  disabled?: boolean;
-}) {
-  const t = useT();
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useDismiss(ref, open, () => setOpen(false));
-  return (
-    <div ref={ref} className="relative flex">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        disabled={disabled}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        className={buttonClass({ variant: "secondary", size: "sm" })}
-      >
-        <Plus size={13} />
-        {t("assistant.chat")}
-        <ChevronDown size={12} className="text-[var(--cf-text-muted)]" />
-      </button>
-      {open && (
-        <div role="menu" className={`absolute left-0 top-full z-40 mt-1 w-64 ${popoverClass}`}>
-          <ChatScopeOptions workspaceId={workspaceId} project={project} onPicked={() => setOpen(false)} />
-        </div>
-      )}
-    </div>
-  );
-}
-
 /** The repository's open pull requests, fetched when the menu first shows them. */
 function PrPicker({ projectId, onPicked }: { projectId: string; onPicked: () => void }) {
   const t = useT();
@@ -861,41 +876,3 @@ function PrPicker({ projectId, onPicked }: { projectId: string; onPicked: () => 
   );
 }
 
-/** "Review PR" as a button with its own menu — the Inbox's version of the "+" menu's PR list. */
-export function ReviewPrMenu({ projectId }: { projectId: string; variant?: "button" }) {
-  const t = useT();
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useDismiss(ref, open, () => setOpen(false));
-  return (
-    // `flex`, so the wrapper is exactly the button: as a block it added a line box around it, and
-    // centred in the Inbox's row the button sat a pixel above its neighbours.
-    <div ref={ref} className="relative flex">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        // The Inbox's other two actions' size, exactly — it sits between them. At `md` it stood 4px
-        // taller and a text step larger than its neighbours (user report).
-        className={buttonClass({ variant: "secondary", size: "sm" })}
-      >
-        <GitPullRequest size={13} />
-        {t("assistant.reviewPr")}
-        <ChevronDown size={12} className="text-[var(--cf-text-muted)]" />
-      </button>
-      {open && (
-        <div role="menu" className={`absolute left-0 top-full z-40 mt-1 w-72 ${popoverClass}`}>
-          <PrPicker projectId={projectId} onPicked={() => setOpen(false)} />
-          <MenuItem
-            icon={Link2}
-            label={t("assistant.reviewFromLink")}
-            onClick={() => {
-              setOpen(false);
-              useUiStore.getState().openPrLinkModal();
-            }}
-          />
-        </div>
-      )}
-    </div>
-  );
-}

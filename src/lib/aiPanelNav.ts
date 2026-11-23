@@ -152,6 +152,11 @@ export function askInRepoChat(projectId: string, text: string, opts: { send?: bo
  */
 export function startPanelChatWith(target: { projectId: string } | { workspaceId: string }, text: string): void {
   const key = "projectId" in target ? openNewChat(target.projectId) : openWorkspaceChat(target.workspaceId);
+  putChatDraft(key, text);
+}
+
+/** Leaves `text` in the composer of the chat tab `key` — just opened — and focuses it. Nothing is sent. */
+export function putChatDraft(key: string, text: string): void {
   useAiPanelStore.getState().setDraft(key, text);
   // Two frames: one for the panel to open, one for the tab to be shown.
   requestAnimationFrame(() => requestAnimationFrame(() => window.dispatchEvent(new CustomEvent(FOCUS_CHAT_EVENT, { detail: key }))));

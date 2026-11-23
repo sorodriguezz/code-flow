@@ -194,3 +194,47 @@ export function entryVisual(entry: ActivityEntry): { icon: LucideIcon; color: st
   }
   return { icon: job.kind === "pr-review" ? GitPullRequest : ShieldCheck, color, spinning: false };
 }
+
+/** What was last done with a reviewed PR, newest run first: a decision, or a review with none yet. */
+export type PrRowState = "reviewed" | "approved" | "changes" | "closed";
+
+/**
+ * A PR row's parts, for the Inbox to lay out: the number on its own, the title without the
+ * repository or the commit-style prefix, the repository a link review came from, and what was last
+ * done with it. `null` for a row that is not a PR, or one recorded without them.
+ *
+ * The label these rows carry («#94025 org/Repo · fix(scope): title · Aprobado») is one string built
+ * for search and for screens that show one line; in a list of them the number, the path and the
+ * prefix pushed the title itself out of sight (user ask, 2026-11-23). A row the user renamed keeps
+ * their name.
+ */
+export function entryPr(entry: ActivityEntry): { id: string; title: string; repo: string | null; state: PrRowState | null } | null {
+  if (entry.type !== "job") return null;
+  const { job } = entry;
+  if (job.kind !== "pr-review" && job.kind !== "pr-action") return null;
+  const id = job.meta.prId;
+  const prTitle = job.meta.prTitle;
+  if ((typeof id !== "number" && typeof id !== "string") || typeof prTitle !== "string") return null;
+  const renamed = !job.label.startsWith(`#${id} `);
+  const repo = typeof job.meta.repoLabel === "string" && job.meta.repoLabel ? job.meta.repoLabel : null;
+  let state: PrRowState | null = null;
+  for (const run of entry.runs) {
+    if (run.kind === "pr-action") {
+      const action = run.meta.action;
+      state = action === "approve" ? "approved" : action === "request_changes" ? "changes" : "closed";
+      break;
+    }
+    if (run.kind === "pr-review" && run.status === "done") {
+      state = "reviewed";
+      break;
+    }
+  }
+  return { id: String(id), title: renamed ? job.label : plainPrTitle(prTitle), repo, state };
+}
+
+/** «fix(planificacion): avisa de…» → «Avisa de…»: the conventional-commit type says what kind of
+ *  change it is, which the title already says in words. */
+function plainPrTitle(title: string): string {
+  const bare = title.replace(/^[a-z]+(\([^)]*\))?!?:\s+/i, "").trim() || title;
+  return bare.charAt(0).toUpperCase() + bare.slice(1);
+}

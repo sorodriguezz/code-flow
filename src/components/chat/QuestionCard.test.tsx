@@ -29,12 +29,22 @@ const HEIGHT_CLASS = "max-h-[min(50vh,28rem)]";
 const PROGRESS_TEXT = "0/3";
 
 describe("question card", () => {
-  it("offers a separate send button even for a single question", () => {
+  it("answers a lone single-choice question on the click: no send step, a free answer still there", () => {
     const questions = QUESTIONS.slice(undefined, SINGLE_QUESTION_COUNT);
+    const markup = renderToStaticMarkup(<QuestionCard questions={questions} onAnswer={vi.fn()} />);
+    const buttons = markup.match(BUTTON_PATTERN) ?? EMPTY_MATCHES;
+    expect(buttons.some((button) => button.includes(SEND_LABEL))).toBe(false);
+    expect(buttons.filter((button) => button.includes("Búsqueda") || button.includes("Alta"))).toHaveLength(2);
+    expect(markup.match(INPUT_PATTERN) ?? EMPTY_MATCHES).toHaveLength(SINGLE_QUESTION_COUNT);
+  });
+
+  it("keeps the send button for a lone question that takes several options", () => {
+    const questions = [QUESTIONS[2]];
     const markup = renderToStaticMarkup(<QuestionCard questions={questions} onAnswer={vi.fn()} />);
     const buttons = markup.match(BUTTON_PATTERN) ?? EMPTY_MATCHES;
     const send = buttons.find((button) => button.includes(SEND_LABEL));
     expect(send).toContain(DISABLED_ATTRIBUTE);
+    expect(markup).toContain(MULTIPLE_LABEL);
   });
 
   it("offers one send button for the whole group and shows pending progress", () => {
@@ -56,14 +66,22 @@ describe("question card", () => {
     expect(markup).toContain(HEIGHT_CLASS);
   });
 
-  it("keeps historical questions read only without a send button or text inputs", () => {
+  it("folds historical questions into one closed line, with nothing to answer", () => {
     const markup = renderToStaticMarkup(<QuestionCard questions={QUESTIONS} />);
     const inputs = markup.match(INPUT_PATTERN) ?? EMPTY_MATCHES;
     const fieldsets = markup.match(FIELDSET_PATTERN) ?? EMPTY_MATCHES;
-    const allDisabled = fieldsets.every((fieldset) => fieldset.includes(DISABLED_ATTRIBUTE));
     expect(inputs).toEqual(EMPTY_MATCHES);
-    expect(allDisabled).toBe(true);
+    expect(fieldsets).toEqual(EMPTY_MATCHES);
+    expect(markup).toContain('aria-expanded="false"');
+    expect(markup).toContain(QUESTIONS[FIRST_QUESTION_INDEX].question);
     expect(markup).not.toContain(SEND_ALL_LABEL);
+    expect(markup).not.toContain("Búsqueda");
+  });
+
+  it("shows on the folded line the option the next message chose, and nothing for a reply in other words", () => {
+    const questions = QUESTIONS.slice(undefined, SINGLE_QUESTION_COUNT);
+    expect(renderToStaticMarkup(<QuestionCard questions={questions} answeredWith="Alta" />)).toContain("Alta");
+    expect(renderToStaticMarkup(<QuestionCard questions={questions} answeredWith="no entendí" />)).not.toContain("no entendí");
   });
 
   it("does not show an empty questionnaire", () => {

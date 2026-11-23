@@ -73,7 +73,7 @@ describe("team chat pane", () => {
     state.messages = [{ id: "message", role: "assistant", memberId: "lead", memberName: "Arquitecto", content: '```pregunta\n{"pregunta":"¿Cómo seguimos?","opciones":["Implementar"]}\n```', provider: "claude", model: "sonnet", traceId: null, responseTimeMs: 1, createdAt: "2026-11-06" }];
     const html = render();
     expect(html).toContain("Arquitecto");
-    expect(html).toMatch(/<button(?![^>]*\sdisabled=)[^>]*>Implementar<\/button>/);
+    expect(html).toMatch(/<button(?![^>]*\sdisabled=)[^>]*>(?:(?!<\/button>)[\s\S])*Implementar(?:(?!<\/button>)[\s\S])*<\/button>/);
     actions?.onAnswer?.("Implementar");
     expect(send).toHaveBeenCalledWith("chat", "Implementar", undefined);
   });

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import DOMPurify from "dompurify";
-import { Check, Code2, Copy, Download, Eye, FileCode2, FileText, FolderGit2, Globe, Image as ImageIcon, Workflow, type LucideIcon } from "lucide-react";
+import { Check, Code2, Copy, Download, Eye, FileCode2, FileText, FolderGit2, Image as ImageIcon, LayoutTemplate, Workflow, type LucideIcon } from "lucide-react";
 import { ApiModal, GhostButton } from "../api/ApiModal";
 import { Select } from "../common/Select";
 import { ArtifactMarkdown } from "./ArtifactMarkdown";
@@ -20,7 +20,8 @@ const ARTIFACT_MODAL_MAX_HEIGHT_CLASS = "max-h-[92vh]";
 export function artifactIcon(kind: ArtifactKind | string): LucideIcon {
   switch (kind) {
     case "html":
-      return Globe;
+      // A page laid out, not the web: an artifact page never leaves the app (no network, ever).
+      return LayoutTemplate;
     case "markdown":
       return FileText;
     case "mermaid":

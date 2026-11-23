@@ -1,7 +1,9 @@
 import { createPortal } from "react-dom";
-import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, Check, Copy, Eye, EyeOff, FileText, GitCommitHorizontal, Link2, Loader2, LogOut, Radio, Share2, UserPlus, Users, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, Check, ChevronDown, Copy, Eye, EyeOff, FileText, GitCommitHorizontal, Link2, Loader2, LogOut, Radio, Share2, UserPlus, Users, X } from "lucide-react";
 import { ChatMessageBubble } from "../chat/ChatMessageBubble";
+import { menuRowClass, useDismiss } from "./docParts";
+import { popoverClass } from "../common/recipes";
 import { openWorkspaceChat } from "../../lib/aiPanelNav";
 import { engineName, hueOf, initials } from "../../lib/sharedChat";
 import {
@@ -464,15 +466,91 @@ export function JoinChatDialog({ workspaceId, initialLink, onClose }: { workspac
   );
 }
 
-/** The bar a chat shows under its header strip: «Compartir», or the live session. */
-export function SharedChatBar({ workspaceId, chatId, title, persisted }: { workspaceId: string; chatId: string; title: string; persisted: boolean }) {
+/**
+ * «Compartir ▾» in a chat's header strip, while the chat is not shared: share it, or join someone
+ * else's with a link. It used to be a row of its own under the header — two buttons on a full-width
+ * strip, a third row of chrome over every chat (user ask, 2026-11-23). Once the chat is shared it
+ * steps aside for `SharedChatBar`, which has the live session to show.
+ */
+export function SharedChatMenu({ workspaceId, chatId, title, persisted }: { workspaceId: string; chatId: string; title: string; persisted: boolean }) {
+  const l = useL();
+  const shared = useSharedChatStore((s) => !!s.byChat[chatId]);
+  const [open, setOpen] = useState(false);
+  const [sharing, setSharing] = useState(false);
+  const [joining, setJoining] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useDismiss(ref, open, () => setOpen(false));
+  // The dialogs outlive the button: sharing this chat is what makes it shared, and the dialog still
+  // has the invitation to show when that happens.
+  if (shared && !sharing && !joining) return null;
+  return (
+    <div ref={ref} className="relative shrink-0">
+      {!shared && (
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          title={l("Compartir este chat o unirse a uno", "Share this chat or join one")}
+          className="inline-flex h-5 items-center gap-1 rounded-md px-1.5 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        >
+          <Share2 size={11} className="shrink-0" />
+          {l("Compartir", "Share")}
+          <ChevronDown size={10} className="shrink-0" />
+        </button>
+      )}
+      {open && !shared && (
+        <div role="menu" className={`absolute right-0 top-full z-40 mt-1 w-64 p-1 ${popoverClass}`}>
+          <button
+            type="button"
+            role="menuitem"
+            disabled={!persisted}
+            onClick={() => {
+              setOpen(false);
+              setSharing(true);
+            }}
+            className={menuRowClass()}
+          >
+            <Share2 size={13} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
+            <span className="min-w-0">
+              <span className="block">{l("Compartir este chat", "Share this chat")}</span>
+              <span className="block text-[11.5px] text-[var(--cf-text-muted)]">
+                {persisted
+                  ? l("Con sus repos, para trabajar juntos", "With its repositories, to work together")
+                  : l("Escribe la primera pregunta antes de compartir", "Ask the first question before sharing")}
+              </span>
+            </span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              setOpen(false);
+              setJoining(true);
+            }}
+            className={menuRowClass()}
+          >
+            <UserPlus size={13} className="mt-0.5 shrink-0 text-[var(--cf-text-muted)]" />
+            <span className="min-w-0">
+              <span className="block">{l("Unirse con un link", "Join with a link")}</span>
+              <span className="block text-[11.5px] text-[var(--cf-text-muted)]">{l("Entrar al chat que alguien compartió", "Enter a chat someone shared")}</span>
+            </span>
+          </button>
+        </div>
+      )}
+      {sharing && <ShareChatDialog workspaceId={workspaceId} chatId={chatId} defaultName={title} onClose={() => setSharing(false)} />}
+      {joining && <JoinChatDialog workspaceId={workspaceId} initialLink="" onClose={() => setJoining(false)} />}
+    </div>
+  );
+}
+
+/** The bar a chat shows under its header strip while it is shared: the live session. */
+export function SharedChatBar({ chatId }: { chatId: string }) {
   const l = useL();
   const view = useSharedChatStore((s) => s.byChat[chatId]);
   const live = useSharedChatStore((s) => (view ? s.live[view.session.id] : undefined));
   const channel = useLiveStore((s) => (view ? s.sessions[view.session.id] : undefined));
   const [following, setFollowing] = useState<string | null>(null);
-  const [sharing, setSharing] = useState(false);
-  const [joining, setJoining] = useState(false);
   const [busy, setBusy] = useState(false);
   const [, setNow] = useState(0);
 
@@ -493,28 +571,9 @@ export function SharedChatBar({ workspaceId, chatId, title, persisted }: { works
     openSessionFile(view.session.id, followedFile.repoKey, followedFile.path);
   }, [view, followedFile?.repoKey, followedFile?.path]);
 
-  if (!view) {
-    return (
-      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] px-3 py-1 text-[11px] text-[var(--cf-text-muted)]">
-        <button
-          type="button"
-          disabled={!persisted}
-          title={persisted ? l("Compartir este chat y sus repos con otra persona", "Share this chat and its repositories with someone") : l("Escribe la primera pregunta antes de compartir", "Ask the first question before sharing")}
-          onClick={() => setSharing(true)}
-          className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-45"
-        >
-          <Share2 size={11} />
-          {l("Compartir", "Share")}
-        </button>
-        <button type="button" onClick={() => setJoining(true)} className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]">
-          <UserPlus size={11} />
-          {l("Unirse con un link", "Join with a link")}
-        </button>
-        {sharing && <ShareChatDialog workspaceId={workspaceId} chatId={chatId} defaultName={title} onClose={() => setSharing(false)} />}
-        {joining && <JoinChatDialog workspaceId={workspaceId} initialLink="" onClose={() => setJoining(false)} />}
-      </div>
-    );
-  }
+  // Not shared: the header's «Compartir ▾» (`SharedChatMenu`) offers sharing and joining, so there is
+  // no row to draw. Only a live session takes a row of its own — there it carries who is here.
+  if (!view) return null;
 
   const me = view.session.personId;
   const people: CollabPerson[] = live?.people ?? [];

@@ -1,13 +1,16 @@
 import { ArtifactsList } from "../chat/ArtifactCards";
 import { useChatArtifactsStore } from "../../state/chatArtifactsStore";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
+  Ban,
   ChevronDown,
   ChevronRight,
   Clock,
+  FolderGit2,
+  GitBranch,
   GitPullRequest,
-  Globe,
+  Layers,
   Link2,
   Loader2,
   MessageSquare,
@@ -16,17 +19,21 @@ import {
   Search,
   ShieldCheck,
   Square,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { buttonClass, iconButtonClass } from "../common/Button";
-import { chipClass, fieldClass } from "../common/recipes";
+import { fieldClass } from "../common/recipes";
 import { Segmented } from "../common/Segmented";
 import { Tooltip } from "../common/Tooltip";
 import {
   entryIsGlobal,
   entryIsRunning,
+  entryPr,
   entryKey,
   entryRunCount,
   entryTimestamp,
@@ -36,7 +43,10 @@ import {
   mergeActivityEntries,
   WORKSPACE_CHAT_PROJECT,
   type ActivityEntry,
+  type PrRowState,
 } from "../../lib/activityEntries";
+import { shortRepoNames } from "../../lib/repoShortNames";
+import type { TranslationKey } from "../../lib/i18n/translations";
 import { workspaceActivityKey } from "../../lib/prTarget";
 import { moveChatToApp } from "../../lib/moveChatToApp";
 import {
@@ -51,7 +61,7 @@ import {
 } from "../../lib/aiPanelNav";
 import { usePrStore } from "../../state/prStore";
 import { useRepoQueueStore } from "../../lib/repoQueue";
-import { NewChatMenu, ReviewPrMenu } from "./PanelTabStrip";
+import { InboxNewMenu } from "./PanelTabStrip";
 import { ChatModelPicker } from "./ChatModelPicker";
 import { EMPTY_JOBS, useJobsStore, type Job } from "../../state/jobsStore";
 import { EMPTY_CONVERSATIONS, useChatHistoryStore } from "../../state/activityStore";
@@ -62,10 +72,10 @@ import type { ChatConversation } from "../../lib/tauri/chatCommands";
 import { liveSessionsOf, useChatStore, type ChatSession } from "../../state/chatStore";
 import { EMPTY_TRACKED, usePrWatchStore } from "../../state/prWatchStore";
 import { useAiRunStore } from "../../state/aiRunStore";
-import { chatTabKey, useAiPanelStore, type UnreadMark } from "../../state/aiPanelStore";
+import { chatTabKey, useAiPanelStore, wsChatTabKey, type UnreadMark } from "../../state/aiPanelStore";
 import { followTarget } from "../../state/notificationStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-import { translate, useLanguageStore, useT } from "../../state/languageStore";
+import { useLanguageStore, useT } from "../../state/languageStore";
 import type { ChatConversationSummary, Project } from "../../types/domain";
 import { searchAssistantChats, type AssistantChatHit } from "../../lib/tauri/commands";
 import { activitySearchMatch } from "../../lib/activitySearch";
@@ -245,6 +255,16 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
 
   // A workspace with artifacts and no activity left still has something under «Artefactos».
   const artifactCount = useChatArtifactsStore((s) => (workspaceId ? (s.byWorkspace[workspaceId]?.length ?? 0) : 0));
+  /** How many rows each kind holds, of what the search leaves — the numbers on the filter tabs. */
+  const kindCounts = useMemo(() => {
+    const out: Record<Filter, number> = { all: 0, chat: 0, pr: 0, analysis: 0, artifacts: artifactCount };
+    for (const entry of entries) {
+      if (entryIsRunning(entry) || matches.get(entryKey(entry)) === null) continue;
+      out[kindOf(entry)] += 1;
+    }
+    return out;
+  }, [entries, matches, artifactCount]);
+
   useEffect(() => {
     if (workspaceId) void useChatArtifactsStore.getState().loadWorkspace(workspaceId);
   }, [workspaceId]);
@@ -263,11 +283,15 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
           was nothing to list, so a repository with no activity left you on "This repo", looking at
           nothing, with no way back to a workspace that had plenty (user report). With one
           repository, or none open, both would show the same list, so there is nothing to choose. */}
-      <div className="flex shrink-0 flex-col gap-2 px-3 pb-1 pt-3">
+      {/* One row: the scope, the search, the analysis with its engine, and «Nuevo ▾». It used to be
+          three — the scope, a row of «Chat ▾ · Revisar PR ▾ · Analizar cambios ▾», and Recent's
+          heading with the search under it — before the first chat showed (user ask, 2026-11-23).
+          The search narrows Recent only, as it always did. */}
+      <div className="@container flex shrink-0 items-center gap-2 px-3 pb-2 pt-2.5">
         {projects.length > 1 && activeProject && (
           <Segmented
             size="sm"
-            className="self-start"
+            className="shrink-0"
             layoutId={`inbox-scope-${workspaceId}`}
             value={scope}
             onChange={setScope}
@@ -277,34 +301,44 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
             ]}
           />
         )}
-        <div className="flex flex-wrap items-center gap-1.5">
-          {/* One door to both chats: this repository, or every repository of the workspace and the
-              agents' work in flight — asked on click. */}
-          <NewChatMenu
-            workspaceId={workspaceId}
-            project={activeProject ?? null}
-            disabled={!activeProject && projects.length === 0}
-          />
-          {activeProject && <ReviewPrMenu projectId={activeProject.id} variant="button" />}
-          {/* The run and its engine as one button, as the 🛡 in Changes is: the words analyze, the
-              chevron changes the `analyze` routing — provider, model, account — right here (user:
-              "no puedo elegir el modelo ni proveedor, pone la flechita al lado"). The chevron works
-              with nothing to analyze, too: choosing the engine first is a fair order. */}
-          <ChatModelPicker
-            task="analyze"
-            variant="button"
-            liveModel={null}
-            chatActive={false}
-            title={t("changes.analyzeModelHint")}
-            action={{
-              icon: <ShieldCheck size={13} />,
-              label: t("assistant.analyze"),
-              disabled: !activeProject || changes === 0,
-              title: changes === 0 ? t("analyze.nothingToAnalyze") : undefined,
-              onClick: () => activeProject && openAnalysis(activeProject.id, { run: true }),
-            }}
-          />
-        </div>
+        {empty ? (
+          <span className="flex-1" />
+        ) : (
+          <div className="relative min-w-0 flex-1">
+            <Search size={13} className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+              placeholder={t("assistant.search")}
+              aria-label={t("assistant.search")}
+              // The recipe's padding, with room made on the left for the magnifier — inline, so it
+              // wins over the recipe's own `px` without two classes fighting for the edge.
+              style={{ paddingLeft: 26 }}
+              className={fieldClass({ size: "sm", className: "w-full" })}
+            />
+          </div>
+        )}
+        {/* The run and its engine as one control, as the 🛡 in Changes is: the shield analyzes, the
+            chevron changes the `analyze` routing — provider, model, account — right here (user: "no
+            puedo elegir el modelo ni proveedor, pone la flechita al lado"). Outside «Nuevo ▾»
+            because the engine menu opens on top of everything, and inside another menu a click on
+            it would close that menu first. */}
+        <ChatModelPicker
+          task="analyze"
+          variant="split"
+          liveModel={null}
+          chatActive={false}
+          title={t("changes.analyzeModelHint")}
+          action={{
+            icon: <ShieldCheck size={13} />,
+            label: t("assistant.analyze"),
+            disabled: !activeProject || changes === 0,
+            title: changes === 0 ? t("analyze.nothingToAnalyze") : undefined,
+            onClick: () => activeProject && openAnalysis(activeProject.id, { run: true }),
+          }}
+        />
+        <InboxNewMenu workspaceId={workspaceId} />
       </div>
 
       {(needs.length > 0 || running.length > 0) && (
@@ -333,60 +367,38 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
 
       {!empty && (
         <section className="flex min-h-0 flex-1 flex-col">
-          <div className="shrink-0 px-2">
-            {/* Still as tall as the scope toggle that sat at its end, so moving the toggle to the top
-                left this heading and the search box under it where they were. */}
-            <div className="flex min-h-[26px] items-center">
-              <SectionLabel label={t("assistant.recent")} />
-            </div>
-            <div className="space-y-1.5 px-0.5 pb-1">
-              <div className="relative">
-                <Search
-                  size={13}
-                  className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-faint)]"
-                />
-                <input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => e.key === "Escape" && setQuery("")}
-                  placeholder={t("assistant.search")}
-                  aria-label={t("assistant.search")}
-                  // The recipe's padding, with room made on the left for the magnifier — inline, so
-                  // it wins over the recipe's own `px` without two classes fighting for the edge.
-                  style={{ paddingLeft: 26 }}
-                  className={fieldClass({ size: "sm", className: "w-full" })}
-                />
-              </div>
-              <div className="flex flex-wrap gap-1" role="group">
-                {(
-                  [
-                    ["all", t("assistant.filterAll")],
-                    ["chat", t("assistant.filterChats")],
-                    // The workspace's artifacts (`chat_refs::artifacts`), a list of their own rather
-                    // than a fold above Recent (user, 2026-11-09).
-                    ["artifacts", t("artifact.title")],
-                    ["pr", t("assistant.filterPrs")],
-                    ["analysis", t("assistant.filterAnalyses")],
-                  ] as const
-                ).map(([value, label]) => (
-                  <button
-                    key={value}
-                    onClick={() => setFilter(value)}
-                    aria-pressed={filter === value}
-                    className={
-                      filter === value
-                        ? chipClass("accent")
-                        : chipClass("neutral", "transition-colors duration-100 hover:text-[var(--cf-text)]")
-                    }
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
+          {/* The kinds as tabs, each with how many it holds — «Chats 14 · PRs 3» says at a glance what
+              is there, where a row of grey buttons under a «RECIENTE» heading said nothing. */}
+          <div role="tablist" aria-label={t("assistant.recent")} className="flex shrink-0 gap-3.5 overflow-x-auto border-b border-[var(--cf-border)] px-3.5 [scrollbar-width:none]">
+            {(
+              [
+                ["all", t("assistant.filterAll")],
+                ["chat", t("assistant.filterChats")],
+                ["pr", t("assistant.filterPrs")],
+                ["analysis", t("assistant.filterAnalyses")],
+                // The workspace's artifacts (`chat_refs::artifacts`), a list of their own rather
+                // than a fold above Recent (user, 2026-11-09).
+                ["artifacts", t("artifact.title")],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                role="tab"
+                aria-selected={filter === value}
+                onClick={() => setFilter(value)}
+                className={`-mb-px inline-flex shrink-0 items-center gap-1 border-b-2 pb-1.5 pt-1 text-[12px] transition-colors duration-100 ${
+                  filter === value
+                    ? "border-[var(--cf-accent)] font-semibold text-[var(--cf-text)]"
+                    : "border-transparent text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
+                }`}
+              >
+                {label}
+                {value !== "all" && <span className="text-[11px] font-normal tabular-nums text-[var(--cf-text-faint)]">{kindCounts[value]}</span>}
+              </button>
+            ))}
           </div>
           {/* The one part that moves. */}
-          <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+          <div className="@container min-h-0 flex-1 overflow-y-auto px-2 pb-3">
             {filter === "artifacts" ? (
               <ArtifactsList workspaceId={workspaceId} query={query} />
             ) : (
@@ -640,14 +652,15 @@ function RunningRow({
   );
 }
 
-function dayLabel(ts: number, t: ReturnType<typeof useT>, locale: string): string {
+/** A day's heading: «Hoy», «Ayer», or «20 nov» with its weekday beside it. */
+function dayLabel(ts: number, t: ReturnType<typeof useT>, locale: string): { day: string; weekday: string | null } {
   const day = new Date(ts);
   const today = new Date();
   const startOf = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
   const diff = Math.round((startOf(today) - startOf(day)) / 86_400_000);
-  if (diff === 0) return t("assistant.today");
-  if (diff === 1) return t("assistant.yesterday");
-  return day.toLocaleDateString(locale, { day: "numeric", month: "short" });
+  if (diff === 0) return { day: t("assistant.today"), weekday: null };
+  if (diff === 1) return { day: t("assistant.yesterday"), weekday: null };
+  return { day: day.toLocaleDateString(locale, { day: "numeric", month: "short" }), weekday: day.toLocaleDateString(locale, { weekday: "long" }) };
 }
 
 function RecentList({
@@ -666,6 +679,7 @@ function RecentList({
   const t = useT();
   // The app's language, not the OS's — a Spanish UI prints Spanish dates.
   const locale = useLanguageStore((s) => s.language) === "es" ? "es-ES" : "en-US";
+  const unread = useAiPanelStore((s) => s.unread);
   // Subchats under their chat (`chatLineageStore`), foldable. A subchat whose parent is not in the
   // list (deleted, or out of the filter) stands on its own.
   const links = useChatLineageStore((s) => s.byWorkspace[workspaceId] ?? EMPTY_LINKS);
@@ -682,6 +696,16 @@ function RecentList({
     for (const link of links) out.set(link.parentId, (out.get(link.parentId) ?? 0) + 1);
     return out;
   }, [links]);
+  // Every repository the list names, shortened against each other: «DataSync», not
+  // «Dev.Agenda.Node.DataSync» — see `shortRepoNames`.
+  const sources = useMemo(() => {
+    const out = new Map<string, string | null>();
+    for (const entry of entries) out.set(entryKey(entry), sourceOf(entry, showRepo, projectName));
+    return out;
+    // `projectName` reads the projects `showRepo` already follows.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries, showRepo]);
+  const short = useMemo(() => shortRepoNames([...sources.values()].filter((name): name is string => !!name)), [sources]);
   // What is drawn: everything but the rows inside a folded parent.
   const visible = useMemo(() => {
     const out: { item: ActivityEntry; depth: number; hasChildren: boolean; isFolded: boolean }[] = [];
@@ -708,23 +732,35 @@ function RecentList({
   const guideX = (level: number) => 13 + (level - 1) * 12;
   let lastDay = "";
   return (
+    // The day headings are this list's own children, not wrapped with their first row: a sticky
+    // element sticks only within its parent, and the list is the parent that spans the history.
     <div className="space-y-0.5">
       {visible.map(({ item: entry, depth, hasChildren, isFolded }, index) => {
         const id = entry.type === "chat" ? entry.conv.session_id : "";
         // A subchat sits under its parent, wherever its own day falls.
-        const day = depth === 0 ? dayLabel(entryTimestamp(entry), t, locale) : lastDay;
-        const header = day !== lastDay ? day : null;
-        lastDay = day;
+        const label = depth === 0 ? dayLabel(entryTimestamp(entry), t, locale) : null;
+        const header = label && label.day !== lastDay ? label : null;
+        if (label) lastDay = label.day;
         const ancestors: number[] = [];
         for (let level = 1; level < depth; level++) if (continues(index, level)) ancestors.push(guideX(level));
+        const source = sources.get(entryKey(entry)) ?? null;
         return (
-          <div key={entryKey(entry)}>
-            {header && <p className="px-1.5 pb-1 pt-2 text-[11px] font-semibold text-[var(--cf-text-faint)]">{header}</p>}
+          <Fragment key={entryKey(entry)}>
+            {header && (
+              // Stays at the top while its day scrolls by, so a long history always says which day
+              // you are in. It bleeds over the scroller's side padding so rows pass under it whole.
+              <p className="sticky top-0 z-[2] -mx-2 flex items-baseline gap-1 bg-[var(--cf-surface)] px-3.5 pb-1 pt-2.5 text-[11px] font-semibold text-[var(--cf-text-muted)]">
+                {header.day}
+                {header.weekday && <span className="font-normal text-[var(--cf-text-faint)]">· {header.weekday}</span>}
+              </p>
+            )}
             <div className={depth > 0 ? "relative" : undefined} style={depth > 0 ? { paddingLeft: guideX(depth) + 4 } : undefined}>
               {depth > 0 && <TreeGuide x={guideX(depth)} last={!continues(index, depth)} ancestors={ancestors} bleed={2} />}
               <RecentRow
                 entry={entry}
-                repo={showRepo ? projectOf(entry, projectName) : null}
+                source={source ? { full: source, short: short.get(source) ?? source } : null}
+                unread={!!unreadKeyOf(entry) && !!unread[unreadKeyOf(entry)!]}
+                locale={locale}
                 snippet={snippets?.get(entryKey(entry)) ?? undefined}
                 subchats={
                   hasChildren
@@ -743,30 +779,57 @@ function RecentList({
                 }
               />
             </div>
-          </div>
+          </Fragment>
         );
       })}
     </div>
   );
 }
 
-function projectOf(entry: ActivityEntry, projectName: (id: string) => string): string | null {
-  // Named after the workspace rather than left blank: a row with no sub-label in a list where every
-  // other row has one reads as a chat whose repository could not be found.
-  if (isWorkspaceChat(entry)) return translate("inbox.workspaceChat");
+/**
+ * The repository a row names, or `null`: in the whole workspace's list only, where rows come from
+ * several — except a review from a link, which names its own repository even in «this repo», since
+ * it belongs to no repository of the workspace.
+ */
+function sourceOf(entry: ActivityEntry, showRepo: boolean, projectName: (id: string) => string): string | null {
+  const pr = entryPr(entry);
+  if (pr?.repo) return pr.repo;
+  if (!showRepo || isWorkspaceChat(entry)) return null;
   if (entry.type === "chat") return projectName(entry.conv.project_id) || null;
   return entryIsGlobal(entry) ? null : projectName(entry.job.projectId) || null;
 }
 
-/** One row of history. Rename and delete happen here — no modal between the list and the action. */
+/** The tab key an unread mark for this row would be filed under. */
+function unreadKeyOf(entry: ActivityEntry): string | null {
+  if (entry.type === "chat") return isWorkspaceChat(entry) ? wsChatTabKey(entry.conv.session_id) : chatTabKey(entry.conv.session_id);
+  return tabKeyForJob(entry.job);
+}
+
+const PR_STATE: Record<PrRowState, { label: TranslationKey; icon: LucideIcon; tone: string }> = {
+  reviewed: { label: "inbox.prReviewed", icon: Clock, tone: "var(--cf-text-muted)" },
+  approved: { label: "inbox.prApproved", icon: ThumbsUp, tone: "var(--cf-success)" },
+  changes: { label: "inbox.prChanges", icon: ThumbsDown, tone: "var(--cf-warning)" },
+  closed: { label: "inbox.prClosed", icon: Ban, tone: "var(--cf-danger)" },
+};
+
+/** One row of history. Rename and delete happen here — no modal between the list and the action.
+ *
+ * Laid out by the list's width (`@container`): wide, one line in columns — title, repository, time —
+ * so the time sits beside what it dates instead of across the screen and the history fits nearly
+ * twice the rows; narrow, the repository drops under the title (user ask, 2026-11-23). The whole
+ * row opens the activity: the title's button stretches over it, and the controls on it sit above. */
 function RecentRow({
   entry,
-  repo,
+  source,
+  unread,
+  locale,
   snippet,
   subchats,
 }: {
   entry: ActivityEntry;
-  repo: string | null;
+  source: { full: string; short: string } | null;
+  unread: boolean;
+  locale: string;
   snippet?: string;
   /** The row's subchats, when it has any: how many, and the fold. */
   subchats?: { count: number; open: boolean; toggle: () => void };
@@ -775,10 +838,22 @@ function RecentRow({
   const [mode, setMode] = useState<"idle" | "renaming" | "deleting">("idle");
   const [value, setValue] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
-  const { icon: Icon, color } = entryVisual(entry);
+  const visual = entryVisual(entry);
   const runs = entryRunCount(entry);
   const title = entryTitle(entry);
+  const pr = entryPr(entry);
+  const workspaceChat = isWorkspaceChat(entry);
   const bucket = entry.type === "job" ? entry.job.projectId : entry.conv.project_id;
+  // The kind first, the outcome on top of it: a workspace chat has its own mark, so it need not say
+  // «Espacio de trabajo» under every row; a finished PR reads as a PR, its decision in words beside.
+  const failed = entry.type === "job" && entry.job.status === "error";
+  const { icon: Icon, color } = visual.spinning || failed
+    ? visual
+    : workspaceChat
+      ? { icon: Layers, color: "var(--cf-accent)" }
+      : pr
+        ? { icon: GitPullRequest, color: "var(--cf-accent)" }
+        : visual;
 
   useEffect(() => {
     if (mode === "renaming") inputRef.current?.select();
@@ -790,7 +865,7 @@ function RecentRow({
     if (!next || next === title) return;
     if (entry.type === "chat") {
       // A workspace chat's row belongs to its own store, like its delete below.
-      if (isWorkspaceChat(entry)) await useWorkspaceChatStore.getState().rename(entry.conv.session_id, next);
+      if (workspaceChat) await useWorkspaceChatStore.getState().rename(entry.conv.session_id, next);
       else await useChatHistoryStore.getState().rename(bucket, entry.conv.session_id, next);
       return;
     }
@@ -800,7 +875,7 @@ function RecentRow({
   const remove = async () => {
     setMode("idle");
     if (entry.type === "chat") {
-      if (isWorkspaceChat(entry)) {
+      if (workspaceChat) {
         // Its own store owns the row, the tab and the transcript.
         if (await useWorkspaceChatStore.getState().remove(entry.conv.session_id)) {
           useChatLineageStore.getState().dropLocal(entry.conv.session_id);
@@ -856,36 +931,79 @@ function RecentRow({
     );
   }
 
-  const time = new Date(entryTimestamp(entry)).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const time = new Date(entryTimestamp(entry)).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
+  const state = pr?.state ? PR_STATE[pr.state] : null;
+  const action = "relative z-[1] inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]";
   return (
-    <div className="group flex items-center gap-2 rounded-lg px-1.5 py-1 hover:bg-[var(--cf-hover)]">
-      <button onClick={() => void openActivityEntry(entry)} title={title} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-        <Icon size={14} className="shrink-0" style={{ color }} />
-        {entryIsGlobal(entry) && <Globe size={12} className="shrink-0 text-[var(--cf-text-muted)]" aria-label={t("activity.workspaceWide")} />}
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-[13px] text-[var(--cf-text)]">{title}</span>
-          {snippet && <span className="block truncate text-[11px] text-[var(--cf-text-muted)]" title={snippet}>{snippet}</span>}
-          {(repo || runs > 1) && (
-            <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
-              {[repo, runs > 1 ? t("ai.runCount", { n: runs }) : null].filter(Boolean).join(" · ")}
+    <div className="group relative grid grid-cols-[14px_minmax(0,1fr)_auto] items-center gap-x-2.5 gap-y-px rounded-lg px-1.5 py-1 hover:bg-[var(--cf-hover)] @[34rem]:grid-cols-[14px_minmax(0,1fr)_minmax(0,11rem)_4.25rem]">
+      {unread && (
+        <span
+          className="absolute left-0 top-1/2 h-[5px] w-[5px] -translate-y-1/2 rounded-full bg-[var(--cf-accent-fill)]"
+          aria-label={t("assistant.unread")}
+        />
+      )}
+      <Icon size={14} className="row-span-2 mt-[3px] self-start @[34rem]:row-span-1 @[34rem]:mt-0 @[34rem]:self-center" style={{ color }} />
+      <span className="col-start-2 row-start-1 min-w-0">
+        <span className="flex min-w-0 items-center gap-1.5">
+          {pr && <span className="shrink-0 font-mono text-[11px] text-[var(--cf-text-muted)]">#{pr.id}</span>}
+          <button
+            onClick={() => void openActivityEntry(entry)}
+            title={title}
+            // Stretched over the whole row: a click anywhere on it opens the activity.
+            className="min-w-0 truncate text-left text-[13px] text-[var(--cf-text)] after:absolute after:inset-0 after:rounded-lg after:content-['']"
+          >
+            {pr ? pr.title : title}
+          </button>
+          {runs > 1 && (
+            <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-faint)]" title={t("ai.runCount", { n: runs })}>
+              ×{runs}
             </span>
           )}
+          {state && (
+            <span
+              className="hidden shrink-0 items-center gap-0.5 rounded-full px-1.5 text-[10.5px] font-semibold @[34rem]:inline-flex"
+              style={{ color: state.tone, background: `color-mix(in oklab, ${state.tone} 12%, transparent)` }}
+            >
+              <state.icon size={10} />
+              {t(state.label)}
+            </span>
+          )}
+          {subchats && (
+            // Beside the title it counts, not by the time at the far edge.
+            <button
+              onClick={subchats.toggle}
+              aria-expanded={subchats.open}
+              title={subchats.open ? t("assistant.subchatsHide") : t("assistant.subchatsShow")}
+              aria-label={subchats.open ? t("assistant.subchatsHide") : t("assistant.subchatsShow")}
+              className="relative z-[1] inline-flex h-[18px] shrink-0 items-center gap-0.5 rounded-[5px] px-1 text-[11px] tabular-nums text-[var(--cf-text-muted)] shadow-[inset_0_0_0_1px_var(--cf-border)] hover:text-[var(--cf-text)]"
+            >
+              <GitBranch size={10} />
+              {subchats.count}
+              {subchats.open ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+            </button>
+          )}
         </span>
-        <span className="shrink-0 text-[11px] tabular-nums text-[var(--cf-text-faint)] group-hover:hidden">{time}</span>
-      </button>
-      {subchats && (
-        <button
-          onClick={subchats.toggle}
-          aria-expanded={subchats.open}
-          title={subchats.open ? t("assistant.subchatsHide") : t("assistant.subchatsShow")}
-          aria-label={subchats.open ? t("assistant.subchatsHide") : t("assistant.subchatsShow")}
-          className="inline-flex h-[22px] shrink-0 items-center gap-0.5 rounded-md px-1 text-[11px] tabular-nums text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        {snippet && <span className="block truncate text-[11px] text-[var(--cf-text-muted)]" title={snippet}>{snippet}</span>}
+      </span>
+      {source ? (
+        <span
+          title={source.full}
+          className="col-start-2 row-start-2 inline-flex min-w-0 max-w-full items-center gap-1 justify-self-start truncate text-[11px] text-[var(--cf-text-muted)] @[34rem]:col-start-3 @[34rem]:row-start-1 @[34rem]:rounded-full @[34rem]:bg-[var(--cf-hover)] @[34rem]:px-1.5 @[34rem]:py-px"
         >
-          {subchats.open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-          {subchats.count}
-        </button>
+          <FolderGit2 size={10} className="shrink-0" />
+          <span className="truncate">{source.short}</span>
+        </span>
+      ) : (
+        workspaceChat && (
+          <span className="col-start-2 row-start-2 text-[11px] text-[var(--cf-text-faint)] @[34rem]:col-start-3 @[34rem]:row-start-1">
+            {t("inbox.workspaceShort")}
+          </span>
+        )
       )}
-      <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
+      <span className="col-start-3 row-start-1 text-right text-[11px] tabular-nums text-[var(--cf-text-faint)] group-hover:invisible @[34rem]:col-start-4">
+        {time}
+      </span>
+      <span className="absolute right-1.5 top-1/2 z-[1] hidden -translate-y-1/2 items-center gap-0.5 rounded-md bg-[var(--cf-surface-raised)] p-0.5 shadow-[0_0_0_1px_var(--cf-border)] group-hover:flex">
         <button
           onClick={() => {
             setValue(title);
@@ -893,18 +1011,18 @@ function RecentRow({
           }}
           title={t("ai.rename")}
           aria-label={t("ai.rename")}
-          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)]"
+          className={`${action} hover:text-[var(--cf-accent)]`}
         >
           <Pencil size={13} />
         </button>
         {/* A repository conversation can move to the chat workspace, for good. A workspace chat has
             no repository to move out of. */}
-        {entry.type === "chat" && !isWorkspaceChat(entry) && (
+        {entry.type === "chat" && !workspaceChat && (
           <button
             onClick={() => void moveChatToApp(bucket, entry.conv.session_id)}
             title={t("assistant.moveToChat")}
             aria-label={t("assistant.moveToChat")}
-            className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)]"
+            className={`${action} hover:text-[var(--cf-accent)]`}
           >
             <MessageSquareShare size={13} />
           </button>
@@ -913,7 +1031,7 @@ function RecentRow({
           onClick={() => setMode("deleting")}
           title={t("chatHistory.delete")}
           aria-label={t("chatHistory.delete")}
-          className="inline-flex h-[22px] w-[22px] items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)]"
+          className={`${action} hover:text-[var(--cf-danger)]`}
         >
           <Trash2 size={13} />
         </button>

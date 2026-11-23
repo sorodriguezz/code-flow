@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { AssistantInbox } from "./AssistantInbox";
 import { AnalysisDocument } from "./AnalysisDocument";
@@ -13,8 +13,7 @@ import { useChatStore } from "../../state/chatStore";
 import { EMPTY_TABS, INBOX_KEY, NO_WORKSPACE, useAiPanelStore, type PanelTab } from "../../state/aiPanelStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-
-const PANEL_MIN = 300;
+import { PANEL_MIN, reachesMax, restoreWidth, useMaxPanelWidth } from "./panelSize";
 
 /** The panel while shut — see the root of `AiPanel`. `visibility` takes it out of painting, hit
  *  testing and the tab order without touching its layout. */
@@ -31,27 +30,6 @@ const COLLAPSED = { width: 0, paddingRight: 0, visibility: "hidden" } as const;
  * cards, selection, the run being read.
  */
 const KEEP_ALIVE = 3;
-
-/**
- * How wide the panel is allowed to get: half the window, and no more.
- *
- * Past half it stops being a panel — the view it is docked beside becomes the smaller of the two,
- * and the thing the user came to look at is the one that gets squeezed. The floor keeps the ceiling
- * above `PANEL_MIN` on a window too narrow for both.
- */
-const maxPanelWidth = () => Math.max(PANEL_MIN, Math.round(window.innerWidth / 2));
-
-/** That ceiling, kept current as the window is resized. The clamp is applied to what is rendered,
- * never written back: plug the large display in again and the width chosen there comes back. */
-function useMaxPanelWidth(): number {
-  const [max, setMax] = useState(maxPanelWidth);
-  useEffect(() => {
-    const onResize = () => setMax(maxPanelWidth());
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-  return max;
-}
 
 /**
  * The assistant — a rail beside whatever view is showing, holding the Inbox and one tab per open
@@ -184,6 +162,9 @@ function SizedSheet({ children, anchored }: { children: ReactNode; anchored: boo
   const width = wide ? maxWidth : Math.min(storedWidth, maxWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
+  /** The width on record when the drag began: where the header's restore button goes back to if
+   *  this drag ends at the top. */
+  const dragFrom = useRef(storedWidth);
   return (
     <>
       <ResizeHandle
@@ -192,12 +173,24 @@ function SizedSheet({ children, anchored }: { children: ReactNode; anchored: boo
         min={PANEL_MIN}
         max={maxWidth}
         invert
+        onDragChange={(dragging) => {
+          if (dragging) dragFrom.current = useLayoutStore.getState().sizes.aiPanelWidth;
+        }}
         onChange={(w) => {
-          // Dragging is choosing a width: it takes the panel out of wide mode.
-          if (useAiPanelStore.getState().wide) useAiPanelStore.getState().toggleWide();
+          // A drag to the edge is the same as the header's maximize: the panel goes wide, and the
+          // width it had before the drag stays on record for the restore button. Anything short of
+          // the edge is choosing a width, which takes it out of wide mode.
+          const panel = useAiPanelStore.getState();
+          if (reachesMax(w, maxWidth)) {
+            if (!panel.wide) panel.toggleWide();
+            const back = reachesMax(dragFrom.current, maxWidth) ? restoreWidth(maxWidth) : dragFrom.current;
+            setSize("aiPanelWidth", back);
+            return;
+          }
+          if (panel.wide) panel.toggleWide();
           setSize("aiPanelWidth", w);
         }}
-        onCommit={(w) => commitSize("aiPanelWidth", w)}
+        onCommit={() => commitSize("aiPanelWidth", useLayoutStore.getState().sizes.aiPanelWidth)}
         seamless
       />
       <aside

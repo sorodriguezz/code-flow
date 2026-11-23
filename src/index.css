@@ -3481,6 +3481,26 @@ body.cf-dragging * {
 .cf-markdown-preview li {
   margin: 0.2em 0;
 }
+/* Tailwind's preflight takes the markers off every list, and rendered markdown never put them
+   back: a model's bullet list came out as indented paragraphs with nothing to say they were items
+   (user report, 2026-11-23). The markers are muted, so the item's text stays what the eye reads. A
+   task list item carries its own checkbox and needs no bullet besides. */
+.cf-markdown-preview ul {
+  list-style: disc;
+}
+.cf-markdown-preview ol {
+  list-style: decimal;
+}
+.cf-markdown-preview ul ul,
+.cf-markdown-preview ol ul {
+  list-style: circle;
+}
+.cf-markdown-preview li::marker {
+  color: var(--cf-text-muted);
+}
+.cf-markdown-preview li:has(> input[type="checkbox"]) {
+  list-style: none;
+}
 .cf-markdown-preview a {
   color: var(--cf-accent);
   text-decoration: underline;
@@ -3534,14 +3554,19 @@ body.cf-dragging * {
    words anywhere (`wrap-anywhere`, for pasted logs) — inside a table that crushed every column to a
    few letters and split words mid-way. Here the table is a scroller the column's width: its grid
    inside takes what its content needs up to that width (long cells wrap at spaces), and only a
-   table that cannot fit even so — many columns, long unbroken values — scrolls sideways. */
-.cf-chat-reading table {
+   table that cannot fit even so — many columns, long unbroken values — scrolls sideways.
+   The AI panel's answers too (2026-11-23): the same column rule cut `bookingReference` into
+   «bookingReferenc / e» in a panel table. */
+.cf-chat-reading table,
+.cf-markdown-chat table {
   display: block;
   max-width: 100%;
   overflow-x: auto;
 }
 .cf-chat-reading th,
-.cf-chat-reading td {
+.cf-chat-reading td,
+.cf-markdown-chat th,
+.cf-markdown-chat td {
   overflow-wrap: normal;
   word-break: normal;
   min-width: 4ch;
@@ -3558,14 +3583,26 @@ body.cf-dragging * {
   font-size: 12px;
   line-height: 1.55;
 }
+/* Headings a step above the text, with room before them: at 1.05em a section title in an answer
+   («RUT o pasaporte») read as one more bold line, and a long answer as one block (2026-11-23). */
 .cf-markdown-chat h1,
 .cf-markdown-chat h2,
 .cf-markdown-chat h3,
 .cf-markdown-chat h4 {
-  margin: 0.8em 0 0.4em;
-  font-size: 1.05em;
+  margin: 1.15em 0 0.4em;
+  font-size: 1.12em;
   border-bottom: none;
   padding-bottom: 0;
+}
+.cf-markdown-chat h1,
+.cf-markdown-chat h2 {
+  font-size: 1.2em;
+}
+.cf-markdown-chat h4 {
+  font-size: 1em;
+}
+.cf-markdown-chat > :first-child {
+  margin-top: 0;
 }
 .cf-markdown-chat p,
 .cf-markdown-chat ul,
@@ -3584,6 +3621,24 @@ body.cf-dragging * {
 .cf-markdown-chat pre {
   padding: 0.6em 0.8em;
   font-size: 0.95em;
+}
+
+/* A transcript's edges fade instead of cutting a line in half: under the header strip on top, over
+   the composer at the bottom — each only while there is more to scroll that way, so the first line
+   of a chat and the last of an answer at rest are never dimmed. `useScrollFade` sets the two
+   attributes; the scroller itself is masked, and a mask on a scroll container stays put while its
+   content moves. */
+.cf-scroll-fade {
+  --cf-fade-top: 0px;
+  --cf-fade-bottom: 0px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 var(--cf-fade-top), #000 calc(100% - var(--cf-fade-bottom)), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 var(--cf-fade-top), #000 calc(100% - var(--cf-fade-bottom)), transparent 100%);
+}
+.cf-scroll-fade[data-fade-top] {
+  --cf-fade-top: 18px;
+}
+.cf-scroll-fade[data-fade-bottom] {
+  --cf-fade-bottom: 24px;
 }
 
 /* The frame `ChatMessageBubble` builds around every code block in an answer: a bar that names the

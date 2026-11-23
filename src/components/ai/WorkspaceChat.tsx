@@ -2,7 +2,6 @@ import { Fragment, Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, 
 import { AlertCircle, ArrowDown, ArrowUp, Download, Eraser, FolderGit2, History, Link2, ListChecks, ListPlus, Loader2, Pencil, Play, RotateCcw, Search, SquarePen, Square, Trash2, UsersRound } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AiRunLog } from "./AiRunLog";
-import { ContextSources } from "./ContextSources";
 import { ChatModelPicker } from "./ChatModelPicker";
 import { menuRowClass, useDismiss } from "./docParts";
 import { AttachmentBar } from "../chat/AttachmentBar";
@@ -10,7 +9,7 @@ import { AnswerLengthPicker } from "../chat/AnswerLengthPicker";
 import { PermissionsPicker } from "../chat/PermissionsPicker";
 import { CavemanChip } from "../chat/CavemanChip";
 import { ChatFindBar, useChatFind } from "../chat/ChatFind";
-import { ChatArtifactsStrip } from "../chat/ArtifactCards";
+import { ChatArtifactsMenu } from "../chat/ArtifactCards";
 import { ContextMeter, type ContextReading } from "../chat/ContextMeter";
 import { SkillChip } from "../chat/ChatComposer";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
@@ -22,8 +21,8 @@ import { McpMenu } from "../chat/McpMenu";
 import { MentionMenu, useMentions } from "../chat/MentionMenu";
 import { GhostOverlay, useComposerGhost } from "../chat/useComposerGhost";
 import { ContextMenu } from "../common/ContextMenu";
-import { TurnReview } from "./TurnReview";
 import { EffortPicker } from "../chat/EffortPicker";
+import { useScrollFade } from "../chat/useScrollFade";
 import { ChatMessageBubble, dayDivider, type ChatBubbleActions, type CodeBlockTarget } from "../chat/ChatMessageBubble";
 import { insertCodeAtCaret, useApplyCodeStore } from "../../lib/codeToEditor";
 import { QueuedMessages, type ComposerQueue } from "../chat/QueuedMessages";
@@ -53,12 +52,11 @@ import { useConversationStore } from "../../state/conversationStore";
 import { usePreferencesStore } from "../../state/preferencesStore";
 import { registerDictationSend } from "../../state/dictationStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
-import { pushErrorToast, pushSuccessToast, useToastStore } from "../../state/toastStore";
-import { restoreAiTurn } from "../../lib/tauri/commands";
+import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { EMPTY_WS_CHAT, EMPTY_WS_LIST, pinWsChat, useWorkspaceChatStore, wsChatQueueKey, type WsChatMessage } from "../../state/workspaceChatStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-import { ChatLineageButtons, SubchatRow } from "./ChatLineage";
-import { LiveOtherTurn, OtherTurn, SharedChatBar } from "./SharedChat";
+import { ChatLineageButtons, SubchatRow, startSubchat } from "./ChatLineage";
+import { LiveOtherTurn, OtherTurn, SharedChatBar, SharedChatMenu } from "./SharedChat";
 import { useLiveStore } from "../../state/liveStore";
 import { interleave } from "../../lib/sharedChat";
 import { othersOf, useSharedChatStore } from "../../state/sharedChatStore";
@@ -421,23 +419,9 @@ export function WorkspaceChat({
   const applyRequest = useApplyCodeStore((s) => (s.request?.tabKey === tabKey ? s.request : null));
 
   /** Bumped after «Deshacer el turno», so each repository's review re-reads what is on disk now. */
-  const [undoEpoch, setUndoEpoch] = useState(0);
-  /** «Deshacer el turno»: every repository the turn changed, in one action — see `restoreAiTurn`. */
-  const undoTurn = async (changes: readonly { repoPath: string; checkpointId: string; paths: string[] }[]) => {
-    const files = changes.reduce((sum, change) => sum + change.paths.length, 0);
-    const ok = await confirmAction(t("turnReview.undoTurnConfirm", { files, count: changes.length }), true, t("turnReview.undoTurn", { count: changes.length }));
-    if (!ok) return;
-    try {
-      const restored = await restoreAiTurn(changes.map(({ repoPath, checkpointId, paths }) => ({ repoPath, checkpointId, paths })));
-      pushSuccessToast(t("turnReview.undoTurnDone", { files: restored.length }));
-    } catch (e) {
-      pushErrorToast(String(e));
-    } finally {
-      setUndoEpoch((n) => n + 1);
-    }
-  };
   const rootRef = useRef<HTMLDivElement>(null);
   const find = useChatFind({ rootRef, contentRef, scrollRef });
+  useScrollFade(scrollRef, contentRef);
   const submitRef = useRef(submit);
   submitRef.current = submit;
   useEffect(() => registerDictationSend(boxRef.current, () => submitRef.current()));
@@ -565,6 +549,7 @@ export function WorkspaceChat({
           // Only the last answer, and only while nothing is running: an option clicked on an older
           // card would be answering a question the conversation moved past.
           onAnswer: index === session.messages.length - 1 && canAct ? (text: string) => handlers.current.answerQuestion(text) : undefined,
+          answeredWith: session.messages[index + 1]?.role === "user" ? session.messages[index + 1].content : undefined,
         };
       }),
     // `toBottom` only touches refs and setters.
@@ -619,8 +604,6 @@ export function WorkspaceChat({
     () => ({ surface: "ws" as const, scopeId: workspaceId, workspaceId, conversationId }),
     [workspaceId, conversationId],
   );
-  /** The workspace's project a turn's repository folder belongs to — «Abrir» switches to it. */
-  const projectOfPath = (path: string) => projects.find((p) => samePath(p.local_path, path));
 
   // Announced politely to a screen reader, as in the repository chat: that a reply is coming and
   // that it is in — never the streamed text, which would be read out token by token.
@@ -665,6 +648,8 @@ export function WorkspaceChat({
           </span>
         )}
         <span className="ml-auto" />
+        <ChatArtifactsMenu workspaceId={workspaceId} conversationId={conversationId} />
+        <SharedChatMenu workspaceId={workspaceId} chatId={conversationId} title={session.title} persisted={session.persisted && session.messages.length > 0} />
         {session.messages.length > 0 && (
           <button
             type="button"
@@ -708,9 +693,8 @@ export function WorkspaceChat({
           persisted={session.persisted && session.messages.length > 0}
         />
       </div>
-      <SharedChatBar workspaceId={workspaceId} chatId={conversationId} title={session.title} persisted={session.persisted && session.messages.length > 0} />
+      <SharedChatBar chatId={conversationId} />
       <SubchatRow scope={lineage} />
-      <ChatArtifactsStrip workspaceId={workspaceId} conversationId={conversationId} />
       {/* Select a passage of an answer: quote it here, take it to a new chat, or ask to explain,
           improve or shorten it — the chat workspace's bar, the same rules (user request, 2026-11-18).
           The quote goes into the composer; nothing is sent. */}
@@ -724,9 +708,16 @@ export function WorkspaceChat({
           setDraft(`${appendQuote(draft, passage)}\n\n${t(`chat.selection.${kind}Ask` as const)}`);
           focusComposerSoon();
         }}
-        onQuoteNewChat={(passage) => startPanelChatWith({ workspaceId }, passageForNewChat(passage))}
+        // A subchat of this one, not a stranger: the passage came from here, and the subchat row
+        // keeps the way back (user ask, 2026-11-23). Without a workspace to file the link under,
+        // a plain new chat.
+        onQuoteNewChat={(passage) => {
+          const text = passageForNewChat(passage);
+          void startSubchat(lineage, text).then((made) => made || startPanelChatWith({ workspaceId }, text));
+        }}
+        newChatLabel={t("chat.quoteSubchat")}
       />
-      <div ref={scrollRef} onScroll={onScroll} tabIndex={-1} onContextMenu={textMenu.onText} className="cf-paper-scroll relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none">
+      <div ref={scrollRef} onScroll={onScroll} tabIndex={-1} onContextMenu={textMenu.onText} className="cf-paper-scroll cf-scroll-fade relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none">
         {exportMenu && (
           <ContextMenu
             x={exportMenu.x}
@@ -738,7 +729,7 @@ export function WorkspaceChat({
           />
         )}
 
-        <div ref={contentRef} className="space-y-2.5 wrap-anywhere">
+        <div ref={contentRef} className="space-y-2.5 wrap-anywhere [&>[data-turn=question]:not(:first-child)]:mt-6">
           {loading && (
             <p role="status" className="flex items-center justify-center gap-1.5 pt-10 text-[12px] text-[var(--cf-text-muted)]">
               <Loader2 size={13} className="animate-spin" />
@@ -783,31 +774,10 @@ export function WorkspaceChat({
                   sessionId={session.engineSessionId}
                   actions={actionsByMessage[i]}
                   codeTarget={codeTarget}
+                  context={message.role === "assistant" ? message.context : undefined}
+                  turnChanges={message.role === "assistant" ? message.changes : undefined}
                 />
-                {message.role === "assistant" && message.context && <ContextSources sources={message.context} />}
                 {message.role === "assistant" && <TurnNotes message={message} />}
-                {message.role === "assistant" && (message.changes?.length ?? 0) > 1 && (
-                  <button
-                    type="button"
-                    disabled={session.sending}
-                    onClick={() => void undoTurn(message.changes ?? [])}
-                    className="flex items-center gap-1 self-start rounded-md px-1.5 py-0.5 text-[11px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40"
-                  >
-                    <RotateCcw size={11} />
-                    {t("turnReview.undoTurn", { count: message.changes?.length ?? 0 })}
-                  </button>
-                )}
-                {message.role === "assistant" &&
-                  message.changes?.map((change) => (
-                    <TurnReview
-                      key={`${change.repoPath}:${undoEpoch}`}
-                      repoPath={change.repoPath}
-                      repoLabel={change.repo}
-                      changes={{ checkpointId: change.checkpointId, paths: change.paths }}
-                      canOpen={!!projectOfPath(change.repoPath)}
-                      openProjectId={projectOfPath(change.repoPath)?.id === activeProjectId ? undefined : projectOfPath(change.repoPath)?.id}
-                    />
-                  ))}
                 {message.role === "assistant" &&
                   message.plan &&
                   !message.isError &&
@@ -1147,11 +1117,6 @@ function HistoryMenu({ workspaceId, current }: { workspaceId: string; current: s
       )}
     </div>
   );
-}
-
-/** Two spellings of one folder: a trailing separator is not a different repository. */
-function samePath(a: string, b: string): boolean {
-  return a.replace(/[/\\]+$/, "") === b.replace(/[/\\]+$/, "");
 }
 
 /** The line drawn above the question the engine started over at. */

@@ -53,6 +53,7 @@ export function SelectionActions({
   scope,
   onQuoteReply,
   onQuoteNewChat,
+  newChatLabel,
   onTransform,
 }: {
   /** Quotes the passage with an instruction about it — explain, improve, shorten — left in the composer to send. */
@@ -64,6 +65,8 @@ export function SelectionActions({
   onQuoteReply: (passage: string) => void;
   /** Start a new conversation with it in the composer. */
   onQuoteNewChat: (passage: string) => void;
+  /** What that button says, where the new conversation is a subchat of this one. */
+  newChatLabel?: string;
 }) {
   const t = useT();
   const [picked, setPicked] = useState<Picked | null>(null);
@@ -230,7 +233,7 @@ export function SelectionActions({
         className={buttonClass({ variant: "ghost", size: "sm" })}
       >
         <MessageSquarePlus size={11} className="shrink-0 text-[var(--cf-text-muted)]" />
-        {t("chat.quoteNewChat")}
+        {newChatLabel ?? t("chat.quoteNewChat")}
       </button>
       {onTransform &&
         (["explain", "improve", "shorten"] as const).map((kind) => (

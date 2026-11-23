@@ -102,3 +102,30 @@ export function answerMessage(questions: ChatQuestion[], answers: string[][]): s
     .map((q, i) => `${q.question}\n→ ${(answers[i] ?? []).join(", ") || "—"}`)
     .join("\n\n");
 }
+
+/**
+ * What `reply` — the message that followed the questions — chose, read back the way `answerMessage`
+ * writes it: per question, the options it names, `[]` for one it does not answer.
+ *
+ * Options only, never free text: a reply typed in the user's own words ("sigo sin entender…") is
+ * not an answer to show under the question, and guessing which part of it was would put words in
+ * their mouth. An earlier question card draws this as «✓ what you chose».
+ */
+export function answersIn(questions: ChatQuestion[], reply: string): string[][] {
+  const text = reply.trim();
+  if (questions.length === 1) return [optionsIn(questions[0], text)];
+  return questions.map((q) => {
+    const marker = `${q.question}\n→ `;
+    const at = text.indexOf(marker);
+    if (at < 0) return [];
+    return optionsIn(q, text.slice(at + marker.length).split("\n")[0].trim());
+  });
+}
+
+/** The options `line` names: the whole line when it is one (an option may hold a comma), else each
+ *  comma-separated part that is one. */
+function optionsIn(question: ChatQuestion, line: string): string[] {
+  if (!line) return [];
+  if (question.options.includes(line)) return [line];
+  return line.split(", ").filter((part) => question.options.includes(part));
+}

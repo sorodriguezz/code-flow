@@ -15,6 +15,28 @@ Cómo usarlo:
   y el workflow deja un aviso.
 -->
 
+## 2.9.5
+
+### 🚀 Mejorado
+- **Chat más fácil de leer:** las listas de las respuestas vuelven a tener viñetas, los subtítulos se distinguen del texto y las tablas ya no cortan palabras a la mitad. Cada respuesta termina en una sola línea con el modelo, la hora y las fuentes de contexto («2 fuentes ▾»). La versión, los tokens y el costo aparecen al pasar el mouse. Hay más espacio antes de cada pregunta nueva, y el texto se desvanece en los bordes en vez de cortarse.
+- **Encabezado del chat más compacto:** «Compartir» y «Unirse con un link» están ahora en un menú de la barra superior, así el chat gana una fila.
+- **Maximizar el panel al arrastrar:** si llevas el borde del panel hasta el tope, queda maximizado y el botón de arriba cambia a «restaurar». Al restaurar, vuelve al ancho que tenía antes.
+- **Preguntas del chat más ágiles:** cuando la IA hace una sola pregunta, un clic en la opción (o su número en el teclado) la responde, sin pasar por «Responder». Las opciones se muestran como una lista numerada, y «Otra respuesta» se envía con Enter. Con varias preguntas, el progreso y el envío quedan en una sola línea al final.
+- **Preguntas anteriores plegadas:** las preguntas ya respondidas ocupan una sola línea que se despliega al hacer clic. Si respondiste con una de las opciones, la línea la muestra.
+- **Bandeja renovada:**
+  - El alcance, la búsqueda, «Analizar cambios» y un botón «Nuevo» quedan en una sola fila, y los filtros pasan a pestañas con cuántos hay de cada tipo.
+  - En un panel ancho cada actividad ocupa una línea, con el título, el repositorio y la hora en columnas, así entran casi el doble.
+  - Los repositorios aparecen con un nombre corto («DataSync» en vez de «Dev.Agenda.Node.DataSync»), y los chats del workspace tienen su propio ícono.
+  - Los PRs muestran el número aparte, un título limpio y lo último que hiciste con ellos (revisado, aprobado, cambios pedidos o cerrado).
+  - Los subchats se despliegan desde junto al título, y la fecha queda fija arriba mientras bajas.
+- **Cambios del turno más claros:**
+  - Lo que una respuesta cambió en tus repositorios aparece dentro de la respuesta, en una sola tarjeta aunque haya tocado varios repositorios. Plegada ya muestra los primeros archivos.
+  - Al desplegarla, cada repositorio es una línea con su total de líneas y cada archivo indica si es nuevo, modificado o eliminado. Los repositorios con muchos archivos muestran los primeros y un «Ver más».
+  - El diff de cada bloque muestra los números de línea.
+  - «Deshacer todo» deja todo como estaba antes del turno, en todos los repositorios, y siempre pide confirmación. Lo mismo al descartar un repositorio completo.
+- **«Enviar a un subchat»:** al seleccionar texto de una respuesta, el botón que antes abría un chat nuevo sin relación ahora crea un subchat del chat actual, con el texto citado listo para enviar.
+- **Artefactos más compactos:** la tarjeta de un artefacto se ajusta a su contenido, muestra el tipo en palabras («Página · 200 líneas») y se abre al hacer clic en cualquier parte. La lista de artefactos del chat pasó de una franja propia a un botón en la barra superior.
+
 ## 2.9.4
 
 ### ✨ Nuevo

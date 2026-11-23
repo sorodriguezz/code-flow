@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { answerMessage, splitQuestions } from "./chatQuestions";
+import { answerMessage, answersIn, splitQuestions } from "./chatQuestions";
 
 describe("chatQuestions", () => {
   it("lifts a question block out of the answer", () => {
@@ -57,5 +57,17 @@ describe("chatQuestions", () => {
     expect(answerMessage(one, [["Rojo"]])).toBe("Rojo");
     const two = [...one, { question: "¿Tamaño?", options: [], multiple: false }];
     expect(answerMessage(two, [["Rojo"], ["Grande"]])).toBe("¿Color?\n→ Rojo\n\n¿Tamaño?\n→ Grande");
+  });
+
+  it("reads back which options a reply chose, and nothing from a reply in other words", () => {
+    const one = [{ question: "¿Color?", options: ["Rojo", "Azul, oscuro", "Verde"], multiple: true }];
+    expect(answersIn(one, "Rojo")).toEqual([["Rojo"]]);
+    expect(answersIn(one, "Azul, oscuro")).toEqual([["Azul, oscuro"]]);
+    expect(answersIn(one, "Rojo, Verde, y algo más")).toEqual([["Rojo", "Verde"]]);
+    expect(answersIn(one, "sigo sin entender")).toEqual([[]]);
+    const two = [one[0], { question: "¿Tamaño?", options: ["Grande", "Chico"], multiple: false }];
+    expect(answersIn(two, answerMessage(two, [["Verde"], ["Chico"]]))).toEqual([["Verde"], ["Chico"]]);
+    expect(answersIn(two, answerMessage(two, [["Verde"], []]))).toEqual([["Verde"], []]);
+    expect(answersIn(two, "")).toEqual([[], []]);
   });
 });

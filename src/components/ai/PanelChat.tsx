@@ -6,8 +6,7 @@ import { SkillChip } from "../chat/ChatComposer";
 import { AttachmentBar } from "../chat/AttachmentBar";
 import { MentionMenu, useMentions } from "../chat/MentionMenu";
 import { GhostOverlay, useComposerGhost } from "../chat/useComposerGhost";
-import { TurnReview } from "./TurnReview";
-import { ContextSources } from "./ContextSources";
+import type { TurnChangePart } from "./TurnReview";
 import { useTextMenu } from "../common/TextMenu";
 import { useModelReadsImages } from "../../lib/useModelReadsImages";
 import { isImagePath, useImageDrop } from "../../lib/useImageDrop";
@@ -28,9 +27,10 @@ import { registerDictationSend } from "../../state/dictationStore";
 import { DictationBar, DictationMic, useDictatingHere } from "../dictation/DictationControls";
 import { useIsQueued, repoHolder } from "../../lib/repoQueue";
 import { resolveAccount } from "../../lib/aiAccounts";
+import { useScrollFade } from "../chat/useScrollFade";
 import { ChatMessageBubble, dayDivider, type ChatBubbleActions, type CodeBlockTarget } from "../chat/ChatMessageBubble";
 import { ChatFindBar, useChatFind } from "../chat/ChatFind";
-import { ChatArtifactsStrip } from "../chat/ArtifactCards";
+import { ChatArtifactsMenu } from "../chat/ArtifactCards";
 import { ContextMeter, type ContextReading } from "../chat/ContextMeter";
 import { insertCodeAtCaret, useApplyCodeStore } from "../../lib/codeToEditor";
 import { estimateTokens } from "../../lib/contextWindow";
@@ -41,7 +41,7 @@ import { exportMenuItems, exportRepoConversation } from "../chat/exportChat";
 import { ContextMenu } from "../common/ContextMenu";
 import { AiRunLog } from "./AiRunLog";
 import { ChatModelPicker } from "./ChatModelPicker";
-import { ChatLineageButtons, SubchatRow } from "./ChatLineage";
+import { ChatLineageButtons, SubchatRow, startSubchat } from "./ChatLineage";
 import { useChatLineageStore } from "../../state/chatLineageStore";
 import { AnswerLengthPicker } from "../chat/AnswerLengthPicker";
 import { PermissionsPicker } from "../chat/PermissionsPicker";
@@ -604,11 +604,24 @@ export function PanelChat({
               : undefined,
           onBranch: canAct && session.persisted && !message.isCancelled && at ? () => void handlers.current.branchAt(at) : undefined,
           onAnswer: latest && canAct ? (text: string) => handlers.current.answerQuestion(text) : undefined,
+          answeredWith: session.messages[index + 1]?.role === "user" ? session.messages[index + 1].content : undefined,
         };
       }),
     // `toBottom` only touches refs and setters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [session.messages, session.sending, session.persisted, projectId, conversationId, tabKey],
+  );
+
+  // What each answer changed, as the turn-changes card takes it: built once per transcript, so the
+  // bubbles (memoised on their props) are handed the same array every render.
+  const turnParts = useMemo(
+    () =>
+      session.messages.map((message): TurnChangePart[] | undefined =>
+        message.role === "assistant" && message.changes && project
+          ? [{ repoPath: project.local_path, checkpointId: message.changes.checkpointId, paths: message.changes.paths }]
+          : undefined,
+      ),
+    [session.messages, project],
   );
 
   // ── Code blocks → editor ──────────────────────────────────────────────────────────────────
@@ -678,6 +691,7 @@ export function PanelChat({
   // ── Find ──────────────────────────────────────────────────────────────────────────────────
   const rootRef = useRef<HTMLDivElement>(null);
   const find = useChatFind({ rootRef, contentRef, scrollRef });
+  useScrollFade(scrollRef, contentRef);
 
   return (
     <div ref={rootRef} className="flex h-full min-h-0 flex-col">
@@ -707,13 +721,15 @@ export function PanelChat({
             {t("assistant.canEdit")}
           </span>
         )}
+        <span className="ml-auto" />
+        <ChatArtifactsMenu workspaceId={workspaceId ?? null} conversationId={conversationId} projectId={projectId} />
         {session.messages.length > 0 && (
           <button
             type="button"
             onClick={find.show}
             title={t("chat.find")}
             aria-label={t("chat.find")}
-            className="ml-auto flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
           >
             <Search size={12} />
           </button>
@@ -745,7 +761,6 @@ export function PanelChat({
         />
       </div>
       <SubchatRow scope={lineage} />
-      <ChatArtifactsStrip workspaceId={workspaceId ?? null} conversationId={conversationId} projectId={projectId} />
       {/* Select a passage of an answer: quote it here, take it to a new chat, or ask to explain,
           improve or shorten it — the chat workspace's bar, the same rules (user request, 2026-11-18).
           The quote goes into the composer; nothing is sent. */}
@@ -759,7 +774,14 @@ export function PanelChat({
           setDraft(`${appendQuote(draft, passage)}\n\n${t(`chat.selection.${kind}Ask` as const)}`);
           focusComposerSoon();
         }}
-        onQuoteNewChat={(passage) => startPanelChatWith({ projectId }, passageForNewChat(passage))}
+        // A subchat of this one, not a stranger: the passage came from here, and the subchat row
+        // keeps the way back (user ask, 2026-11-23). Without a workspace to file the link under,
+        // a plain new chat.
+        onQuoteNewChat={(passage) => {
+          const text = passageForNewChat(passage);
+          void startSubchat(lineage, text).then((made) => made || startPanelChatWith({ projectId }, text));
+        }}
+        newChatLabel={t("chat.quoteSubchat")}
       />
       <div
         ref={scrollRef}
@@ -767,7 +789,7 @@ export function PanelChat({
         // Focusable, so a click in the transcript puts the focus here and ⌘F finds in this chat.
         tabIndex={-1}
         onContextMenu={textMenu.onText}
-        className="cf-paper-scroll relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none"
+        className="cf-paper-scroll cf-scroll-fade relative min-h-0 flex-1 overflow-auto px-3 pb-3 pt-2.5 outline-none"
       >
         {exportMenu && (
           <ContextMenu
@@ -781,7 +803,7 @@ export function PanelChat({
         )}
 
         {/* `wrap-anywhere`: see the same class on the Chat app's column (`ChatTranscript`). */}
-        <div ref={contentRef} className="space-y-2.5 wrap-anywhere">
+        <div ref={contentRef} className="space-y-2.5 wrap-anywhere [&>[data-turn=question]:not(:first-child)]:mt-6">
           {session.messages.map((message, i) => {
             const day = dayDivider(message, session.messages[i - 1], locale);
             // A finished turn far off screen is not laid out or painted (`content-visibility`), which
@@ -791,6 +813,9 @@ export function PanelChat({
             return (
               <div
                 key={i}
+                // Each turn sits in its own box here, so the box carries the question mark the
+                // transcript's spacing reads (see `data-turn` in `ChatMessageBubble`).
+                data-turn={message.role === "user" ? "question" : undefined}
                 className="space-y-2.5"
                 style={settled ? { contentVisibility: "auto", containIntrinsicSize: "auto 120px" } : undefined}
               >
@@ -819,16 +844,15 @@ export function PanelChat({
                   sessionId={session.sessionId}
                   actions={actions[i]}
                   codeTarget={project ? codeTarget : undefined}
+                  context={message.role === "assistant" ? message.context : undefined}
+                  turnChanges={turnParts[i]}
+                  turnProjectId={projectId}
                   emptyText={
                     message.role === "assistant" && isCompactCommand(session.messages[i - 1])
                       ? t("chat.compactedReply")
                       : undefined
                   }
                 />
-                {message.role === "assistant" && message.context && <ContextSources sources={message.context} />}
-                {message.role === "assistant" && message.changes && project && (
-                  <TurnReview repoPath={project.local_path} changes={message.changes} openProjectId={projectId} />
-                )}
                 {message.role === "assistant" &&
                   message.plan &&
                   !message.isError &&

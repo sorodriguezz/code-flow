@@ -258,27 +258,6 @@ impl Deterministic {
         }
         (!parts.is_empty()).then(|| format!("🧪 Determinista: {}\n", parts.join(" · ")))
     }
-
-    /// The report with [`Self::report_line`] after its scope line — or after the rating line, or on
-    /// top, whichever the text has. Never before the `📈 CALIDAD` line: the frontend reads it first.
-    pub fn annotate(&self, report: String) -> String {
-        let Some(line) = self.report_line() else { return report };
-        let anchor = report.find("🔍 Alcance:").or_else(|| report.starts_with("📈").then_some(0));
-        match anchor {
-            Some(at) => {
-                let end = report[at..].find('\n').map(|i| at + i + 1).unwrap_or(report.len());
-                let mut out = String::with_capacity(report.len() + line.len() + 1);
-                out.push_str(&report[..end]);
-                if !out.ends_with('\n') {
-                    out.push('\n');
-                }
-                out.push_str(&line);
-                out.push_str(&report[end..]);
-                out
-            }
-            None => format!("{line}\n{report}"),
-        }
-    }
 }
 
 /// A bundle with `block` inside its header, right before the code — so the pre-marks read as part
@@ -329,7 +308,7 @@ mod tests {
     }
 
     #[test]
-    fn the_report_line_lands_after_the_scope_line() {
+    fn a_rule_run_gives_its_report_line_and_record() {
         let det = Deterministic {
             rules_on: true,
             runs: vec![RuleRun {
@@ -346,20 +325,13 @@ mod tests {
             }],
             ..Default::default()
         };
-        let report = "📈 CALIDAD: Fiabilidad=A Seguridad=A Mantenibilidad=A\n\n🚦 Quality Gate: ✅ PASSED\n🔍 Alcance: 1 archivo(s)\n\nResumen";
-        let out = det.annotate(report.to_string());
-        assert_eq!(
-            out,
-            "📈 CALIDAD: Fiabilidad=A Seguridad=A Mantenibilidad=A\n\n🚦 Quality Gate: ✅ PASSED\n🔍 Alcance: 1 archivo(s)\n🧪 Determinista: reglas: R-0004 no evaluada (superó su límite de 120 s)\n\nResumen"
-        );
+        assert_eq!(det.report_line().as_deref(), Some("🧪 Determinista: reglas: R-0004 no evaluada (superó su límite de 120 s)\n"));
         let records = det.records();
         assert_eq!(records.len(), 1);
         assert_eq!((records[0].id.as_str(), records[0].status), ("R-0004", RunStatus::NotEvaluated));
         assert_eq!(records[0].reason.as_deref(), Some("superó su límite de 120 s"));
         let json = serde_json::to_value(&records).unwrap();
         assert_eq!(json[0]["status"], "not_evaluated");
-        let bare = det.annotate("📈 CALIDAD: x\nbody".into());
-        assert!(bare.starts_with("📈 CALIDAD: x\n🧪 Determinista"));
         assert_eq!(into_header("# head\ncode", "code", "# block\n"), "# head\n# block\n#\ncode");
     }
 }

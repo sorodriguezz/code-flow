@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  entryPr,
   entryTitle,
   isWorkspaceChat,
   mergeActivityEntries,
@@ -81,5 +82,31 @@ describe("a workspace chat among the entries", () => {
     const older = { ...conv, session_id: "p-1", project_id: "p1", updated_at: "2026-10-19T10:00:00Z" };
     const entries = mergeActivityEntries([], [older, conv]);
     expect(entries.map((entry) => (entry.type === "chat" ? entry.conv.session_id : ""))).toEqual(["ws-1", "p-1"]);
+  });
+});
+
+describe("a PR row's parts", () => {
+  const meta = { prId: 94025, prTitle: "fix(planificacion): avisa de traslados", repoLabel: "Org/Transporte.Web" };
+  const review = job({ id: "r", projectId: "p", kind: "pr-review", label: "#94025 Org/Transporte.Web · fix(planificacion): avisa de traslados", meta });
+
+  it("splits the number, a plain title, the repository and the review", () => {
+    expect(entryPr({ type: "job", job: review, runs: [review] })).toEqual({
+      id: "94025",
+      title: "Avisa de traslados",
+      repo: "Org/Transporte.Web",
+      state: "reviewed",
+    });
+  });
+
+  it("reads the newest decision, and keeps a name the user gave the row", () => {
+    const approve = job({ id: "a", projectId: "p", kind: "pr-action", label: "#94025 x · Aprobado", meta: { ...meta, action: "approve" } });
+    expect(entryPr({ type: "job", job: approve, runs: [approve, review] })?.state).toBe("approved");
+    const renamed = { ...review, label: "Revisión del aviso" };
+    expect(entryPr({ type: "job", job: renamed, runs: [renamed] })?.title).toBe("Revisión del aviso");
+  });
+
+  it("is nothing for a row that is not a PR", () => {
+    const analysis = job({ id: "x", projectId: "p", kind: "analyze-changes" });
+    expect(entryPr({ type: "job", job: analysis, runs: [analysis] })).toBeNull();
   });
 });

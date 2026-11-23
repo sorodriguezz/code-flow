@@ -2,6 +2,7 @@ import { useEffect, useMemo } from "react";
 import { CornerLeftUp, GitBranch, MessageSquarePlus, PictureInPicture2 } from "lucide-react";
 import { WINDOW } from "../../lib/windowIdentity";
 import { openChatIsland } from "../../lib/chatIslands";
+import { putChatDraft } from "../../lib/aiPanelNav";
 import { chatTabKey, newConversationId, useAiPanelStore, wsChatTabKey, type PanelTab } from "../../state/aiPanelStore";
 import { EMPTY_LINKS, useChatLineageStore } from "../../state/chatLineageStore";
 import { useChatHistoryStore } from "../../state/activityStore";
@@ -28,9 +29,13 @@ export interface LineageScope {
 const headerButton =
   "flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-40 disabled:hover:bg-transparent";
 
-/** A blank conversation on the same repository or workspace, opened in its own tab under this one. */
-export async function startSubchat(scope: LineageScope): Promise<void> {
-  if (!scope.workspaceId) return;
+/**
+ * A blank conversation on the same repository or workspace, opened in its own tab under this one.
+ * `draft` is left in its composer — the passage «Enviar a un subchat» quotes — to be sent or not.
+ * `false` when there is no workspace to keep the link under, and so no subchat.
+ */
+export async function startSubchat(scope: LineageScope, draft?: string): Promise<boolean> {
+  if (!scope.workspaceId) return false;
   const id = scope.surface === "panel" ? newConversationId() : crypto.randomUUID();
   await useChatLineageStore.getState().link(scope.workspaceId, {
     conversationId: id,
@@ -45,13 +50,15 @@ export async function startSubchat(scope: LineageScope): Promise<void> {
     const narrowed = ws.scopeFor(scope.conversationId);
     if (narrowed) ws.setScope(id, narrowed);
   }
-  useAiPanelStore
+  const key = useAiPanelStore
     .getState()
     .open(
       scope.surface === "panel"
         ? { kind: "chat", projectId: scope.scopeId, conversationId: id, fresh: true }
         : { kind: "wsChat", workspaceId: scope.scopeId, conversationId: id, fresh: true },
     );
+  if (draft) putChatDraft(key, draft);
+  return true;
 }
 
 /** The two header buttons. `busy`: a turn is running — no island then. */

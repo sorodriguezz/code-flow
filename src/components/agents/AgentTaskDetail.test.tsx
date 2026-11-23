@@ -56,6 +56,11 @@ beforeEach(() => {
   send.mockClear();
 });
 
+/** A live option: a button, not disabled, whose row (number key and text) says «Solo contrato». */
+const LIVE_OPTION = /<button(?![^>]*\sdisabled=)[^>]*>(?:(?!<\/button>)[\s\S])*Solo contrato(?:(?!<\/button>)[\s\S])*<\/button>/g;
+/** A question that can no longer be answered folds into one closed line, its options out of sight. */
+const FOLDED = 'aria-expanded="false"';
+
 describe("agent question answers", () => {
   it("keeps a team chat coordinated when its task is opened outside the team drawer", () => {
     task.batch_id = "team-chat:team-conversation:lead";
@@ -64,7 +69,7 @@ describe("agent question answers", () => {
   });
   it("enables the latest question and sends the selected answer to the same task", () => {
     const html = render();
-    expect(html).toMatch(/<button(?![^>]*\sdisabled=)[^>]*>Solo contrato<\/button>/);
+    expect(html.match(LIVE_OPTION)).toHaveLength(1);
     expect(html).toMatch(/placeholder="(?:Another answer|Otra respuesta)[^"]*"/);
     rendered[rendered.length - 1]?.actions?.onAnswer?.("Solo contrato");
     expect(send).toHaveBeenCalledWith("t1", "Solo contrato");
@@ -73,7 +78,9 @@ describe("agent question answers", () => {
   it("keeps earlier questions read-only after the conversation moves on", () => {
     live.messages.push({ role: "user", content: "Otra cosa" }, { role: "assistant", content: question });
     const html = render();
-    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Solo contrato<\/button>/);
+    // The earlier card folds; only the latest one offers its options.
+    expect(html).toContain(FOLDED);
+    expect(html.match(LIVE_OPTION)).toHaveLength(1);
     expect(rendered[1].actions?.onAnswer).toBeUndefined();
     expect(rendered[3].actions?.onAnswer).toBeTypeOf("function");
   });
@@ -85,7 +92,8 @@ describe("agent question answers", () => {
     if (blocked === "local execution") task.provider = "local-exec";
     if (blocked === "loading") live.loaded = false;
     const html = render();
-    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Solo contrato<\/button>/);
+    expect(html).toContain(FOLDED);
+    expect(html.match(LIVE_OPTION)).toBeNull();
     expect(rendered[rendered.length - 1]?.actions?.onAnswer).toBeUndefined();
     expect(send).not.toHaveBeenCalled();
   });
