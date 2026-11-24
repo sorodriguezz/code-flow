@@ -19085,7 +19085,7 @@ export const es = {
   "browser.stop": "Detener",
   "browser.open": "Abrir",
   "browser.openAddress": "Abrir dirección…",
-  "browser.empty": "Escribe una dirección arriba, o abre un enlace con Mayús+clic en cualquier parte de CodeFlow.",
+  "browser.empty": "Escribe una dirección arriba, o abre cualquier enlace de CodeFlow: se abre aquí.",
   "browser.viewport": "Ancho",
   "browser.viewportFull": "Ancho del panel",
   "browser.viewportTablet": "Tablet (768 px)",

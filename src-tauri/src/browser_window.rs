@@ -50,8 +50,11 @@ use url::Url;
 /// A tab's webview label. No `sat-` prefix: it is not a window, and nothing that walks the
 /// satellites should ever take it for one.
 fn page_label(id: u64) -> String {
-    format!("browser-page-{id}")
+    format!("{PAGE_LABEL_PREFIX}{id}")
 }
+
+/// What every tab's label starts with — how the menu tells a site from the app's own bar.
+pub(crate) const PAGE_LABEL_PREFIX: &str = "browser-page-";
 
 /// The bar's height until the bar says otherwise — the tab row and the address row.
 const DEFAULT_TOP: f64 = 84.0;

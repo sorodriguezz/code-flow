@@ -10,6 +10,8 @@ import { MotionLevel } from "./components/common/MotionLevel";
 // repeated here.
 import { startScrollFeedback } from "./lib/scrollFeedback";
 import { startExternalLinks } from "./lib/externalLinks";
+// The macOS menu's ⌘Z, ⌘⇧Z, ⌘A and ⌘W, handed back to the page — see `lib/menuChords.ts`.
+import { startMenuChords } from "./lib/menuChords";
 import { startContextMenuGuard } from "./lib/contextMenuGuard";
 import { startOverlayDragRegion } from "./lib/overlayDragRegion";
 import { startEscapeFullscreenGuard } from "./lib/escapeFullscreenGuard";
@@ -29,6 +31,7 @@ import "./index.css";
 
 startScrollFeedback();
 startExternalLinks();
+startMenuChords();
 startContextMenuGuard();
 startOverlayDragRegion();
 startEscapeFullscreenGuard();

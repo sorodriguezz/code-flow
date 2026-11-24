@@ -15,6 +15,16 @@ Cómo usarlo:
   y el workflow deja un aviso.
 -->
 
+## 2.9.8
+
+### 🚀 Mejorado
+- **Los enlaces del chat se abren en el Navegador de CodeFlow.** Un enlace en una respuesta (por ejemplo, las fuentes al final) ya no te saca de la app: se abre en una pestaña del Navegador, y desde ahí puedes pasarlo a tu navegador con «Abrir en tu navegador». Si prefieres ir directo a tu navegador, haz clic con Shift.
+
+### 🐛 Corregido
+- **⌘Z, ⌘⇧Z, ⌘A y ⌘W vuelven a funcionar en el editor y en el resto de la app (macOS).** Desde la versión anterior, deshacer, rehacer y seleccionar todo no hacían nada en el editor de código, y ⌘W cerraba la ventana completa en vez de la pestaña. Ahora cada atajo hace lo que corresponde donde está el cursor, también en el menú Edición.
+- **El texto que el asistente escribe mientras trabaja ya no sale todo junto.** Cada vez que retoma después de usar una herramienta empieza un párrafo nuevo, en vez de pegarse a la frase anterior («…el repo.Ahora la configuración…»).
+- **No más líneas de código crudo en la actividad del asistente.** Cuando una herramienta devolvía un resultado muy largo, la lista de pasos mostraba fragmentos de datos internos en vez de ocultarlos.
+
 ## 2.9.7
 
 ### ✨ Nuevo

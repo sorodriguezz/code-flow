@@ -29,6 +29,8 @@ import { startScrollFeedback } from "./lib/scrollFeedback";
 // inside an AI answer or a repo file, means replacing the app with a web page it can't come back
 // from. One document-level listener, for the links no component of ours ever sees.
 import { startExternalLinks } from "./lib/externalLinks";
+// The macOS menu's ⌘Z, ⌘⇧Z, ⌘A and ⌘W, handed back to the page — see `lib/menuChords.ts`.
+import { startMenuChords } from "./lib/menuChords";
 // Leaves right-click to the app's own menus by swallowing the webview's — the Reload/Back/Inspect
 // one, which belongs to a browser this window isn't.
 import { startContextMenuGuard } from "./lib/contextMenuGuard";
@@ -55,6 +57,7 @@ import "./index.css";
 
 startScrollFeedback();
 startExternalLinks();
+startMenuChords();
 startContextMenuGuard();
 startOverlayDragRegion();
 startEscapeFullscreenGuard();

@@ -2781,6 +2781,25 @@ fn is_stream_event_line(line: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Where the reply being typed breaks into paragraphs.
+///
+/// A turn that works between its words — "Reviso el repo." → a tool call → "Ahora la configuración."
+/// — writes each stretch as a text block of its own message, and the CLI streams them with nothing
+/// in between: appended as they come they read "…el repo.Ahora la configuración.", one run-on
+/// paragraph for the whole turn. So a text block that opens after words were already typed starts a
+/// new paragraph, and so does a follow-up turn after a verdict went past — the report on work the
+/// first one left in the background, as it will read in the saved reply (`claude::result_payload`).
+#[derive(Default)]
+struct ReplyJoin {
+    /// Words have been typed this run — a break before the very first would be a blank opening line.
+    streamed: bool,
+    /// The next text chunk opens a new paragraph.
+    break_next: bool,
+}
+
+/// How `content_block_start` names a text block, as the CLI prints it (no spaces, `claude 2.1.266`).
+const TEXT_BLOCK_START: &str = r#""content_block":{"type":"text""#;
+
 /// Routes one complete line of output: to the run log, or — when it is a partial-message frame and
 /// this run asked for deltas — to the frontend as chunks of the reply being written.
 ///
@@ -2796,16 +2815,14 @@ fn is_stream_event_line(line: &str) -> bool {
 /// are machine-written JSON that carries no escape sequences; at one call per token that is
 /// hundreds of pointless allocations per reply.
 ///
-/// `answered` is set by a turn's verdict going past: what streams after it is a follow-up turn — the
-/// report on work the first one left in the background — and its first words open a new paragraph,
-/// as they will in the saved reply (see `claude::result_payload`).
+/// `join` decides where the reply's paragraphs break — see [`ReplyJoin`].
 fn emit_pumped(
     ctx: &RunCtx,
     stream: &'static str,
     raw: &[u8],
     deltas: Option<&DeltaPump>,
     engine: Option<&dyn AiEngine>,
-    answered: &mut bool,
+    join: &mut ReplyJoin,
 ) {
     let text = String::from_utf8_lossy(raw);
     let Some((deltas, engine)) = deltas.zip(engine) else {
@@ -2814,7 +2831,7 @@ fn emit_pumped(
     };
     if !text.contains(STREAM_EVENT_TAG) {
         if text.contains(r#""type":"result""#) {
-            *answered = true;
+            join.break_next = true;
         }
         ai_runs::emit_line(ctx, stream, &strip_ansi(&text));
         return;
@@ -2828,10 +2845,16 @@ fn emit_pumped(
         ai_runs::emit_line(ctx, stream, &strip_ansi(&text));
         return;
     }
+    if parsed.is_empty() && join.streamed && line.contains(TEXT_BLOCK_START) {
+        join.break_next = true;
+    }
     for mut delta in parsed {
-        if *answered && delta.kind == AiDeltaKind::Text {
-            *answered = false;
-            delta.text.insert_str(0, "\n\n");
+        if delta.kind == AiDeltaKind::Text {
+            if join.break_next && join.streamed {
+                delta.text.insert_str(0, "\n\n");
+            }
+            join.break_next = false;
+            join.streamed = join.streamed || !delta.text.trim().is_empty();
         }
         ai_runs::emit_delta(
             ctx,
@@ -2842,6 +2865,9 @@ fn emit_pumped(
         );
     }
 }
+
+/// How long one JSON event line may grow before the pump gives up waiting for its newline.
+const JSON_LINE_LIMIT: usize = 16 * 1024 * 1024;
 
 /// Claude Code's ceiling on the wait for background tasks after a turn's answer, in milliseconds —
 /// see [`ai_runs::background_wait_ceiling`].
@@ -2940,7 +2966,7 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
 
     let mut buf = [0u8; 8192];
     let mut pending: Vec<u8> = Vec::new();
-    let mut answered = false;
+    let mut join = ReplyJoin::default();
     loop {
         let read = match pipe.read(&mut buf).await {
             Ok(0) | Err(_) => break,
@@ -2956,18 +2982,22 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(
         while let Some(idx) = pending.iter().position(|b| *b == b'\n') {
             let line: Vec<u8> = pending.drain(..=idx).collect();
             track_subagent(&line, &activity);
-            emit_pumped(ctx, stream, &line, deltas.as_ref(), delta_engine.as_deref(), &mut answered);
+            emit_pumped(ctx, stream, &line, deltas.as_ref(), delta_engine.as_deref(), &mut join);
         }
         // A CLI drawing a progress bar rewrites one line forever with `\r` and never sends a
         // newline; without this the buffer would grow unbounded and the user would see nothing.
-        if pending.len() > 8192 {
-            emit_pumped(ctx, stream, &pending, deltas.as_ref(), delta_engine.as_deref(), &mut answered);
+        // A JSON event is a line that is merely long — a tool result carrying a whole file, a
+        // thinking signature — and cut in pieces it parses as nothing and lands in the trace as raw
+        // JSON, so it gets room to finish.
+        let limit = if pending.first() == Some(&b'{') { JSON_LINE_LIMIT } else { 8192 };
+        if pending.len() > limit {
+            emit_pumped(ctx, stream, &pending, deltas.as_ref(), delta_engine.as_deref(), &mut join);
             pending.clear();
         }
     }
     if let Some(ctx) = &ctx {
         if !pending.is_empty() {
-            emit_pumped(ctx, stream, &pending, deltas.as_ref(), delta_engine.as_deref(), &mut answered);
+            emit_pumped(ctx, stream, &pending, deltas.as_ref(), delta_engine.as_deref(), &mut join);
         }
     }
     collected.finish()

@@ -17,6 +17,16 @@
 //! frontend rather than logic here — the app already knows how to open its own settings, and a
 //! second implementation in Rust would be a second thing to keep in step.
 //!
+//! **Undo, Redo, Select All and Close Window are the app's own items, not AppKit's.** Since the
+//! browser window, the app is built with Tauri's multiwebview (`unstable`), and under it *every*
+//! window's webview is a child webview — and wry hands a child webview's ⌘-key events straight to
+//! the menu, never to the page (`WryWebView::performKeyEquivalent`). With the predefined items, ⌘Z
+//! and ⌘A ran AppKit's `undo:` / `selectAll:` on Monaco's hidden text area, which does nothing
+//! visible, and ⌘W closed the window instead of the editor tab. So these four items forward the
+//! chord to the webview that has the focus (`forward_chord`), where `lib/menuChords.ts` replays
+//! it as the keystroke the page never got. Cut, Copy and Paste stay predefined: AppKit's `copy:`
+//! fires the DOM clipboard events, which is all Monaco and the fields listen for.
+//!
 //! **It speaks the app's language**, and follows it live: the labels were English-only, so a
 //! Spanish install had one English corner. [`setup`] listens for the language setting and rebuilds
 //! the whole bar — cheap, and simpler than keeping a handle to each of twenty items.
@@ -24,7 +34,11 @@
 /// Every id this menu's own items carry. Anything else reaching the handler is another menu's item
 /// — the tray's, which Tauri delivers to every global menu listener — and must be left alone: see
 /// `tray::tray_action` for what answering it used to do.
-const APP_MENU_IDS: [&str; 9] = [
+const APP_MENU_IDS: [&str; 13] = [
+    "edit-undo",
+    "edit-redo",
+    "edit-select-all",
+    "close-window",
     "quit",
     "stop-agents",
     "settings",
@@ -38,6 +52,19 @@ const APP_MENU_IDS: [&str; 9] = [
 
 fn is_app_menu_item(id: &str) -> bool {
     APP_MENU_IDS.contains(&id)
+}
+
+/// The chord an Edit or Window item stands for, as `lib/menuChords.ts` names it — `None` for every
+/// other item. See the module note for why these are forwarded rather than predefined.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn menu_chord(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "edit-undo" => "undo",
+        "edit-redo" => "redo",
+        "edit-select-all" => "selectAll",
+        "close-window" => "closeWindow",
+        _ => return None,
+    })
 }
 
 /// The bar's words, in one language.
@@ -191,18 +218,24 @@ fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         ],
     )?;
 
+    // The app's own, not `PredefinedMenuItem`'s — see the module note.
+    let undo = MenuItem::with_id(app, "edit-undo", words.undo, true, Some("Cmd+Z"))?;
+    let redo = MenuItem::with_id(app, "edit-redo", words.redo, true, Some("Cmd+Shift+Z"))?;
+    let select_all = MenuItem::with_id(app, "edit-select-all", words.select_all, true, Some("Cmd+A"))?;
+    let close_window = MenuItem::with_id(app, "close-window", words.close_window, true, Some("Cmd+W"))?;
+
     let edit_menu = Submenu::with_items(
         app,
         words.edit,
         true,
         &[
-            &PredefinedMenuItem::undo(app, Some(words.undo))?,
-            &PredefinedMenuItem::redo(app, Some(words.redo))?,
+            &undo,
+            &redo,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::cut(app, Some(words.cut))?,
             &PredefinedMenuItem::copy(app, Some(words.copy))?,
             &PredefinedMenuItem::paste(app, Some(words.paste))?,
-            &PredefinedMenuItem::select_all(app, Some(words.select_all))?,
+            &select_all,
         ],
     )?;
 
@@ -218,7 +251,7 @@ fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &PredefinedMenuItem::maximize(app, Some(words.zoom))?,
             &PredefinedMenuItem::fullscreen(app, Some(words.fullscreen))?,
             &PredefinedMenuItem::separator(app)?,
-            &PredefinedMenuItem::close_window(app, Some(words.close_window))?,
+            &close_window,
         ],
     )?;
 
@@ -258,6 +291,10 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         if !is_app_menu_item(id) {
             return;
         }
+        if let Some(chord) = menu_chord(id) {
+            forward_chord(app, chord);
+            return;
+        }
         if id == "quit" {
             // Cmd+Q is a real quit, so it goes the tray's way: asked about unsaved work, then the
             // same closing backup. See `quit_guard`.
@@ -295,11 +332,45 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Hands `chord` to the webview with the focus, in the window with the focus.
+///
+/// A window may hold several webviews — the browser's bar and one per tab — and Tauri does not say
+/// which of them is AppKit's first responder, but each page knows: `document.hasFocus()` is true in
+/// exactly that one. So when there are several, every one is told and only the focused one acts.
+///
+/// The app's own pages replay the chord (`window.__codeflowMenuChord`, `lib/menuChords.ts`); a site
+/// in a browser tab gets what the predefined item would have done there, `execCommand`. ⌘W in the
+/// browser window closes the window, as it did: nothing in it binds the chord.
+#[cfg(target_os = "macos")]
+fn forward_chord(app: &AppHandle, chord: &'static str) {
+    use tauri::Manager;
+    let Some(window) = app.get_focused_window() else { return };
+    if chord == "closeWindow" && window.label() == crate::windows::browser_label() {
+        let _ = window.close();
+        return;
+    }
+    let webviews = window.webviews();
+    let several = webviews.len() > 1;
+    for webview in webviews {
+        let site = webview.label().starts_with(crate::browser_window::PAGE_LABEL_PREFIX);
+        let run = if site {
+            format!("document.execCommand('{chord}')")
+        } else {
+            format!("window.__codeflowMenuChord ? window.__codeflowMenuChord('{chord}') : document.execCommand('{chord}')")
+        };
+        let js = if several { format!("if (document.hasFocus()) {{ {run} }}") } else { run };
+        if let Err(e) = webview.eval(js) {
+            crate::applog::info(&format!("menu: could not forward {chord} to {} — {e}", webview.label()));
+        }
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 pub fn setup(_app: &tauri::AppHandle) -> tauri::Result<()> {
     // Referenced so the id list and its check are not dead code off macOS: the test below holds
     // them to the tray's ids on every platform CI builds.
     let _ = is_app_menu_item;
+    let _ = menu_chord;
     Ok(())
 }
 
@@ -317,6 +388,16 @@ mod tests {
         for id in APP_MENU_IDS {
             assert!(is_app_menu_item(id));
         }
+    }
+
+    /// Each forwarded item names a chord `lib/menuChords.ts` knows, and is one of the menu's own.
+    #[test]
+    fn the_forwarded_items_name_the_chords_the_page_replays() {
+        for (id, chord) in [("edit-undo", "undo"), ("edit-redo", "redo"), ("edit-select-all", "selectAll"), ("close-window", "closeWindow")] {
+            assert_eq!(menu_chord(id), Some(chord));
+            assert!(is_app_menu_item(id));
+        }
+        assert_eq!(menu_chord("settings"), None);
     }
 
     /// Both languages name every item — a blank label is an item that looks like a separator.

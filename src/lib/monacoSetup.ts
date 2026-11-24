@@ -2,6 +2,7 @@ import * as monaco from "monaco-editor";
 import { loader } from "@monaco-editor/react";
 import { ALL_THEMES, monacoThemeName, tokenRulesFor } from "./codeThemes";
 import { installGoToDefinition } from "./goToDefinition";
+import { addMenuChordHandler } from "./menuChords";
 import { installSnippets } from "./monacoSnippets";
 import { installInlineCompletion } from "./inlineCompletion";
 import { registerDbmlLanguage } from "./monacoDbml";
@@ -328,6 +329,19 @@ installLinkedTags(monaco);
 // SchemaStore's schemas (and each file's own `$schema`) for the editor's JSON files, fetched by the
 // backend and cached — see `jsonSchemas.ts`. Answers nothing while its switch is off.
 installJsonSchemas(monaco);
+
+// The macOS menu's ⌘Z, ⌘⇧Z and ⌘A, on the editor that has the caret. The menu takes those chords
+// before the page sees them, and a replayed keystroke cannot reach Monaco, which reads `keyCode` —
+// see `menuChords.ts`. The find, replace and rename boxes are left to the replay: ⌘Z there undoes
+// typing in the box, not in the file.
+const MENU_COMMANDS = { undo: "undo", redo: "redo", selectAll: "editor.action.selectAll" } as const;
+addMenuChordHandler((chord, target) => {
+  if (chord === "closeWindow" || !(target instanceof HTMLElement) || target.closest(".monaco-inputbox")) return false;
+  const editor = monaco.editor.getEditors().find((candidate) => candidate.getDomNode()?.contains(target));
+  if (!editor) return false;
+  editor.trigger("menu", MENU_COMMANDS[chord], null);
+  return true;
+});
 
 /**
  * Options every embedded editor needs so its overlay widgets aren't clipped.

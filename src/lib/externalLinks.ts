@@ -3,7 +3,8 @@ import { pushErrorToast } from "../state/toastStore";
 import { openInCodeFlow } from "./webPreview";
 
 /**
- * Sends every link click to the user's own browser instead of to the webview.
+ * Sends every link click somewhere other than the app's own webview: a web page to «Navegador»,
+ * CodeFlow's browser, and anything else worth opening (`mailto:`) to the OS.
  *
  * This is a webview, not a browser tab: an ordinary `<a href="https://…">` navigates *it*, so a
  * source link in an AI answer replaces the entire application with a web page — and there is no
@@ -21,12 +22,13 @@ import { openInCodeFlow } from "./webPreview";
  * not http(s) — but a `file:` link that reaches neither would still be handed to the webview to
  * follow. Anything absolute and not on the list is swallowed: not opened, and not navigated to.
  *
- * **Shift-click opens it inside CodeFlow** instead (`lib/webPreview`): the user's own pages in an
- * editor tab, the internet in «Navegador». Shift because it already means "somewhere else" for a
- * link, and because ⌘/Ctrl-click is the terminal's way to follow one at all.
+ * **A web page opens inside CodeFlow** (`lib/webPreview`): the user's own pages in an editor tab,
+ * the internet in «Navegador» — where the reader stays in the app and can still hand the page to
+ * their own browser with the address bar's «Abrir en tu navegador». **Shift-click goes straight to
+ * the user's browser**, for the reader who already knows that is where they want it.
  */
 
-/** Schemes worth handing to the OS. */
+/** Schemes worth opening at all: a web page, or a `mailto:` for the OS. */
 const EXTERNAL = /^(?:https?|mailto):/i;
 
 /** Anything with a scheme at all. What is left over — `#anchor`, a relative path — is the app's. */
@@ -51,7 +53,7 @@ export function startExternalLinks() {
 
     event.preventDefault();
     if (!EXTERNAL.test(href)) return;
-    if (event.shiftKey && /^https?:/i.test(href)) {
+    if (/^https?:/i.test(href) && !event.shiftKey) {
       openInCodeFlow(href);
       return;
     }

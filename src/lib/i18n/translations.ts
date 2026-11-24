@@ -19246,7 +19246,7 @@ const en = {
   "browser.stop": "Stop",
   "browser.open": "Open",
   "browser.openAddress": "Open address…",
-  "browser.empty": "Write an address above, or open a link with Shift-click anywhere in CodeFlow.",
+  "browser.empty": "Write an address above, or click any link in CodeFlow: it opens here.",
   "browser.viewport": "Width",
   "browser.viewportFull": "As wide as the pane",
   "browser.viewportTablet": "Tablet (768 px)",
