@@ -15,6 +15,22 @@ Cómo usarlo:
   y el workflow deja un aviso.
 -->
 
+## 2.9.7
+
+### ✨ Nuevo
+- **Scripts de CodeFlow para el asistente.** Cuando una tarea necesita muchas llamadas a la app (revisar varios servicios y reiniciar los caídos, cruzar datos, filtrar una respuesta grande), el asistente puede escribir un script corto que hace todas esas llamadas en un entorno aislado de este equipo y le devuelve solo el resultado. Son menos idas y vueltas y menos tokens. Para una o dos llamadas sigue usando la herramienta de siempre.
+- **El script se ve en el chat como un paso que se abre:** cada llamada con su resultado y su duración, el código que escribió el asistente (con un botón para copiarlo), lo que devolvió y, si algo falló, en qué llamada y por qué. Si falla, se abre solo.
+- **Un ajuste por proveedor** en Ajustes › Proveedores: «Automático» o «Apagado». Viene encendido para Claude, Codex, opencode, Cline, Gemini y Grok (en Gemini y Grok el script solo puede consultar) y apagado para los modelos locales. Los comandos destructivos nunca corren dentro de un script: siguen pidiendo tu aprobación uno por uno.
+
+### 🚀 Mejorado
+- **«Consultó» agrupa todo lo que el asistente hizo en la app** (buscar comandos, llamarlos y los scripts) bajo «CodeFlow», en vez de mostrarlo como un conector aparte.
+
+### 🐛 Corregido
+- **Los chats del workspace ya no desaparecen de la Bandeja.** En un workspace con un solo repositorio, o sin ninguno (por ejemplo, después de quitar el único que tenía), la Bandeja no mostraba los chats del workspace, y al cerrar su pestaña no había forma de volver a abrirlos. Ahora siempre aparecen. Una Bandeja vacía lo dice, en vez de quedar en blanco.
+- **Quitar un repositorio ya no borra sus chats.** Antes, quitar un repositorio de CodeFlow borraba todas las conversaciones que tuviste en él. Ahora siguen en la Bandeja del workspace, marcadas con «(quitado)» junto al nombre del repositorio, y se pueden abrir para leerlas. Duran hasta que las borres o elimines el workspace. Si vuelves a agregar la misma carpeta al workspace, sus chats vuelven a ese repositorio y puedes seguirlos.
+- **Borrar un workspace no deja basura.** Sus chats ya se borraban con él; ahora también se borran de inmediato las carpetas en disco de esos chats (los archivos que generaron, las imágenes adjuntas y la carpeta de trabajo del workspace).
+- **Servicios creados por el asistente aparecen al instante.** Cuando el asistente crea, edita o borra un servicio o un grupo, el panel Servicios se actualiza solo; ya no hace falta recargar la ventana ni cambiar de workspace. Lo mismo pasa si un servicio del workspace se levanta desde fuera de la ventana.
+
 ## 2.9.6
 
 ### ✨ Nuevo

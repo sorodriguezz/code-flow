@@ -10,6 +10,19 @@ pub struct Workspace {
     pub created_at: String,
 }
 
+/// A repository the user removed from CodeFlow whose chats are still kept — under its old id, in its
+/// workspace, until the workspace goes or the user deletes them (`queries::remove_project_keeping_chats`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemovedProject {
+    pub id: String,
+    pub workspace_id: String,
+    /// Empty when the record of its name is gone (a database restored without it): the UI names it
+    /// generically.
+    pub name: String,
+    pub local_path: String,
+    pub removed_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Project {
     pub id: String,

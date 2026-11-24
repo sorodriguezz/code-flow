@@ -71,6 +71,34 @@ export async function prPromptsAnswer(payload: unknown): Promise<{
   };
 }
 
+/** The commands that change the Services list. A window that clicks them re-reads the list itself
+ *  (`servicesStore`); a model calling them through `app.invoke` does not, so the panel kept showing
+ *  the list as it was until a reload (2026-11-24: "y por qué no lo veo acá?"). */
+export const SERVICE_LIST_COMMANDS = new Set([
+  "create_service",
+  "update_service",
+  "delete_service",
+  "create_service_group",
+  "rename_service_group",
+  "delete_service_group",
+]);
+
+/** What the window would have re-read after making the call itself. Never fails the call: the
+ *  command already ran, and a list that refreshes late is not the model's error to report. */
+async function afterAppInvoke(command: string): Promise<void> {
+  if (!SERVICE_LIST_COMMANDS.has(command)) return;
+  try {
+    const [{ useServicesStore }, { useWorkspaceStore }] = await Promise.all([
+      import("../../state/servicesStore"),
+      import("../../state/workspaceStore"),
+    ]);
+    const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
+    if (workspaceId) await useServicesStore.getState().load(workspaceId);
+  } catch {
+    // The next load (opening the panel, switching workspace) reads it.
+  }
+}
+
 const handlers: Record<string, Handler> = {
   "dbml.fromSchema": dbmlAnswer,
   "pr.decisionComment": decisionCommentAnswer,
@@ -86,7 +114,9 @@ const handlers: Record<string, Handler> = {
   "app.invoke": async (payload) => {
     const { command, args } = payload as { command: string; args: Record<string, unknown> };
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke(command, args ?? {});
+    const answer = await invoke(command, args ?? {});
+    await afterAppInvoke(command);
+    return answer;
   },
   /** A saved request as a complete curl line, nothing sent (`api_request_curl`). */
   "api.curl": async (payload) => {

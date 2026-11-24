@@ -2,6 +2,7 @@ import type { AiRunLine } from "../state/aiRunStore";
 import type { RunPhase } from "./thinking/activity";
 import { PLAN_MARK } from "./runPlan";
 import { isMemoryFileStep } from "./turnActivity";
+import { applyScriptRecord, isScriptTool, SCRIPT_MARK, type AppScript } from "./appScript";
 
 /**
  * A run's log, read as steps — what the run card shows as rows and what its headline says.
@@ -31,6 +32,8 @@ export interface RunStep {
   at?: number;
   /** How long it took: until the next step began (see [`withDurations`]). */
   ms?: number;
+  /** A CodeFlow script (`app_run`): its code and every call it made, from the app's own records. */
+  script?: AppScript;
 }
 
 /**
@@ -51,20 +54,64 @@ const TOOL = /^⏵ ([^:]+?)(?:: (.*))?$/;
 const NOTE = /^· (.*)$/;
 const SUB = "↳ ";
 
+/** The waiting step for `title` — the one whose title matches (a CLI's line cuts it at 160
+ *  characters), else the oldest: a call refused before its script started leaves a line with no
+ *  record, and must not take the next script's. */
+function takeFor(waiting: RunStep[], title: string): RunStep | undefined {
+  const key = title.replace(/…$/, "").trim();
+  const same = (step: RunStep) => {
+    const other = (step.script?.title ?? step.arg).replace(/…$/, "").trim();
+    return Boolean(key && other) && (other.startsWith(key) || key.startsWith(other));
+  };
+  const index = waiting.findIndex(same);
+  return waiting.splice(index >= 0 ? index : 0, 1)[0];
+}
+
 export function parseRunSteps(lines: readonly AiRunLine[] | undefined): RunStep[] {
   const steps: RunStep[] = [];
   if (!lines) return steps;
+  // A script's records and the CLI's own line for the same call arrive in either order (the CLI
+  // prints its call before or after running it, the app writes as the script runs): whichever comes
+  // second joins the first, so each script is one step.
+  const scripts = new Map<string, AppScript>();
+  const waitingForRecord: RunStep[] = [];
+  const waitingForLine: RunStep[] = [];
   for (const line of lines) {
     for (const raw of line.text.split("\n")) {
       if (!raw.trim()) continue;
       // The plan's own line (`runPlan`) is drawn as a checklist, never as a step.
       if (raw.startsWith(PLAN_MARK)) continue;
+      if (raw.startsWith(SCRIPT_MARK)) {
+        const applied = applyScriptRecord(scripts, raw);
+        if (applied?.started) {
+          const step = takeFor(waitingForRecord, applied.script.title);
+          if (step) step.script = applied.script;
+          else {
+            const own: RunStep = { kind: "tool", tool: "app_run", arg: applied.script.title, text: raw, sub: false, error: false, script: applied.script, ...(line.at === undefined ? {} : { at: line.at }) };
+            steps.push(own);
+            waitingForLine.push(own);
+          }
+        }
+        continue;
+      }
       const sub = raw.startsWith(SUB);
       const text = sub ? raw.slice(SUB.length) : raw;
       const error = line.stream === "stderr";
       const tool = error ? null : TOOL.exec(text);
       if (tool) {
-        steps.push({ kind: "tool", tool: tool[1].trim(), arg: (tool[2] ?? "").trim(), text, sub, error, ...(line.at === undefined ? {} : { at: line.at }) });
+        const name = tool[1].trim();
+        if (isScriptTool(name) && !sub) {
+          const recorded = takeFor(waitingForLine, (tool[2] ?? "").trim());
+          if (recorded) {
+            recorded.tool = name;
+            continue;
+          }
+          const step: RunStep = { kind: "tool", tool: name, arg: (tool[2] ?? "").trim(), text, sub, error, ...(line.at === undefined ? {} : { at: line.at }) };
+          steps.push(step);
+          waitingForRecord.push(step);
+          continue;
+        }
+        steps.push({ kind: "tool", tool: name, arg: (tool[2] ?? "").trim(), text, sub, error, ...(line.at === undefined ? {} : { at: line.at }) });
         continue;
       }
       const note = error ? null : NOTE.exec(text);

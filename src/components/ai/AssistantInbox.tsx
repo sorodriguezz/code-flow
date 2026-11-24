@@ -78,6 +78,7 @@ import { useWorkspaceStore } from "../../state/workspaceStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 import type { ChatConversationSummary, Project } from "../../types/domain";
 import { searchAssistantChats, type AssistantChatHit } from "../../lib/tauri/commands";
+import { useRemovedProjects, useRemovedProjectsStore } from "../../state/removedProjectsStore";
 import { activitySearchMatch } from "../../lib/activitySearch";
 
 type Filter = "all" | "chat" | "artifacts" | "pr" | "analysis";
@@ -111,7 +112,13 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
   const projects = useWorkspaceStore((s) => s.projectsByWorkspace[workspaceId] ?? EMPTY_PROJECTS);
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
   const changes = useChangesToAnalyze(activeProject?.id ?? null);
-  const [scope, setScope] = useState<Scope>("repo");
+  const [chosenScope, setScope] = useState<Scope>("repo");
+  // «This repo» is a choice only where there is one to make: more than one repository, one of them
+  // open. Anywhere else the list is the workspace's — its own chats included, which belong to no
+  // repository. Held at «repo» with no switch drawn, a workspace with one repository or none hid
+  // every workspace chat, and closing its tab lost the way back to it (user report, 2026-11-24).
+  const canChooseScope = projects.length > 1 && !!activeProject;
+  const scope: Scope = canChooseScope ? chosenScope : "workspace";
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState<{ key: string; hits: AssistantChatHit[]; pending: boolean; error: string | null }>({
@@ -122,6 +129,10 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
     () => (scope === "workspace" || !activeProject ? projects : [activeProject]),
     [scope, activeProject, projects],
   );
+  // Repositories removed from CodeFlow whose chats are kept: the workspace's list shows those chats
+  // under the old name, until the user deletes them or the workspace goes.
+  const removed = useRemovedProjects(workspaceId);
+  const removedInScope = useMemo(() => (scope === "workspace" ? removed : []), [scope, removed]);
   const workspaceBucket = workspaceActivityKey(workspaceId);
   const buckets = useMemo(() => [...scopedProjects.map((p) => p.id), workspaceBucket], [scopedProjects, workspaceBucket]);
 
@@ -135,7 +146,11 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
     // The workspace's own chats, which belong to no repository and are therefore in none of the
     // buckets above — see `WORKSPACE_CHAT_PROJECT`.
     void useWorkspaceChatStore.getState().loadList(workspaceId);
+    void useRemovedProjectsStore.getState().load(workspaceId);
   }, [buckets, scopedProjects, loadJobs, loadHistory, workspaceId]);
+  useEffect(() => {
+    for (const project of removedInScope) void loadHistory(project.id);
+  }, [removedInScope, loadHistory]);
   useEffect(() => {
     void loadWatch(workspaceId);
   }, [workspaceId, loadWatch]);
@@ -153,6 +168,7 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
     const jobs: Job[] = buckets.flatMap((bucket) => jobsByBucket[bucket] ?? EMPTY_JOBS);
     const conversations: ChatConversationSummary[] = [
       ...scopedProjects.flatMap((project) => historyByProject[project.id] ?? EMPTY_CONVERSATIONS),
+      ...removedInScope.flatMap((project) => historyByProject[project.id] ?? EMPTY_CONVERSATIONS),
       // The workspace's own, as the same row shape — and only in the workspace scope: «this repo»
       // is a question about a repository, and a chat that belongs to none is not an answer to it.
       // `turn_count` is not kept for these (the list they come from is the sidebar's, which counts
@@ -168,10 +184,16 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
     ];
     const live: ChatSession[] = scopedProjects.flatMap((project) => liveSessionsOf(byConversation, project.id));
     return mergeActivityEntries(jobs, conversations, live);
-  }, [buckets, jobsByBucket, scope, scopedProjects, historyByProject, workspaceChats, byConversation]);
+  }, [buckets, jobsByBucket, scope, scopedProjects, removedInScope, historyByProject, workspaceChats, byConversation]);
 
-  const projectName = (id: string) => projects.find((p) => p.id === id)?.name ?? "";
-  const showRepo = scope === "workspace" && projects.length > 1;
+  const projectName = (id: string) => {
+    const live = projects.find((p) => p.id === id);
+    if (live) return live.name;
+    const gone = removed.find((p) => p.id === id);
+    if (!gone) return "";
+    return gone.name ? t("assistant.removedRepoNamed", { name: gone.name }) : t("assistant.removedRepo");
+  };
+  const showRepo = scope === "workspace" && (projects.length > 1 || removedInScope.length > 0);
 
   // Needs you: pending decisions, then unread results — one row per thing.
   const needs = useMemo(() => {
@@ -226,13 +248,14 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
     [runs, about, queuedRuns, workspaceId],
   );
 
-  const searchKey = JSON.stringify([scopedProjects.map((p) => p.id), scope === "workspace" ? workspaceId : null, query.trim()]);
+  const searchedProjects = useMemo(() => [...scopedProjects.map((p) => p.id), ...removedInScope.map((p) => p.id)], [scopedProjects, removedInScope]);
+  const searchKey = JSON.stringify([searchedProjects, scope === "workspace" ? workspaceId : null, query.trim()]);
   useEffect(() => {
     if (!query.trim()) return;
     let cancelled = false;
     setSearch({ key: searchKey, hits: [], pending: true, error: null });
     const timer = setTimeout(() => {
-      void searchAssistantChats(scopedProjects.map((p) => p.id), scope === "workspace" ? workspaceId : null, query.trim())
+      void searchAssistantChats(searchedProjects, scope === "workspace" ? workspaceId : null, query.trim())
         .then((hits) => { if (!cancelled) setSearch({ key: searchKey, hits, pending: false, error: null }); })
         .catch((error: unknown) => { if (!cancelled) setSearch({ key: searchKey, hits: [], pending: false, error: String(error) }); });
     }, 250);
@@ -288,12 +311,12 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
           heading with the search under it — before the first chat showed (user ask, 2026-11-23).
           The search narrows Recent only, as it always did. */}
       <div className="@container flex shrink-0 items-center gap-2 px-3 pb-2 pt-2.5">
-        {projects.length > 1 && activeProject && (
+        {canChooseScope && activeProject && (
           <Segmented
             size="sm"
             className="shrink-0"
             layoutId={`inbox-scope-${workspaceId}`}
-            value={scope}
+            value={chosenScope}
             onChange={setScope}
             options={[
               { value: "repo", label: t("assistant.scopeRepo"), title: activeProject.name },
@@ -363,6 +386,10 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
             </section>
           )}
         </div>
+      )}
+
+      {empty && (
+        <p className="px-6 py-10 text-center text-[12px] leading-relaxed text-[var(--cf-text-faint)]">{t("assistant.inboxEmpty")}</p>
       )}
 
       {!empty && (

@@ -2664,6 +2664,7 @@
 {"name":"get_project","area":"repos","risk":"read","args":[{"name":"id","type":"String","optional":false}],"returns":"Result<Option<Project>, String>","doc":""},
 {"name":"get_workspace_identity","area":"repos","risk":"read","args":[{"name":"workspaceId","type":"String","optional":false}],"returns":"Result<Option<crate::git::identity::GitIdentity>, String>","doc":"A workspace's git identity, or `None` when it inherits the global one."},
 {"name":"list_projects","area":"repos","risk":"read","args":[{"name":"workspaceId","type":"String","optional":false}],"returns":"Result<Vec<Project>, String>","doc":""},
+{"name":"list_removed_projects","area":"repos","risk":"read","args":[{"name":"workspaceId","type":"String","optional":false}],"returns":"Result<Vec<RemovedProject>, String>","doc":"The repositories removed from a workspace whose chats are still kept — see `queries::remove_project_keeping_chats`."},
 {"name":"list_workspace_identities","area":"repos","risk":"read","args":[],"returns":"Result<Vec<(String, String, String)>, String>","doc":"Every workspace that overrides the global identity, keyed by workspace id."},
 {"name":"list_workspaces","area":"repos","risk":"read","args":[],"returns":"Result<Vec<Workspace>, String>","doc":""},
 {"name":"move_project_to_workspace","area":"repos","risk":"write","args":[{"name":"id","type":"String","optional":false},

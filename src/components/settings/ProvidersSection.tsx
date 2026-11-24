@@ -31,6 +31,7 @@ import {
 } from "../../lib/tauri/commands";
 import { AI_PROVIDERS, isAgenticProvider, modelDisplayLabel, type AiProviderOption } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
+import { AppScriptsSettings } from "./AppScriptsSettings";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useProviderStatusStore } from "../../state/providerStatusStore";
@@ -1145,6 +1146,7 @@ export function ProvidersSection() {
         <AutomationField />
       </div>
       <BackupModelsField />
+      <AppScriptsSettings />
       {AI_PROVIDERS.filter((p) => p.available).map((provider) => (
         <ProviderRow key={provider.id} provider={provider} />
       ))}

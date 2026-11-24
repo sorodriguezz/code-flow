@@ -2077,6 +2077,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_identity_to_agents(conn)?;
     add_roster_to_meetings(conn)?;
     allow_repo_only_review_runs(conn)?;
+    keep_repo_chats_past_their_repository(conn)?;
     // «Equipo»: teams, their runs, items and channel (`team`).
     crate::team::migrate(conn)?;
     // The agent library, the local backlog and the decision log of the Agents view (`crew`).
@@ -2244,6 +2245,95 @@ fn allow_repo_only_review_runs(conn: &Connection) -> rusqlite::Result<()> {
     }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_review_runs_repo ON review_runs (workspace_id, repo_key, pr_id, created_at);",
+    )
+}
+
+/// The tables a repository chat lives in: its turns, its rename, its `/clear`s — keyed by the
+/// project they were held in and stamped with that project's workspace.
+pub(crate) const REPO_CHAT_TABLES: [&str; 3] = ["activity_log", "conversation_titles", "conversation_resets"];
+
+/// A repository chat outlives its repository: it goes when its workspace does, or when the user
+/// deletes it (user's call, 2026-11-24: "visibles hasta eliminar el workspace o el usuario los borre
+/// manualmente").
+///
+/// The three tables were `project_id REFERENCES projects(id) ON DELETE CASCADE`, so removing a
+/// repository from the sidebar shredded every conversation held in it. Now:
+///
+/// - **No foreign key on the project.** SQLite cannot drop one in place, so each table is rebuilt
+///   once from its own stored definition — every column it gained since, whatever order — with that
+///   one clause gone. `project_id` keeps its value: a removed repository's chats are still found by
+///   it, and its name and folder are in `removed_projects`.
+/// - **`workspace_id`, cascading from the workspace**, so deleting the workspace still takes them.
+///   Filled by a trigger on insert from the project (the writers never had to say it), and moved
+///   with the project by another when a repository changes workspace.
+/// - **`removed_projects`**: what a repository was called and where it lived, written when the user
+///   removes it (`queries::remove_project_keeping_chats`), so its chats can still be listed under its
+///   name — and re-attached if the same folder is added back.
+///
+/// `queries::delete_project` — the internal one (a collaboration's session checkout, tests) — keeps
+/// taking a project's chats with it, by deleting them itself.
+fn keep_repo_chats_past_their_repository(conn: &Connection) -> rusqlite::Result<()> {
+    const CASCADE: &str = "REFERENCES projects(id) ON DELETE CASCADE";
+    for table in REPO_CHAT_TABLES {
+        if !table_exists(conn, table)? {
+            continue;
+        }
+        let sql: String = conn.query_row("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |row| row.get(0))?;
+        if sql.contains(CASCADE) {
+            let indexes: Vec<String> = {
+                let mut statement = conn.prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ?1 AND sql IS NOT NULL")?;
+                let rows = statement.query_map([table], |row| row.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            let columns: Vec<String> = {
+                let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+                let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+                rows.map(|name| name.map(|n| format!("\"{n}\""))).collect::<rusqlite::Result<_>>()?
+            };
+            let Some(open) = sql.find('(') else { continue };
+            let staged = format!("{table}__kept");
+            let list = columns.join(", ");
+            conn.execute_batch(&format!(
+                "DROP TABLE IF EXISTS {staged};
+                 CREATE TABLE {staged} {};
+                 INSERT INTO {staged} ({list}) SELECT {list} FROM {table};
+                 DROP TABLE {table};
+                 ALTER TABLE {staged} RENAME TO {table};",
+                sql[open..].replace(CASCADE, "")
+            ))?;
+            for index in indexes {
+                conn.execute_batch(&index)?;
+            }
+        }
+        if !has_column(conn, table, "workspace_id")? {
+            conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE;
+                 UPDATE {table} SET workspace_id = (SELECT p.workspace_id FROM projects p WHERE p.id = {table}.project_id);"
+            ))?;
+        }
+        conn.execute_batch(&format!(
+            "CREATE INDEX IF NOT EXISTS idx_{table}_workspace ON {table} (workspace_id);
+             CREATE TRIGGER IF NOT EXISTS {table}_stamp_workspace AFTER INSERT ON {table}
+                 WHEN NEW.workspace_id IS NULL
+             BEGIN
+                 UPDATE {table} SET workspace_id = (SELECT workspace_id FROM projects WHERE id = NEW.project_id) WHERE rowid = NEW.rowid;
+             END;"
+        ))?;
+    }
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS projects_carry_repo_chats AFTER UPDATE OF workspace_id ON projects
+         BEGIN
+             UPDATE activity_log SET workspace_id = NEW.workspace_id WHERE project_id = NEW.id;
+             UPDATE conversation_titles SET workspace_id = NEW.workspace_id WHERE project_id = NEW.id;
+             UPDATE conversation_resets SET workspace_id = NEW.workspace_id WHERE project_id = NEW.id;
+         END;
+         CREATE TABLE IF NOT EXISTS removed_projects (
+            id           TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            name         TEXT NOT NULL,
+            local_path   TEXT NOT NULL DEFAULT '',
+            removed_at   TEXT NOT NULL
+         );",
     )
 }
 

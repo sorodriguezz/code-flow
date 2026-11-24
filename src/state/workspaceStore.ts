@@ -5,6 +5,7 @@ import { WINDOW } from "../lib/windowIdentity";
 import { pushErrorToast } from "./toastStore";
 import { recordProjectOpened } from "../lib/projectLastOpened";
 import { DEFAULT_WORKSPACE_COLOR } from "../lib/workspaceColors";
+import { useRemovedProjectsStore } from "./removedProjectsStore";
 import type { NewProject, Project, Workspace } from "../types/domain";
 
 const LAST_WORKSPACE_KEY = "last_active_workspace_id";
@@ -261,6 +262,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     }));
     void api.setSetting(windowKey(LAST_PROJECT_KEY), project.id);
     announce();
+    // The same folder, added back where it was removed from, took its chats back (`create_project`).
+    void useRemovedProjectsStore.getState().load(input.workspace_id);
     return project;
   },
 
@@ -280,6 +283,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     // parked in a workspace this window has not loaded is invisible to `abortForProject`'s own
     // sweep, so nothing else would ever take its amber row out of the status bar.
     void useChainStore.getState().refreshGates();
+    // Its chats stay, under its name: the Inbox lists them from here.
+    void useRemovedProjectsStore.getState().load(workspaceId);
     set((s) => ({
       projectsByWorkspace: {
         ...s.projectsByWorkspace,
@@ -427,7 +432,8 @@ export const useWorkspaceStore = create<WorkspaceState>((set, get) => ({
     for (const [workspaceId, projects] of Object.entries(get().projectsByWorkspace)) {
       if (projects.some((p) => p.id === projectId)) return workspaceId;
     }
-    return null;
+    // A repository removed from CodeFlow still belongs to its workspace while its chats are kept.
+    return useRemovedProjectsStore.getState().find(projectId)?.workspace_id ?? null;
   },
 }));
 

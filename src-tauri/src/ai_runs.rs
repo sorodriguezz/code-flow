@@ -29,6 +29,10 @@ pub const CANCELLED_MARKER: &str = "RUN_CANCELLED::";
 /// progress bar can produce megabytes on one "line", and the UI only ever shows a tail anyway.
 const MAX_LINE_CHARS: usize = 2_000;
 
+/// …except a record the app writes about its own work, which the UI reads whole: an `app_run`
+/// script and its steps (`crate::app_script`). Bounded by the script's own limit, plus its title.
+const MAX_RECORD_CHARS: usize = 24_000;
+
 /// How many lines of a run are kept for its stored trace. Enough to reconstruct what an agent
 /// did, bounded so one chatty run can't bloat the database — the oldest lines are dropped first,
 /// since the tail is what explains how a turn ended up where it did.
@@ -408,12 +412,22 @@ pub fn emit_engine(ctx: &RunCtx, provider: &str, engine: &str, model: &str, idle
 /// Records one line of a run's output and queues it for the frontend. Blank lines are dropped —
 /// the CLIs pad their output generously and the log reads better without the gaps.
 pub fn emit_line(ctx: &RunCtx, stream: &'static str, line: &str) {
+    push_line(ctx, stream, line, MAX_LINE_CHARS);
+}
+
+/// [`emit_line`] for a line the app itself writes for the UI to parse — one JSON record, which a cut
+/// at [`MAX_LINE_CHARS`] would leave unreadable. See [`MAX_RECORD_CHARS`].
+pub fn emit_record(ctx: &RunCtx, line: &str) {
+    push_line(ctx, "stdout", line, MAX_RECORD_CHARS);
+}
+
+fn push_line(ctx: &RunCtx, stream: &'static str, line: &str, cap: usize) {
     let line = line.trim_end();
     if line.is_empty() {
         return;
     }
-    let line = if line.chars().count() > MAX_LINE_CHARS {
-        format!("{}…", line.chars().take(MAX_LINE_CHARS).collect::<String>())
+    let line = if line.chars().count() > cap {
+        format!("{}…", line.chars().take(cap).collect::<String>())
     } else {
         line.to_string()
     };

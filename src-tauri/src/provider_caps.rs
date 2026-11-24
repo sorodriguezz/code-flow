@@ -136,6 +136,12 @@ pub struct ProviderCaps {
     pub native_skills_dir: Option<String>,
     pub npm_package: Option<String>,
     pub update_args: Option<Vec<String>>,
+    /// What CodeFlow scripts (`app_run`, `crate::app_script`) can do on this provider's runs: `full`
+    /// (reads and changes, per the run's own permissions), `read` (the run's token never acts — agy
+    /// and Grok find it in a file), or `none` (no CodeFlow tools reach it at all).
+    pub app_scripts: String,
+    /// Whether scripts are on for it until the user says otherwise (`app_script::default_on`).
+    pub app_scripts_default: bool,
 }
 
 impl ProviderCaps {
@@ -163,7 +169,21 @@ pub fn caps_of(id: &str) -> Option<ProviderCaps> {
         native_skills_dir: engine.native_skills_dir().map(str::to_string),
         npm_package: install.and_then(|row| row.npm_package).map(str::to_string),
         update_args: install.and_then(|row| row.update_args).map(|args| args.iter().map(|arg| arg.to_string()).collect()),
+        app_scripts: scripts_reach(known).to_string(),
+        app_scripts_default: crate::app_script::default_on(known),
     })
+}
+
+/// [`ProviderCaps::app_scripts`]: how each provider gets CodeFlow's tools — per run over MCP
+/// (`ai.rs`: Claude Code, Codex, opencode, Cline), from a file that only ever holds a query token
+/// (agy, Grok: `codemap::mcp::for_file_client`), in-process (the local agent), or not at all.
+fn scripts_reach(id: &str) -> &'static str {
+    match id {
+        "claude" | "codex" | "opencode" | "cline" => "full",
+        "gemini" | "grok" => "read",
+        id if id == crate::local_agent::PROVIDER_ID => "full",
+        _ => "none",
+    }
 }
 
 /// Every provider, in settings order.
@@ -179,6 +199,18 @@ pub fn read_only_ids() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_provider_says_what_scripts_can_do_there() {
+        for caps in all() {
+            assert!(matches!(caps.app_scripts.as_str(), "full" | "read" | "none"), "{}: {}", caps.id, caps.app_scripts);
+            // A provider scripts cannot reach is never "on by default".
+            assert!(caps.app_scripts != "none" || !caps.app_scripts_default, "{}", caps.id);
+        }
+        assert_eq!(caps_of(crate::custom::PROVIDER_ID).unwrap().app_scripts, "none");
+        assert!(!caps_of(crate::local_agent::PROVIDER_ID).unwrap().app_scripts_default);
+        assert_eq!(caps_of("grok").unwrap().app_scripts, "read");
+    }
 
     #[test]
     fn every_provider_has_exactly_one_install_row() {

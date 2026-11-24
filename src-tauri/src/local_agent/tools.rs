@@ -106,6 +106,10 @@ pub enum Reach {
 pub struct Inventory {
     /// The folder belongs to a project (`add_task` files into its tree).
     pub project: bool,
+    /// The local models have CodeFlow scripts on (Settings › Providers, `crate::app_script`): the
+    /// run gets `app_commands` and `app_run` — the whole app, a script at a time. Off unless the user
+    /// switched it on, since a small model writes worse code.
+    pub scripts: bool,
     pub services: bool,
     pub terminals: bool,
     /// A saved database connection the user opened to AI («Acceso de IA»), and one open for writing.
@@ -147,6 +151,9 @@ const OBSERVE_TOOLS: &[&str] = &["service_logs", "service_wait", "terminal_outpu
 /// The app's action tools, offered only to a run that may act.
 const ACT_TOOLS: &[&str] =
     &["service_restart", "open_in_editor", "notify", "propose_memory", "flag_memory", "add_task", "db_write", "http_request", "run_with_secret"];
+/// The app's gateway for a local model: finding a command, and a script of them. No `app_call`: one
+/// call is a one-line script, and a small model is better off with one way to reach the app than two.
+const SCRIPT_TOOLS: [&str; 2] = [crate::app_gateway::LIST_TOOL, crate::app_gateway::RUN_TOOL];
 /// The tools whose definitions and `cf` calls are the MCP server's own (`codemap::mcp::data_tool_call`),
 /// so a CLI agent and this one read and call them the same way.
 const DATA_TOOLS: &[&str] = &["db_connections", "db_schema", "db_read", "db_write", "kubernetes", "azure", "containers"];
@@ -210,6 +217,10 @@ pub fn offered(grants: Grants, map: bool, checks: bool, inventory: &Inventory, g
         if inventory.engines {
             names.push("containers");
         }
+    }
+    // The app's commands, as a script — reads only for a run that observes (`app_gateway::admit`).
+    if grants.reach >= Reach::Observe && inventory.scripts {
+        names.extend(SCRIPT_TOOLS);
     }
     if grants.reach == Reach::Act {
         names.push(crate::ai_memory::tools::WRITE);
@@ -323,6 +334,7 @@ impl Toolbox {
         // workspace's knowledge and memories and none of the app's tools — "no one place for them to
         // act in" — and so does this. Its own files stay its to read and write.
         let grants = if workspace_chat { Grants { reach: grants.reach.min(Reach::Observe), ..grants } } else { grants };
+        let inventory = Inventory { scripts: crate::app_script::enabled_for(crate::local_agent::PROVIDER_ID), ..inventory };
         // "Allow in this terminal" for this run's approvals is keyed by the run, as the MCP server
         // keys a chat's: an allowance lasts the turn it was given in.
         let session = format!("codeflow:{}", crate::ai_runs::current().map(|ctx| ctx.run_id).unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string()));
@@ -535,6 +547,12 @@ impl Toolbox {
         if crate::ai_memory::tools::is_tool(name) {
             return crate::ai_memory::tools::schemas(true).into_iter().find(|t| t["name"] == name)
                 .map(|t| json!({"type": "function", "function": {"name": name, "description": t["description"], "parameters": t["inputSchema"]}}));
+        }
+        if SCRIPT_TOOLS.contains(&name) {
+            return crate::app_gateway::tools(self.grants.reach == Reach::Act)
+                .into_iter()
+                .find(|t| t["name"] == name)
+                .map(|t| json!({ "type": "function", "function": { "name": name, "description": t["description"], "parameters": t["inputSchema"] } }));
         }
         if DATA_TOOLS.contains(&name) {
             return crate::codemap::mcp::db_tools(true)
@@ -818,9 +836,15 @@ impl Toolbox {
         // What was never offered does not exist — the same answer for a tool this run may not have
         // as for one nobody has, so a model that invents a call learns nothing it was not shown.
         // The file and command tools keep their own refusals below, which say why.
-        let gated = matches!(name, "recall" | "read_note" | "read_context" | "reference_repos" | "read_reference_file") || OBSERVE_TOOLS.contains(&name) || ACT_TOOLS.contains(&name);
+        let gated = matches!(name, "recall" | "read_note" | "read_context" | "reference_repos" | "read_reference_file")
+            || OBSERVE_TOOLS.contains(&name)
+            || ACT_TOOLS.contains(&name)
+            || SCRIPT_TOOLS.contains(&name);
         if gated && !self.offered().contains(&name) {
             return Outcome::err(format!("there is no tool named {name:?}"));
+        }
+        if SCRIPT_TOOLS.contains(&name) {
+            return self.script_tool(name, args).await;
         }
         if let Some(call) = app_verb(name, args) {
             return match call {
@@ -919,6 +943,34 @@ impl Toolbox {
                 let mut outcome = Outcome::err(format!("{name}: {error}"));
                 outcome.summary = first_line(&error);
                 outcome
+            }
+        }
+    }
+
+    /// `app_commands` and `app_run`, answered by the gateway as this run — the same gates a CLI's run
+    /// has over the MCP server, and a script's steps in this run's log. Stop reaches a script through
+    /// the run (`app_script::run`).
+    async fn script_tool(&self, name: &str, args: &Value) -> Outcome {
+        let Some(app) = crate::ai_usage::app() else { return Outcome::err("CodeFlow is not ready yet") };
+        let place = crate::agentcli::place::of(app, &self.root_str, &self.session);
+        let scope = crate::app_gateway::Scope {
+            root: &self.root_str,
+            session: &self.session,
+            acts: self.grants.reach == Reach::Act,
+            workspace_id: place.workspace_id.clone().or_else(|| self.workspace_id.clone()),
+            project: place.project.clone(),
+            scripts: true,
+        };
+        if name == crate::app_gateway::LIST_TOOL {
+            let query = args.get("query").and_then(Value::as_str).unwrap_or("areas").to_string();
+            return Outcome::ok(crate::app_gateway::list(&scope, args), query);
+        }
+        let title = args.get("title").and_then(Value::as_str).unwrap_or("script").to_string();
+        match crate::app_script::run(app, &scope, args, crate::ai_runs::current()).await {
+            Ok(text) => Outcome::ok(text, title),
+            Err(text) => {
+                let summary = text.lines().next().unwrap_or("the script stopped").chars().take(120).collect::<String>();
+                Outcome { content: text, summary, ok: false, changed: None }
             }
         }
     }
@@ -1581,6 +1633,7 @@ fn is_outside_text(name: &str) -> bool {
         || crate::ai_memory::tools::READ.contains(&name)
         || OBSERVE_TOOLS.contains(&name)
         || matches!(name, "db_write" | "http_request" | "run_with_secret")
+        || name == crate::app_gateway::RUN_TOOL
 }
 
 /// The `cf` verb behind an app tool and its arguments, built exactly as `codemap::mcp::app_tool`
@@ -2035,6 +2088,8 @@ mod tests {
     const FULL: Inventory =
         Inventory {
             project: true,
+            // Off as the setting starts: its own test below.
+            scripts: false,
             services: true,
             terminals: true,
             databases: true,
@@ -2049,6 +2104,20 @@ mod tests {
             references: 0,
             contexts: 0,
         };
+
+    /// CodeFlow scripts reach a local model only once switched on, and never a run that may not
+    /// look at the app.
+    #[test]
+    fn scripts_are_offered_only_when_switched_on_and_the_run_may_observe() {
+        let on = Inventory { scripts: true, ..FULL };
+        let act = Grants { write: true, run: true, reach: Reach::Act };
+        let observe = Grants { write: false, run: false, reach: Reach::Observe };
+        assert!(!offered(act, true, false, &FULL, 0).contains(&"app_run"));
+        assert!(offered(act, true, false, &on, 0).contains(&"app_run"));
+        assert!(offered(observe, true, false, &on, 0).contains(&"app_commands"));
+        assert!(!offered(WRITE, true, false, &on, 0).contains(&"app_run"), "a project-only run gets none of the app");
+        assert!(!offered(act, true, false, &on, 0).contains(&"app_call"), "one door to the app for a small model");
+    }
 
     /// Reference repositories add the two reference tools and teach the map's tools `repo` — and
     /// cost nothing where there are none.

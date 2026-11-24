@@ -9,6 +9,7 @@ mod ado;
 mod ado_agent;
 /// Every command of the app, for a chat's model (`app_commands` / `app_call`).
 mod app_gateway;
+mod app_script;
 mod ai;
 mod applog;
 mod asr;
@@ -1450,6 +1451,7 @@ sharded_invoke_handler! {
         commands::repos::reorder_projects,
         commands::repos::get_project,
         commands::repos::delete_project,
+        commands::repos::list_removed_projects,
         commands::repos::move_project_to_workspace,
     ]
     shard_06 => [

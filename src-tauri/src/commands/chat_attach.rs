@@ -618,6 +618,21 @@ pub fn chat_sweep_attachments(db: State<'_, Db>) -> Result<usize, String> {
     };
     removed += sweep_root(&crate::paths::repo_chat_attachments_dir(), &live_repo);
 
+    // And the workspace chats' working folders (`workspace_chat::working_dir`), one per workspace,
+    // against the workspaces that still exist — `delete_workspace` removes its own, but not when the
+    // app was killed first or the database came back from a backup without it.
+    let live_workspaces: std::collections::HashSet<String> = {
+        let conn = db.0.lock().map_err(|e| e.to_string())?;
+        crate::db::queries::list_workspaces(&conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter_map(|w| crate::workspace_chat::working_dir(&w.id).file_name().and_then(|n| n.to_str()).map(str::to_string))
+            .collect()
+    };
+    if let Some(root) = crate::workspace_chat::working_dir("_").parent() {
+        removed += sweep_root(root, &live_workspaces);
+    }
+
     // And the dependency trees inside the directories that *do* have an owner.
     removed += sweep_dependency_trees(&crate::paths::chat_outputs_dir());
 

@@ -69,6 +69,10 @@ const BY_TOOL: Record<string, ActivityKind> = {
   notify: "app",
   open_in_editor: "app",
   add_task: "app",
+  // The whole app's gateway: a command found, one called, a script of them (`app_gateway`).
+  app_commands: "app",
+  app_call: "app",
+  app_run: "app",
 };
 
 /** A path inside an engine's memory directory (Claude Code: `…/projects/<repo>/memory/<name>.md`). */

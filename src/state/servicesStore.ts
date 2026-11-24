@@ -91,6 +91,22 @@ interface ServicesState {
 }
 
 let syncStarted = false;
+/** Services already re-read for, so a definition that is truly gone (deleted while running) costs
+ *  one read and not one per event. */
+const rereadFor = new Set<string>();
+
+/**
+ * A service of the open workspace the list does not know, running: defined by something other than
+ * this window — a chat's model, the CLI — so the list is re-read and it shows up where it runs,
+ * rather than only in the status bar until the next reload.
+ */
+function rereadIfUnknown(runtime: ServiceRuntime): void {
+  const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
+  if (!workspaceId || runtime.workspaceId !== workspaceId || rereadFor.has(runtime.id)) return;
+  if (useServicesStore.getState().services.some((s) => s.id === runtime.id)) return;
+  rereadFor.add(runtime.id);
+  void useServicesStore.getState().load(workspaceId);
+}
 
 /**
  * Starts mirroring the supervisor, if this window has not already.
@@ -124,6 +140,7 @@ function startSync(): void {
     fresh.add(runtime.id);
     if (runtime.sessionId) disownTerminalBacklog(runtime.sessionId);
     useServicesStore.setState((s) => ({ runtime: { ...s.runtime, [runtime.id]: runtime } }));
+    rereadIfUnknown(runtime);
   });
   void api
     .servicesRuntime()

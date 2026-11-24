@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, ListChecks, ListPlus, Pencil, Play, Search, Square, Users, UsersRound } from "lucide-react";
+import { ArrowDown, ArrowUp, Clock, Download, Eraser, FilePen, FolderX, ListChecks, ListPlus, Pencil, Play, Search, Square, Users, UsersRound } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { CommandMenu, appCommandFor, type ChatAppCommand } from "../chat/CommandMenu";
 import { SkillChip } from "../chat/ChatComposer";
@@ -55,6 +55,7 @@ import { useAiPanelStore } from "../../state/aiPanelStore";
 import { useAiProviderStore, useTaskProvider } from "../../state/aiProviderStore";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
+import { useRemovedProjectsStore } from "../../state/removedProjectsStore";
 import { useLanguageStore, useT } from "../../state/languageStore";
 
 // Lazy, as the editor it diffs in is: a static import put all of Monaco on the boot path, since
@@ -127,7 +128,10 @@ export function PanelChat({
       .flat()
       .find((p) => p.id === projectId) ?? null,
   );
-  const workspaceId = useWorkspaceStore((s) => s.workspaceOfProject(projectId));
+  // A repository removed from CodeFlow: its chats are kept to read, and there is no working copy
+  // to run a turn in — the composer gives way to a notice (`RemovedRepoNotice`).
+  const removedRepo = useRemovedProjectsStore((s) => (project ? null : s.find(projectId)));
+  const workspaceId = useWorkspaceStore((s) => s.workspaceOfProject(projectId)) ?? removedRepo?.workspace_id ?? null;
   const draft = useAiPanelStore((s) => s.drafts[tabKey] ?? "");
   const setDraft = (text: string) => useAiPanelStore.getState().setDraft(tabKey, text);
   /** The composer focused with the caret at the end, once the draft just set has rendered. */
@@ -514,7 +518,7 @@ export function PanelChat({
     if (session.runId) void useAiRunStore.getState().cancel(session.runId);
   };
 
-  const repoName = project?.name ?? "";
+  const repoName = project?.name ?? removedRepo?.name ?? "";
   const lineage = useMemo(
     () => ({ surface: "panel" as const, scopeId: projectId, workspaceId: workspaceId ?? null, conversationId }),
     [projectId, workspaceId, conversationId],
@@ -978,6 +982,10 @@ export function PanelChat({
         {mentions.open && !menuOpen && <MentionMenu items={mentions.items} index={mentions.index} onPick={mentions.pick} listboxId={mentions.listboxId} />}
         <QueuedMessages queue={queue} />
         {textMenu.menu}
+        {removedRepo ? (
+          <RemovedRepoNotice />
+        ) : (
+        <>
         <div
           ref={composerRef}
           className={`flex flex-col gap-1.5 rounded-xl border bg-[var(--cf-surface-raised)] p-1.5 focus-within:border-[color-mix(in_oklab,var(--cf-accent)_45%,var(--cf-border))] ${
@@ -1168,6 +1176,8 @@ export function PanelChat({
             </span>
           )}
         </div>
+        </>
+        )}
       </div>
       {applyRequest && project && (
         <Suspense fallback={null}>
@@ -1202,6 +1212,21 @@ function AccountBreak({ label, detail }: { label: string; detail: string }) {
         <span className="truncate">{label}</span>
       </span>
       <div className="h-px flex-1 bg-[color-mix(in_oklab,var(--cf-warning)_40%,transparent)]" />
+    </div>
+  );
+}
+
+/** Where the composer was, in a chat of a repository removed from CodeFlow: what happened, and the
+ *  two ways on — add the folder back, which brings its chats back to it, or delete the chat. */
+function RemovedRepoNotice() {
+  const t = useT();
+  return (
+    <div role="status" className="flex items-start gap-2 rounded-xl border border-dashed border-[var(--cf-border-strong)] bg-[var(--cf-sunken)] px-3 py-2.5">
+      <FolderX size={14} className="mt-[2px] shrink-0 text-[var(--cf-text-muted)]" aria-hidden />
+      <div className="min-w-0 text-[12px] leading-snug">
+        <p className="text-[var(--cf-text)]">{t("assistant.removedRepoChat")}</p>
+        <p className="mt-0.5 text-[var(--cf-text-muted)]">{t("assistant.removedRepoChatHint")}</p>
+      </div>
     </div>
   );
 }

@@ -57,6 +57,7 @@ import type {
   PrLinkActionOutcome,
   PrLinkResolution,
   Project,
+  RemovedProject,
   PipelineAvailability,
   PipelineRun,
   PipelineRunDetail,
@@ -340,7 +341,12 @@ export const listProjects = (workspaceId: string) =>
 
 export const getProject = (id: string) => invoke<Project | null>("get_project", { id });
 
+/** Removes a repository from CodeFlow. Its chats stay, listed by {@link listRemovedProjects}. */
 export const deleteProject = (id: string) => invoke<void>("delete_project", { id });
+
+/** The repositories removed from a workspace whose chats are still kept, newest removal first. */
+export const listRemovedProjects = (workspaceId: string) =>
+  invoke<RemovedProject[]>("list_removed_projects", { workspaceId });
 
 /** Writes the order the workspace's repositories are shown in. `ids` is the whole list, in order. */
 export const reorderProjects = (workspaceId: string, ids: string[]) =>
@@ -1651,6 +1657,24 @@ export const cancelAiRun = (runId: string) => invoke<boolean>("cancel_ai_run", {
 /** The providers whose read-only mode their CLI enforces (`AiEngine::enforces_read_only`). Where a
  *  provider is missing, "text only" is a request, and the UI says so. Fixed per build. */
 export const aiReadOnlyEngines = () => invoke<string[]>("ai_read_only_engines");
+
+/** Mirrors `provider_caps::ProviderCaps` — the fields the UI reads. */
+export interface ProviderCaps {
+  id: string;
+  label: string;
+  inProcess: boolean;
+  /** What CodeFlow scripts can do on this provider's runs (`app_run`): reads and changes, reads only, or nothing. */
+  appScripts: "full" | "read" | "none";
+  /** Scripts are on for it until the user says otherwise. */
+  appScriptsDefault: boolean;
+}
+
+/** Every provider's capabilities, in settings order. Fixed per build. */
+export const providerCaps = () => invoke<ProviderCaps[]>("provider_caps");
+
+/** The setting that switches CodeFlow scripts for one provider: `on` or `off`; unset is its default.
+ *  Read by `app_script::enabled_for`. */
+export const appScriptsKey = (providerId: string) => `app_scripts:${providerId}`;
 
 /** Mirrors `ai::AiFailure` — one failed run, classified. See `aiClassifyFailure`. */
 export interface AiFailure {

@@ -192,10 +192,25 @@ pub fn reorder_workspaces(db: State<Db>, ids: Vec<String>) -> Result<(), String>
 
 #[tauri::command]
 pub fn delete_workspace(db: State<Db>, id: String) -> Result<(), String> {
-    {
+    let conversations = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
+        // Read first: the cascade takes the rows, and with them the only record of which folders
+        // were theirs.
+        let conversations = crate::db::chat_queries::conversation_ids_of_workspace(&conn, &id).unwrap_or_default();
         queries::delete_workspace(&conn, &id).map_err(|e| e.to_string())?;
-    }
+        conversations
+    };
+    // Its chats' folders on disk — the files they built, the images attached, the workspace chat's
+    // working folder — go now rather than at the next launch's sweep (`chat_sweep_attachments`),
+    // off this thread: one of them can hold a dependency tree.
+    let workspace_dir = crate::workspace_chat::working_dir(&id);
+    std::thread::spawn(move || {
+        for conversation in &conversations {
+            let _ = std::fs::remove_dir_all(paths::chat_conversation_outputs_dir(conversation));
+            let _ = std::fs::remove_dir_all(paths::chat_conversation_attachments_dir(conversation));
+        }
+        let _ = std::fs::remove_dir_all(workspace_dir);
+    });
     // Its repositories' and folders' passages in the knowledge index go too (off this thread).
     crate::knowledge::prune_in_background();
     Ok(())
@@ -323,6 +338,8 @@ pub fn create_project(db: State<Db>, input: NewProject) -> Result<Project, Strin
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let workspace_id = input.workspace_id.clone();
         let created = queries::create_project(&conn, input).map_err(|e| e.to_string())?;
+        // The same folder, back where it was removed from: its chats come back with it.
+        let _ = queries::reattach_removed_project(&conn, &created);
         let identity = queries::get_workspace_identity(&conn, &workspace_id)
             .map_err(|e| e.to_string())?;
         (created, workspace_id, identity)
@@ -467,7 +484,8 @@ pub fn delete_project(db: State<Db>, id: String) -> Result<(), String> {
             // the repository.
             let _ = crate::team::forget_repository(&conn, &project.workspace_id, &id);
         }
-        queries::delete_project(&conn, &id).map_err(|e| e.to_string())?;
+        // Its chats stay, listed under its name until the workspace goes or the user deletes them.
+        queries::remove_project_keeping_chats(&conn, &id).map_err(|e| e.to_string())?;
         project.map(|p| p.local_path)
     };
     // The checkout PR reviews read from (`review::checkout`) is the project's, and goes with it —
@@ -478,6 +496,14 @@ pub fn delete_project(db: State<Db>, id: String) -> Result<(), String> {
     // And its passages in the knowledge index.
     crate::knowledge::prune_in_background();
     Ok(())
+}
+
+/// The repositories removed from a workspace whose chats are still kept — see
+/// `queries::remove_project_keeping_chats`.
+#[tauri::command]
+pub fn list_removed_projects(db: State<Db>, workspace_id: String) -> Result<Vec<RemovedProject>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    queries::list_removed_projects(&conn, &workspace_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

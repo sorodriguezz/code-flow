@@ -1914,7 +1914,7 @@ pub async fn chat_send(
     // statement, on a turn that may write. Held until the turn ends: dropping the grant
     // revokes its token. Agy and Grok get the best passages with the question instead, below.
     let ws_knowledge = if workspace_scope && matches!(config.provider.as_str(), "claude" | "codex" | "opencode" | "cline") {
-        crate::codemap::mcp::for_workspace_chat_without(&conversation.workspace_id, may_write, full_access, &ws_excluded, &ws_excluded_roots)
+        crate::codemap::mcp::for_workspace_chat_without(&conversation.workspace_id, may_write, full_access, &ws_excluded, &ws_excluded_roots).inspect(|(_, grant)| grant.for_provider(&config.provider))
     } else {
         None
     };
@@ -2280,6 +2280,10 @@ pub async fn chat_send(
     // Boxed for the reason the repository chat's is (`send_chat_message`): the wrappers' by-value
     // moves are stack copies in a debug build.
     let (result, trace) = ai_runs::scoped_with_trace(app, run_id, crate::context::need::within(judgement, async {
+        // The token was made before the run began: from here its `app_run` steps land in this turn's log.
+        if let Some((_, grant)) = &ws_knowledge {
+            grant.attach_current_run();
+        }
         Box::pin(ai::chat_turn(
             &*config.engine,
             &config.binary,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { dbmlAnswer } from "./bridge";
+import { dbmlAnswer, SERVICE_LIST_COMMANDS } from "./bridge";
+import catalog from "../../../src-tauri/src/app_catalog.json";
 import type { DbSchemaDiagram } from "../../types/database";
 
 const column = (name: string, data_type: string, extra: Partial<{ primary_key: boolean; foreign_key: boolean }> = {}) => ({
@@ -32,5 +33,12 @@ describe("a flow's schema as DBML", () => {
     expect(answer.dbml).toMatch(/Table .*capa/);
     expect(answer.dbml).toContain("integer");
     expect(answer.dbml).not.toContain("usuario");
+  });
+});
+
+describe("a model's call that changes the Services list", () => {
+  it("names only commands the catalogue has, so a rename cannot leave the panel stale", () => {
+    const names = new Set((catalog as { name: string }[]).map((c) => c.name));
+    for (const command of SERVICE_LIST_COMMANDS) expect(names.has(command), command).toBe(true);
   });
 });

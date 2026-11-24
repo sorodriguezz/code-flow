@@ -54,6 +54,8 @@ function toolCallLabel(name: string, input: unknown): string {
     return `${name}: ${truncate(input.description)}`;
   }
   if (name === "spawn_agent" && typeof input.task === "string" && input.task.trim()) return `${name}: ${truncate(input.task)}`;
+  // A CodeFlow script is named by the title the model gave it, not by its code (`appScript`).
+  if (/(^|__|[.:/])app_run$/.test(name) && typeof input.title === "string" && input.title.trim()) return `${name}: ${truncate(input.title)}`;
   // Cline's tools take lists (`commands`, `paths`): the first item is what it is doing.
   for (const value of Object.values(input)) {
     if (Array.isArray(value) && typeof value[0] === "string" && value[0].trim() && !TOOL_ARG_KEYS.some((key) => typeof input[key] === "string")) {

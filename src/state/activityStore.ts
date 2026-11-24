@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { listChatConversations, deleteChatConversation, renameChatConversation } from "../lib/tauri/commands";
+import { useRemovedProjectsStore } from "./removedProjectsStore";
 import { onChatTitled } from "../lib/tauri/events";
 import type { ChatConversationSummary } from "../types/domain";
 
@@ -45,6 +46,9 @@ export const useChatHistoryStore = create<ChatHistoryState>((set) => ({
 
   remove: async (projectId, sessionId) => {
     await deleteChatConversation(projectId, sessionId);
+    // The last chat of a removed repository takes the repository off the Inbox's list.
+    const removed = useRemovedProjectsStore.getState().find(projectId);
+    if (removed) void useRemovedProjectsStore.getState().load(removed.workspace_id);
     set((s) => ({
       byProject: {
         ...s.byProject,

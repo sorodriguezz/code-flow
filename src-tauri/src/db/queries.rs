@@ -6,7 +6,7 @@ use super::models::{
     ActivityLogEntry, AgentChain, AgentChainStep, AgentProject, AgentTask, BenchTab, ChainClaim, ChainDetail,
     ChainRepo, ChainStepBrief, ChainTemplate, ChainTemplateStep, ReviewSpec, ChatConversationSummary, DocPage,
     GatedChain, HarvestOutcome, ParkedChain,
-    JobHistoryEntry, NewChainStep, NewProject, NewStoryWorkItem, Project, ReviewContext, ReviewRunDetail,
+    JobHistoryEntry, NewChainStep, NewProject, NewStoryWorkItem, Project, RemovedProject, ReviewContext, ReviewRunDetail,
     ReviewRunSummary, StoryBatch, StoryBatchDetail, StoryDraft, Workspace, WorkspaceActivityEntry,
     WorkspaceAgent, WorkspaceSkill, WorkspaceTerminal, WorkItemReviewRow,
 };
@@ -1029,9 +1029,94 @@ pub fn move_project_to_workspace(conn: &Connection, id: &str, workspace_id: &str
     Ok(())
 }
 
+/// Deletes a project and everything of it, its chats included. The app's own removals (a
+/// collaboration's session checkout, the tests); the user's «remove from CodeFlow» is
+/// [`remove_project_keeping_chats`]. The chats are deleted here rather than by a cascade, since they
+/// no longer have one (`migrations::keep_repo_chats_past_their_repository`).
 pub fn delete_project(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    for table in super::migrations::REPO_CHAT_TABLES {
+        conn.execute(&format!("DELETE FROM {table} WHERE project_id = ?1"), params![id])?;
+    }
+    conn.execute("DELETE FROM removed_projects WHERE id = ?1", params![id])?;
     conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
     Ok(())
+}
+
+/// The user removes a repository from CodeFlow: the project goes, its chats stay — listed under its
+/// name in its workspace ([`list_removed_projects`]) until the workspace is deleted or the user
+/// deletes them. What is not a chat goes with it: turns with no conversation, and the turns of agent
+/// tasks, whose tasks cascade with the project.
+pub fn remove_project_keeping_chats(conn: &Connection, id: &str) -> rusqlite::Result<()> {
+    let Some(project) = get_project(conn, id)? else { return Ok(()) };
+    conn.execute(
+        "DELETE FROM activity_log WHERE project_id = ?1 AND (session_id IS NULL OR substr(session_id, 1, length(?2)) = ?2)",
+        params![id, AGENT_CONVERSATION_PREFIX],
+    )?;
+    if repo_chats_left(conn, id)? {
+        conn.execute(
+            "INSERT OR REPLACE INTO removed_projects (id, workspace_id, name, local_path, removed_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![project.id, project.workspace_id, project.name, project.local_path, now()],
+        )?;
+    } else {
+        forget_removed_project(conn, id)?;
+    }
+    conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// Whether `project_id` still holds a conversation — what keeps a removed repository listed.
+fn repo_chats_left(conn: &Connection, project_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM activity_log WHERE project_id = ?1 AND session_id IS NOT NULL AND substr(session_id, 1, length(?2)) != ?2)",
+        params![project_id, AGENT_CONVERSATION_PREFIX],
+        |row| row.get(0),
+    )
+}
+
+/// The rest of a removed repository, once nothing of it is left to read.
+fn forget_removed_project(conn: &Connection, project_id: &str) -> rusqlite::Result<()> {
+    for table in &super::migrations::REPO_CHAT_TABLES[1..] {
+        conn.execute(&format!("DELETE FROM {table} WHERE project_id = ?1"), params![project_id])?;
+    }
+    conn.execute("DELETE FROM removed_projects WHERE id = ?1", params![project_id])?;
+    Ok(())
+}
+
+/// The removed repositories of a workspace that still hold chats, newest removal first. Read off the
+/// chats themselves, so a repository whose `removed_projects` row did not survive (a database
+/// restored without it) is still listed — with no name.
+pub fn list_removed_projects(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<RemovedProject>> {
+    let mut statement = conn.prepare(
+        "SELECT a.project_id, a.workspace_id, COALESCE(r.name, ''), COALESCE(r.local_path, ''), COALESCE(r.removed_at, MAX(a.created_at))
+         FROM activity_log a LEFT JOIN removed_projects r ON r.id = a.project_id
+         WHERE a.workspace_id = ?1 AND a.session_id IS NOT NULL AND substr(a.session_id, 1, length(?2)) != ?2
+           AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.id = a.project_id)
+         GROUP BY a.project_id
+         ORDER BY 5 DESC",
+    )?;
+    let rows = statement.query_map(params![workspace_id, AGENT_CONVERSATION_PREFIX], |row| {
+        Ok(RemovedProject { id: row.get(0)?, workspace_id: row.get(1)?, name: row.get(2)?, local_path: row.get(3)?, removed_at: row.get(4)? })
+    })?;
+    rows.collect()
+}
+
+/// A repository added back where it was removed from — the same folder, the same workspace — takes
+/// its chats back: they move to the new project and the removed record goes. Returns how many
+/// removed repositories were folded in.
+pub fn reattach_removed_project(conn: &Connection, project: &Project) -> rusqlite::Result<usize> {
+    let wanted = crate::repo_identity::canonical_path(&project.local_path);
+    let same: Vec<String> = list_removed_projects(conn, &project.workspace_id)?
+        .into_iter()
+        .filter(|removed| !removed.local_path.is_empty() && crate::repo_identity::canonical_path(&removed.local_path) == wanted)
+        .map(|removed| removed.id)
+        .collect();
+    for old in &same {
+        for table in super::migrations::REPO_CHAT_TABLES {
+            conn.execute(&format!("UPDATE {table} SET project_id = ?1 WHERE project_id = ?2"), params![project.id, old])?;
+        }
+        conn.execute("DELETE FROM removed_projects WHERE id = ?1", params![old])?;
+    }
+    Ok(same.len())
 }
 
 // ---------- review contexts (per workspace) ----------
@@ -5137,6 +5222,11 @@ pub fn delete_chat_conversation(conn: &Connection, project_id: &str, session_id:
         "DELETE FROM conversation_resets WHERE project_id = ?1 AND session_id = ?2",
         params![project_id, session_id],
     )?;
+    // The last chat of a removed repository takes the record of it along.
+    let removed = conn.query_row("SELECT EXISTS(SELECT 1 FROM removed_projects WHERE id = ?1)", params![project_id], |row| row.get::<_, bool>(0))?;
+    if removed && !repo_chats_left(conn, project_id)? {
+        forget_removed_project(conn, project_id)?;
+    }
     Ok(())
 }
 
@@ -7632,6 +7722,112 @@ ok", "").unwrap().unwrap();
             false,
         )
         .unwrap();
+    }
+
+    /// Removing a repository keeps its chats — and only its chats — under its name, in its
+    /// workspace, until the user deletes them, the same folder comes back, or the workspace goes.
+    #[test]
+    fn a_removed_repositorys_chats_stay_until_deleted_readded_or_their_workspace_goes() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        let (ws, project) = workspace_with_project(&conn, "alpha");
+        log(&conn, &project, "chat-1", "e1", "¿qué hace esto?");
+        log(&conn, &project, "chat-2", "e2", "otra");
+        log(&conn, &project, &format!("{AGENT_CONVERSATION_PREFIX}task"), "e3", "una tarea");
+        conn.execute("INSERT INTO activity_log (id, project_id, question, answer, created_at) VALUES ('loose', ?1, 'q', 'a', 'x')", params![project]).unwrap();
+        rename_chat_conversation(&conn, &project, "chat-1", "Mi chat").unwrap();
+        let stamped: String = conn.query_row("SELECT workspace_id FROM activity_log WHERE session_id = 'chat-1' LIMIT 1", [], |r| r.get(0)).unwrap();
+        assert_eq!(stamped, ws, "every turn is stamped with its workspace on the way in");
+
+        remove_project_keeping_chats(&conn, &project).unwrap();
+        assert!(get_project(&conn, &project).unwrap().is_none());
+        let removed = list_removed_projects(&conn, &ws).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!((removed[0].id.as_str(), removed[0].name.as_str()), (project.as_str(), "alpha-proj"));
+        let chats = list_chat_conversations(&conn, &project, None).unwrap();
+        assert_eq!(chats.iter().map(|c| c.session_id.as_str()).collect::<Vec<_>>().len(), 2);
+        assert!(chats.iter().any(|c| c.title == "Mi chat"), "its rename stays too");
+        let leftovers: i64 = conn
+            .query_row("SELECT COUNT(*) FROM activity_log WHERE project_id = ?1 AND (session_id IS NULL OR session_id LIKE 'agent-%')", params![project], |r| r.get(0))
+            .unwrap();
+        assert_eq!(leftovers, 0, "what was not a chat went with the repository");
+
+        // Deleting one keeps the record; deleting the last takes it.
+        delete_chat_conversation(&conn, &project, "chat-2").unwrap();
+        assert_eq!(list_removed_projects(&conn, &ws).unwrap().len(), 1);
+        delete_chat_conversation(&conn, &project, "chat-1").unwrap();
+        assert!(list_removed_projects(&conn, &ws).unwrap().is_empty());
+        let records: i64 = conn.query_row("SELECT COUNT(*) FROM removed_projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(records, 0);
+
+        // The same folder added back takes its chats back.
+        let (ws2, second) = workspace_with_project(&conn, "beta");
+        log(&conn, &second, "chat-b", "e4", "hola");
+        remove_project_keeping_chats(&conn, &second).unwrap();
+        let again = create_project(
+            &conn,
+            crate::db::models::NewProject {
+                workspace_id: ws2.clone(),
+                name: "beta otra vez".into(),
+                local_path: "/tmp/beta".into(),
+                remote_url: None,
+                color: "#fff".into(),
+                icon: "folder".into(),
+                ado_org: None,
+                ado_project: None,
+                ado_repo_id: None,
+                github_owner: None,
+                github_repo: None,
+                github_host: None,
+                gitlab_project: None,
+                gitlab_host: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(reattach_removed_project(&conn, &again).unwrap(), 1);
+        assert_eq!(list_chat_conversations(&conn, &again.id, None).unwrap().len(), 1);
+        assert!(list_removed_projects(&conn, &ws2).unwrap().is_empty());
+
+        // And a workspace takes every chat of its removed repositories with it.
+        remove_project_keeping_chats(&conn, &again.id).unwrap();
+        assert_eq!(list_removed_projects(&conn, &ws2).unwrap().len(), 1);
+        delete_workspace(&conn, &ws2).unwrap();
+        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM activity_log WHERE project_id = ?1", params![again.id], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0);
+        let records: i64 = conn.query_row("SELECT COUNT(*) FROM removed_projects", [], |r| r.get(0)).unwrap();
+        assert_eq!(records, 0);
+    }
+
+    /// The app's own removals — a collaboration's session checkout — still take the chats along.
+    #[test]
+    fn the_internal_delete_still_takes_a_projects_chats() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        let (ws, project) = workspace_with_project(&conn, "gamma");
+        log(&conn, &project, "chat-1", "e1", "q");
+        delete_project(&conn, &project).unwrap();
+        assert!(list_chat_conversations(&conn, &project, None).unwrap().is_empty());
+        assert!(list_removed_projects(&conn, &ws).unwrap().is_empty());
+    }
+
+    /// The rebuilt tables keep their columns and indexes, lose only the cascade from the project,
+    /// and the migration is a no-op the second time.
+    #[test]
+    fn the_chat_tables_lose_the_projects_cascade_and_nothing_else() {
+        let conn = Connection::open_in_memory().unwrap();
+        migrations::run(&conn).unwrap();
+        for table in migrations::REPO_CHAT_TABLES {
+            let sql: String = conn.query_row("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| r.get(0)).unwrap();
+            assert!(!sql.contains("REFERENCES projects(id)"), "{table}: {sql}");
+            assert!(sql.contains("workspace_id"), "{table}: {sql}");
+        }
+        let index: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_activity_log_session'", [], |r| r.get(0)).unwrap();
+        assert_eq!(index, 1, "the session index survived the rebuild");
+        for column in ["trace", "usage", "question_files", "checkpoint"] {
+            assert!(conn.prepare(&format!("SELECT {column} FROM activity_log")).is_ok(), "{column} is still there");
+        }
+        migrations::run(&conn).unwrap();
     }
 
     /// The bug this split fixes: Gemini/agy reports one fixed session sentinel for every run, so

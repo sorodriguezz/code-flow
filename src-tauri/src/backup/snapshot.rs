@@ -185,6 +185,8 @@ pub const TABLES: &[&str] = &[
     "conversation_titles",
     // The assistant panel's `/clear`s, beside the titles they are keyed like.
     "conversation_resets",
+    // The repositories removed from a workspace whose chats are still kept, beside those chats.
+    "removed_projects",
     // Which assistant conversation is a subchat of which (`chat_lineage`), beside them too.
     "chat_lineage",
     // The chat workspace. Conversations before messages: a message points at the thread it is in.
@@ -470,6 +472,7 @@ pub const GROUPS: &[Group] = &[
             "activity_log",
             "conversation_titles",
             "conversation_resets",
+            "removed_projects",
             "chat_lineage",
             // The chat workspace's threads and their messages. Here rather than in a switch of
             // their own for the reason the group's name argues: to the person reading the settings

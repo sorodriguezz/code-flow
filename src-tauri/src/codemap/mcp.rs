@@ -87,6 +87,23 @@ struct Access {
     /// command, destructive or not, every tool, every saved credential. Only with [`acts`](Self::acts);
     /// a plan turn stays a plan turn. See `agentcli::FULL_ACCESS`.
     full: bool,
+    /// The provider whose CLI holds the token (`claude`, `codex`, `gemini`…), said by whoever started
+    /// the run ([`Grant::for_provider`]) or by the file it was written into. Decides whether the run
+    /// gets `app_run` (`crate::app_script::enabled_for`); unknown means it does not.
+    provider: Option<String>,
+    /// The run itself, when there was one: where `app_run` writes the records the chat draws its step
+    /// from (`crate::app_script::MARK`).
+    run_ctx: Option<RunLink>,
+}
+
+/// [`Access::run_ctx`] — the run's handle, which has no `Debug` of its own.
+#[derive(Clone)]
+struct RunLink(crate::ai_runs::RunCtx);
+
+impl std::fmt::Debug for RunLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RunLink")
+    }
 }
 
 impl Access {
@@ -103,7 +120,15 @@ impl Access {
             confined_to: Vec::new(),
             run: crate::ai_runs::current().map(|ctx| ctx.run_id),
             full: false,
+            provider: None,
+            run_ctx: crate::ai_runs::current().map(RunLink),
         }
+    }
+
+    /// Whether this run is offered `app_run`: its provider has scripts on, and it is not a run that
+    /// gets none of the app (one over someone else's material, «Codi»'s).
+    fn scripts(&self) -> bool {
+        !self.grounding && !self.codi && self.provider.as_deref().is_some_and(crate::app_script::enabled_for)
     }
 
     /// Who is calling a chat tool: the chat whose turn this run is, else the workspace of the folder.
@@ -148,6 +173,31 @@ pub struct Grant {
     token: String,
     /// The run's full permissions, given up with the grant — see [`Access::full`].
     _full: Option<crate::agentcli::FullAccess>,
+}
+
+impl Grant {
+    /// Binds the token to the run this task belongs to, for a grant made before its run began (the
+    /// workspace chat's) — see [`Access::run_ctx`]. A grant already bound keeps its run.
+    pub fn attach_current_run(&self) {
+        let Some(ctx) = crate::ai_runs::current() else { return };
+        if let Ok(mut runs) = RUNS.lock() {
+            if let Some(access) = runs.get_mut(&self.token) {
+                if access.run_ctx.is_none() {
+                    access.run.get_or_insert_with(|| ctx.run_id.clone());
+                    access.run_ctx = Some(RunLink(ctx));
+                }
+            }
+        }
+    }
+
+    /// Says which provider's CLI the token is for — see [`Access::provider`].
+    pub fn for_provider(&self, provider: &str) {
+        if let Ok(mut runs) = RUNS.lock() {
+            if let Some(access) = runs.get_mut(&self.token) {
+                access.provider = Some(provider.to_string());
+            }
+        }
+    }
 }
 
 impl Drop for Grant {
@@ -333,6 +383,14 @@ enum FileClient {
 const GROK_MARKER: &str = "# Managed by CodeFlow";
 
 impl FileClient {
+    /// The provider id of the CLI that reads this file — see [`Access::provider`].
+    fn provider(self) -> &'static str {
+        match self {
+            FileClient::Agy => "gemini",
+            FileClient::Grok => "grok",
+        }
+    }
+
     /// What a run writes, relative to the repository root: a folder for agy, a file for Grok.
     fn path(self) -> &'static str {
         match self {
@@ -503,7 +561,7 @@ fn install_as(client: FileClient, root: &std::path::Path, port: u16, workspace: 
     // From here every way out releases this run's hold.
     let grant = FileGrant { client, root: root.to_path_buf() };
     // Queries only: this token sits in a file in the repository while the run lasts.
-    RUNS.lock().ok()?.insert(token.clone(), Access { workspace, ..Access::new(&root.to_string_lossy(), false, &token) });
+    RUNS.lock().ok()?.insert(token.clone(), Access { workspace, provider: Some(client.provider().to_string()), ..Access::new(&root.to_string_lossy(), false, &token) });
     client.write(root, &format!("http://127.0.0.1:{port}{PATH}/{token}"))?;
     if crate::git_exclude::exclude(root, &client.exclude_line()).unwrap_or(false) {
         if let Some(entry) = FILE_RUNS.lock().ok()?.get_mut(&key) {
@@ -1599,9 +1657,15 @@ async fn app_tool(access: &Access, name: &str, args: &Value) -> Option<Result<St
             acts: access.acts,
             workspace_id: place.workspace_id.clone(),
             project: place.project.clone(),
+            scripts: access.scripts(),
         };
         return Some(if name == crate::app_gateway::LIST_TOOL {
             Ok(crate::app_gateway::list(&scope, args))
+        } else if name == crate::app_gateway::RUN_TOOL {
+            if !scope.scripts {
+                return Some(Err("app_run is switched off for this provider (Settings › Providers › CodeFlow scripts): use app_call".to_string()));
+            }
+            crate::app_script::run(app, &scope, args, access.run_ctx.clone().map(|link| link.0)).await
         } else {
             crate::app_gateway::call(app, &scope, args).await
         });
@@ -1766,6 +1830,15 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
                      and read_reference_file reads a file of one. They are read-only, for comparison.",
                 );
             }
+            // When to write a script, said once where the run has one: the tool's own description
+            // says how, and `app_call` points at it when a task turns into many calls.
+            if access.scripts() {
+                instructions.push_str(
+                    " For a task of several of CodeFlow's commands — a loop over services, one answer feeding the next call, a large \
+                     answer to filter — app_run runs them as one short script and hands back only what it returns, which saves the \
+                     round trips and the tokens; one or two calls are app_call's.",
+                );
+            }
             let db_saved = db_saved_here(&access.root);
             if !access.codi && !access.grounding && db_saved {
                 instructions.push_str(if access.acts {
@@ -1810,6 +1883,10 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
             // context every turn pays for (2026-11-18).
             let unused = unused_app_tools(&access.root, access.workspace);
             own.retain(|tool| !tool["name"].as_str().is_some_and(|name| unused.contains(&name)));
+            // The script only where this run's provider has it on (Settings › Providers).
+            if !access.scripts() {
+                own.retain(|tool| tool["name"].as_str() != Some(crate::app_gateway::RUN_TOOL));
+            }
             let db_saved = db_saved_here(&access.root);
             if !access.grounding && db_saved {
                 own.extend(db_tools(access.acts));

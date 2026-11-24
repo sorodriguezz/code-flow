@@ -3130,6 +3130,7 @@ async fn run_engine(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) 
             // except a run that reads someone else's material, which gets the queries alone.
             let grounding = GROUNDING_TASKS.contains(&inv.task);
             crate::codemap::mcp::for_repository(cwd, !inv.read_only && !grounding, inv.full_access, grounding, inv.extra_dirs).map(|(server, grant)| {
+                grant.for_provider(engine.id());
                 inv.app_mcp.push(server);
                 grant
             })

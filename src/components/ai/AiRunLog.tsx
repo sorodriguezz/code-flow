@@ -26,6 +26,7 @@ import type { RunPhase } from "../../lib/thinking/activity";
 import { parseRunSteps, phaseOfSteps, phaseOfTool, touchedFiles, withDurations, type RunStep } from "../../lib/runSteps";
 import { latestPlan } from "../../lib/runPlan";
 import { PlanChecklist } from "./PlanChecklist";
+import { ScriptStep } from "./ScriptStep";
 import { lanesOf, type SubagentLane } from "../../lib/subagentLanes";
 
 /**
@@ -671,6 +672,14 @@ function StepRow({
             ? "bg-[var(--cf-border-strong)]"
             : "bg-[var(--cf-success)]";
   const clip = wrap ? "whitespace-pre-wrap break-words" : "truncate";
+  // A CodeFlow script is one step that opens into its calls — drawn by the app's own records.
+  if (step.script) {
+    return (
+      <li className="cf-runstep-in min-w-0 py-[2px]">
+        <ScriptStep script={step.script} live={status === "run" || status === "wait"} reading={!compact} />
+      </li>
+    );
+  }
   return (
     <li className={`cf-runstep-in flex min-w-0 gap-2 py-[3px] leading-[1.45] ${wrap ? "items-start" : "items-center"}`}>
       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot} ${wrap ? "mt-[6px]" : ""}`} />

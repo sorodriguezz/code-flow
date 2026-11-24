@@ -498,6 +498,14 @@ pub fn list_workspace_conversations(
 /// Every conversation the chat workspace's own lists leave out — the workspace chats, archived or
 /// not, in every workspace. What the startup sweep adds to [`list_conversations`]'s ids, or it
 /// would take a workspace chat's images for an orphan's.
+/// Every conversation stamped with `workspace_id` — its workspace chats and the chats started in it —
+/// read before the workspace is deleted, so their folders can go with the rows the cascade takes.
+pub fn conversation_ids_of_workspace(conn: &Connection, workspace_id: &str) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare("SELECT id FROM chat_conversations WHERE workspace_id = ?1")?;
+    let rows = statement.query_map(params![workspace_id], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
 pub fn workspace_conversation_ids(conn: &Connection) -> rusqlite::Result<Vec<String>> {
     let mut statement = conn.prepare("SELECT id FROM chat_conversations WHERE workspace_scope = 1")?;
     let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
@@ -1355,6 +1363,28 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    /// Removing a repository leaves the workspace's chats where they were; deleting the workspace
+    /// takes them, messages and all — nothing of it is left to list.
+    #[test]
+    fn a_workspace_chat_outlives_its_repositories_and_goes_with_its_workspace() {
+        let conn = seeded();
+        let id = Uuid::new_v4().to_string();
+        create_workspace_conversation(&conn, &id, "w1", "claude", None, "", "").unwrap();
+        conn.execute(
+            "INSERT INTO chat_messages (id, conversation_id, turn, role, content, created_at) VALUES ('m1', ?1, 1, 'user', 'hola', '2026-01-01T00:00:00+00:00')",
+            params![id],
+        )
+        .unwrap();
+        crate::db::queries::delete_project(&conn, "p1").unwrap();
+        assert_eq!(list_workspace_conversations(&conn, "w1").unwrap().len(), 1, "removing a repository keeps the chat");
+        assert_eq!(conversation_ids_of_workspace(&conn, "w1").unwrap(), vec![id.clone()]);
+
+        crate::db::queries::delete_workspace(&conn, "w1").unwrap();
+        assert!(conversation_ids_of_workspace(&conn, "w1").unwrap().is_empty());
+        let messages: i64 = conn.query_row("SELECT COUNT(*) FROM chat_messages WHERE conversation_id = ?1", params![id], |r| r.get(0)).unwrap();
+        assert_eq!(messages, 0, "its messages go too");
     }
 
     #[test]

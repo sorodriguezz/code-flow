@@ -18,6 +18,17 @@ export interface Workspace {
   created_at: string;
 }
 
+/** Mirrors `db::models::RemovedProject`: a repository removed from CodeFlow whose chats are kept —
+ *  under its old id, in its workspace, until the workspace goes or the user deletes them. */
+export interface RemovedProject {
+  id: string;
+  workspace_id: string;
+  /** Empty when the record of its name did not survive (a restored database). */
+  name: string;
+  local_path: string;
+  removed_at: string;
+}
+
 export interface Project {
   id: string;
   workspace_id: string;
