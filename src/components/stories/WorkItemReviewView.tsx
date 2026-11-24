@@ -67,6 +67,7 @@ import {
   type TaskProposal,
 } from "../../state/workItemReviewStore";
 import { ContextMenu } from "../common/ContextMenu";
+import { WorkItemLookup } from "./WorkItemLookup";
 import { useT } from "../../state/languageStore";
 import { useActiveProjects } from "../../state/workspaceStore";
 import { TaskModelTag } from "../ai/ModelTag";
@@ -75,7 +76,7 @@ import { loadAdoConnections } from "../../lib/adoConnections";
 import { htmlToText } from "../../lib/workItemHtml";
 import { renderInlineMarkdown, renderMarkdown } from "../../lib/markdown";
 import { riseDelay } from "../../lib/rise";
-import { openExternalUrl } from "../../lib/tauri/commands";
+import { adoListProjects, getSetting, openExternalUrl, setSetting } from "../../lib/tauri/commands";
 import { boardLabelKey } from "../../lib/boardLabel";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import type {
@@ -2779,6 +2780,34 @@ export function WorkItemReviewView() {
       .catch(() => setOrgs([]));
   }, []);
 
+  // The project the work-item list is narrowed to, remembered per organisation: an organisation
+  // with a dozen projects listed everyone's items mixed together (user ask, 2026-11-23). Empty is
+  // every project. Loaded with the organisation's project list, so a pick that was since deleted
+  // falls back to all of them.
+  const [adoProjects, setAdoProjects] = useState<string[]>([]);
+  const [searchProject, setSearchProject] = useState("");
+  useEffect(() => {
+    setAdoProjects([]);
+    setSearchProject("");
+    if (!org || orgs.length === 0) return;
+    let cancelled = false;
+    void Promise.all([adoListProjects(org), getSetting(`hu_review_search_project:${org}`).catch(() => null)])
+      .then(([projects, saved]) => {
+        if (cancelled) return;
+        const names = projects.map((p) => p.name).sort((a, b) => a.localeCompare(b));
+        setAdoProjects(names);
+        setSearchProject(saved && names.includes(saved) ? saved : "");
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [org, orgs.length]);
+  const pickSearchProject = (name: string) => {
+    setSearchProject(name);
+    if (org) void setSetting(`hu_review_search_project:${org}`, name).catch(() => {});
+  };
+
   const isBug = item ? kindOf(item.work_item_type) === "bug" : false;
   const TypeIcon = isBug ? Bug : FileText;
   const anyRunning = Object.keys(running).length > 0;
@@ -2847,21 +2876,33 @@ export function WorkItemReviewView() {
 
         {/* Bounded rather than free to grow: on a wide window a `flex-1` field becomes a 1500px box
             for a forty-character link, which reads as a text editor rather than as a lookup. */}
-        <div className="relative min-w-[14rem] max-w-xl flex-1">
-          <ScanSearch
-            size={12}
-            className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--cf-text-muted)]"
-          />
-          <input
-            value={input}
-            onChange={(e) => store().setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void store().load();
-            }}
-            placeholder={t("huReview.inputPlaceholder")}
-            className={`${FIELD_FULL} pl-6`}
-          />
-        </div>
+        {adoProjects.length > 1 && (
+          <div className="w-52 shrink-0" title={t("huReview.projectHint")}>
+            <Select
+              size="field"
+              value={searchProject}
+              ariaLabel={t("huReview.projectFilter")}
+              onChange={pickSearchProject}
+              options={[{ value: "", label: t("huReview.allProjects") }, ...adoProjects.map((name) => ({ value: name, label: name }))]}
+            />
+          </div>
+        )}
+
+        {/* A link or number still loads as typed; with an Azure organisation chosen, the box also
+            lists the work items to pick from — see `WorkItemLookup`. */}
+        <WorkItemLookup
+          org={orgs.length > 0 ? org : ""}
+          project={searchProject}
+          value={input}
+          onChange={(value) => store().setInput(value)}
+          onPick={(id) => {
+            store().setInput(String(id));
+            void store().load();
+          }}
+          onSubmit={() => void store().load()}
+          placeholder={orgs.length > 0 ? t("huReview.inputPlaceholderSearch") : t("huReview.inputPlaceholder")}
+          className={`${FIELD_FULL} pl-6`}
+        />
         <button
           type="button"
           // Armed only by something to look up. With the box cleared on a successful load, this is

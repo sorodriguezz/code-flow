@@ -28,7 +28,7 @@ import {
   type ComposeService,
 } from "./composeFile";
 import { baseName, composeProjectName, dirOf } from "./pageModel";
-import { writeFileBytes } from "../../lib/tauri/commands";
+import { clipboardReadText, writeFileBytes } from "../../lib/tauri/commands";
 import { confirmAction } from "../../state/confirmStore";
 import { listKey, useContainersStore } from "../../state/containersStore";
 import { useT } from "../../state/languageStore";
@@ -346,7 +346,8 @@ function ServiceForm({
 
   const pasteEnv = async () => {
     try {
-      const text = await navigator.clipboard.readText();
+      // Natively: WebKit answers `navigator.clipboard.readText()` with its own «Paste» bubble.
+      const text = await clipboardReadText();
       const rows = text
         .split(/\r?\n/)
         .map((line) => line.trim())

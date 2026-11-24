@@ -190,7 +190,9 @@ function ShowMoreRow({ hidden, onClick }: { hidden: number; onClick: () => void 
 const TREE_SHOWN = "inset(0% 0% 0% 0%)";
 const TREE_HIDDEN = "inset(0% 0% 100% 0%)";
 
-const SIDEBAR_MIN = 200;
+/** Narrowest the panel may be dragged: below it repository names and branches were cut to a few
+ *  letters (was 200 until 2026-11-23). Past it, the drag folds the panel to its chips. */
+const SIDEBAR_MIN = 232;
 const SIDEBAR_MAX = 440;
 /** Folded, the panel is exactly wide enough for a centred project chip inside its own padding.
  *
@@ -2668,7 +2670,10 @@ export function Sidebar() {
   const loadWorkspaces = useWorkspaceStore((s) => s.loadWorkspaces);
   const addProject = useWorkspaceStore((s) => s.addProject);
   const reorderProject = useWorkspaceStore((s) => s.reorderProject);
-  const sidebarWidth = useLayoutStore((s) => s.sizes.sidebarWidth);
+  // Never under the floor, for a width saved before the floor was raised.
+  const sidebarWidth = Math.max(SIDEBAR_MIN, useLayoutStore((s) => s.sizes.sidebarWidth));
+  /** The width when the current drag began: what the panel comes back at if that drag folds it. */
+  const sidebarDragFrom = useRef(sidebarWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   const openProjectInit = useUiStore((s) => s.openProjectInit);
@@ -3191,6 +3196,17 @@ export function Sidebar() {
           max={SIDEBAR_MAX}
           onChange={(w) => setSize("sidebarWidth", w)}
           onCommit={(w) => commitSize("sidebarWidth", w)}
+          // Dragged well past the minimum it folds to its chips, as the fold button and the status
+          // bar's toggle do — and unfolds at the width it had before the drag (user ask, 2026-11-23).
+          onDragChange={(dragging) => {
+            if (dragging) sidebarDragFrom.current = sidebarWidth;
+          }}
+          collapseBeyond={80}
+          onCollapse={() => {
+            setSize("sidebarWidth", sidebarDragFrom.current);
+            commitSize("sidebarWidth", sidebarDragFrom.current);
+            if (!useLayoutStore.getState().flags.sidebarCollapsed) useLayoutStore.getState().toggleFlag("sidebarCollapsed");
+          }}
           seamless
         />
       )}

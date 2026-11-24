@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { clipboardReadText } from "../../lib/tauri/commands";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { ChevronDown, ClipboardPaste, Copy, Eye, EyeOff, FolderOpen, Loader2, Play, Plus, X } from "lucide-react";
 import { Button } from "../common/Button";
@@ -111,7 +112,8 @@ export function RunContainerDialog({ runtime, context, initialImage = "", onClos
 
   const pasteEnv = async () => {
     try {
-      const text = await navigator.clipboard.readText();
+      // Natively: WebKit answers `navigator.clipboard.readText()` with its own «Paste» bubble.
+      const text = await clipboardReadText();
       const rows = text
         .split(/\r?\n/)
         .map((line) => line.trim())

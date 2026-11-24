@@ -495,7 +495,8 @@ export function SharedChatMenu({ workspaceId, chatId, title, persisted }: { work
           className="inline-flex h-5 items-center gap-1 rounded-md px-1.5 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
         >
           <Share2 size={11} className="shrink-0" />
-          {l("Compartir", "Share")}
+          {/* Icon only on a narrow header (the strip is a size container); the title says it. */}
+          <span className="sr-only @[30rem]:not-sr-only">{l("Compartir", "Share")}</span>
           <ChevronDown size={10} className="shrink-0" />
         </button>
       )}

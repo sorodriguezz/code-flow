@@ -14,6 +14,7 @@ const generate: Loader = () => import("./GenerateTools") as never;
 const time: Loader = () => import("./TimeTools") as never;
 const web: Loader = () => import("./WebTools") as never;
 const numbers: Loader = () => import("./NumberCryptoTools") as never;
+const more: Loader = () => import("./MoreTools") as never;
 
 const from = (load: Loader, name: string) => lazy(() => load().then((m) => ({ default: m[name] })));
 
@@ -72,4 +73,14 @@ export const TOOL_COMPONENTS: Record<string, LazyExoticComponent<ComponentType>>
   cert: from(numbers, "CertTool"),
   keypair: from(numbers, "KeyPairTool"),
   aes: from(numbers, "AesTool"),
+  base32: from(more, "Base32Tool"),
+  base58: from(more, "Base58Tool"),
+  "web-format": from(more, "WebFormatTool"),
+  "json-diff": from(more, "JsonDiffTool"),
+  "json-schema": from(more, "JsonSchemaTool"),
+  env: from(more, "EnvTool"),
+  bcrypt: from(more, "BcryptTool"),
+  totp: from(more, "TotpTool"),
+  "id-decode": from(more, "IdDecodeTool"),
+  "qr-read": from(more, "QrReadTool"),
 };

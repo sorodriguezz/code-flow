@@ -120,7 +120,10 @@ export function ChatArtifactsMenu({ workspaceId, conversationId, projectId }: { 
         className="inline-flex h-5 items-center gap-1 rounded-md px-1.5 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       >
         <Layers size={11} className="shrink-0" />
-        {label}
+        {/* Just the count on a narrow header (the strip is a size container), the words when it
+            has room. The button's title still says it in full. */}
+        <span className="tabular-nums @[30rem]:hidden">{list.length}</span>
+        <span className="hidden @[30rem]:inline">{label}</span>
         <ChevronDown size={10} className="shrink-0" />
       </button>
       {menu && (

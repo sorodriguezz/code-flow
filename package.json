@@ -1,7 +1,7 @@
 {
   "name": "codeflow",
   "private": true,
-  "version": "2.9.5",
+  "version": "2.9.6",
   "type": "module",
   "packageManager": "pnpm@11.5.0",
   "scripts": {
@@ -51,6 +51,7 @@
     "dompurify": "^3.4.17",
     "emmet-monaco-es": "5.7.0",
     "framer-motion": "~12.42.2",
+    "js-beautify": "2.0.3",
     "katex": "0.19.0",
     "lucide-react": "^1.59.0",
     "marked": "^18.1.1",
@@ -61,6 +62,7 @@
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "sql-formatter": "^15.9.0",
+    "terser": "5.51.2",
     "y-protocols": "1.0.6",
     "yaml": "^2.9.1",
     "yjs": "13.6.27",
@@ -69,6 +71,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.12.3",
+    "@types/js-beautify": "1.14.3",
     "@types/pdfmake": "^0.3.3",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",

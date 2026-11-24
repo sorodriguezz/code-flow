@@ -1,9 +1,9 @@
 import { Fragment, Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { AlertCircle, ArrowDown, ArrowUp, Download, Eraser, FolderGit2, History, Link2, ListChecks, ListPlus, Loader2, Pencil, Play, RotateCcw, Search, SquarePen, Square, Trash2, UsersRound } from "lucide-react";
+import { AlertCircle, ArrowDown, ArrowUp, Download, Eraser, FolderGit2, History, Link2, ListChecks, ListPlus, Loader2, Pencil, Play, RotateCcw, Search, Square, Trash2, UsersRound } from "lucide-react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { AiRunLog } from "./AiRunLog";
 import { ChatModelPicker } from "./ChatModelPicker";
-import { menuRowClass, useDismiss } from "./docParts";
+import { useDismiss } from "./docParts";
 import { AttachmentBar } from "../chat/AttachmentBar";
 import { AnswerLengthPicker } from "../chat/AnswerLengthPicker";
 import { PermissionsPicker } from "../chat/PermissionsPicker";
@@ -625,7 +625,10 @@ export function WorkspaceChat({
           carries find, export, history and "new chat". Inside it, it was the first thing to scroll
           away — so a conversation long enough to be worth searching was exactly the one whose
           search button had gone. */}
-      <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
+      {/* A size container: on a narrow panel the plan badge, the artifacts chip and «Compartir» keep
+          their icon and drop their words (`@[30rem]`/`@[36rem]` below and in those components)
+          rather than overflowing into each other. */}
+      <div className="@container flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
         <ReposChip
           rows={rows}
           total={snapshot?.repoCount ?? repoCount}
@@ -640,11 +643,11 @@ export function WorkspaceChat({
         )}
         {session.plan && (
           <span
-            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-accent)]"
+            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] px-1.5 py-[3px] text-[10.5px] font-semibold text-[var(--cf-accent)] @[36rem]:py-px"
             title={t("assistant.planModeHint")}
           >
-            <ListChecks size={9} />
-            {t("assistant.planModeBadge")}
+            <ListChecks size={9} className="shrink-0" />
+            <span className="sr-only @[36rem]:not-sr-only">{t("assistant.planModeBadge")}</span>
           </span>
         )}
         <span className="ml-auto" />
@@ -677,15 +680,8 @@ export function WorkspaceChat({
           </button>
         )}
         <HistoryMenu workspaceId={workspaceId} current={conversationId} />
-        <button
-          type="button"
-          onClick={() => openWorkspaceChat(workspaceId)}
-          title={t("assistant.wsChatNew")}
-          aria-label={t("assistant.wsChatNew")}
-          className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-        >
-          <SquarePen size={12} />
-        </button>
+        {/* No «new workspace chat» button: the subchat button beside it and the tab strip's «+»
+            already start one (user ask, 2026-11-23). */}
         <ChatLineageButtons
           scope={lineage}
           title={session.title}
@@ -1075,48 +1071,108 @@ function HistoryMenu({ workspaceId, current }: { workspaceId: string; current: s
         <History size={12} />
       </button>
       {open && (
-        <div role="menu" className={`absolute right-0 top-full z-40 mt-1 max-h-80 w-72 overflow-y-auto ${popoverClass}`}>
+        // Grouped by day, one line a chat: the title, and the time it was last touched on the
+        // right. Two lines a row with the full date on each repeated the same day down the list
+        // and made a long history twice as tall to scan (user ask, 2026-11-23).
+        <div role="menu" className={`absolute right-0 top-full z-40 mt-1 max-h-80 w-80 max-w-[85vw] overflow-y-auto ${popoverClass}`}>
           {list.length === 0 && <p className="px-2.5 py-2 text-[12px] text-[var(--cf-text-faint)]">{t("assistant.wsChatNoHistory")}</p>}
-          {list.map((row) => (
-            <div key={row.id} className="group flex items-center">
-              <button
-                role="menuitem"
-                onClick={() => {
-                  setOpen(false);
-                  openWorkspaceChat(workspaceId, { conversationId: row.id });
-                }}
-                className={menuRowClass(row.id === current, "min-w-0 flex-1")}
-              >
-                <span className="min-w-0">
-                  <span className="block truncate">{row.title || t("assistant.newChat")}</span>
-                  <span className="block truncate text-[11.5px] text-[var(--cf-text-muted)]">
-                    {new Date(row.updatedAt).toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" })}
-                  </span>
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  void confirmAction(t("assistant.wsChatDeleteConfirm", { name: row.title || t("assistant.newChat") })).then((ok) => {
-                    if (!ok) return;
-                    // Closed only when it was deleted: a running chat is refused, and its tab stays.
-                    void useWorkspaceChatStore.getState().remove(row.id).then((deleted) => {
-                      if (deleted) useAiPanelStore.getState().close(`wschat:${row.id}`, workspaceId);
-                    });
-                  });
-                }}
-                title={t("common.delete")}
-                aria-label={t("common.delete")}
-                className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] opacity-0 hover:bg-[var(--cf-hover)] hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
-              >
-                <Trash2 size={12} />
-              </button>
+          {groupByDay(list, locale, t).map((group) => (
+            <div key={group.key} role="group" aria-label={group.label} className="pb-1 last:pb-0">
+              <div className="px-2 pb-0.5 pt-1.5 text-[10.5px] font-medium text-[var(--cf-text-faint)]">{group.label}</div>
+              {group.rows.map((row) => {
+                const isCurrent = row.id === current;
+                const name = row.title || t("assistant.newChat");
+                return (
+                  <div
+                    key={row.id}
+                    className={`group relative flex h-7 items-center rounded-md transition-colors duration-100 ${
+                      isCurrent ? "bg-[var(--cf-hover)]" : "hover:bg-[var(--cf-hover)]"
+                    }`}
+                  >
+                    <button
+                      role="menuitem"
+                      aria-current={isCurrent || undefined}
+                      onClick={() => {
+                        setOpen(false);
+                        if (!isCurrent) openWorkspaceChat(workspaceId, { conversationId: row.id });
+                      }}
+                      title={name}
+                      className="flex h-full min-w-0 flex-1 items-center gap-2 pl-2 pr-8 text-left"
+                    >
+                      <span
+                        aria-hidden
+                        className={`h-1.5 w-1.5 shrink-0 rounded-full ${isCurrent ? "bg-[var(--cf-accent)]" : "bg-transparent"}`}
+                      />
+                      <span className={`min-w-0 flex-1 truncate text-[12.5px] ${isCurrent ? "font-medium text-[var(--cf-text)]" : "text-[var(--cf-text)]"}`}>
+                        {name}
+                      </span>
+                    </button>
+                    {/* The time and the delete button share the row's right end: the time at rest,
+                        the button under the pointer or the keyboard. */}
+                    <span className="pointer-events-none absolute right-2 text-[11px] tabular-nums text-[var(--cf-text-faint)] group-focus-within:opacity-0 group-hover:opacity-0">
+                      {new Date(row.updatedAt).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void confirmAction(t("assistant.wsChatDeleteConfirm", { name })).then((ok) => {
+                          if (!ok) return;
+                          // Closed only when it was deleted: a running chat is refused, and its tab stays.
+                          void useWorkspaceChatStore.getState().remove(row.id).then((deleted) => {
+                            if (deleted) useAiPanelStore.getState().close(`wschat:${row.id}`, workspaceId);
+                          });
+                        });
+                      }}
+                      title={t("common.delete")}
+                      aria-label={`${t("common.delete")}: ${name}`}
+                      className="absolute right-1 flex h-5 w-5 items-center justify-center rounded text-[var(--cf-text-muted)] opacity-0 hover:text-[var(--cf-danger)] focus:opacity-100 group-hover:opacity-100"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           ))}
         </div>
       )}
     </div>
   );
+}
+
+/** A history list split into days, newest first as it comes: «Hoy», «Ayer», then the date. */
+function groupByDay<R extends { updatedAt: string | number }>(
+  rows: readonly R[],
+  locale: string,
+  t: ReturnType<typeof useT>,
+): { key: string; label: string; rows: R[] }[] {
+  const dayKey = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  const now = new Date();
+  const today = dayKey(now);
+  const yesterday = dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
+  const groups: { key: string; label: string; rows: R[] }[] = [];
+  for (const row of rows) {
+    const date = new Date(row.updatedAt);
+    const key = dayKey(date);
+    let group = groups[groups.length - 1];
+    if (!group || group.key !== key) {
+      const label =
+        key === today
+          ? t("assistant.today")
+          : key === yesterday
+            ? t("assistant.yesterday")
+            : date.toLocaleDateString(locale, {
+                weekday: "short",
+                day: "numeric",
+                month: "short",
+                ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
+              });
+      group = { key, label, rows: [] };
+      groups.push(group);
+    }
+    group.rows.push(row);
+  }
+  return groups;
 }
 
 /** The line drawn above the question the engine started over at. */
@@ -1178,7 +1234,10 @@ function ReposChip({
     onScope(next.length === rows.length ? null : next);
   };
   return (
-    <div ref={ref} className="relative min-w-0">
+    // A flex box, so the button inside shrinks with it and its label truncates. As a plain block the
+    // box shrank and the button kept its width, painting «10 repos» under the plan badge beside it
+    // (user report, 2026-11-23).
+    <div ref={ref} className="relative flex min-w-0">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -1186,7 +1245,7 @@ function ReposChip({
         aria-expanded={open}
         aria-label={`${label}. ${t("assistant.wsChatReposOpen")}`}
         title={problems > 0 ? t("assistant.wsChatReposProblem") : t("assistant.wsChatHint")}
-        className={`inline-flex min-w-0 items-center gap-1 rounded-md px-1 py-0.5 hover:bg-[var(--cf-hover)] ${
+        className={`inline-flex min-w-0 max-w-full items-center gap-1 rounded-md px-1 py-0.5 hover:bg-[var(--cf-hover)] ${
           problems > 0 ? "text-[var(--cf-warning)]" : "text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
         }`}
       >

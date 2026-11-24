@@ -702,23 +702,25 @@ export function PanelChat({
       {/* Above the scroller, not in it: find, export and "move to the chat workspace" are needed
           most in a long conversation, which is exactly the one that had scrolled them off the
           top. Same strip, same place, as the workspace chat's. */}
-      <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
+      {/* A size container, like the workspace chat's: on a narrow panel the badge and the artifacts
+          chip keep their icon and drop their words instead of crowding the repository's name. */}
+      <div className="@container flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
         <span className="min-w-0 truncate">{repoName}</span>
         {planMode ? (
           <span
-            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-accent)]"
+            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] px-1.5 py-[3px] text-[10.5px] font-semibold text-[var(--cf-accent)] @[36rem]:py-px"
             title={t("assistant.planModeHint")}
           >
-            <ListChecks size={9} />
-            {t("assistant.planModeBadge")}
+            <ListChecks size={9} className="shrink-0" />
+            <span className="sr-only @[36rem]:not-sr-only">{t("assistant.planModeBadge")}</span>
           </span>
         ) : (
           <span
-            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_13%,transparent)] px-1.5 py-px text-[10.5px] font-semibold text-[var(--cf-warning)]"
+            className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_13%,transparent)] px-1.5 py-[3px] text-[10.5px] font-semibold text-[var(--cf-warning)] @[36rem]:py-px"
             title={t("assistant.canEditHint", { repo: repoName })}
           >
-            <FilePen size={9} />
-            {t("assistant.canEdit")}
+            <FilePen size={9} className="shrink-0" />
+            <span className="sr-only @[36rem]:not-sr-only">{t("assistant.canEdit")}</span>
           </span>
         )}
         <span className="ml-auto" />

@@ -17,8 +17,8 @@ component's own licence wins — which is what section 6 says.
 
 | What ships | Count |
 |---|---|
-| npm packages (production tree) | 350 resolved versions of 321 packages |
-| Rust crates (resolved for macOS on Apple Silicon, macOS on Intel and Windows) | 880 resolved versions of 774 crates |
+| npm packages (production tree) | 390 resolved versions of 360 packages |
+| Rust crates (resolved for macOS on Apple Silicon, macOS on Intel and Windows) | 882 resolved versions of 776 crates |
 | C libraries compiled into the app | 6, plus 4 bundled inside them |
 | Runtimes, drivers and web apps bundled with it | 3 |
 | Fonts | 11 |
@@ -290,7 +290,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### MIT — 240 packages
+### MIT — 266 packages
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -313,6 +313,11 @@ because there the order carries meaning.
 | `@iconify-json/vscode-icons` | 1.2.91 | MIT | <https://icon-sets.iconify.design/vscode-icons> |
 | `@iconify/types` | 2.0.0 | MIT | <https://github.com/iconify/iconify> |
 | `@iconify/utils` | 3.1.7 | MIT | <https://iconify.design/docs/libraries/utils> |
+| `@jridgewell/gen-mapping` | 0.3.13 | MIT | <https://github.com/jridgewell/sourcemaps/tree/main/packages/gen-mapping> |
+| `@jridgewell/resolve-uri` | 3.1.2 | MIT | <https://github.com/jridgewell/resolve-uri> |
+| `@jridgewell/source-map` | 0.3.11 | MIT | <https://github.com/jridgewell/sourcemaps/tree/main/packages/source-map> |
+| `@jridgewell/sourcemap-codec` | 1.5.5 | MIT | <https://github.com/jridgewell/sourcemaps/tree/main/packages/sourcemap-codec> |
+| `@jridgewell/trace-mapping` | 0.3.31 | MIT | <https://github.com/jridgewell/sourcemaps/tree/main/packages/trace-mapping> |
 | `@mermaid-js/parser` | 0.6.3, 1.2.1 | MIT | <https://github.com/mermaid-js/mermaid/tree/develop/packages/mermaid/parser> |
 | `@monaco-editor/loader` | 1.7.0 | MIT | <https://github.com/suren-atoyan/monaco-loader> |
 | `@monaco-editor/react` | 4.7.0 | MIT | <https://github.com/suren-atoyan/monaco-react> |
@@ -320,6 +325,7 @@ because there the order carries meaning.
 | `@noble/curves` | 2.4.0 | MIT | <https://paulmillr.com/noble> |
 | `@noble/hashes` | 1.8.0, 2.4.0 | MIT | <https://paulmillr.com/noble> |
 | `@noble/post-quantum` | 0.7.1 | MIT | <https://paulmillr.com/noble> |
+| `@one-ini/wasm` | 0.2.1 | MIT | <https://github.com/one-ini/core> |
 | `@radix-ui/primitive` | 1.0.0, 1.1.1 | MIT | <https://radix-ui.com/primitives> |
 | `@radix-ui/react-arrow` | 1.1.2 | MIT | <https://radix-ui.com/primitives> |
 | `@radix-ui/react-collection` | 1.0.1 | MIT | <https://radix-ui.com/primitives> |
@@ -345,6 +351,8 @@ because there the order carries meaning.
 | `@radix-ui/react-use-rect` | 1.1.0 | MIT | <https://radix-ui.com/primitives> |
 | `@radix-ui/react-use-size` | 1.1.0 | MIT | <https://radix-ui.com/primitives> |
 | `@radix-ui/rect` | 1.1.0 | MIT | <https://radix-ui.com/primitives> |
+| `@supabase/node-fetch` | 2.6.15 | MIT | <https://github.com/supabase/node-fetch> |
+| `@supabase/realtime-js` | 2.11.2 | MIT | <https://github.com/supabase/realtime-js> |
 | `@types/d3` | 7.4.3 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3> |
 | `@types/d3-array` | 3.2.2 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-array> |
 | `@types/d3-axis` | 3.0.6 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-axis> |
@@ -378,11 +386,13 @@ because there the order carries meaning.
 | `@types/d3-zoom` | 3.0.9 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/d3-zoom> |
 | `@types/geojson` | 7946.0.16 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/geojson> |
 | `@types/node` | 26.2.0 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/node> |
+| `@types/phoenix` | 1.6.8 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/phoenix> |
 | `@types/react` | 19.3.0 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/react> |
 | `@types/react-dom` | 19.3.0 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/react-dom> |
 | `@types/readable-stream` | 4.0.10 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/readable-stream> |
 | `@types/trusted-types` | 2.0.7 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/trusted-types> |
 | `@types/urijs` | 1.19.26 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/urijs> |
+| `@types/ws` | 8.18.2 | MIT | <https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/ws> |
 | `@upsetjs/venn.js` | 2.0.0 | MIT | <https://github.com/upsetjs/venn.js> |
 | `@xterm/addon-fit` | 0.11.0 | MIT | <https://github.com/xtermjs/xterm.js/tree/master> |
 | `@xterm/addon-search` | 0.16.0 | MIT | <https://github.com/xtermjs/xterm.js/tree/master> |
@@ -393,20 +403,25 @@ because there the order carries meaning.
 | `@xyflow/react` | 12.12.0 | MIT | <https://reactflow.dev> |
 | `@xyflow/system` | 0.0.83 | MIT | <https://github.com/xyflow/xyflow> |
 | `abort-controller` | 3.0.0 | MIT | <https://github.com/mysticatea/abort-controller> |
+| `acorn` | 8.19.0 | MIT | <https://github.com/acornjs/acorn> |
 | `aria-hidden` | 1.2.6 | MIT | <https://github.com/theKashey/aria-hidden> |
+| `balanced-match` | 4.0.4 | MIT | <https://github.com/juliangruber/balanced-match> |
 | `base64-js` | 0.0.8, 1.5.1 | MIT | <https://github.com/beatgammit/base64-js> |
 | `binary-extensions` | 2.3.0 | MIT | <https://github.com/sindresorhus/binary-extensions> |
+| `brace-expansion` | 5.0.13 | MIT | <https://github.com/juliangruber/brace-expansion> |
 | `braces` | 3.0.3 | MIT | <https://github.com/micromatch/braces> |
 | `brotli` | 1.3.3 | MIT | <https://github.com/devongovett/brotli.js> |
 | `browser-or-node` | 3.0.0 | MIT | <https://github.com/flexdinesh/browser-or-node> |
 | `buffer` | 6.0.3 | MIT | <https://github.com/feross/buffer> |
+| `buffer-from` | 1.1.2 | MIT | <https://github.com/LinusU/buffer-from> |
 | `canvas-roundrect-polyfill` | 0.0.1 | MIT | <https://github.com/Kaiido/roundRect> |
 | `chevrotain-allstar` | 0.3.1 | MIT | <https://github.com/langium/chevrotain-allstar> |
 | `chokidar` | 3.6.0 | MIT | <https://github.com/paulmillr/chokidar> |
 | `classcat` | 5.0.5 | MIT | <https://github.com/jorgebucaran/classcat> |
 | `clone` | 2.1.2 | MIT | <https://github.com/pvorb/node-clone> |
 | `clsx` | 1.1.1 | MIT | <https://github.com/lukeed/clsx> |
-| `commander` | 15.0.0, 2.20.3, 7.2.0 | MIT | <https://github.com/tj/commander.js> |
+| `commander` | 14.0.3, 15.0.0, 2.20.3, 7.2.0 | MIT | <https://github.com/tj/commander.js> |
+| `config-chain` | 1.1.13 | MIT | <http://github.com/dominictarr/config-chain> |
 | `cose-base` | 1.0.3, 2.2.0 | MIT | <https://github.com/iVis-at-Bilkent/cose-base> |
 | `cross-env` | 7.0.3 | MIT | <https://github.com/kentcdodds/cross-env> |
 | `cross-spawn` | 7.0.6 | MIT | <https://github.com/moxystudio/node-cross-spawn> |
@@ -419,6 +434,7 @@ because there the order carries meaning.
 | `detect-node-es` | 1.1.0 | MIT | <https://github.com/thekashey/detect-node> |
 | `dfa` | 1.2.0 | MIT | <https://github.com/devongovett/dfa> |
 | `discontinuous-range` | 1.0.0 | MIT | <https://github.com/dtudury/discontinuous-range> |
+| `editorconfig` | 3.0.2 | MIT | <https://github.com/editorconfig/editorconfig-core-js> |
 | `emmet` | 2.4.11 | MIT | <https://github.com/emmetio/emmet> |
 | `emmet-monaco-es` | 5.7.0 | MIT | <https://github.com/troy351/emmet-monaco-es> |
 | `es-toolkit` | 1.52.0 | MIT | <https://es-toolkit.dev> |
@@ -445,12 +461,16 @@ because there the order carries meaning.
 | `is-glob` | 4.0.3 | MIT | <https://github.com/micromatch/is-glob> |
 | `is-number` | 7.0.0 | MIT | <https://github.com/jonschlinkert/is-number> |
 | `is-url` | 1.2.4 | MIT | <https://github.com/segmentio/is-url> |
+| `isomorphic.js` | 0.2.5 | MIT | <https://github.com/dmonad/isomorphic.js> |
 | `jotai` | 2.11.0 | MIT | <https://github.com/pmndrs/jotai> |
 | `jotai-scope` | 0.7.2 | MIT | <https://github.com/jotaijs/jotai-scope> |
+| `js-beautify` | 2.0.3 | MIT | <https://beautifier.io> |
+| `js-cookie` | 3.0.8 | MIT | <https://github.com/js-cookie/js-cookie> |
 | `katex` | 0.19.0 | MIT | <https://katex.org> |
 | `khroma` | 2.1.0 | MIT | <https://github.com/fabiospampinato/khroma> |
 | `langium` | 3.3.1 | MIT | <https://langium.org> |
 | `layout-base` | 1.0.2, 2.0.1 | MIT | <https://github.com/iVis-at-Bilkent/layout-base> |
+| `lib0` | 0.2.120 | MIT | <https://github.com/dmonad/lib0> |
 | `linebreak` | 1.1.0 | MIT | <https://github.com/devongovett/linebreaker> |
 | `lodash` | 4.18.1 | MIT | <https://lodash.com> |
 | `lodash-es` | 4.18.1 | MIT | <https://lodash.com/custom-builds> |
@@ -506,6 +526,7 @@ because there the order carries meaning.
 | `shebang-command` | 2.0.0 | MIT | <https://github.com/kevva/shebang-command> |
 | `shebang-regex` | 3.0.0 | MIT | <https://github.com/sindresorhus/shebang-regex> |
 | `sliced` | 1.0.1 | MIT | <https://github.com/aheckmann/sliced> |
+| `source-map-support` | 0.5.21 | MIT | <https://github.com/evanw/node-source-map-support> |
 | `sql-formatter` | 15.9.0 | MIT | <https://github.com/sql-formatter-org/sql-formatter> |
 | `state-local` | 1.0.7 | MIT | <https://github.com/suren-atoyan/state-local> |
 | `strictdom` | 1.0.1 | MIT | <https://github.com/wilsonpage/strictdom> |
@@ -514,6 +535,7 @@ because there the order carries meaning.
 | `tiny-inflate` | 1.0.3 | MIT | <https://github.com/devongovett/tiny-inflate> |
 | `tinyexec` | 1.3.1 | MIT | <https://github.com/tinylibs/tinyexec> |
 | `to-regex-range` | 5.0.1 | MIT | <https://github.com/micromatch/to-regex-range> |
+| `tr46` | 0.0.3 | MIT | <https://github.com/Sebmaster/tr46.js> |
 | `ts-dedent` | 2.3.0 | MIT | <https://github.com/tamino-martinius/node-ts-dedent> |
 | `tunnel-rat` | 0.1.2 | MIT | <https://github.com/pmndrs/tunnel-rat> |
 | `undici-types` | 8.3.0 | MIT | <https://undici.nodejs.org> |
@@ -531,14 +553,19 @@ because there the order carries meaning.
 | `vscode-languageserver-types` | 3.17.5 | MIT | <https://github.com/Microsoft/vscode-languageserver-node> |
 | `vscode-uri` | 3.0.8 | MIT | <https://github.com/microsoft/vscode-uri> |
 | `webworkify` | 1.5.0 | MIT | <https://github.com/substack/webworkify> |
+| `whatwg-url` | 5.0.0 | MIT | <https://github.com/jsdom/whatwg-url> |
 | `wordwrap` | 1.0.0 | MIT | <https://github.com/substack/node-wordwrap> |
+| `ws` | 8.23.0 | MIT | <https://github.com/websockets/ws> |
 | `xmldoc` | 2.0.3 | MIT | <https://github.com/nfarina/xmldoc> |
+| `y-protocols` | 1.0.6 | MIT | <https://github.com/yjs/y-protocols> |
+| `yjs` | 13.6.27 | MIT | <https://docs.yjs.dev> |
 | `zustand` | 4.5.7, 5.0.15 | MIT | <https://github.com/pmndrs/zustand> |
 
-### ISC — 39 packages
+### ISC — 44 packages
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
+| `abbrev` | 5.0.0 | ISC | <https://github.com/npm/abbrev-js> |
 | `anymatch` | 3.1.3 | ISC | <https://github.com/micromatch/anymatch> |
 | `d3` | 7.9.0 | ISC | <https://d3js.org> |
 | `d3-array` | 3.2.4 | ISC | <https://d3js.org/d3-array> |
@@ -573,9 +600,13 @@ because there the order carries meaning.
 | `delaunator` | 5.1.0 | ISC | <https://github.com/mapbox/delaunator> |
 | `glob-parent` | 5.1.2 | ISC | <https://github.com/gulpjs/glob-parent> |
 | `inherits` | 2.0.4 | ISC | <https://github.com/isaacs/inherits> |
+| `ini` | 1.3.8 | ISC | <https://github.com/isaacs/ini> |
 | `internmap` | 1.0.1, 2.0.3 | ISC | <https://github.com/mbostock/internmap> |
 | `isexe` | 2.0.0 | ISC | <https://github.com/isaacs/isexe> |
 | `lucide-react` | 1.59.0 | ISC | <https://lucide.dev> |
+| `nopt` | 10.0.1 | ISC | <https://github.com/npm/nopt> |
+| `proto-list` | 1.2.4 | ISC | <https://github.com/isaacs/proto-list> |
+| `semver` | 7.8.6 | ISC | <https://github.com/npm/node-semver> |
 | `which` | 2.0.2 | ISC | <https://github.com/isaacs/node-which> |
 | `yaml` | 2.9.0, 2.9.1 | ISC | <https://eemeli.org/yaml> |
 
@@ -598,7 +629,7 @@ because there the order carries meaning.
 | `pwacompat` | 2.0.17 | Apache-2.0 | <https://github.com/GoogleChrome/pwacompat> |
 | `quicktype-core` | 26.0.0 | Apache-2.0 | <https://github.com/glideapps/quicktype> |
 
-### BSD-3-Clause — 10 packages
+### BSD-3-Clause — 11 packages
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -611,6 +642,7 @@ because there the order carries meaning.
 | `ieee754` | 1.2.1 | BSD-3-Clause | <https://github.com/feross/ieee754> |
 | `moo` | 0.5.3 | BSD-3-Clause | <https://github.com/tjvr/moo> |
 | `rw` | 1.3.3 | BSD-3-Clause | <https://github.com/mbostock/rw> |
+| `source-map` | 0.6.1 | BSD-3-Clause | <https://github.com/mozilla/source-map> |
 | `source-map-js` | 1.2.2 | BSD-3-Clause | <https://github.com/7rulnik/source-map-js> |
 
 ### Apache-2.0 OR MIT — 6 packages
@@ -624,6 +656,17 @@ because there the order carries meaning.
 | `@tauri-apps/plugin-process` | 2.3.1 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/plugins-workspace> |
 | `@tauri-apps/plugin-updater` | 2.10.1 | Apache-2.0 OR MIT | <https://github.com/tauri-apps/plugins-workspace> |
 
+### BlueOak-1.0.0 — 6 packages
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `glob` | 13.0.7 | BlueOak-1.0.0 | <https://github.com/isaacs/node-glob> |
+| `lru-cache` | 11.5.3 | BlueOak-1.0.0 | <https://github.com/isaacs/node-lru-cache> |
+| `minimatch` | 10.2.6 | BlueOak-1.0.0 | <https://github.com/isaacs/minimatch> |
+| `minipass` | 7.1.3 | BlueOak-1.0.0 | <https://github.com/isaacs/minipass> |
+| `path-scurry` | 2.0.2 | BlueOak-1.0.0 | <https://github.com/isaacs/path-scurry> |
+| `sax` | 1.6.1 | BlueOak-1.0.0 | <https://github.com/isaacs/sax-js> |
+
 ### CC0-1.0 — 3 packages
 
 | Component | Version | Licence (SPDX) | Project |
@@ -631,6 +674,13 @@ because there the order carries meaning.
 | `@iconify-json/logos` | 1.2.17 | CC0-1.0 | <https://icon-sets.iconify.design/logos> |
 | `fractional-indexing` | 3.2.0 | CC0-1.0 | <https://github.com/rocicorp/fractional-indexing> |
 | `railroad-diagrams` | 1.0.0 | CC0-1.0 | <https://github.com/tabatkins/railroad-diagrams> |
+
+### BSD-2-Clause — 2 packages
+
+| Component | Version | Licence (SPDX) | Project |
+|---|---|---|---|
+| `terser` | 5.51.2 | BSD-2-Clause | <https://terser.org> |
+| `webidl-conversions` | 3.0.1 | BSD-2-Clause | <https://github.com/jsdom/webidl-conversions> |
 
 ### OFL-1.1 — 2 packages
 
@@ -650,12 +700,6 @@ because there the order carries meaning.
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
 | `dompurify` | 3.4.17 | Apache-2.0 OR MPL-2.0 | <https://github.com/cure53/DOMPurify> |
-
-### BlueOak-1.0.0 — 1 package
-
-| Component | Version | Licence (SPDX) | Project |
-|---|---|---|---|
-| `sax` | 1.6.1 | BlueOak-1.0.0 | <https://github.com/isaacs/sax-js> |
 
 ### MIT AND Zlib — 1 package
 
@@ -694,7 +738,7 @@ dropped, and the branches of an `OR` are sorted, so that one licence gets one he
 four spellings. Expressions containing `AND` are left exactly as their manifest declares them,
 because there the order carries meaning.
 
-### Apache-2.0 OR MIT — 449 crates
+### Apache-2.0 OR MIT — 450 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -738,6 +782,7 @@ because there the order carries meaning.
 | `block-buffer` | 0.10.4, 0.12.1 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `block-padding` | 0.3.3, 0.4.2 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `blocking` | 1.6.2 | Apache-2.0 OR MIT | <https://github.com/smol-rs/blocking> |
+| `blowfish` | 0.10.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/block-ciphers> |
 | `bs58` | 0.5.1 | Apache-2.0 OR MIT | <https://github.com/Nullus157/bs58-rs> |
 | `bstr` | 1.13.0 | Apache-2.0 OR MIT | <https://github.com/BurntSushi/bstr> |
 | `btoi` | 0.5.0 | Apache-2.0 OR MIT | <https://github.com/niklasf/rust-btoi> |
@@ -1148,7 +1193,7 @@ because there the order carries meaning.
 | `zeroize` | 1.9.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 | `zeroize_derive` | 1.5.0 | Apache-2.0 OR MIT | <https://github.com/RustCrypto/utils> |
 
-### MIT — 173 crates
+### MIT — 174 crates
 
 | Component | Version | Licence (SPDX) | Project |
 |---|---|---|---|
@@ -1159,6 +1204,7 @@ because there the order carries meaning.
 | `axum` | 0.8.9 | MIT | <https://github.com/tokio-rs/axum> |
 | `axum-core` | 0.5.6 | MIT | <https://github.com/tokio-rs/axum> |
 | `axum-macros` | 0.5.1 | MIT | <https://github.com/tokio-rs/axum> |
+| `bcrypt` | 0.19.3 | MIT | <https://github.com/Keats/rust-bcrypt> |
 | `bitvec` | 1.1.1 | MIT | <https://github.com/bitvecto-rs/bitvec> |
 | `block2` | 0.6.2 | MIT | <https://github.com/madsmtm/objc2> |
 | `bson` | 2.15.0 | MIT | <https://github.com/mongodb/bson-rust> |

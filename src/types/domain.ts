@@ -232,6 +232,8 @@ export interface WorkItem {
   work_item_type: string;
   state: string;
   assigned_to: string | null;
+  /** The Azure project it lives in. */
+  project?: string | null;
 }
 
 export interface GitIdentity {

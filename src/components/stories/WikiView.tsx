@@ -2,9 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   BookText,
   CircleAlert,
+  Check,
   CloudDownload,
   ExternalLink,
   FileCode2,
+  FileText,
   History,
   Loader2,
   MoreHorizontal,
@@ -532,10 +534,53 @@ function ImportWikiModal({ onClose }: { onClose: () => void }) {
   const candidates = useWikiPathCandidates(org, project, wikiId, path, Boolean(error));
 
   // One organisation is the common case, and making somebody choose from a list of one is a step
-  // that only exists to be got through.
+  // that only exists to be got through. The same for a project's only wiki.
   useEffect(() => {
     if (!org && orgs.length === 1) setOrg(orgs[0]);
   }, [org, orgs]);
+  useEffect(() => {
+    if (!wikiId && wikis.length === 1) setWikiId(wikis[0].id);
+  }, [wikiId, wikis]);
+
+  // The wiki's pages, listed as soon as a wiki is chosen: the page is picked from what the wiki
+  // has rather than typed from memory and 404'd on a dash (user ask, 2026-11-23). The field above
+  // the list filters it, and a pasted URL still lands on its page.
+  const wikiKey = `${org}|${project}|${wikiId}`;
+  const [listing, setListing] = useState<{ key: string; pages: AdoWikiPage[]; error: string } | null>(null);
+  useEffect(() => {
+    if (!org || !project || !wikiId) {
+      setListing(null);
+      return;
+    }
+    let cancelled = false;
+    void adoListWikiPages(org, project, wikiId)
+      .then((pages) => {
+        if (!cancelled) setListing({ key: wikiKey, pages, error: "" });
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setListing({ key: wikiKey, pages: [], error: String(e) });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [org, project, wikiId, wikiKey]);
+  const pagesLoading = Boolean(wikiId) && listing?.key !== wikiKey;
+  const listed = listing?.key === wikiKey ? listing : null;
+  /** Every page while nothing is typed or a page is picked; otherwise those whose title or path
+   *  holds what was typed — matched under `wikiPathKey`, so a dash finds a space. */
+  const visible = useMemo(() => {
+    const pages = listed?.pages ?? [];
+    const needle = wikiPathKey(path).replace(/^\//, "");
+    if (!needle || pages.some((page) => page.path === path)) return { rows: pages, filtering: false };
+    return {
+      rows: pages.filter((page) => wikiPathKey(page.path).includes(needle) || wikiPathKey(page.title).includes(needle)),
+      filtering: true,
+    };
+  }, [listed, path]);
+  const pickedRow = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    pickedRow.current?.scrollIntoView({ block: "nearest" });
+  }, [path, listed]);
 
   const ready = Boolean(detail && detail.content.trim() && !importing);
 
@@ -569,7 +614,8 @@ function ImportWikiModal({ onClose }: { onClose: () => void }) {
       icon={CloudDownload}
       title={t("docs.import")}
       subtitle={t("docs.importSubtitle")}
-      width="max-w-lg"
+      // Room for the page list's deeper titles; still no wider than the window allows.
+      width="max-w-[min(720px,92vw)]"
       busy={importing}
       dismissOnBackdrop={false}
       onClose={onClose}
@@ -639,7 +685,7 @@ function ImportWikiModal({ onClose }: { onClose: () => void }) {
                 autoFocus
                 value={path}
                 onChange={(e) => setPath(wikiPathFrom(e.target.value))}
-                placeholder="/Servicios/Checkout API"
+                placeholder={t("docs.importPathPlaceholder")}
                 aria-label={t("docs.pagePath")}
                 className={`${FIELD} font-mono`}
               />
@@ -647,6 +693,59 @@ function ImportWikiModal({ onClose }: { onClose: () => void }) {
                 {t("docs.importPathHint")}
               </span>
             </label>
+
+            {wikiId && (
+              <div
+                role="listbox"
+                aria-label={t("docs.importPages")}
+                className="max-h-64 overflow-y-auto rounded-md border border-[var(--cf-border)] p-1"
+              >
+                {pagesLoading ? (
+                  <p className="flex items-center justify-center gap-1.5 px-2 py-4 text-[12px] text-[var(--cf-text-muted)]">
+                    <Loader2 size={12} className="animate-spin" />
+                    {t("stories.loadingPages")}
+                  </p>
+                ) : listed?.error ? (
+                  <p className="px-2 py-3 text-[11.5px] leading-snug text-[var(--cf-danger)]">{listed.error}</p>
+                ) : visible.rows.length === 0 ? (
+                  <p className="px-2 py-4 text-center text-[12px] text-[var(--cf-text-muted)]">
+                    {visible.filtering ? t("docs.importNoMatch") : t("stories.noPages")}
+                  </p>
+                ) : (
+                  visible.rows.map((page) => {
+                    const picked = page.path === path;
+                    return (
+                      <button
+                        key={page.path}
+                        ref={picked ? pickedRow : undefined}
+                        type="button"
+                        role="option"
+                        aria-selected={picked}
+                        onClick={() => setPath(page.path)}
+                        title={page.path}
+                        // A tree while browsing; flat with each page's folder beside it while
+                        // filtering, where the indentation would no longer say what it is under.
+                        style={{ paddingLeft: visible.filtering ? 8 : 8 + page.depth * 14 }}
+                        className={`flex h-7 w-full items-center gap-2 rounded pr-2 text-left transition-colors duration-100 ${
+                          picked
+                            ? "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
+                            : "text-[var(--cf-text)] hover:bg-[var(--cf-hover)]"
+                        }`}
+                      >
+                        <FileText size={12} className={`shrink-0 ${picked ? "" : "text-[var(--cf-text-muted)]"}`} />
+                        <span className="min-w-0 shrink-0 truncate text-[12px]">{page.title}</span>
+                        {visible.filtering && (
+                          <span className="min-w-0 truncate font-mono text-[10.5px] text-[var(--cf-text-faint)]">
+                            {page.path.slice(0, page.path.lastIndexOf("/")) || "/"}
+                          </span>
+                        )}
+                        {picked && <Check size={12} className="ml-auto shrink-0" />}
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            )}
 
             {error ? (
               <div className="space-y-1.5">

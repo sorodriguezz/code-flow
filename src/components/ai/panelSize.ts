@@ -2,8 +2,18 @@ import { useEffect, useState } from "react";
 import { useAiPanelStore } from "../../state/aiPanelStore";
 import { useLayoutStore } from "../../state/layoutStore";
 
-/** The narrowest the assistant panel may be dragged. */
-export const PANEL_MIN = 300;
+/**
+ * The narrowest the assistant panel may be dragged. Below this the header strip (chips, badge,
+ * share, history…) no longer fits and the transcript's cards fold into each other — 300 did both
+ * (user report, 2026-11-23).
+ */
+export const PANEL_MIN = 420;
+
+/**
+ * Dragged this far past `PANEL_MIN`, the panel shuts — the same as the rail's assistant button —
+ * instead of stopping at a width that would not hold its contents.
+ */
+export const PANEL_COLLAPSE_BEYOND = 80;
 
 /**
  * How close to the ceiling a dragged width counts as "all the way". A drag that stops a few

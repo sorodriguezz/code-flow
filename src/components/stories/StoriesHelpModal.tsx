@@ -22,14 +22,19 @@ export function StoriesHelpModal({ onClose }: { onClose: () => void }) {
       icon={CircleHelp}
       title={t("stories.help")}
       subtitle={t("stories.helpSubtitle")}
-      width="max-w-2xl"
+      // Sized by the window, like the other dialogs of this view (user ask, 2026-11-23): wider
+      // than the old 672px, though capped so the manual's lines stay short enough to read, and
+      // nearly the window's height so more of it is on screen at once.
+      width="max-w-[min(900px,90vw)]"
+      height="h-[88vh]"
+      maxHeight="max-h-[92vh]"
       onClose={onClose}
     >
       {/* The guide is a constant per language, so `Markdown`'s memo means it is parsed and
           sanitised once — not again on every unrelated re-render of the modal. */}
       <Markdown
         source={content}
-        className="cf-markdown-preview min-h-0 flex-1 overflow-y-auto px-5 py-4 text-[13px]"
+        className="cf-markdown-preview min-h-0 flex-1 overflow-y-auto px-6 py-4 text-[13px]"
       />
     </ApiModal>
   );

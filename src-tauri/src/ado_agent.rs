@@ -165,7 +165,7 @@ pub async fn read(linked: Option<&Project>, args: &Value) -> Result<String, Stri
         }
         "work_items" => {
             let project = need_project()?;
-            let found = crate::ado::search_work_items(&org, &project, &text("query"), &pat).await?;
+            let found = crate::ado::search_work_items(&org, Some(&project), &text("query"), &pat).await?;
             if found.is_empty() {
                 "No work items found.".to_string()
             } else {

@@ -55,6 +55,14 @@ import {
   Quote,
   Languages,
   Shield,
+  ScanLine,
+  Smartphone,
+  KeySquare,
+  GitCompare,
+  FileCheck2,
+  Paintbrush,
+  Settings2,
+  Clock4,
 } from "lucide-react";
 import type { TranslationKey } from "../i18n/translations";
 
@@ -91,6 +99,8 @@ export const TOOLS: ToolEntry[] = [
   tool("punycode", "encode", Globe, "punycode idn idna xn-- dominio domain ñ"),
   tool("qp", "encode", Quote, "quoted printable qp email correo mime"),
   tool("gzip", "encode", Archive, "gzip deflate zlib compress comprimir inflate descomprimir"),
+  tool("base32", "encode", Binary, "base32 rfc4648 totp secret secreto otp google authenticator"),
+  tool("base58", "encode", Binary, "base58 bitcoin btc ipfs solana address direccion"),
 
   tool("jwt", "jwt", KeyRound, "jwt token bearer decode decodificar verify verificar firma signature hs256 rs256 es256 jwk jws oauth oidc claims exp"),
   tool("jwt-sign", "jwt", FileKey2, "jwt sign firmar crear build token hs256 hmac secret secreto"),
@@ -105,6 +115,10 @@ export const TOOLS: ToolEntry[] = [
   tool("markdown", "format", FileText, "markdown md html preview vista previa"),
   tool("query", "format", ListOrdered, "query string querystring params parametros url json"),
   tool("curl", "format", Terminal, "curl fetch axios httpclient c# python requests code snippet codigo"),
+  tool("web-format", "format", Paintbrush, "html css javascript js format formatear beautify prettify minify minificar compress uglify terser"),
+  tool("json-diff", "format", GitCompare, "json diff compare comparar estructura structure keys claves cambios changes"),
+  tool("json-schema", "format", FileCheck2, "json schema esquema validate validar contrato contract openapi ajv draft"),
+  tool("env", "format", Settings2, "env dotenv .env variables entorno environment json kubernetes secret docker compose"),
 
   tool("diff", "text", FileDiff, "diff compare comparar texto text changes diferencias"),
   tool("case", "text", CaseSensitive, "case camel snake kebab pascal constant title mayusculas minusculas"),
@@ -123,6 +137,8 @@ export const TOOLS: ToolEntry[] = [
   tool("qr", "generate", QrCode, "qr code codigo wifi"),
   tool("fake", "generate", Users, "fake falso datos data fixture faker nombres names email rut iban test"),
   tool("rut", "generate", IdCard, "rut run chile chileno validar validate digito verificador dv"),
+  tool("id-decode", "generate", Clock4, "objectid mongo mongodb snowflake twitter discord id decode decodificar fecha timestamp creado created ulid"),
+  tool("qr-read", "generate", ScanLine, "qr leer read decode decodificar scan escanear imagen image captura screenshot"),
 
   tool("timestamp", "time", Clock, "timestamp unix epoch date fecha time zone zona horaria utc iso"),
   tool("date-calc", "time", CalendarClock, "date difference diferencia fechas add sumar dias days business habiles"),
@@ -144,7 +160,70 @@ export const TOOLS: ToolEntry[] = [
   tool("cert", "crypto", ShieldCheck, "certificate certificado x509 pem der tls ssl san fingerprint huella"),
   tool("keypair", "crypto", KeyRound, "key pair par de claves rsa ec ecdsa ed25519 pem jwk public private publica privada generate"),
   tool("aes", "crypto", Lock, "aes gcm encrypt decrypt cifrar descifrar encriptar passphrase pbkdf2"),
+  tool("bcrypt", "crypto", KeySquare, "bcrypt hash password contraseña verify verificar comparar $2a $2b $2y cost"),
+  tool("totp", "crypto", Smartphone, "totp otp 2fa mfa authenticator codigo code google otpauth hotp"),
 ];
+
+/**
+ * Where a tool takes its text, for the tools that take one: the field «Enviar a» and the clipboard
+ * detection write into. Most call it `input`; the exceptions are named here rather than renamed in
+ * the tools, whose session state already uses those names.
+ */
+export const TOOL_INPUT: Record<string, { field: string }> = {
+  base64: { field: "input" },
+  url: { field: "input" },
+  html: { field: "input" },
+  unicode: { field: "input" },
+  hex: { field: "input" },
+  binary: { field: "input" },
+  punycode: { field: "input" },
+  qp: { field: "input" },
+  gzip: { field: "input" },
+  base32: { field: "input" },
+  base58: { field: "input" },
+  jwt: { field: "token" },
+  json: { field: "input" },
+  convert: { field: "input" },
+  xml: { field: "input" },
+  csv: { field: "input" },
+  jsonpath: { field: "input" },
+  sql: { field: "input" },
+  "json-code": { field: "input" },
+  markdown: { field: "input" },
+  query: { field: "input" },
+  curl: { field: "input" },
+  "web-format": { field: "input" },
+  "json-diff": { field: "left" },
+  "json-schema": { field: "document" },
+  env: { field: "input" },
+  diff: { field: "left" },
+  case: { field: "input" },
+  count: { field: "input" },
+  lines: { field: "input" },
+  escape: { field: "input" },
+  slug: { field: "input" },
+  inspect: { field: "input" },
+  regex: { field: "text" },
+  hash: { field: "input" },
+  hmac: { field: "input" },
+  qr: { field: "input" },
+  rut: { field: "input" },
+  uuid: { field: "inspect" },
+  "id-decode": { field: "input" },
+  timestamp: { field: "input" },
+  cron: { field: "expr" },
+  duration: { field: "input" },
+  "url-parse": { field: "input" },
+  cidr: { field: "input" },
+  "user-agent": { field: "input" },
+  color: { field: "input" },
+  base: { field: "input" },
+  bytes: { field: "input" },
+  cert: { field: "input" },
+  aes: { field: "input" },
+  bcrypt: { field: "hash" },
+  totp: { field: "secret" },
+};
 
 export function toolById(id: string): ToolEntry | undefined {
   return TOOLS.find((t) => t.id === id);

@@ -15,6 +15,37 @@ Cómo usarlo:
   y el workflow deja un aviso.
 -->
 
+## 2.9.6
+
+### ✨ Nuevo
+- **Herramientas: pegar y detectar.** Un botón lee el portapapeles, reconoce qué hay (un JWT, un JSON, un timestamp, un cron, Base64, un UUID, una URL, un certificado, un hash bcrypt…) y abre la herramienta que corresponde con el contenido ya cargado. Si pegas o escribes datos en la búsqueda, también ofrece «Abrir en…».
+- **Herramientas: enviar a otra herramienta.** La salida de cualquier herramienta se puede mandar como entrada a otra: por ejemplo, un Base64 decodificado directo al formateador de JSON.
+- **Diez herramientas nuevas:** bcrypt (generar y verificar), códigos TOTP para probar 2FA (también desde un enlace `otpauth://`), Base32, Base58, formatear y minificar HTML, CSS y JavaScript, diff de JSON por estructura (el orden de las claves no cuenta), validar un JSON contra su JSON Schema, convertir entre `.env` y JSON, ver la fecha de creación dentro de un ObjectId, un Snowflake o un ULID, y leer un código QR desde una imagen o una captura pegada.
+
+### 🚀 Mejorado
+- **Herramientas más cómodas:** las favoritas (con la estrella de cada fila) y las últimas que abriste aparecen arriba de la lista. La búsqueda se recorre con las flechas y Enter abre la marcada. La lista se puede ensanchar y, si la arrastras más allá de su mínimo, se pliega a una barra.
+- **Panel del asistente que no se deforma:** el panel ya no se puede angostar hasta que su contenido se encime; si sigues arrastrando el borde más allá del mínimo, el panel se oculta, igual que con su botón en la barra lateral, y al volver a abrirlo recupera el ancho que tenía. En un panel angosto, la insignia «Plan», los artefactos y «Compartir» muestran solo su ícono.
+- **Historial del chat del workspace más limpio:** los chats se agrupan por día («Hoy», «Ayer», la fecha) y cada uno ocupa una sola línea con su hora; el chat abierto se marca con un punto y el botón de borrar aparece al pasar el mouse.
+- **Menos botones en el chat del workspace:** se quitó «Nuevo chat del workspace»; para eso están el subchat y el «+» de las pestañas.
+- **Pregunta rápida con esquinas redondeadas,** como la ventana de CodeFlow.
+- **Lista de puntos de interrupción más legible:** cada fila muestra primero el archivo y la línea, y después la carpeta en gris. La fila usa todo el ancho y los botones de editar, convertir en logpoint y quitar aparecen al pasar el mouse.
+- **Marcadores, solo marcadores:** el panel «Marcadores» ya no repite los puntos de interrupción, que tienen su lista en «Ejecutar y depurar».
+- **Captura de código más grande:** la ventana de captura crece con el tamaño de la ventana de CodeFlow, así se ven bien las líneas largas.
+- **Pipelines con lista plegable:** si arrastras el borde de la lista de ejecuciones más allá de su mínimo, se pliega a una barra delgada, igual que en el cliente de API o en base de datos. Un clic en la barra la vuelve a abrir.
+- **Proyectos y Configuración se pliegan al arrastrar:** si llevas el borde de la lista de proyectos o del menú de Configuración más allá de su mínimo, se pliegan a su barra de íconos, igual que con su botón. Al abrirlos de nuevo recuperan el ancho que tenían. Además, los dos tienen un ancho mínimo un poco mayor, para que los nombres no se corten tanto.
+- **«Nuevo conjunto de historias» más amplio:** la ventana se adapta al tamaño de la pantalla, así las fuentes caben en una línea y la lista de páginas de la wiki muestra más a la vez.
+- **Importar de la wiki sin adivinar la ruta:** al elegir la wiki aparece la lista de sus páginas. Escribe para filtrarla o haz clic en la que quieras; pegar la URL de la página sigue funcionando. Si el proyecto tiene una sola wiki, se elige sola.
+- **Revisar un work item eligiéndolo de una lista:** en «Revisar», el campo de búsqueda muestra tus work items abiertos al hacer clic, y al escribir busca por título o número en toda la organización. Un selector de proyecto, al lado de la organización, acota la lista a uno solo y recuerda tu elección. Un clic lo carga; pegar el enlace sigue funcionando.
+- **«Cómo funciona» más grande:** la guía de Especificación se adapta al tamaño de la ventana.
+
+### 🐛 Corregido
+- En el encabezado del chat del workspace, «10 repos» ya no queda montado bajo la insignia «Plan · solo lectura».
+- En el editor, un breakpoint en una línea larga que se ajusta en varias filas ya no muestra un punto por fila, sino uno solo.
+- En la captura de código, la vista previa ya no deforma el texto: si la imagen no cabe, se achica entera y mantiene sus proporciones.
+- En Herramientas, los botones «Pegar» pegan con un solo clic: ya no aparece la burbuja «Paste» del sistema pidiendo confirmar.
+- En Herramientas, «Copiar» ya no falla en silencio: si el sistema rechaza la copia, lo intenta por otra vía y avisa si tampoco funciona.
+- En los diálogos de contenedores, «Pegar variables» pega con un solo clic, sin la burbuja «Paste» del sistema.
+
 ## 2.9.5
 
 ### 🚀 Mejorado

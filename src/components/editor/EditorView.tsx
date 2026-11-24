@@ -3138,7 +3138,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
               onOpenAnchor={openHit}
             />
           ) : sidePanel === "bookmarks" ? (
-            <BookmarksPanel repoPath={project.local_path} onOpen={openHit} />
+            <BookmarksPanel onOpen={openHit} />
           ) : sidePanel === "icons" ? (
             <IconProfilePanel />
           ) : sidePanel === "debug" ? (

@@ -260,8 +260,12 @@ export function NewStoryBatchModal({ onClose }: { onClose: () => void }) {
       icon={ClipboardList}
       title={t("stories.newBatchTitle")}
       subtitle={t("stories.newBatchSubtitle")}
-      width="max-w-2xl"
-      height="h-[80vh]"
+      // Grows with the window instead of a fixed 672px: at that width the source tabs broke onto
+      // two lines and a wiki's page list showed a few titles at a time (user ask, 2026-11-23).
+      // Capped so the form's fields do not stretch into lines too long to read.
+      width="max-w-[min(1100px,90vw)]"
+      height="h-[86vh]"
+      maxHeight="max-h-[90vh]"
       busy={starting}
       dismissOnBackdrop={false}
       onClose={onClose}

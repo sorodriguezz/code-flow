@@ -1,12 +1,10 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Bookmark, ChevronDown, ChevronRight, Circle, Trash2, X } from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
+import { Bookmark, ChevronDown, ChevronRight, Trash2, X } from "lucide-react";
 import { useBookmarkStore } from "../../state/bookmarkStore";
-import { useDebugStore, normalizePath } from "../../state/debugStore";
 import { FileGlyph } from "../common/FileGlyph";
 import { Tooltip } from "../common/Tooltip";
 import { Kbd } from "../common/Button";
 import { explorerHeadClass, explorerTitleClass } from "../common/recipes";
-import { readFileText } from "../../lib/tauri/commands";
 import { useShortcutChord } from "../../lib/useShortcutHint";
 import { useT } from "../../state/languageStore";
 import { riseDelay } from "../../lib/rise";
@@ -21,15 +19,14 @@ const REMOVE_BUTTON =
   "inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)]";
 
 /**
- * The two kinds of "come back to this line", in one list.
+ * The lines the user marked, and nothing else.
  *
- * Bookmarks and breakpoints are unrelated features with unrelated storage — one is a personal note,
- * the other is where a debugger stops — but they answer the same question when you are looking for
- * one: *where was I?* Keeping them in separate panels means knowing which kind you left behind
- * before you can go and find it, so they share a column and stay clearly labelled.
+ * Breakpoints were listed here too, under their own heading, as a second «come back to this line».
+ * They already have their list in «Ejecutar y depurar», with the controls that go with them, so
+ * here they were the same rows twice (user ask, 2026-11-23).
  *
- * Both sections are grouped by file for the same reason a file tree is: a flat list of line numbers
- * from four files is a list you have to read, not one you can scan.
+ * Grouped by file for the same reason a file tree is: a flat list of line numbers from four files
+ * is a list you have to read, not one you can scan.
  */
 
 interface Row {
@@ -37,7 +34,7 @@ interface Row {
   path: string;
   line: number;
   label: string;
-  /** Identifies the row for removal: a bookmark id, or the absolute path for a breakpoint. */
+  /** Identifies the row for removal: the bookmark's id. */
   key: string;
 }
 
@@ -200,11 +197,8 @@ function Section({
 }
 
 export function BookmarksPanel({
-  repoPath,
   onOpen,
 }: {
-  /** Absolute path of the open project — breakpoints are stored absolute and shown relative. */
-  repoPath: string;
   onOpen: (path: string, line: number) => void;
 }) {
   const t = useT();
@@ -213,74 +207,9 @@ export function BookmarksPanel({
   const bookmarks = useBookmarkStore((s) => s.bookmarks);
   const removeBookmark = useBookmarkStore((s) => s.remove);
   const clearBookmarks = useBookmarkStore((s) => s.clear);
-  const breakpoints = useDebugStore((s) => s.breakpoints);
-  const toggleBreakpoint = useDebugStore((s) => s.toggleBreakpoint);
-
   const bookmarkRows = useMemo<Row[]>(
     () => bookmarks.map((mark) => ({ ...mark, key: mark.id })),
     [bookmarks],
-  );
-
-  /**
-   * Breakpoints live under absolute paths, because that is what a debug adapter speaks. Only the
-   * ones inside the open project can be shown: a row the editor cannot open is a dead end, and the
-   * panel has no business listing files from a repo that isn't on screen.
-   */
-  const breakpointPlaces = useMemo(() => {
-    const root = normalizePath(`${repoPath}/`);
-    const places: { path: string; line: number; key: string }[] = [];
-    for (const [absolute, list] of Object.entries(breakpoints)) {
-      if (!absolute.startsWith(root)) continue;
-      const relative = absolute.slice(root.length);
-      for (const { line } of list) {
-        places.push({ path: relative, line, key: `${absolute}:${line}` });
-      }
-    }
-    return places.sort((a, b) => a.path.localeCompare(b.path) || a.line - b.line);
-  }, [breakpoints, repoPath]);
-
-  /**
-   * The text of every breakpointed line, so those rows read like the bookmarks above them rather
-   * than as a bare number.
-   *
-   * A bookmark carries its own label — it was captured from the buffer at the moment it was set —
-   * but a breakpoint is just a line number in the debug store, so the text has to be fetched. From
-   * disk, and only for the handful of files that actually hold one: the alternative is keeping every
-   * breakpointed file open in memory to label a list. Unsaved edits therefore show the saved text,
-   * which is the right trade for a label nobody edits from here.
-   */
-  const [lineText, setLineText] = useState<Record<string, string[]>>({});
-  const filesWithBreakpoints = useMemo(
-    () => [...new Set(breakpointPlaces.map((place) => place.path))].sort().join("\n"),
-    [breakpointPlaces],
-  );
-
-  useEffect(() => {
-    if (filesWithBreakpoints === "") {
-      setLineText({});
-      return;
-    }
-    let cancelled = false;
-    void Promise.all(
-      filesWithBreakpoints.split("\n").map(async (path) => {
-        const text = await readFileText(repoPath, path).catch(() => null);
-        return [path, text === null ? [] : text.split("\n")] as const;
-      }),
-    ).then((entries) => {
-      if (!cancelled) setLineText(Object.fromEntries(entries));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [filesWithBreakpoints, repoPath]);
-
-  const breakpointRows = useMemo<Row[]>(
-    () =>
-      breakpointPlaces.map((place) => ({
-        ...place,
-        label: lineText[place.path]?.[place.line - 1]?.trim() ?? "",
-      })),
-    [breakpointPlaces, lineText],
   );
 
   return (
@@ -303,15 +232,6 @@ export function BookmarksPanel({
           onRemove={(row) => removeBookmark(row.key)}
           onClear={clearBookmarks}
           clearLabel={t("bookmarks.clear")}
-        />
-        <Section
-          title={t("bookmarks.breakpoints")}
-          icon={<Circle size={10} className="shrink-0 fill-[var(--cf-danger)] text-[var(--cf-danger)]" />}
-          rows={breakpointRows}
-          emptyLabel={t("bookmarks.noBreakpoints")}
-          onOpen={(row) => onOpen(row.path, row.line)}
-          // Back through the same toggle the gutter uses, so the two never disagree about what is set.
-          onRemove={(row) => toggleBreakpoint(`${repoPath}/${row.path}`, row.line)}
         />
       </div>
     </div>

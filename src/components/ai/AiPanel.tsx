@@ -12,8 +12,9 @@ import { useChatLineageStore } from "../../state/chatLineageStore";
 import { useChatStore } from "../../state/chatStore";
 import { EMPTY_TABS, INBOX_KEY, NO_WORKSPACE, useAiPanelStore, type PanelTab } from "../../state/aiPanelStore";
 import { useLayoutStore } from "../../state/layoutStore";
+import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
-import { PANEL_MIN, reachesMax, restoreWidth, useMaxPanelWidth } from "./panelSize";
+import { PANEL_COLLAPSE_BEYOND, PANEL_MIN, reachesMax, restoreWidth, useMaxPanelWidth } from "./panelSize";
 
 /** The panel while shut — see the root of `AiPanel`. `visibility` takes it out of painting, hit
  *  testing and the tab order without touching its layout. */
@@ -158,8 +159,9 @@ function SizedSheet({ children, anchored }: { children: ReactNode; anchored: boo
   const storedWidth = useLayoutStore((s) => s.sizes.aiPanelWidth);
   const maxWidth = useMaxPanelWidth();
   // Wide is half the window — the most a panel may take. Otherwise what was chosen, clamped only
-  // while the window is too small to honour it.
-  const width = wide ? maxWidth : Math.min(storedWidth, maxWidth);
+  // while the window is too small to honour it — and never under the floor, for a width saved
+  // before the floor was raised.
+  const width = wide ? maxWidth : Math.min(Math.max(storedWidth, PANEL_MIN), maxWidth);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
   /** The width on record when the drag began: where the header's restore button goes back to if
@@ -191,6 +193,15 @@ function SizedSheet({ children, anchored }: { children: ReactNode; anchored: boo
           setSize("aiPanelWidth", w);
         }}
         onCommit={() => commitSize("aiPanelWidth", useLayoutStore.getState().sizes.aiPanelWidth)}
+        // Past the floor the panel shuts, as the rail's assistant button does, rather than holding
+        // a width its contents fold up in. It reopens at the width it had when the drag began.
+        collapseBeyond={PANEL_COLLAPSE_BEYOND}
+        onCollapse={() => {
+          const back = Math.max(PANEL_MIN, dragFrom.current);
+          setSize("aiPanelWidth", back);
+          commitSize("aiPanelWidth", back);
+          if (useUiStore.getState().aiPanelOpen) useUiStore.getState().toggleAiPanel();
+        }}
         seamless
       />
       <aside

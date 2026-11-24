@@ -148,10 +148,13 @@ export function CodeSnapModal({
   // its backdrop would be trapped in `.cf-ambient-bg`'s stacking context and paint under the app's
   // own bars, leaving them clickable through the modal. See `ApiModal` for the full account.
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-6" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      {/* Sized by the window, not a fixed 768px: a snapshot of long lines is wider than that, and
+          shrunk to fit it the code came out too small to judge (user ask, 2026-11-23). Up to 1400px,
+          and never past 94% of the window either way. */}
       <div
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[85vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
+        className="flex max-h-[94vh] w-full max-w-[min(1400px,94vw)] flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow)]"
       >
         <div className="flex items-center gap-2 border-b border-[var(--cf-border)] px-4 py-2.5">
           <Camera size={14} className="text-[var(--cf-accent)]" />
@@ -178,8 +181,11 @@ export function CodeSnapModal({
           <canvas
             ref={canvasRef}
             // The backing store is `scale`× these dimensions; CSS pins it back to its true size
-            // so the preview is a faithful 1:1 view of the exported image.
-            style={{ width: size.width, height: size.height, maxWidth: "100%" }}
+            // so the preview is a faithful 1:1 view of the exported image. Narrower than that it
+            // shrinks as a whole: `height: auto` keeps the canvas's own proportions. A fixed height
+            // with `maxWidth` squeezed only the width, and the code read stretched tall (user
+            // report, 2026-11-23).
+            style={{ width: size.width, maxWidth: "100%", height: "auto" }}
             className="mx-auto block"
           />
         </div>

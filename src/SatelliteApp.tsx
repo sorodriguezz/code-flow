@@ -690,7 +690,9 @@ export default function SatelliteApp() {
   if (ready && spec && kind === "quick") {
     return (
       // One sheet and no frame, so see-through it is a single layer — see `.cf-glass-solo`.
-      <div className="cf-glass-solo flex h-screen flex-col overflow-hidden">
+      // Rounded like Codi's: the window clips to `CODI_CORNER_RADIUS` (`windows.rs`), the sheet
+      // draws the same curve and its hairline — see `.cf-round-shell`.
+      <div className="cf-round-shell cf-glass-solo flex h-screen flex-col overflow-hidden">
         <QuickWindow refId={spec.refId} />
         <TitleTooltips />
       </div>
@@ -719,7 +721,7 @@ export default function SatelliteApp() {
   // window has no other way out — and the body waits for `ready`.
   if (spec && kind === "codi") {
     return (
-      <div className="cf-codi-shell cf-glass-solo flex h-screen flex-col overflow-hidden">
+      <div className="cf-round-shell cf-glass-solo flex h-screen flex-col overflow-hidden">
         <ErrorBoundary resetKey={spec.refId}>
           <Suspense fallback={<ViewSkeleton />}>
             <CodiWindow ready={ready} />

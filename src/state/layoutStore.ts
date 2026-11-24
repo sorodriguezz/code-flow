@@ -51,6 +51,7 @@ export type LayoutKey =
   | "dbmlInspectorWidth"
   | "dbmlConsoleHeight"
   | "pipelinesListWidth"
+  | "toolboxListWidth"
   | "pipelinesGraphHeight"
   | "servicesListWidth"
   | "containersListWidth"
@@ -104,6 +105,7 @@ const STORAGE_KEYS: Record<LayoutKey, string> = {
   dbmlInspectorWidth: "layout_dbml_inspector_width",
   dbmlConsoleHeight: "layout_dbml_console_height",
   pipelinesListWidth: "layout_pipelines_list_width",
+  toolboxListWidth: "layout_toolbox_list_width",
   pipelinesGraphHeight: "layout_pipelines_graph_height",
   servicesListWidth: "layout_services_list_width",
   containersListWidth: "layout_containers_list_width",
@@ -125,7 +127,7 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   graphColDate: 70,
   graphColMessage: 360,
   // A findings document needs the room: at 340 its header and action bar left the findings a sliver.
-  aiPanelWidth: 400,
+  aiPanelWidth: 440,
   terminalPanelHeight: 260,
   apiSidebarWidth: 288,
   apiSnippetWidth: 420,
@@ -205,6 +207,7 @@ export const LAYOUT_DEFAULTS: Record<LayoutKey, number> = {
   // Wider than a plain list needs, because each row carries three things a CI list is read for:
   // the workflow's name, the branch, and the strip showing how many jobs ran at once.
   pipelinesListWidth: 292,
+  toolboxListWidth: 244,
   // The graph, above the log. Tall enough for four job cards stacked in one stage — which is the
   // shape this pane exists to be able to draw — before it starts scrolling.
   pipelinesGraphHeight: 268,

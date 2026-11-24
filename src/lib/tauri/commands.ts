@@ -2336,6 +2336,10 @@ export const generatePrDescription = (
  */
 export const searchWorkItems = (projectId: string, query: string) =>
   invoke<WorkItem[]>("search_work_items", { projectId, query });
+/** Work items in an Azure project — or the whole organisation when `project` is empty — by id or
+ *  title; an empty query lists your open ones. */
+export const adoSearchWorkItems = (org: string, project: string, query: string) =>
+  invoke<WorkItem[]>("ado_search_work_items", { org, project: project || null, query });
 
 /** Opens a PR on the project's linked host. Returns the created PR. */
 export const createPullRequest = (
@@ -3604,3 +3608,13 @@ export const architectureScanSystem = (paths: string[]) => invoke<SystemMap>("ar
 /** A Mermaid sequence of what happens from one repository outward, or `null` when it calls nothing placed. */
 export const architectureSequenceFrom = (paths: string[], start: string) =>
   invoke<string | null>("architecture_sequence_from", { paths, start });
+
+// ── «Herramientas»: what the webview has no primitive for (`commands/toolbox_cmd.rs`) ──────────
+export const toolboxBcryptHash = (password: string, cost: number) => invoke<string>("toolbox_bcrypt_hash", { password, cost });
+export const toolboxBcryptVerify = (password: string, hash: string) => invoke<boolean>("toolbox_bcrypt_verify", { password, hash });
+export const toolboxJsonSchemaValidate = (schema: string, document: string) =>
+  invoke<{ path: string; message: string }[]>("toolbox_json_schema_validate", { schema, document });
+export const toolboxJsonDiff = (left: string, right: string) =>
+  invoke<{ path: string; op: "added" | "removed" | "changed"; from?: unknown; to?: unknown }[]>("toolbox_json_diff", { left, right });
+/** `image` is the file's bytes in Base64. */
+export const toolboxQrRead = (image: string) => invoke<string[]>("toolbox_qr_read", { image });

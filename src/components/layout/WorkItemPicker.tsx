@@ -22,7 +22,7 @@ import type { WorkItem } from "../../types/domain";
 const DEBOUNCE_MS = 300;
 
 /** Anything Azure would call a bug, whatever the process template names it. */
-function iconFor(type: string) {
+export function iconFor(type: string) {
   const lower = type.toLowerCase();
   if (lower.includes("bug") || lower.includes("defect")) return Bug;
   if (lower.includes("epic") || lower.includes("feature")) return Layers;
@@ -34,7 +34,7 @@ function iconFor(type: string) {
  * be read. Deliberately literal rather than palette tokens: these are *Azure's* semantics, not this
  * app's, and mapping them onto the accent would make two different bug types look the same.
  */
-function colourFor(type: string): string {
+export function colourFor(type: string): string {
   const lower = type.toLowerCase();
   if (lower.includes("bug") || lower.includes("defect")) return "#cc293d";
   if (lower.includes("epic")) return "#ff7b00";

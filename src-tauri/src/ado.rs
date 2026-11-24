@@ -752,6 +752,9 @@ pub struct WorkItem {
     pub work_item_type: String,
     pub state: String,
     pub assigned_to: Option<String>,
+    /// The Azure project it lives in — what tells two items apart in an organisation-wide search.
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -776,7 +779,9 @@ struct RawWorkItem {
 /// for browsing a backlog — past a screenful the answer is a better query, not more rows.
 const MAX_WORK_ITEMS: usize = 50;
 
-/// Searches a project's work items by id or by text in the title.
+/// Searches work items by id or by text in the title — in one project, or, with `project` `None`,
+/// across every project of the organisation (the review screen, which starts from an organisation
+/// and a work item and has no project to ask about).
 ///
 /// Two round trips, because Azure splits the question in half: WIQL answers *which* ids match and
 /// returns nothing else about them, so the fields the picker draws take a second, batched read.
@@ -786,12 +791,11 @@ const MAX_WORK_ITEMS: usize = 50;
 /// number, and that is overwhelmingly what a number typed into this box means.
 pub async fn search_work_items(
     org: &str,
-    project: &str,
+    project: Option<&str>,
     query: &str,
     pat: &str,
 ) -> Result<Vec<WorkItem>, String> {
     let org_enc = encode_segment(&normalize_org(org));
-    let project_enc = encode_segment(project);
     let trimmed = query.trim();
 
     // Single-quote is the escape in WIQL, exactly as in SQL. Without this a title containing an
@@ -811,13 +815,21 @@ pub async fn search_work_items(
     } else {
         clauses.join(" OR ")
     };
+    // `@Project` only means something on the project-scoped endpoint; the organisation-wide one
+    // takes the same query without it.
+    let (scope, url_scope) = match project {
+        Some(project) => ("[System.TeamProject] = @Project AND ".to_string(), format!("/{}", encode_segment(project))),
+        None => (String::new(), String::new()),
+    };
     let wiql = format!(
-        "SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = @Project AND ({where_clause}) \
+        "SELECT [System.Id] FROM WorkItems WHERE {scope}({where_clause}) \
          ORDER BY [System.ChangedDate] DESC"
     );
 
+    // `$top`, so an organisation-wide title search stops at a screenful on the server instead of
+    // sending back every id that matched.
     let url = format!(
-        "https://dev.azure.com/{org_enc}/{project_enc}/_apis/wit/wiql?api-version={API_VERSION}"
+        "https://dev.azure.com/{org_enc}{url_scope}/_apis/wit/wiql?$top={MAX_WORK_ITEMS}&api-version={API_VERSION}"
     );
     let res = client()
         .post(&url)
@@ -846,7 +858,7 @@ pub async fn search_work_items(
 
     // Organisation-scoped, not project-scoped: the batch endpoint takes ids across the whole
     // account, and the ids came from a project-scoped query so they are already the right ones.
-    let fields = "System.Id,System.Title,System.WorkItemType,System.State,System.AssignedTo";
+    let fields = "System.Id,System.Title,System.WorkItemType,System.State,System.AssignedTo,System.TeamProject";
     let detail_url = format!(
         "https://dev.azure.com/{org_enc}/_apis/wit/workitems?ids={}&fields={fields}\
          &$expand=none&errorPolicy=omit&api-version={API_VERSION}",
@@ -873,6 +885,7 @@ pub async fn search_work_items(
                 .and_then(|v| v.get("displayName"))
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            project: item.fields.get("System.TeamProject").and_then(|v| v.as_str()).map(str::to_string),
         })
         .collect())
 }

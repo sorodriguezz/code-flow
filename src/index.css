@@ -4223,14 +4223,15 @@ body.cf-dragging * {
   background: var(--cf-glass-solo-fill);
 }
 
-/* Codi's window is rounded (`windows::CODI_CORNER_RADIUS`, the same 16px): the page's sheet carries
-   the curve, and nothing past it is painted — the body would fill the corners back in square. */
-.cf-codi-shell {
+/* The frameless windows that are rounded — Codi's and the quick-ask box (`windows::CODI_CORNER_RADIUS`,
+   the same 16px): the page's sheet carries the curve, and nothing past it is painted — the body
+   would fill the corners back in square. */
+.cf-round-shell {
   border-radius: 16px;
   border: 1px solid var(--cf-border);
 }
-html:has(.cf-codi-shell),
-html:has(.cf-codi-shell) body {
+html:has(.cf-round-shell),
+html:has(.cf-round-shell) body {
   background: transparent;
 }
 

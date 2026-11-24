@@ -872,7 +872,13 @@ pub async fn open_quick_ask(app: AppHandle) -> Result<String, String> {
     }
 
     match builder.build() {
-        Ok(window) => crate::glass::on_create(&window, &look),
+        Ok(window) => {
+            // Rounded like CodeFlow's own window and Codi's: frameless, it would otherwise be the
+            // one square box on screen (user ask, 2026-11-23). The page rounds its sheet to match
+            // (`.cf-round-shell`).
+            crate::glass::round_corners(&window, CODI_CORNER_RADIUS);
+            crate::glass::on_create(&window, &look);
+        }
         Err(e) => {
             // Hands the claim back. A slot held for a window that failed to open would count against
             // `MAX_SATELLITES` for the life of the process, and — worse here — the guard above would
@@ -995,7 +1001,8 @@ pub fn remember_codi_spot(window: &tauri::Window) {
 }
 
 /// How round Codi's window is, in points. A frameless window has square corners of its own; the
-/// page rounds its sheet by the same amount (`.cf-codi-shell`), the platform clips the rest.
+/// page rounds its sheet by the same amount (`.cf-round-shell`), the platform clips the rest. The
+/// quick-ask box uses it too.
 pub const CODI_CORNER_RADIUS: f64 = 16.0;
 
 /// Opens Codi's window, or brings it forward: small, on top of whatever the user is working in, on

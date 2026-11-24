@@ -1834,12 +1834,21 @@ pub async fn search_work_items(
     match linked_repo(&project)? {
         LinkedRepo::Azure { org, project: ado_project, .. } => {
             let pat = pat_for_org(&org)?;
-            ado::search_work_items(&org, &ado_project, &query, &pat).await
+            ado::search_work_items(&org, Some(&ado_project), &query, &pat).await
         }
         // Not an error: the picker asks whenever a PR form is open, and the answer for a GitHub or
         // GitLab repository is simply that there is nothing of this kind to offer.
         _ => Ok(vec![]),
     }
+}
+
+/// Work items by id or title text — an empty `query` lists the caller's own open ones — in one
+/// project, or anywhere in the organisation when `project` is empty. For the review screen.
+#[tauri::command]
+pub async fn ado_search_work_items(org: String, project: Option<String>, query: String) -> Result<Vec<ado::WorkItem>, String> {
+    let pat = pat_for_org(&org)?;
+    let project = project.filter(|p| !p.trim().is_empty());
+    ado::search_work_items(&org, project.as_deref(), &query, &pat).await
 }
 
 /// Existing PR comment threads — e.g. from a human reviewer — so they can be shown alongside

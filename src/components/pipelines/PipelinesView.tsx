@@ -8,6 +8,7 @@ import { useRepoStore } from "../../state/repoStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { EmptyState } from "../common/EmptyState";
+import { CollapsedPanelBar, useCollapsiblePanel } from "../common/CollapsedPanelBar";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { JobLogPane } from "./JobLogPane";
 import { RunActions } from "./RunActions";
@@ -48,6 +49,9 @@ export function PipelinesView() {
   const activeView = useUiStore((s) => s.activeView);
   const branch = useRepoStore((s) => s.status?.current_branch ?? null);
   const listWidth = useLayoutStore((s) => s.sizes.pipelinesListWidth);
+  // Dragged well past its minimum the runs list folds to a bar, as the API client's and the
+  // database's sidebars do; a click on the bar brings it back (user ask, 2026-11-23).
+  const listFold = useCollapsiblePanel("pipelinesListWidth");
   const graphHeight = useLayoutStore((s) => s.sizes.pipelinesGraphHeight);
   const setSize = useLayoutStore((s) => s.setSize);
   const commitSize = useLayoutStore((s) => s.commitSize);
@@ -133,22 +137,34 @@ export function PipelinesView() {
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--cf-surface)]">
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div
-          data-tour="pipelines-list"
-          style={{ width: listWidth }}
-          className="flex h-full min-h-0 shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
-        >
-          <RunList projectId={project.id} localPath={project.local_path} currentBranch={branch} provider={availability?.provider} />
-        </div>
+        {listFold.collapsed ? (
+          <CollapsedPanelBar
+            label={t("pipelines.runs")}
+            title={t("common.expandPanel")}
+            onExpand={listFold.expand}
+            tour="pipelines-list"
+          />
+        ) : (
+          <>
+            <div
+              data-tour="pipelines-list"
+              style={{ width: listWidth }}
+              className="flex h-full min-h-0 shrink-0 flex-col overflow-hidden bg-[var(--cf-surface)]"
+            >
+              <RunList projectId={project.id} localPath={project.local_path} currentBranch={branch} provider={availability?.provider} />
+            </div>
 
-        <ResizeHandle
-          axis="x"
-          value={listWidth}
-          min={220}
-          max={460}
-          onChange={(value) => setSize("pipelinesListWidth", value)}
-          onCommit={(value) => commitSize("pipelinesListWidth", value)}
-        />
+            <ResizeHandle
+              axis="x"
+              value={listWidth}
+              min={220}
+              max={460}
+              onChange={(value) => setSize("pipelinesListWidth", value)}
+              onCommit={(value) => commitSize("pipelinesListWidth", value)}
+              {...listFold.handleProps}
+            />
+          </>
+        )}
 
         <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--cf-surface)]">
           {fetched && runs.length === 0 && !error ? (

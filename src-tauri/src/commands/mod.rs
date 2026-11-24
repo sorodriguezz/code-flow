@@ -74,4 +74,5 @@ pub mod stories_cmd;
 pub mod terminal_cmd;
 pub mod mock_cmd;
 pub mod watcher_cmd;
+pub mod toolbox_cmd;
 pub mod worklog_cmd;

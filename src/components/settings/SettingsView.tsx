@@ -45,7 +45,9 @@ import {
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { scrollBehavior } from "../../lib/motion";
 
-const NAV_MIN = 160;
+/** Narrowest the nav may be dragged: room for «Repositorios de referencia» on one line. It was 160,
+ *  where the longer names broke onto two (user ask, 2026-11-23). Past it, the drag folds the nav. */
+const NAV_MIN = 200;
 const NAV_COLLAPSED = 50;
 const NAV_MAX = 320;
 
@@ -346,7 +348,10 @@ export function SettingsView() {
   const section = useUiStore((s) => s.settingsSection);
   const setSection = useUiStore((s) => s.openSettings);
   const openSettingsAt = useUiStore((s) => s.openSettingsAt);
-  const navWidth = useLayoutStore((s) => s.sizes.settingsNavWidth);
+  // Never under the floor, for a width saved before the floor was raised.
+  const navWidth = Math.max(NAV_MIN, useLayoutStore((s) => s.sizes.settingsNavWidth));
+  /** The width when the current drag began: what the nav comes back at if that drag folds it. */
+  const navDragFrom = useRef(navWidth);
   // The window always opens with the nav unfolded, names beside the icons (the user's call,
   // 2026-10-09 — it opened folded to icons since 2026-09-24), and « folds it for this visit only.
   // Not a remembered layout flag: each opening starts the same way.
@@ -677,6 +682,17 @@ export function SettingsView() {
               max={NAV_MAX}
               onChange={(w) => setSize("settingsNavWidth", w)}
               onCommit={(w) => commitSize("settingsNavWidth", w)}
+              // Dragged well past the minimum it folds to its icon rail, as « does — and unfolds at
+              // the width it had before the drag, not at the minimum it was dragged through.
+              onDragChange={(dragging) => {
+                if (dragging) navDragFrom.current = navWidth;
+              }}
+              collapseBeyond={80}
+              onCollapse={() => {
+                setSize("settingsNavWidth", navDragFrom.current);
+                commitSize("settingsNavWidth", navDragFrom.current);
+                setCollapsed(true);
+              }}
             />
           )}
 

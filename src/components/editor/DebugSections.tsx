@@ -282,6 +282,16 @@ function fileLabel(file: string, repoPath: string): string {
   return file.startsWith(root) ? file.slice(root.length) : (file.split("/").pop() ?? file);
 }
 
+/** The file's own name. */
+const baseName = (file: string) => file.split("/").pop() ?? file;
+
+/** The folder the file is in, relative to the repository — empty at its root. */
+function dirLabel(file: string, repoPath: string): string {
+  const label = fileLabel(file, repoPath);
+  const cut = label.lastIndexOf("/");
+  return cut < 0 ? "" : label.slice(0, cut);
+}
+
 /**
  * Every breakpoint in the workspace, and the exceptions that stop the program: switch one off
  * without losing it, give it a condition, turn it into a logpoint, or take it away.
@@ -338,28 +348,32 @@ export function BreakpointsSection({
         <p className="px-1.5 py-1 text-[11px] text-[var(--cf-text-faint)]">{t("debug.noBreakpoints")}</p>
       ) : (
         rows.map(({ file, bp }) => (
+          // The label has the whole row at rest; the actions sit over its right end and show on
+          // hover or keyboard focus, when the label makes room for them. Hidden but still laid out,
+          // they used to keep ~70px of a narrow sidebar empty and cut every path short (user ask,
+          // 2026-11-23).
           <div
             key={`${file}:${bp.line}`}
-            className="group flex h-6 items-center gap-2 rounded-md pl-1.5 pr-1 hover:bg-[var(--cf-hover)]"
+            className="group relative flex h-6 items-center gap-2 rounded-md pl-1.5 pr-1 hover:bg-[var(--cf-hover)]"
           >
             <Checkbox checked={bp.enabled} onChange={(on) => setBreakpoint(file, bp.line, { enabled: on })} />
             {/* The gutter's own glyph, so the row says at a glance what kind of breakpoint it is. */}
             <span className={`relative h-3 w-3 shrink-0 ${breakpointGlyphClass(bp)}`} aria-hidden />
             <button
               onClick={() => onOpen(file, bp.line)}
-              className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-              title={bp.logMessage ?? bp.condition ?? file}
+              className="flex min-w-0 flex-1 items-center gap-1.5 text-left group-focus-within:pr-[68px] group-hover:pr-[68px]"
+              title={[fileLabel(file, repoPath) + `:${bp.line}`, bp.logMessage ? `“${bp.logMessage}”` : bp.condition].filter(Boolean).join("\n")}
             >
-              <span className="truncate font-mono text-[12px] text-[var(--cf-text)]">
-                {fileLabel(file, repoPath)}:{bp.line}
+              {/* File and line first, the folder after it in the faint tone: two breakpoints in the
+                  same deep folder read apart, where a path cut from the end made them identical. */}
+              <span className="min-w-0 shrink-0 truncate font-mono text-[12px] text-[var(--cf-text)]">
+                {baseName(file)}:{bp.line}
               </span>
-              {(bp.condition || bp.logMessage) && (
-                <span className="truncate font-mono text-[11px] text-[var(--cf-text-faint)]">
-                  {bp.logMessage ? `“${bp.logMessage}”` : bp.condition}
-                </span>
-              )}
+              <span className="min-w-0 truncate font-mono text-[11px] text-[var(--cf-text-faint)]">
+                {bp.logMessage ? `“${bp.logMessage}”` : bp.condition || dirLabel(file, repoPath)}
+              </span>
             </button>
-            <div className="flex shrink-0 items-center opacity-0 group-hover:opacity-100 focus-within:opacity-100">
+            <div className="absolute inset-y-0 right-1 flex items-center opacity-0 transition-opacity duration-100 group-focus-within:opacity-100 group-hover:opacity-100">
               <Tooltip side="left" label={t("debug.editCondition")}>
                 <button
                   onClick={() => void promptBreakpoint(file, bp.line, "condition")}

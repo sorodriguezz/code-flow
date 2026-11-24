@@ -97,26 +97,34 @@ export function useBreakpointGutter(
     const current = fileRef.current;
     const lineCount = model.getLineCount();
     const list = (current ? (useDebugStore.getState().breakpoints[current] ?? []) : []).filter((bp) => bp.line <= lineCount);
+    // An empty range at the line's start, not the whole line: Monaco paints a glyph on every view
+    // line a decoration covers, so a long line wrapped onto two rows showed two dots (user report,
+    // 2026-11-23). `GrowsOnlyWhenTypingAfter` moves both ends past text typed at that spot, so an
+    // Enter at column 1 still carries the breakpoint down with its code, as the whole-line range did.
     const decorations: MonacoEditorNS.editor.IModelDeltaDecoration[] = list.map((bp) => ({
-      range: new mon.Range(bp.line, 1, bp.line, model.getLineMaxColumn(bp.line)),
+      range: new mon.Range(bp.line, 1, bp.line, 1),
       options: {
         glyphMarginClassName: breakpointGlyphClass(bp),
         glyphMarginHoverMessage: hoverFor(bp),
-        stickiness: mon.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+        stickiness: mon.editor.TrackedRangeStickiness.GrowsOnlyWhenTypingAfter,
       },
     }));
     // Only when the *selected* frame is this file: stepping through a call shows where you are,
     // not a stale highlight in a file you happen to have open.
     const paused = pausedRef.current;
     if (paused && current && normalizePath(paused.file) === current && paused.line <= lineCount) {
-      decorations.push({
-        range: new mon.Range(paused.line, 1, paused.line, 1),
-        options: {
-          isWholeLine: true,
-          className: "cf-debug-current-line",
-          glyphMarginClassName: "cf-debug-current-glyph",
+      // The highlight spans every wrapped row; the arrow goes on the first only — two decorations,
+      // since `isWholeLine` would put a glyph on each row too.
+      decorations.push(
+        {
+          range: new mon.Range(paused.line, 1, paused.line, 1),
+          options: { isWholeLine: true, className: "cf-debug-current-line" },
         },
-      });
+        {
+          range: new mon.Range(paused.line, 1, paused.line, 1),
+          options: { glyphMarginClassName: "cf-debug-current-glyph" },
+        },
+      );
     }
     const ids = ed.deltaDecorations(decorationsRef.current, decorations);
     decorationsRef.current = ids;

@@ -790,6 +790,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bcrypt"
+version = "0.19.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a0cd0bd35a28836d528d2b58ad499bc3c5641d59379421b1be9eeb0c2f2b912a"
+dependencies = [
+ "base64 0.23.1",
+ "blowfish",
+ "getrandom 0.4.3",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
 name = "beef"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -911,6 +924,16 @@ dependencies = [
  "futures-io",
  "futures-lite",
  "piper",
+]
+
+[[package]]
+name = "blowfish"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62ce3946557b35e71d1bbe07ec385073ce9eda05043f95de134eb578fcf1a298"
+dependencies = [
+ "byteorder",
+ "cipher 0.5.2",
 ]
 
 [[package]]
@@ -1319,6 +1342,7 @@ dependencies = [
  "async-imap",
  "axum",
  "base64 0.22.1",
+ "bcrypt",
  "block2",
  "brotli",
  "bytes",
