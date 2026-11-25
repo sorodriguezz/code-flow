@@ -18,6 +18,7 @@ function gateTitle(run: TeamRun, l: (es: string, en: string) => string): string 
   if (run.gate === "plan") return l("Aprobar el plan", "Approve the plan");
   if (run.gate === "merge") return l("Listo para integrar", "Ready to merge");
   if (run.gate === "budget") return l("Llegó al presupuesto", "Budget reached");
+  if (run.gate.startsWith("deps:")) return l("Depende de una tarea que no existe", "Depends on a task that does not exist");
   if (run.gate.startsWith("stuck:")) return l("Se atascó", "It got stuck");
   return l("Espera tu OK", "Needs your OK");
 }
@@ -113,8 +114,8 @@ export function Inbox({ onClose }: { onClose: () => void }) {
               {requiresReview ? <Btn small onClick={() => open(run.id)}>{l("Revisar en la corrida", "Review in the run")}</Btn> : <>
                 <input value={comment[run.id] ?? ""} onChange={(e) => setComment((c) => ({ ...c, [run.id]: e.target.value }))} placeholder={l("Comentario (opcional)", "Comment (optional)")} className={`${field} h-[28px]`} />
                 <div className="flex justify-end gap-1.5">
-                  <Btn small kind="ghost" onClick={() => void useTeamStore.getState().decide(run.id, false, comment[run.id] ?? "", run.gate)}>{l("No", "No")}</Btn>
-                  <Btn small kind="primary" icon={CheckCircle2} onClick={() => void useTeamStore.getState().decide(run.id, true, comment[run.id] ?? "", run.gate)}>{l("Aprobar", "Approve")}</Btn>
+                  <Btn small kind="ghost" onClick={() => void useTeamStore.getState().decide(run.id, false, comment[run.id] ?? "", run.gate)}>{run.gate.startsWith("deps:") ? l("Omitir la tarea", "Skip the task") : l("No", "No")}</Btn>
+                  <Btn small kind="primary" icon={CheckCircle2} onClick={() => void useTeamStore.getState().decide(run.id, true, comment[run.id] ?? "", run.gate)}>{run.gate.startsWith("deps:") ? l("Seguir sin ella", "Go on without it") : l("Aprobar", "Approve")}</Btn>
                 </div>
               </>}
             </section>

@@ -28,6 +28,7 @@ import { applyPreset, presetOf, type PolicyPreset, type Team, type TeamMember, t
 import { AgentAvatar, TeamAvatar } from "../kit/Avatar";
 import { SelectBox, Btn, Label, Panel, Seg, Stepper, Switch, ToggleChip } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
+import { SafetyPanel } from "./SafetyPanel";
 
 type Update = (fn: (team: Team) => Team, now?: boolean) => void;
 const NO_PROJECTS: never[] = [];
@@ -175,6 +176,27 @@ export function TeamInspector({ team, update }: { team: Team; update: Update }) 
       </Panel>
 
       <Panel title={l("Revisión", "Review")} icon={ShieldCheck} open={panels.is("review")} onToggle={() => panels.toggle("review")}>
+        <div className="flex flex-col gap-1.5 rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2.5">
+          <span className="text-[12.5px] font-medium">{l("Qué cuenta como hecho", "What counts as done")}</span>
+          <Seg
+            size="sm"
+            full
+            value={p.dod ?? "warn"}
+            onChange={(dod) => set({ dod })}
+            options={[
+              { value: "off" as const, label: l("Su palabra", "Its word"), title: l("Basta con que el agente diga que terminó", "It is enough for the agent to say it finished") },
+              { value: "warn" as const, label: l("Avisar", "Flag"), title: l("La tarea se da por hecha, pero queda marcada si le falta evidencia", "The task counts as done, but it is flagged when evidence is missing") },
+              { value: "block" as const, label: l("Exigir", "Require"), title: l("Sin evidencia la tarea vuelve al agente", "Without evidence the task goes back to the agent") },
+            ]}
+          />
+          <span className="text-[11.5px] leading-snug text-[var(--cf-text-muted)]">
+            {(p.dod ?? "warn") === "off"
+              ? l("Una tarea termina cuando el agente lo dice. Las pruebas del repositorio se corren igual.", "A task ends when the agent says so. The repository's tests still run.")
+              : (p.dod ?? "warn") === "warn"
+                ? l("Si el agente no reporta evidencia de un criterio, o no cambia ningún archivo sin decir por qué, la tarea termina pero queda marcada para ti y para el líder.", "If the agent reports no evidence for a criterion, or changes no file without saying why, the task ends but is flagged for you and the lead.")
+                : l("Cada criterio de aceptación necesita evidencia y un trabajo sin cambios debe explicar por qué. Si falta, la tarea vuelve al agente y gasta un intento.", "Every acceptance criterion needs evidence and work with no changes must say why. If it is missing, the task goes back to the agent and spends an attempt.")}
+          </span>
+        </div>
         <Switch checked={p.review.enabled} onChange={(enabled) => set({ review: { ...p.review, enabled } })} label={l("Revisión entre pares", "Peer review")} hint={l("Un miembro revisa el trabajo de otros antes de integrarlo.", "A member reviews others' work before it is merged.")} />
         {p.review.enabled && (
           <>
@@ -217,6 +239,8 @@ export function TeamInspector({ team, update }: { team: Team; update: Update }) 
           aria-label={l("Rutas adicionales que requieren aprobación", "Additional paths requiring approval")}
           placeholder={l("Una ruta adicional por línea, relativa al repositorio", "One additional repository-relative path per line")} />}
       </Panel>
+
+      <SafetyPanel team={team} set={set} open={panels.is("safety")} onToggle={() => panels.toggle("safety")} />
 
       <Panel title={l("Recursos y presupuesto", "Resources and budget")} icon={Coins} open={panels.is("budget")} onToggle={() => panels.toggle("budget")}>
         <Row label={l("Tareas a la vez", "Tasks at once")} title={l("Tope de tareas que el equipo ejecuta en paralelo", "Cap on tasks the team runs in parallel")}>

@@ -14,7 +14,7 @@ import { AgentAvatar } from "../kit/Avatar";
 import { SelectBox, Btn, Chip, Drawer, Empty, Seg } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
 import { Channel } from "./Channel";
-import { ITEM_KIND, ITEM_STATUS } from "./look";
+import { ITEM_KIND, itemLook } from "./look";
 
 
 export function MemberChat({ runId, memberId, taskId: initialTask }: { runId: string; memberId: string; taskId?: string }) {
@@ -101,7 +101,7 @@ export function MemberChat({ runId, memberId, taskId: initialTask }: { runId: st
         {tab === "items" && (
           <div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-auto p-3">
             {items.map((i) => {
-              const [es, en, tone] = ITEM_STATUS[i.status];
+              const [es, en, tone] = itemLook(i);
               const [kes, ken] = ITEM_KIND[i.kind];
               return (
                 <button

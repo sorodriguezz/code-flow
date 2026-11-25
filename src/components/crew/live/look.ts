@@ -5,7 +5,7 @@
  * Cancelado — the same as a task's (`agents.status*`) and a Workshop row's (`wt.state.*`), so one
  * piece of work never reads «terminó» in one place and «en curso» in another.
  */
-import type { TeamItem, TeamItemKind, TeamItemStatus, TeamMessageKind, TeamRunStatus } from "../../../types/team";
+import { INFRA_PROVIDER, type TeamItem, type TeamItemKind, type TeamItemStatus, type TeamMessageKind, type TeamRunStatus } from "../../../types/team";
 import type { Tone } from "../kit/ui";
 
 export const ITEM_STATUS: Record<TeamItemStatus, [string, string, Tone]> = {
@@ -56,7 +56,35 @@ export const MESSAGE_KIND: Record<TeamMessageKind, [string, string, Tone]> = {
   error: ["error", "error", "bad"],
 };
 
-export function itemColor(item: Pick<TeamItem, "status">): string {
+/**
+ * How one item reads right now. The status alone says «Trabajando» for a turn that is still
+ * waiting for a slot and for one whose agent finished and whose checks are running, and «Te
+ * espera» for an item that only waits for an engine to come back: the words here are the ones for
+ * what is actually happening.
+ */
+export function itemLook(item: Pick<TeamItem, "status" | "intelligence">): [string, string, Tone] {
+  const info = item.intelligence;
+  if (item.status === "running") {
+    if (info?.phase === "queued") return ["En cola", "Queued", "neutral"];
+    if (info?.phase === "verifying") return ["Verificando", "Verifying", "info"];
+  }
+  if (item.status === "waiting" && info?.recovery) {
+    if (info.recovery.provider === INFRA_PROVIDER) return ["Reintentando", "Retrying", "neutral"];
+    if (info.recovery.resume_at) return ["Espera al motor", "Waiting on engine", "neutral"];
+  }
+  if (item.status === "pending" && info?.missing_deps?.length) return ["Bloqueada", "Blocked", "warn"];
+  if (item.status === "done" && info?.outcome === "partial") return ["Parcial", "Partial", "warn"];
+  return ITEM_STATUS[item.status] ?? ITEM_STATUS.pending;
+}
+
+/** Whether the item's agent is really at work this second — not queued, not being verified. */
+export function isWorking(item: Pick<TeamItem, "status" | "intelligence">): boolean {
+  return item.status === "running" && item.intelligence?.phase !== "queued" && item.intelligence?.phase !== "verifying";
+}
+
+export function itemColor(item: Pick<TeamItem, "status" | "intelligence">): string {
+  if (item.status === "running" && item.intelligence?.phase === "queued") return "var(--cf-border-strong)";
+  if (item.status === "running" && item.intelligence?.phase === "verifying") return "var(--cf-blue)";
   switch (item.status) {
     case "running":
       return "var(--cf-accent)";

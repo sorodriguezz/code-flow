@@ -31,13 +31,77 @@ pub struct ItemIntelligence {
     pub progress: String,
     pub execution: Option<super::coordination::Execution>,
     pub quota_events: Vec<super::coordination::Execution>,
+    /// The identity of the dispatch in flight: set on every claim, carried by whoever runs the
+    /// turn, and asked for when it settles. An answer that names another dispatch is from an
+    /// attempt that is no longer the item's — a turn stopped and re-claimed, a result that arrived
+    /// late — and is dropped instead of closing the attempt running now.
+    pub dispatch_id: String,
+    /// Where a `running` item really is: `queued` (claimed, waiting for a slot of the governor),
+    /// `running` (its turn started) or `verifying` (the turn ended and its checks run). `""` on
+    /// anything that is not running.
+    pub phase: String,
+    /// Keys this item was planned to depend on that no task of the run has. It does not start
+    /// until someone decides: the lead plans again, or the user lets it go on without them.
+    pub missing_deps: Vec<String>,
+    /// Failures of the app's own making in a row (a worktree that could not be created): they
+    /// cost the member no attempt, and past [`MAX_INFRA_FAILURES`] the item stops for the user.
+    pub infra_failures: i64,
+    /// How a closed sub-lead's branch ended: `completed`, `partial` (some of its tasks failed or
+    /// were cancelled), `failed` or `cancelled`. `""` on everything else.
+    pub outcome: String,
+    /// What a `work` turn that changed nothing said about it (`already_satisfied`,
+    /// `no_changes_required`, `unable`), or `undeclared` when it said nothing.
+    pub no_change: String,
+    /// The messages this dispatch was told, to be marked delivered when its turn ends well.
+    pub inbox: Vec<String>,
+    /// Why the item's checks could not run isolated when the team asks for it: the item waits
+    /// (`gated`) for the user to bring the engine back or to let them run on this computer.
+    pub sandbox_hold: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The «provider» of a [`Recovery`] that waits on the app itself (a folder it could not prepare),
+/// not on an engine: it blocks no other item, and it always has a time to try again.
+pub const INFRA_PROVIDER: &str = "codeflow:infra";
+
+/// How many times in a row the app may fail to prepare an item's folder before it stops trying.
+pub const MAX_INFRA_FAILURES: i64 = 3;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Evidence {
     pub label: String,
     pub result: String,
     pub detail: String,
+    /// Who says so: `agent` (the member's own report of a criterion — its word) or `check` (a
+    /// command the app ran itself and read the exit of). Only the second is verification.
+    pub source: String,
+    /// The commit the evidence is about, once the work is committed: evidence of an older commit
+    /// says nothing about the one that lands.
+    pub sha: String,
+    /// The image the check ran in when it ran isolated ([`super::sandbox`]); empty when it ran on
+    /// this computer.
+    pub sandbox: String,
+}
+
+/// What stands between an item and «done» by its own definition: the criteria it reported no
+/// evidence for. Empty when it has none, or when every one of them is accounted for.
+pub fn unreported(evidence: &[Evidence]) -> Vec<&str> {
+    evidence.iter().filter(|e| e.source != "check" && e.result == "unverified").map(|e| e.label.as_str()).collect()
+}
+
+/// What a member that changed no file said about it, read from its `equipo` blocks:
+/// `already_satisfied`, `no_changes_required`, `unable`, or `None` when it said nothing.
+pub fn declared_no_change(reply: &str) -> Option<&'static str> {
+    let (blocks, _) = super::protocol::blocks(reply);
+    blocks.iter().find_map(|block| {
+        let value = block.get("sin_cambios").or_else(|| block.get("no_changes"))?.as_str()?.trim().to_lowercase();
+        Some(match value.as_str() {
+            "ya_estaba" | "already_satisfied" => "already_satisfied",
+            "no_hacia_falta" | "no_changes_required" => "no_changes_required",
+            "no_pude" | "unable" => "unable",
+            _ => return None,
+        })
+    })
 }
 
 pub fn reported_evidence(criteria: &[String], reply: &str) -> Vec<Evidence> {
@@ -50,7 +114,7 @@ pub fn reported_evidence(criteria: &[String], reply: &str) -> Vec<Evidence> {
     criteria.iter().enumerate().map(|(index, label)| {
         let detail = reports.iter().find(|r| r.get("criterio").and_then(|n| n.as_u64()) == Some((index + 1) as u64))
             .and_then(|r| r.get("evidencia").and_then(|v| v.as_str())).unwrap_or("").trim().chars().take(1200).collect::<String>();
-        Evidence { label: label.clone(), result: if detail.is_empty() { "unverified" } else { "reported" }.into(), detail }
+        Evidence { label: label.clone(), result: if detail.is_empty() { "unverified" } else { "reported" }.into(), detail, source: "agent".into(), sha: String::new(), sandbox: String::new() }
     }).collect()
 }
 

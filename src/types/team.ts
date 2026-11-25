@@ -81,7 +81,20 @@ export interface TeamPolicy {
   baseline_failures?: "ignore" | "fix";
   /** Wall-clock minutes one turn may run before it is stopped; `0` is no limit. */
   turn_minutes: number;
+  /** What «done» asks for beyond the member saying so: `off`, `warn` (flagged) or `block` (the
+   *  task goes back to the member). */
+  dod?: TeamDod;
+  /** Where the app runs the checks: `off` (this computer) or `checks` (each in a container, on a
+   *  copy of the tree). */
+  sandbox?: TeamSandbox;
+  /** The image the checks run in; empty picks one from what the repository is. */
+  sandbox_image?: string;
+  /** What a run does about a member whose provider cannot be held to what the team needs of it. */
+  guarantees?: TeamDod;
 }
+
+export type TeamDod = "off" | "warn" | "block";
+export type TeamSandbox = "off" | "checks";
 
 export interface TeamMember {
   id: string;
@@ -226,7 +239,7 @@ export interface TeamRunRepo {
   target_branch: string;
   integration_branch: string;
   integration_path: string;
-  status: "ready" | "merged" | "left" | "pr" | "failed";
+  status: "ready" | "landing" | "merged" | "left" | "pr" | "failed";
   /** The pull request the run opened for this repository. */
   pr_url: string;
   last_error: string;
@@ -274,8 +287,8 @@ export interface TeamItem {
   intelligence?: {
     paths: string[];
     criteria: string[];
-    evidence: { label: string; result: string; detail: string }[];
-    recovery: { kind: "quota" | "auth_required" | "cli_missing" | "cli_busy" | "overloaded"; provider: string; model: string; resume_at: number | null } | null;
+    evidence: TeamEvidence[];
+    recovery: { kind: "quota" | "auth_required" | "cli_missing" | "cli_busy" | "overloaded" | "other"; provider: string; model: string; resume_at: number | null } | null;
     substitute: string | null;
     amendment?: {
       summary: string;
@@ -287,8 +300,35 @@ export interface TeamItem {
     used_contracts?: Record<string, string>;
     impact?: { files: string[]; diff: string; version: string; reasons?: string[] } | null;
     approved_tests?: string;
+    /** Where a `running` item really is: `queued` for a slot, `running`, or `verifying` its checks. */
+    phase?: "" | "queued" | "running" | "verifying";
+    /** Keys the plan made it depend on that no task has: it does not start until that is decided. */
+    missing_deps?: string[];
+    /** How a closed sub-lead's branch ended. */
+    outcome?: "" | "completed" | "partial" | "failed" | "cancelled";
+    /** What a work turn that changed no file said about it; `undeclared` when it said nothing. */
+    no_change?: "" | "already_satisfied" | "no_changes_required" | "unable" | "undeclared";
+    infra_failures?: number;
+    /** Why its checks could not run isolated; the item waits for the user while this is set. */
+    sandbox_hold?: string;
   };
 }
+
+/** One piece of evidence on an item: the member's own report of a criterion (`agent`), or a
+ *  command the app ran itself and read the exit of (`check`). */
+export interface TeamEvidence {
+  label: string;
+  result: "passed" | "failed" | "regression" | "preexisting" | "reported" | "unverified" | (string & {});
+  detail: string;
+  source?: "agent" | "check" | "";
+  /** The commit a check's result is about. */
+  sha?: string;
+  /** The image a check ran in when it ran isolated; empty when it ran on this computer. */
+  sandbox?: string;
+}
+
+/** The «provider» of a recovery that waits on the app itself (a folder it could not prepare). */
+export const INFRA_PROVIDER = "codeflow:infra";
 
 export type TeamMessageKind =
   | "plan"
@@ -416,6 +456,10 @@ export function defaultPolicy(): TeamPolicy {
     baseline_failures: "ignore",
     single_pass: true,
     turn_minutes: 30,
+    dod: "warn",
+    sandbox: "off",
+    sandbox_image: "",
+    guarantees: "warn",
   };
 }
 
@@ -488,6 +532,13 @@ export function emptyTeam(workspaceId: string): Team {
 /** Whether a run still wants the user or is still working. */
 export function runIsLive(run: TeamRun): boolean {
   return run.status === "running" || run.status === "gated" || run.status === "paused";
+}
+
+/** The dependencies of an item that no task of the run answers to. */
+export function danglingDeps(item: TeamItem, items: TeamItem[]): string[] {
+  const missing = [...(item.intelligence?.missing_deps ?? [])];
+  for (const dep of item.depends_on) if (!items.some((other) => other.id === dep)) missing.push(dep.slice(0, 8));
+  return missing;
 }
 
 export function recoveryNeedsUser(state: TeamRunState | undefined): TeamItem[] {

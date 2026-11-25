@@ -28,4 +28,11 @@ describe("splitAttachmentNote", () => {
     const prose = `cita${HEAD}esto lo escribí yo`;
     expect(splitAttachmentNote(prose)).toEqual({ text: prose, files: [] });
   });
+
+  it("drops a note that names no file, as the team chat used to leave after every message", () => {
+    expect(splitAttachmentNote(`hola${HEAD}`)).toEqual({ text: "hola", files: [] });
+    // The sentence typed by hand keeps no line break after it, so it stays the user's.
+    const typed = `hola${HEAD.trimEnd()}`;
+    expect(splitAttachmentNote(typed)).toEqual({ text: typed, files: [] });
+  });
 });

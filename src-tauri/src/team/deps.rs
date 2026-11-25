@@ -20,7 +20,16 @@ pub const INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// The command that installs `root`'s JavaScript dependencies exactly as its lockfile pins them, or
 /// `None` when there is nothing to install (no `package.json`, or `node_modules` already there).
 pub fn install_command(root: &Path) -> Option<String> {
-    if !root.join("package.json").is_file() || root.join("node_modules").exists() {
+    if root.join("node_modules").exists() && !stale(root) {
+        return None;
+    }
+    install_line(root)
+}
+
+/// [`install_command`] whatever `root` already holds: what a tree with no dependencies of its own
+/// installs with — a copy in a container, where the host's `node_modules` is of no use.
+pub fn install_line(root: &Path) -> Option<String> {
+    if !root.join("package.json").is_file() {
         return None;
     }
     let exists = |name: &str| root.join(name).exists();
@@ -55,6 +64,46 @@ pub fn install_command(root: &Path) -> Option<String> {
     )
 }
 
+/// Where an install leaves what it installed from, inside `node_modules` (git never sees it).
+const MARKER: &str = ".codeflow-deps";
+pub const LOCKFILES: [&str; 6] = ["pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb", "package-lock.json", "npm-shrinkwrap.json"];
+
+/// What `root`'s dependencies are installed from: the manifest and the lockfile, by content. Two
+/// trees with the same fingerprint have the same `node_modules`; a member that adds a dependency
+/// changes it.
+pub fn fingerprint(root: &Path) -> String {
+    let read = |name: &str| std::fs::read(root.join(name)).map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default();
+    let mut parts = vec![read("package.json")];
+    for name in LOCKFILES {
+        if root.join(name).is_file() {
+            parts.push(name.to_string());
+            parts.push(read(name));
+        }
+    }
+    let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+    super::coordination::fingerprint(&parts)
+}
+
+/// Whether the `node_modules` already in `root` is no longer what its manifest and lockfile ask
+/// for. «It exists» used to be enough, and a member that added a dependency had its checks run
+/// against the old install. An install of ours left its fingerprint behind; one that did not (the
+/// member's own, the user's) is judged by the clock: a lockfile written after it is newer than it.
+pub fn stale(root: &Path) -> bool {
+    let modules = root.join("node_modules");
+    if let Ok(recorded) = std::fs::read_to_string(modules.join(MARKER)) {
+        return recorded.trim() != fingerprint(root);
+    }
+    let modified = |path: &Path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok();
+    // The folder's own time only moves when a top-level entry does; the managers' own records of
+    // an install are the better clock where they exist.
+    let installed = [modules.clone(), modules.join(".modules.yaml"), modules.join(".package-lock.json"), modules.join(".yarn-integrity")]
+        .iter()
+        .filter_map(|path| modified(path))
+        .max();
+    let Some(installed) = installed else { return false };
+    LOCKFILES.iter().map(|name| root.join(name)).chain([root.join("package.json")]).filter_map(|path| modified(&path)).any(|at| at > installed)
+}
+
 /// The environment a check in the disposable copy at `copy` runs with, borrowing what the tree it is
 /// compared with (`reference`) already built: a Rust base copy compiles into the reference's
 /// `target`, so only the workspace's own crates build again, not every dependency. Cargo keeps
@@ -74,6 +123,7 @@ pub async fn ensure(root: &str) -> Result<Option<String>, String> {
     let Some(command) = install_command(Path::new(root)) else { return Ok(None) };
     let (ok, output) = crate::commands::agents_cmd::run_shell_check_with(&command, root, INSTALL_TIMEOUT, &[]).await;
     if ok {
+        let _ = std::fs::write(Path::new(root).join("node_modules").join(MARKER), fingerprint(Path::new(root)));
         Ok(Some(command))
     } else {
         let tail: String = output.chars().rev().take(1500).collect::<Vec<_>>().into_iter().rev().collect();
@@ -115,6 +165,18 @@ mod tests {
         assert_eq!(install_command(tree(&[("Cargo.toml", "")]).path()), None);
         let done = tree(&[("package.json", "{}"), ("pnpm-lock.yaml", ""), ("node_modules/.keep", "")]);
         assert_eq!(install_command(done.path()), None, "already installed");
+    }
+
+    #[test]
+    fn installs_again_when_the_lockfile_is_not_the_one_it_installed_from() {
+        let root = tree(&[("package.json", "{}"), ("pnpm-lock.yaml", "v1"), ("node_modules/.keep", "")]);
+        // Installed by us from this very lockfile: nothing to do.
+        std::fs::write(root.path().join("node_modules").join(MARKER), fingerprint(root.path())).unwrap();
+        assert_eq!(install_command(root.path()), None);
+        // The member adds a dependency: the install that is there is no longer the right one.
+        std::fs::write(root.path().join("pnpm-lock.yaml"), "v2").unwrap();
+        assert!(stale(root.path()));
+        assert_eq!(install_command(root.path()).as_deref(), Some("pnpm install --frozen-lockfile --prefer-offline"));
     }
 
     #[test]

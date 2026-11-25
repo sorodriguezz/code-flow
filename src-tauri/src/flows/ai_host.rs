@@ -742,7 +742,7 @@ pub(super) async fn team_apply(app: &tauri::AppHandle, link: &TeamLink, answer: 
 
 /// Stops the team run a flow run's node follows, when that flow run is stopped.
 pub(super) async fn team_abort(app: &tauri::AppHandle, team_run: &str) {
-    let _ = crate::commands::team_cmd::team_control(app.clone(), app.state::<Db>(), team_run.to_string(), "abort".into()).await;
+    let _ = crate::commands::team_cmd::team_control(app.clone(), team_run.to_string(), "abort".into()).await;
 }
 
 /// Watches a team run on behalf of the node's «team» wait, and ends the wait when the node has

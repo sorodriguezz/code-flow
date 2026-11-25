@@ -1669,6 +1669,8 @@ export interface ProviderCaps {
   appScriptsDefault: boolean;
   /** It can run as an ACP agent server — Settings offers «ACP / CLI» for it. */
   acp: boolean;
+  /** What the app can hold its turns to, as opposed to what it only asks of the model. */
+  guarantees: { readOnly: boolean; metered: boolean; loopGuard: boolean; resumes: boolean };
 }
 
 /** Every provider's capabilities, in settings order. Fixed per build. */

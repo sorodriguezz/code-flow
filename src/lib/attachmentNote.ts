@@ -34,8 +34,11 @@ export function splitAttachmentNote(content: string): { text: string; files: Not
   const at = content.lastIndexOf(NOTE_HEAD);
   if (at === -1) return { text: content, files: [] };
   const lines = content.slice(at + NOTE_HEAD.length).split("\n").filter((line) => line.trim());
+  // A note with nothing under it: the team chat once wrote one after every message, files or
+  // not. The heading ends in a line break no typed message keeps, so it is never the user's own.
+  if (lines.length === 0) return { text: content.slice(0, at), files: [] };
   const files = lines.map(parseLine);
   // Every line must be a file: anything else means the user wrote this sentence themselves.
-  if (files.length === 0 || files.some((file) => file === null)) return { text: content, files: [] };
+  if (files.some((file) => file === null)) return { text: content, files: [] };
   return { text: content.slice(0, at), files: files as NotedFile[] };
 }

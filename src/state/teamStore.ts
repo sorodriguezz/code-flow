@@ -4,7 +4,9 @@ import { isMainWindow } from "../lib/windowIdentity";
 import { useAiRunStore } from "./aiRunStore";
 import { useAgentsStore } from "./agentsStore";
 import { useChainStore } from "./chainStore";
-import { pushErrorToast } from "./toastStore";
+import { pushErrorToast, useToastStore } from "./toastStore";
+import { useLanguageStore } from "./languageStore";
+import { TEAM_DESIGNED_EVENT, TEAM_PROPOSED_EVENT, openDesignedTeam, openTeamProposal, teamDesignedMessage, teamProposedMessage, type TeamDesigned, type TeamProposed } from "../lib/agents/teamDesigned";
 import { notify } from "./notificationStore";
 import { startAgentCli } from "../lib/agents/startCli";
 import { invoke } from "@tauri-apps/api/core";
@@ -17,12 +19,14 @@ import {
   teamItemTerminal,
   teamList,
   teamNote,
+  teamProposals,
   teamRunMeta,
   teamRunState,
   teamRuns,
   teamSave,
   teamSettle,
   teamStart,
+  type TeamProposal,
   type TeamRepoPick,
 } from "../lib/tauri/teamCommands";
 import type { Team, TeamDispatch, TeamPolicy, TeamRun, TeamRunState } from "../types/team";
@@ -44,9 +48,15 @@ interface TeamState {
   states: Record<string, TeamRunState>;
   selectedRunId: string | null;
   loading: boolean;
+  /** Runs whose last look failed, with why: the view keeps what it had and says it is out of date. */
+  stale: Record<string, string>;
   /** The team dialog open in the Agents view, if any — see `TeamDialogs`. */
   dialog: { kind: "run"; projectId?: string } | { kind: "teams" } | null;
+  /** Teams a chat designed in a turn that could not create them: they wait for a yes. */
+  proposals: TeamProposal[];
 
+  /** Reads the proposals waiting in `workspaceId`, when it is the one this store shows. */
+  loadProposals: (workspaceId: string) => Promise<void>;
   load: (workspaceId: string | null) => Promise<void>;
   refresh: (runId: string) => Promise<void>;
   select: (runId: string | null) => Promise<void>;
@@ -70,6 +80,12 @@ interface TeamState {
 }
 
 
+/** What `team_run_state` answers for a run that no longer exists (`team_cmd::RUN_GONE`). */
+const RUN_GONE = "team.run-gone";
+/** Per run: the last look started, and the last one whose answer was painted. */
+const asked = new Map<string, number>();
+const applied = new Map<string, number>();
+
 export const useTeamStore = create<TeamState>((set, get) => ({
   workspaceId: null,
   teams: [],
@@ -77,12 +93,21 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   states: {},
   selectedRunId: null,
   loading: false,
+  stale: {},
   dialog: null,
+  proposals: [],
+
+  loadProposals: async (workspaceId) => {
+    const proposals = await teamProposals(workspaceId).catch(() => [] as TeamProposal[]);
+    // A store that shows no workspace yet takes this one's: the notice can arrive before the view.
+    if (get().workspaceId === workspaceId || get().workspaceId === null) set({ proposals });
+  },
 
   load: async (workspaceId) => {
-    if (get().workspaceId !== workspaceId) set({ workspaceId, teams: [], runs: [], states: {}, selectedRunId: null });
+    if (get().workspaceId !== workspaceId) set({ workspaceId, teams: [], runs: [], states: {}, stale: {}, selectedRunId: null, proposals: [] });
     if (!workspaceId) return;
     set({ loading: true });
+    void get().loadProposals(workspaceId);
     const [teams, runs] = await Promise.all([teamList(workspaceId).catch(() => [] as Team[]), teamRuns(workspaceId).catch(() => [] as TeamRun[])]);
     if (get().workspaceId !== workspaceId) return;
     set({ teams, runs, loading: false });
@@ -94,15 +119,31 @@ export const useTeamStore = create<TeamState>((set, get) => ({
   },
 
   refresh: async (runId) => {
-    const state = await teamRunState(runId).catch(() => null);
-    if (!state) {
-      set((s) => ({ runs: s.runs.filter((r) => r.id !== runId), states: omit(s.states, runId), selectedRunId: s.selectedRunId === runId ? null : s.selectedRunId }));
+    // Answers can cross: a look that started earlier must not paint over a later one's.
+    const turn = (asked.get(runId) ?? 0) + 1;
+    asked.set(runId, turn);
+    let state: TeamRunState;
+    try {
+      state = await teamRunState(runId);
+    } catch (e) {
+      if ((applied.get(runId) ?? 0) > turn) return;
+      if (String(e).includes(RUN_GONE)) {
+        // It really is gone — deleted here or from another window.
+        set((s) => ({ runs: s.runs.filter((r) => r.id !== runId), states: omit(s.states, runId), stale: omit(s.stale, runId), selectedRunId: s.selectedRunId === runId ? null : s.selectedRunId }));
+        return;
+      }
+      // The look failed, the run did not: it stays on screen as it was, marked out of date. Taking
+      // it off the list made a run that was still working vanish over one failed query.
+      set((s) => ({ stale: { ...s.stale, [runId]: String(e) } }));
       return;
     }
+    if ((applied.get(runId) ?? 0) > turn) return;
+    applied.set(runId, turn);
     if (state.run.workspace_id !== get().workspaceId) return;
     set((s) => ({
       states: { ...s.states, [runId]: state },
       runs: upsertRun(s.runs, state.run),
+      stale: s.stale[runId] ? omit(s.stale, runId) : s.stale,
     }));
   },
 
@@ -271,6 +312,32 @@ void listen<Team>(TEAM_IMPORTED_EVENT, (event) => {
     if (state.workspaceId !== team.workspace_id) return state;
     const remaining = state.teams.filter((existing) => existing.id !== team.id);
     return { teams: [...remaining, team] };
+  });
+});
+
+// A chat made (or replaced) a team with `team_create`: said once, in the window the user is in,
+// with the way to it — the team itself already arrived through the event above.
+void listen<TeamDesigned>(TEAM_DESIGNED_EVENT, (event) => {
+  if (!isMainWindow()) return;
+  const spanish = useLanguageStore.getState().language === "es";
+  useToastStore.getState().pushToast(teamDesignedMessage(event.payload, spanish), "success", {
+    lifetimeMs: 15_000,
+    action: { label: spanish ? "Abrir equipo" : "Open team", run: () => void openDesignedTeam(event.payload.team) },
+  });
+});
+
+// A chat that could not create a team left one to be accepted: the list follows, and the user is
+// told once, with the way to its review.
+void listen<{ workspaceId: string }>("crew:team-proposals", (event) => {
+  if (useTeamStore.getState().workspaceId === event.payload.workspaceId) void useTeamStore.getState().loadProposals(event.payload.workspaceId);
+});
+
+void listen<TeamProposed>(TEAM_PROPOSED_EVENT, (event) => {
+  if (!isMainWindow()) return;
+  const spanish = useLanguageStore.getState().language === "es";
+  useToastStore.getState().pushToast(teamProposedMessage(event.payload, spanish), "info", {
+    lifetimeMs: 20_000,
+    action: { label: spanish ? "Revisar" : "Review", run: () => void openTeamProposal(event.payload.workspaceId, event.payload.id) },
   });
 });
 

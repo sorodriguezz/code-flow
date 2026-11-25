@@ -6,7 +6,7 @@
  */
 import { useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { Activity, ArrowLeft, BarChart3, GitBranch, GitPullRequest, Hand, Kanban, MessagesSquare, Network, Pause, Pin, PinOff, Play, Search, Square, Trash2, Users, WandSparkles } from "lucide-react";
+import { Activity, ArrowLeft, BarChart3, CloudOff, GitBranch, GitFork, GitPullRequest, Hand, Hourglass, Kanban, MessagesSquare, Network, Pause, Pin, PinOff, Play, RefreshCw, Search, ShieldCheck, Square, Trash2, Users, WandSparkles } from "lucide-react";
 import { useTeamStore } from "../../../state/teamStore";
 import { useBacklogStore } from "../../../state/backlogStore";
 import { useT } from "../../../state/languageStore";
@@ -16,7 +16,7 @@ import { recoveryNeedsUser, runIsLive, type TeamRun, type TeamRunState } from ".
 import { TeamAvatar } from "../kit/Avatar";
 import { Btn, Chip, Empty, Seg, field } from "../kit/ui";
 import { money, useCrewStore, useL } from "../state";
-import { RUN_STATUS } from "./look";
+import { RUN_STATUS, isWorking } from "./look";
 import { WorkGraph } from "./WorkGraph";
 import { TeamFlow } from "./TeamFlow";
 import { Lanes } from "./Lanes";
@@ -71,7 +71,7 @@ function RunList({ runs, states }: { runs: TeamRun[]; states: Record<string, Tea
       <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-[repeat(auto-fill,minmax(min(300px,100%),1fr))] gap-3 overflow-y-auto p-3.5">
         {shown.map(({ run, pending }) => {
           const [es, en, tone] = RUN_STATUS[run.status];
-          const working = states[run.id]?.items.some((i) => i.status === "running");
+          const working = states[run.id]?.items.some(isWorking);
           return (
             <button key={run.id} type="button" onClick={() => void useTeamStore.getState().select(run.id)} className="flex min-w-0 flex-col gap-2.5 rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3.5 text-left transition-colors hover:border-[var(--cf-accent-line)]">
               <span className="flex w-full items-center gap-2.5">
@@ -107,19 +107,23 @@ function RunHeader({ state }: { state: TeamRunState }) {
   const store = useTeamStore.getState();
   const card = useBacklogStore((s) => s.items.find((i) => i.links.some((lnk) => lnk.kind === "team_run" && lnk.ref_id === run.id)));
   const [es, en, tone] = RUN_STATUS[run.status];
+  const queued = state.items.filter((i) => i.status === "running" && i.intelligence?.phase === "queued").length;
+  const verifying = state.items.filter((i) => i.status === "running" && i.intelligence?.phase === "verifying").length;
   const remove = async () => {
     if (await confirmAction(l("¿Borrar esta corrida, con su canal y sus worktrees? Lo integrado queda en tus ramas.", "Delete this run, with its channel and worktrees? What was merged stays on your branches."))) await store.removeRun(run.id);
   };
   return (
     <div className="flex shrink-0 flex-col gap-1.5 border-b border-[var(--cf-border)] px-3 py-2.5">
       <div className="flex flex-wrap items-center gap-2">
-        <TeamAvatar size={30} state={state.items.some((i) => i.status === "running") ? "thinking" : "idle"} />
+        <TeamAvatar size={30} state={state.items.some(isWorking) ? "thinking" : "idle"} />
         <div className="min-w-[200px] flex-1">
           <b className="block truncate text-[14px]">{run.title || run.goal}</b>
           <span className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-[var(--cf-text-muted)]">
             <Users className="h-3 w-3" />
             {run.team_name}
             <Chip tone={tone} title={l("Estado de la corrida", "Run status")}>{l(es, en)}</Chip>
+            {queued > 0 && <Chip tone="neutral" icon={Hourglass} title={l("Turnos reclamados que esperan un cupo del límite de turnos a la vez; aún no gastan nada", "Claimed turns waiting for a slot under the limit of turns at once; they spend nothing yet")}>{queued === 1 ? l("1 en cola", "1 queued") : l(`${queued} en cola`, `${queued} queued`)}</Chip>}
+            {verifying > 0 && <Chip tone="info" icon={ShieldCheck} title={l("Tareas cuyo agente terminó y cuyas pruebas corre CodeFlow ahora", "Tasks whose agent finished and whose tests CodeFlow is running now")}>{verifying === 1 ? l("1 verificando", "1 verifying") : l(`${verifying} verificando`, `${verifying} verifying`)}</Chip>}
             <span title={l("Turnos usados de los permitidos", "Turns used of those allowed")}>{l(`${run.dispatches}/${run.policy.max_dispatches} turnos`, `${run.dispatches}/${run.policy.max_dispatches} turns`)}</span>
             {run.policy.budget_usd > 0 && <span>· {l("tope", "cap")} {money(run.policy.budget_usd)}</span>}
           </span>
@@ -130,6 +134,7 @@ function RunHeader({ state }: { state: TeamRunState }) {
           </Btn>
         )}
         <RunShareControls state={state} />
+        <Btn small kind="ghost" icon={GitFork} title={l("Empieza otra corrida desde lo que esta lleva integrado, con otro objetivo o con otro equipo. Esta no se toca.", "Starts another run from what this one has integrated, with another goal or another team. This one is not touched.")} onClick={() => crew.open({ kind: "fork", runId: run.id })}>{l("Bifurcar", "Fork")}</Btn>
         {run.status === "running" && <Btn small icon={Pause} title={l("Detiene a todos los miembros sin perder el trabajo", "Stops every member without losing work")} onClick={() => void store.control(run.id, "pause")}>{l("Pausar", "Pause")}</Btn>}
         {run.status === "paused" && <Btn small kind="primary" icon={Play} title={l("Reanuda la corrida donde quedó", "Resumes the run where it stopped")} onClick={() => void store.control(run.id, "resume")}>{l("Seguir", "Resume")}</Btn>}
         {runIsLive(run) && (
@@ -155,6 +160,7 @@ function RunHeader({ state }: { state: TeamRunState }) {
               <b className="font-medium text-[var(--cf-text)]">{r.name}</b>
               <span>→ <span className="font-mono">{r.target_branch}</span></span>
               {r.status === "merged" && <span className="text-[var(--cf-success)]">· {l("integrado", "merged")}</span>}
+              {r.status === "landing" && <span className="text-[var(--cf-accent)]">· {l("integrando…", "merging…")}</span>}
               {r.status === "failed" && <span className="text-[var(--cf-danger)]" title={r.last_error}>· {l("falló", "failed")}</span>}
               {r.status === "left" && <span>· {l("en su rama", "on its branch")}</span>}
               {r.status === "pr" && r.pr_url && (
@@ -181,6 +187,7 @@ function RunPage({ state }: { state: TeamRunState }) {
   const [rail, setRail] = useState<"canal" | "panel">("canal");
   const item = state.items.find((i) => i.id === selected) ?? null;
   const asks = waitingQuestions(state);
+  const stale = useTeamStore((s) => s.stale[state.run.id]);
   const view = !wide && (tab === "canal" || tab === "panel") ? tab : tab === "canal" || tab === "panel" ? "tareas" : tab;
 
   useEffect(() => setSelected(null), [state.run.id]);
@@ -200,6 +207,16 @@ function RunPage({ state }: { state: TeamRunState }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <RunHeader state={state} />
+      {stale && (
+        <div role="status" className="flex shrink-0 items-center gap-2 border-b border-[var(--cf-border)] bg-[color-mix(in_oklab,var(--cf-warning)_7%,var(--cf-surface))] px-3 py-1.5 text-[12px]">
+          <CloudOff className="h-3.5 w-3.5 shrink-0 text-[var(--cf-warning)]" />
+          <span className="min-w-0 flex-1 truncate" title={stale}>
+            <b className="font-medium">{l("No se pudo actualizar la corrida.", "The run could not be refreshed.")}</b>{" "}
+            <span className="text-[var(--cf-text-muted)]">{l("Ves su último estado conocido; sigue trabajando en segundo plano.", "You are seeing its last known state; it keeps working in the background.")}</span>
+          </span>
+          <Btn small icon={RefreshCw} title={l("Vuelve a pedir el estado de la corrida", "Asks for the run's state again")} onClick={() => void useTeamStore.getState().refresh(state.run.id)}>{l("Reintentar", "Retry")}</Btn>
+        </div>
+      )}
       {state.run.status === "gated" && <GateCard state={state} />}
       <div className="flex min-h-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -245,6 +262,7 @@ export function LiveSpace() {
   const states = useTeamStore((s) => s.states);
   const selectedRunId = useTeamStore((s) => s.selectedRunId);
   const loading = useTeamStore((s) => s.loading);
+  const failed = useTeamStore((s) => (s.selectedRunId ? s.stale[s.selectedRunId] : undefined));
   const openGuest = useSharedRunStore((s) => s.openGuest);
 
   if (openGuest) {
@@ -260,7 +278,11 @@ export function LiveSpace() {
             {l("Corridas", "Runs")}
           </Btn>
         </div>
-        {state ? <RunPage key={selectedRunId} state={state} /> : <div className="grid flex-1 place-items-center text-[12px] text-[var(--cf-text-muted)]">{l("Cargando corrida…", "Loading run…")}</div>}
+        {state ? <RunPage key={selectedRunId} state={state} /> : failed ? (
+          <Empty icon={CloudOff} title={l("No se pudo abrir la corrida", "The run could not be opened")} hint={l("La corrida sigue existiendo y, si estaba trabajando, sigue en segundo plano. Falló la consulta de su estado.", "The run still exists and, if it was working, it keeps going in the background. The query for its state failed.")}>
+            <Btn kind="primary" icon={RefreshCw} onClick={() => void useTeamStore.getState().refresh(selectedRunId)}>{l("Reintentar", "Retry")}</Btn>
+          </Empty>
+        ) : <div className="grid flex-1 place-items-center text-[12px] text-[var(--cf-text-muted)]">{l("Cargando corrida…", "Loading run…")}</div>}
       </div>
     );
   }

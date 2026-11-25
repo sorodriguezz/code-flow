@@ -4,7 +4,7 @@
  */
 import { create } from "zustand";
 
-export type Space = "tablero" | "equipos" | "agentes" | "en-vivo" | "taller";
+export type Space = "tablero" | "equipos" | "agentes" | "en-vivo" | "rutinas" | "taller";
 
 export type Overlay =
   | { kind: "launch"; goal?: string; assignee?: { kind: "agent" | "team"; id: string }; cardId?: string; projectId?: string; attachments?: import("../../lib/tauri/chatCommands").ChatAttachment[] }
@@ -12,14 +12,15 @@ export type Overlay =
   | { kind: "card"; id: string }
   | { kind: "chat"; runId: string; memberId: string; taskId?: string }
   | { kind: "task"; id: string }
-  | { kind: "teamChat"; id: string }
   | { kind: "chain"; id: string }
   | { kind: "teamTemplates" }
+  | { kind: "teamProposal"; id: string }
   | { kind: "decider" }
   | { kind: "governor" }
   | { kind: "race"; batchId: string }
   | { kind: "chainEditor"; templateId?: string | null }
   | { kind: "story" }
+  | { kind: "fork"; runId: string; itemId?: string }
   | null;
 
 const SPACE_KEY = "cf.crew.space";
@@ -27,7 +28,7 @@ const SPACE_KEY = "cf.crew.space";
 function readSpace(): Space {
   try {
     const raw = localStorage.getItem(SPACE_KEY);
-    if (raw === "tablero" || raw === "equipos" || raw === "agentes" || raw === "en-vivo" || raw === "taller") return raw;
+    if (raw === "tablero" || raw === "equipos" || raw === "agentes" || raw === "en-vivo" || raw === "rutinas" || raw === "taller") return raw;
   } catch {
     /* private window, blocked storage */
   }
@@ -41,7 +42,8 @@ interface CrewState {
   selectedMemberId: string | null;
   /** `canal` and `panel` are tabs only on a narrow window, where the side rail folds into the main area. */
   liveTab: "tareas" | "equipo" | "miembros" | "canal" | "panel";
-  workshopTab: "worktrees" | "bench" | "races";
+  workshopTab: "worktrees" | "bench" | "races" | "lab";
+  rosterTab: "agentes" | "bandejas";
   /** A card or agent to draw attention to once its space opens. */
   focus: string | null;
   setSpace: (space: Space) => void;
@@ -57,6 +59,7 @@ export const useCrewStore = create<CrewState>((set) => ({
   selectedMemberId: null,
   liveTab: "tareas",
   workshopTab: "worktrees",
+  rosterTab: "agentes",
   focus: null,
   setSpace: (space) => {
     try {

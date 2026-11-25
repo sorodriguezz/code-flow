@@ -31,8 +31,9 @@ const SECRET = /(?:secret|(?:^|_)pats?(?:_|$)|token|password|passwd|credential|k
 const INVITATION = /^collab_(?:share|invite|join|join_preview|take_join_link|live_connection|run_share|run_accept|run_decline|run_take_seat)$/;
 
 /** What a model must never call: the doors it is itself held at — answering its own approval,
- *  the window's replies to the app's questions, the interface it already drives through `ui_act`. */
-const SELF = /^(?:agentcli_|flows_bridge_|codi_act_result|codi_register|codi_ui_|mcp_trust|log_frontend_error|codi_confirm$|codi_act$)/;
+ *  the window's replies to the app's questions, the interface it already drives through `ui_act`,
+ *  the yes to a team it proposed from a turn that may not act (`team_proposal_accept`). */
+const SELF = /^(?:agentcli_|flows_bridge_|codi_act_result|codi_register|codi_ui_|mcp_trust|log_frontend_error|codi_confirm$|codi_act$|team_proposal_)/;
 
 /** The browser's own plumbing (`browser_window.rs`, `preview_server.rs`): the bar reporting its
  *  height, its tabs, the editor reporting what it shows, and `preview_file_url`, which serves **any** folder

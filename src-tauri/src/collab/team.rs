@@ -518,8 +518,20 @@ pub async fn owner_tick(app: &AppHandle, db: &Db, session_id: &str) -> Result<Ru
             "withdrawn" => ("error", String::new(), "el puesto quedó libre antes de terminar".to_string()),
             _ => continue,
         };
+        // The run hears the result first, and the offer is closed only once it did. Closed before
+        // (and the result of settling ignored), a failure here left the item «running» on a seat
+        // that had already answered, with nothing left to settle it.
+        let settled = crate::commands::team_cmd::settle_item(app, db, &job.item_id, outcome, &text, &error).await;
+        let error = match settled {
+            Ok(_) => error,
+            Err(e) => {
+                let run_id = with(db, |c| team::get_item(c, &job.item_id).map_err(e2s))?.map(|item| item.run_id).unwrap_or_default();
+                let note = format!("no se pudo registrar lo que entregó {nick}: {e}");
+                crate::commands::team_cmd::engine_failure(db, &run_id, &job.item_id, &note);
+                note
+            }
+        };
         with(db, |c| set_job(c, session_id, "owner", &job.item_id, "settled", &error).map_err(e2s))?;
-        let _ = crate::commands::team_cmd::settle_item(app, db, &job.item_id, outcome, &text, &error).await;
         with(db, |c| {
             mark_external(c, &job.item_id, &task.member_id, &nick);
             Ok(())

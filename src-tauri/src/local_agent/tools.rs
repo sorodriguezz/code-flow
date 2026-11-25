@@ -119,6 +119,9 @@ pub enum Reach {
 pub struct Inventory {
     /// The folder belongs to a project (`add_task` files into its tree).
     pub project: bool,
+    /// The folder belongs to a workspace — a project's, or a workspace chat's own: a conversation
+    /// there gets `team_brief` and `team_create` (`crate::team::designer`).
+    pub workspace: bool,
     /// The local models have CodeFlow scripts on (Settings › Providers, `crate::app_script`): the
     /// run gets `app_commands` and `app_run` — the whole app, a script at a time. Off unless the user
     /// switched it on, since a small model writes worse code.
@@ -241,6 +244,11 @@ pub fn offered(grants: Grants, map: bool, checks: bool, inventory: &Inventory, g
     // The app's commands, as a script — reads only for a run that observes (`app_gateway::admit`).
     if grants.reach >= Reach::Observe && inventory.scripts {
         names.extend(SCRIPT_TOOLS);
+    }
+    // A team for the workspace, as a CLI's chat has it: a conversation that may not act gets the
+    // same two, and what it designs waits for the user's yes.
+    if grants.reach >= Reach::Observe && inventory.workspace {
+        names.extend([crate::team::designer::BRIEF_TOOL, crate::team::designer::CREATE_TOOL]);
     }
     if grants.reach == Reach::Act {
         names.push(crate::ai_memory::tools::WRITE);
@@ -579,6 +587,12 @@ impl Toolbox {
             return crate::ai_memory::tools::schemas(true).into_iter().find(|t| t["name"] == name)
                 .map(|t| json!({"type": "function", "function": {"name": name, "description": t["description"], "parameters": t["inputSchema"]}}));
         }
+        if crate::team::designer::is_tool(name) {
+            return crate::team::designer::schemas(self.grants.reach == Reach::Act)
+                .into_iter()
+                .find(|t| t["name"] == name)
+                .map(|t| json!({ "type": "function", "function": { "name": name, "description": t["description"], "parameters": t["inputSchema"] } }));
+        }
         if SCRIPT_TOOLS.contains(&name) {
             return crate::app_gateway::tools_for(self.grants.reach == Reach::Act, false)
                 .into_iter()
@@ -886,9 +900,13 @@ impl Toolbox {
         let gated = matches!(name, "recall" | "read_note" | "read_context" | "reference_repos" | "read_reference_file")
             || OBSERVE_TOOLS.contains(&name)
             || ACT_TOOLS.contains(&name)
-            || SCRIPT_TOOLS.contains(&name);
+            || SCRIPT_TOOLS.contains(&name)
+            || crate::team::designer::is_tool(name);
         if gated && !self.offered().contains(&name) {
             return Outcome::err(format!("there is no tool named {name:?}"));
+        }
+        if crate::team::designer::is_tool(name) {
+            return self.team_tool(name, args).await;
         }
         if SCRIPT_TOOLS.contains(&name) {
             return self.script_tool(name, args).await;
@@ -1018,6 +1036,26 @@ impl Toolbox {
                 let mut outcome = Outcome::err(format!("{name}: {error}"));
                 outcome.summary = first_line(&error);
                 outcome
+            }
+        }
+    }
+
+    /// `team_brief` and `team_create`, answered by the designer as this run — the same checks a
+    /// CLI's chat gets over the MCP server.
+    async fn team_tool(&self, name: &str, args: &Value) -> Outcome {
+        let Some(app) = crate::ai_usage::app() else { return Outcome::err("CodeFlow is not ready yet") };
+        let place = crate::agentcli::place::of(app, &self.root_str, &self.session);
+        let scope = crate::team::designer::Scope {
+            workspace_id: place.workspace_id.clone().or_else(|| self.workspace_id.clone()),
+            project: place.project.clone(),
+            acts: self.grants.reach == Reach::Act,
+        };
+        let about = args.get("name").and_then(Value::as_str).unwrap_or(name).to_string();
+        match crate::team::designer::call(&scope, name, args).await {
+            Ok(text) => Outcome::ok(text, about),
+            Err(text) => {
+                let summary = text.lines().next().unwrap_or("not created").chars().take(120).collect::<String>();
+                Outcome { content: text, summary, ok: false, changed: None }
             }
         }
     }
@@ -1710,6 +1748,8 @@ fn is_outside_text(name: &str) -> bool {
         || OBSERVE_TOOLS.contains(&name)
         || matches!(name, "db_write" | "http_request" | "run_with_secret")
         || name == crate::app_gateway::RUN_TOOL
+        // The roster's prompts and the teams' descriptions are text somebody wrote.
+        || name == crate::team::designer::BRIEF_TOOL
         || (crate::containers::agent_sandbox::tools::is_tool(name) && name != crate::containers::agent_sandbox::tools::WRITE_FILE)
 }
 
@@ -1840,7 +1880,7 @@ fn take_inventory(conn: &rusqlite::Connection, root: &str, reach: Reach) -> (Opt
     let chat_workspace = if project.is_none() { crate::workspace_chat::workspace_of_dir(conn, root) } else { None };
     let workspace_chat = chat_workspace.is_some();
     let workspace = project.as_ref().map(|p| p.workspace_id.clone()).filter(|ws| !ws.is_empty()).or(chat_workspace);
-    let mut inventory = Inventory { project: project.is_some(), ..Default::default() };
+    let mut inventory = Inventory { project: project.is_some(), workspace: workspace.is_some(), ..Default::default() };
     inventory.memories = approved_memories(conn, workspace.as_deref(), project.as_ref().map(|p| p.id.as_str()));
     let Some(ws) = workspace.as_deref() else { return (workspace, inventory, workspace_chat) };
     inventory.notes = conn
@@ -2165,6 +2205,8 @@ mod tests {
     const FULL: Inventory =
         Inventory {
             project: true,
+            // Its own test below.
+            workspace: false,
             // Off as the setting starts: its own test below.
             scripts: false,
             services: true,
@@ -2182,6 +2224,21 @@ mod tests {
             contexts: 0,
             sandbox: false,
         };
+
+    /// A conversation in a workspace can design a team for it; a run that judges material, or a
+    /// fix, cannot — and neither can a folder that belongs to no workspace.
+    #[test]
+    fn the_team_tools_are_offered_to_a_conversation_in_a_workspace() {
+        let here = Inventory { workspace: true, ..FULL };
+        let act = Grants { write: true, run: true, reach: Reach::Act };
+        let observe = Grants { write: false, run: false, reach: Reach::Observe };
+        for grants in [act, observe] {
+            let names = offered(grants, true, false, &here, 0);
+            assert!(names.contains(&"team_brief") && names.contains(&"team_create"));
+        }
+        assert!(!offered(WRITE, true, false, &here, 0).contains(&"team_brief"), "a project-only run gets none of the app");
+        assert!(!offered(act, true, false, &FULL, 0).contains(&"team_create"), "no workspace, nowhere to keep a team");
+    }
 
     /// CodeFlow scripts reach a local model only once switched on, and never a run that may not
     /// look at the app.

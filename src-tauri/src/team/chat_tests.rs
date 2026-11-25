@@ -412,3 +412,71 @@ fn repository_lists_guide_the_lead_instead_of_blocking_it_and_stale_ones_are_for
     let fresh = saved.into_iter().next().unwrap();
     assert!(open(&conn, fresh, &project, true).is_ok());
 }
+
+#[test]
+fn a_message_sent_without_files_is_kept_as_it_was_written() {
+    assert_eq!(stored_question("  hola  ", &[]), "hola");
+
+    let file = crate::commands::chat_attach::ChatAttachment {
+        id: "a3f19c2e-captura.png".into(),
+        name: "captura.png".into(),
+        path: "/state/a3f19c2e-captura.png".into(),
+        bytes: 12,
+        is_image: true,
+    };
+    let kept = stored_question("mira esto", &[file]);
+    assert!(kept.starts_with("mira esto\n\nArchivos adjuntos a este mensaje"), "{kept}");
+    assert!(kept.ends_with("- captura.png (/state/a3f19c2e-captura.png)"), "{kept}");
+}
+
+#[test]
+fn deleting_a_conversation_takes_its_turns_and_leaves_the_team_s_other_ones() {
+    let (conn, team, project) = fixture();
+    let kept = open(&conn, team.clone(), &project, false).unwrap();
+    append(&conn, &kept.chat, "user", None, "Esta se queda", 0, None, false).unwrap();
+    let gone = open(&conn, team.clone(), &project, true).unwrap();
+    append(&conn, &gone.chat, "user", None, "Esta se va", 0, None, false).unwrap();
+    // A member that took a turn has a task of its own in the conversation, with its transcript.
+    let backend = gone.chat.members.iter().find(|m| m.member.id == "backend").unwrap();
+    let member_task = task_for(&conn, &gone.chat, backend).unwrap();
+    for conversation in [&gone.task.conversation_id, &member_task.conversation_id, &kept.task.conversation_id] {
+        conn.execute(
+            "INSERT INTO activity_log (id, project_id, session_id, question, answer, created_at) VALUES (?1,?2,?3,'q','a',?4)",
+            params![uid(), project, conversation, queries::now()],
+        )
+        .unwrap();
+    }
+
+    // Not while the team is answering it: the turn would go on with nowhere to report.
+    let mut busy = gone.chat.clone();
+    busy.status = "running".into();
+    save(&conn, &mut busy).unwrap();
+    assert!(delete(&conn, &gone.chat.id).unwrap_err().contains("Detén"));
+    busy.status = "idle".into();
+    save(&conn, &mut busy).unwrap();
+
+    let mut conversations = delete(&conn, &gone.chat.id).unwrap();
+    conversations.sort();
+    let mut expected = vec![gone.task.conversation_id.clone(), member_task.conversation_id.clone()];
+    expected.sort();
+    assert_eq!(conversations, expected);
+
+    let count = |sql: &str, value: &str| conn.query_row(sql, [value], |row| row.get::<_, i64>(0)).unwrap();
+    assert_eq!(count("SELECT COUNT(*) FROM agent_team_chats WHERE id = ?1", &gone.chat.id), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM agent_team_chat_messages WHERE chat_id = ?1", &gone.chat.id), 0);
+    assert_eq!(count("SELECT COUNT(*) FROM agent_tasks WHERE batch_id LIKE ?1", &format!("{BATCH_PREFIX}{}:%", gone.chat.id)), 0);
+    for conversation in &expected {
+        assert_eq!(count("SELECT COUNT(*) FROM activity_log WHERE session_id = ?1", conversation), 0);
+    }
+
+    // The other conversation is whole, and is the one the team opens next.
+    let rest = history(&conn, &team.id).unwrap();
+    assert_eq!(rest.len(), 1);
+    assert_eq!(rest[0].title, "Esta se queda");
+    assert_eq!(state(&conn, &kept.chat.id).unwrap().messages.len(), 1);
+    assert_eq!(count("SELECT COUNT(*) FROM activity_log WHERE session_id = ?1", &kept.task.conversation_id), 1);
+    assert_eq!(open(&conn, team, &project, false).unwrap().chat.id, kept.chat.id);
+
+    // Asked twice — two windows — the second finds nothing and says nothing.
+    assert!(delete(&conn, &gone.chat.id).unwrap().is_empty());
+}

@@ -17,17 +17,23 @@
 //!   draws as the team's channel.
 //!
 //! The backend decides, the frontend drives: [`claim_ready`] marks items running and the main window
-//! runs them (headless turn or a CLI in a terminal), then reports each one back to `team_cmd`.
+//! runs them (headless turn or a CLI in a terminal), then reports each one back to the engine ([`engine`]).
 
 pub mod artifacts;
 pub mod chat;
 pub mod gitops;
 pub mod coordination;
 pub mod deps;
+pub mod engine;
+pub mod designer;
 pub mod intelligence;
 pub mod hierarchy;
+pub mod inbox;
+pub mod lab;
 pub mod metrics;
 pub mod protocol;
+pub mod routines;
+pub mod sandbox;
 pub mod tamper;
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -198,6 +204,21 @@ pub struct Policy {
     /// had): `ignore` lets the task through with the failure noted, `fix` makes it the member's to
     /// fix as well. A failure the change caused blocks either way.
     pub baseline_failures: String,
+    /// What «done» asks for beyond the member saying so: `off` (its word is enough), `warn` (a task
+    /// that reports no evidence for a criterion, or changes nothing without saying why, is done
+    /// but flagged for you and the lead) or `block` (it goes back to the member as a failure).
+    pub dod: String,
+    /// Where the app runs the checks and the installs before them: `off` (on this computer, as
+    /// the user) or `checks` (each in a container, on a copy of the tree — [`sandbox`]). With
+    /// `checks` and no engine to run them in, the run stops and asks; it never checks on the host
+    /// on its own.
+    pub sandbox: String,
+    /// The image the checks run in; empty picks one from what the repository is.
+    pub sandbox_image: String,
+    /// What a run does about a member whose provider cannot be held to what the team needs of it
+    /// (`provider_caps::gaps`): `off`, `warn` (it starts and says so) or `block` (it does not
+    /// start until the team is changed).
+    pub guarantees: String,
 }
 
 impl Default for Policy {
@@ -243,6 +264,12 @@ impl Default for Policy {
             single_pass: true,
             turn_minutes: 30,
             baseline_failures: "ignore".into(),
+            dod: "warn".into(),
+            // Off for the rows that never chose: a team's checks do not move into a container
+            // behind its back. A new team gets `checks` from the window when an engine is there.
+            sandbox: "off".into(),
+            sandbox_image: String::new(),
+            guarantees: "warn".into(),
         }
     }
 }
@@ -265,6 +292,10 @@ impl Policy {
         self.integrate = pick(&self.integrate, &["merge", "branch", "pr"], "merge");
         self.comms = pick(&self.comms, &["open", "tree", "tree_siblings"], "open");
         self.baseline_failures = pick(&self.baseline_failures, &["ignore", "fix"], "ignore");
+        self.dod = pick(&self.dod, &["off", "warn", "block"], "warn");
+        self.sandbox = pick(&self.sandbox, &["off", "checks"], "off");
+        self.guarantees = pick(&self.guarantees, &["off", "warn", "block"], "warn");
+        self.sandbox_image = self.sandbox_image.trim().chars().take(200).collect();
         self.max_notes_per_item = self.max_notes_per_item.clamp(0, 32);
         self.sub_lead_rounds = self.sub_lead_rounds.clamp(1, 12);
         self.budget_usd = if self.budget_usd.is_finite() { self.budget_usd.clamp(0.0, 10_000.0) } else { 0.0 };
@@ -537,6 +568,7 @@ pub struct RunState {
 // ---------------------------------------------------------------- schema
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    lab::migrate(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS agent_teams (
             id TEXT PRIMARY KEY,
@@ -1099,6 +1131,15 @@ pub fn insert_item(conn: &Connection, item: &Item) -> rusqlite::Result<()> {
 
 /// Writes every mutable column of an item back.
 pub fn update_item(conn: &Connection, item: &Item) -> rusqlite::Result<()> {
+    // The phase says where a *running* item is; on anything else it would be a stale claim, and
+    // every path that takes an item out of `running` would have to remember to clear it.
+    let settled;
+    let item = if item.status != "running" && !item.intelligence.phase.is_empty() {
+        settled = Item { intelligence: intelligence::ItemIntelligence { phase: String::new(), ..item.intelligence.clone() }, ..item.clone() };
+        &settled
+    } else {
+        item
+    };
     conn.execute(
         "UPDATE agent_team_items SET status = ?2, approved = ?3, task_id = ?4, worktree_path = ?5, branch = ?6, commit_sha = ?7,
             merged = ?8, output_text = ?9, attempts = ?10, last_error = ?11, feedback = ?12, terminal_session = ?13,
@@ -1250,8 +1291,18 @@ pub fn state(conn: &Connection, run_id: &str) -> rusqlite::Result<Option<RunStat
 pub fn deps_ready(item: &Item, items: &[Item]) -> bool {
     item.depends_on.iter().all(|dep| match items.iter().find(|i| i.id == *dep) {
         Some(d) => d.status == "skipped" || (d.status == "done" && (!d.writes() || d.merged || d.commit_sha.is_empty())),
-        None => true,
-    })
+        // A dependency that is not in the run is not a satisfied one: what was meant to come
+        // first never will, and starting anyway builds on something that does not exist.
+        None => false,
+    }) && item.intelligence.missing_deps.is_empty()
+}
+
+/// The dependencies of `item` that no item of the run answers to: ids that are gone, and the keys
+/// the plan named that never existed (`ItemIntelligence::missing_deps`).
+pub fn dangling_deps(item: &Item, items: &[Item]) -> Vec<String> {
+    let mut out: Vec<String> = item.intelligence.missing_deps.clone();
+    out.extend(item.depends_on.iter().filter(|dep| !items.iter().any(|i| i.id == **dep)).map(|dep| dep.chars().take(8).collect::<String>()));
+    out
 }
 
 /// The items that may start now, prioritizing work that unblocks other tasks, within the run's and each member's parallel
@@ -1403,11 +1454,27 @@ pub fn running_item_at(conn: &Connection, folder: &str) -> Option<(String, Strin
 /// died with the app), and runs that were moving park as paused until the user resumes them.
 pub fn recover_after_restart(conn: &Connection) -> rusqlite::Result<()> {
     // An item out on another machine (a shared run's seat, `collab::team`) is still running there.
-    conn.execute(
-        "UPDATE agent_team_items SET status = 'pending', last_error = 'team.interrupted', terminal_session = ''
-         WHERE status = 'running' AND run_in <> 'remote'",
-        [],
-    )?;
+    // One at a time rather than one UPDATE: the phase and the dispatch live in the item's JSON, and
+    // a dispatch that died with the app must not be answered by anything that outlived it.
+    let mut stmt = conn.prepare(&format!("SELECT {ITEM_COLUMNS} FROM agent_team_items WHERE status = 'running' AND run_in <> 'remote'"))?;
+    let interrupted: Vec<Item> = stmt.query_map([], map_item)?.filter_map(Result::ok).collect();
+    drop(stmt);
+    for mut item in interrupted {
+        item.status = "pending".into();
+        item.last_error = "team.interrupted".into();
+        item.terminal_session.clear();
+        // A turn that never got its slot spent nothing: its attempt goes back.
+        if item.intelligence.phase == "queued" {
+            item.attempts = (item.attempts - 1).max(0);
+        } else if !item.worktree_path.is_empty() && item.feedback.trim().is_empty() {
+            // Its folder still holds whatever the turn had written when the app closed. The next
+            // attempt is told, so it reads that before it starts over on top of it.
+            item.feedback = "El turno anterior se interrumpió al cerrarse CodeFlow. En esta carpeta puede haber cambios a medias de ese turno: revisa `git status` y el diff antes de seguir, conserva lo que sirva y completa lo que falte.".into();
+        }
+        item.intelligence.phase.clear();
+        item.intelligence.dispatch_id.clear();
+        update_item(conn, &item)?;
+    }
     conn.execute(
         "UPDATE agent_team_runs SET status = 'paused', last_reason = 'team.interrupted' WHERE status = 'running'",
         [],

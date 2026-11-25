@@ -31,6 +31,9 @@ const POLICY_CHOICES: Record<string, string[]> = {
   integrate: ["merge", "branch", "pr"],
   comms: ["open", "tree", "tree_siblings"],
   baseline_failures: ["ignore", "fix"],
+  dod: ["off", "warn", "block"],
+  sandbox: ["off", "checks"],
+  guarantees: ["off", "warn", "block"],
 };
 const REVIEW_EXIGENCE = ["correct", "polished"];
 const DECIMAL_POLICY_FIELDS = new Set(["budget_usd", "budget_minutes", "unmetered_minutes"]);

@@ -13,6 +13,7 @@ import { useTeamStore } from "../../../state/teamStore";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
 import { pushErrorToast } from "../../../state/toastStore";
 import { draftFromTemplate, type TeamSlot, type TeamTemplateBody } from "../../../lib/agents/builtinTemplates";
+import { withSandboxDefault } from "../../../lib/agents/sandboxDefault";
 import { defaultPolicy, emptyTeam, type TeamMember } from "../../../types/team";
 import type { LibraryItem } from "../../../types/crew";
 import type { WorkspaceAgent } from "../../../types/domain";
@@ -143,7 +144,7 @@ export function TeamTemplatesDialog() {
         description: chosen.description,
         lead,
         members,
-        policy: { ...defaultPolicy(), ...(body.policy ?? {}) },
+        policy: await withSandboxDefault({ ...defaultPolicy(), ...(body.policy ?? {}) }),
       });
       if (team) {
         crew.set({ selectedTeamId: team.id, selectedMemberId: null });

@@ -1302,7 +1302,7 @@ pub fn seal_stored(db: &Db, store: &dyn SecretStore) -> Result<SealReport, Strin
 /// The credentials history could hold: the auth blocks of every collection and folder, and the
 /// variables of every collection and environment, read back through the store.
 fn stored_secret_values(db: &Db, store: &dyn SecretStore) -> Result<Vec<String>, String> {
-    let (collections, folders, environments) = {
+    let (collections, folders, environments, requests) = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         let read = |sql: &str| -> rusqlite::Result<Vec<Vec<String>>> {
             let mut stmt = conn.prepare(sql)?;
@@ -1318,6 +1318,7 @@ fn stored_secret_values(db: &Db, store: &dyn SecretStore) -> Result<Vec<String>,
             read("SELECT id, auth, variables FROM api_collections").map_err(|e| e.to_string())?,
             read("SELECT id, auth FROM api_folders").map_err(|e| e.to_string())?,
             read("SELECT id, variables FROM api_environments").map_err(|e| e.to_string())?,
+            read("SELECT id, spec FROM api_requests").map_err(|e| e.to_string())?,
         )
     };
     let mut auths = Vec::new();
@@ -1332,7 +1333,259 @@ fn stored_secret_values(db: &Db, store: &dyn SecretStore) -> Result<Vec<String>,
     for row in environments {
         variables.push(unseal_text(&row[1], Shape::Variables, Owner::Environment, &row[0], store));
     }
-    Ok(secret_values(&auths, &variables))
+    let mut values = secret_values(&auths, &variables);
+    // A request carries credentials of its own — its auth block, an MQTT password, an
+    // `Authorization` header typed in as itself. Leaving them out is how a request's Basic
+    // password reached a model through `api_load_tree` (2026-11-25): nothing knew it was one.
+    for row in requests {
+        let spec = unseal_text(&row[1], Shape::Spec, Owner::Request, &row[0], store);
+        let Ok(mut spec) = serde_json::from_str::<Value>(&spec) else { continue };
+        model_slots(Shape::Spec, &mut spec, Reach::Sealable, &mut |path, slot| {
+            if let Some(text) = slot.as_str().filter(|text| shown_masked(path, text)) {
+                values.push(text.to_string());
+            }
+        });
+    }
+    Ok(values)
+}
+
+// ---------------------------------------------------------------------------
+// What a model is shown
+// ---------------------------------------------------------------------------
+//
+// The window needs the credentials back in place to send a request; a model never does — it sends
+// one through `http_request`, where the app puts them in. So everything the API client hands a
+// model (`app_gateway`) goes through `mask_for_model`, which blanks the slots by where they are,
+// not by what they hold: a list of known values misses the ones nobody listed, and anything
+// shorter than `MIN_SCRUB_LEN`. And since a model that reads a record sends it back whole to change
+// one field, `restore_masked` puts the stored credential back wherever the mask returns, so the
+// mask is never what gets saved.
+
+/// The slots of one blob a model is not shown: the ones sealing knows, and — in a request — a
+/// header whose value is a credential whatever it looks like.
+fn model_slots(shape: Shape, value: &mut Value, reach: Reach, visit: &mut Visit<'_>) {
+    visit_slots(shape, value, reach, visit);
+    if shape != Shape::Spec {
+        return;
+    }
+    let Some(headers) = value.get_mut("headers").and_then(Value::as_array_mut) else { return };
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for header in headers {
+        let Some(key) = header.get("key").and_then(Value::as_str).map(|key| key.trim().to_ascii_lowercase()) else { continue };
+        if !is_sensitive_header(&key) {
+            continue;
+        }
+        let nth = seen.entry(key.clone()).or_default();
+        let path = format!("header.{key}.{nth}");
+        *nth += 1;
+        if let Some(slot) = header.get_mut("value") {
+            string_slot(&path, slot, visit);
+        }
+    }
+}
+
+/// Whether the text in a slot is hidden from a model: a credential typed in as itself. A header
+/// that only carries a variable (`Bearer {{token}}`) holds none.
+fn shown_masked(path: &str, text: &str) -> bool {
+    is_literal(text) && text != REDACTED && !(path.starts_with("header.") && text.contains("{{"))
+}
+
+/// The keys the API client's records keep a credential blob under.
+fn blob_shape(key: &str) -> Option<Shape> {
+    match key {
+        "auth" => Some(Shape::Auth),
+        "variables" => Some(Shape::Variables),
+        "spec" => Some(Shape::Spec),
+        _ => None,
+    }
+}
+
+/// Runs `each` over a record's blob — JSON text, as a row stores it, or already parsed — and
+/// writes it back when `each` says it changed.
+fn with_blob(item: &mut Value, each: &mut dyn FnMut(&mut Value) -> bool) {
+    match item {
+        Value::String(raw) => {
+            let Ok(mut parsed) = serde_json::from_str::<Value>(raw) else { return };
+            if !(parsed.is_object() || parsed.is_array()) {
+                return;
+            }
+            if each(&mut parsed) {
+                if let Ok(text) = serde_json::to_string(&parsed) {
+                    *raw = text;
+                }
+            }
+        }
+        Value::Object(_) | Value::Array(_) => {
+            each(item);
+        }
+        _ => {}
+    }
+}
+
+/// `scheme://user:password@host` with the password masked, or `None` when there is none.
+fn mask_url_password(url: &str) -> Option<String> {
+    let start = url.find("://")? + 3;
+    let rest = &url[start..];
+    let authority = &rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())];
+    let at = authority.rfind('@')?;
+    let colon = authority[..at].find(':')?;
+    let password = &authority[colon + 1..at];
+    if password.is_empty() || password == REDACTED || password.contains("{{") {
+        return None;
+    }
+    Some(format!("{}{}:{REDACTED}{}", &url[..start], &authority[..colon], &rest[at..]))
+}
+
+/// An answer of the API client's as a model may read it: every credential slot of every record in
+/// it — a collection's, a folder's or a request's auth, a secret variable, a sensitive header, a
+/// certificate's passphrase, a password inside a URL — reads `•••`.
+pub(crate) fn mask_for_model(value: &mut Value) {
+    // A blob handed over as text — the open tabs with their drafts, the settings with their
+    // certificates — is read as what it is.
+    if let Value::String(raw) = value {
+        let Ok(mut parsed) = serde_json::from_str::<Value>(raw) else { return };
+        if parsed.is_object() || parsed.is_array() {
+            let before = parsed.clone();
+            mask_records(&mut parsed);
+            if parsed != before {
+                if let Ok(text) = serde_json::to_string(&parsed) {
+                    *raw = text;
+                }
+            }
+        }
+        return;
+    }
+    mask_records(value);
+}
+
+fn mask_records(value: &mut Value) {
+    match value {
+        Value::Array(items) => items.iter_mut().for_each(mask_records),
+        Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                if let Some(shape) = blob_shape(key) {
+                    with_blob(item, &mut |blob| {
+                        let mut changed = false;
+                        model_slots(shape, blob, Reach::Sealable, &mut |path, slot| {
+                            if slot.as_str().is_some_and(|text| shown_masked(path, text)) {
+                                *slot = Value::String(REDACTED.into());
+                                changed = true;
+                            }
+                        });
+                        // The URL inside a request's spec.
+                        if let Some(masked) = blob.get("url").and_then(Value::as_str).and_then(mask_url_password) {
+                            blob["url"] = Value::String(masked);
+                            changed = true;
+                        }
+                        changed
+                    });
+                } else if key == "draft" {
+                    // An open request tab's unsaved spec: its MQTT password and its headers (the
+                    // auth and the variables inside it are met on the way down).
+                    with_blob(item, &mut |blob| {
+                        let mut changed = false;
+                        model_slots(Shape::Spec, blob, Reach::Sealable, &mut |path, slot| {
+                            if slot.as_str().is_some_and(|text| shown_masked(path, text)) {
+                                *slot = Value::String(REDACTED.into());
+                                changed = true;
+                            }
+                        });
+                        changed
+                    });
+                } else if key == "passphrase" {
+                    if item.as_str().is_some_and(|text| is_literal(text) && text != REDACTED) {
+                        *item = Value::String(REDACTED.into());
+                    }
+                } else if key == "url" {
+                    if let Some(masked) = item.as_str().and_then(mask_url_password) {
+                        *item = Value::String(masked);
+                    }
+                }
+                mask_records(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The credentials a stored record holds, by slot: what [`restore_masked`] puts back.
+fn stored_slots(db: &Db, store: &dyn SecretStore, shape: Shape, id: &str) -> HashMap<String, String> {
+    let owners: &[Owner] = match shape {
+        Shape::Spec => &[Owner::Request],
+        Shape::Auth => &[Owner::Collection, Owner::Folder],
+        Shape::Variables => &[Owner::Collection, Owner::Environment],
+        _ => &[],
+    };
+    let mut slots = HashMap::new();
+    if id.is_empty() {
+        return slots;
+    }
+    for owner in owners {
+        let Some((table, columns)) = columns_of(*owner) else { continue };
+        let Some((column, _)) = columns.iter().find(|(_, of)| *of == shape) else { continue };
+        let raw: Option<String> = db.0.lock().ok().and_then(|conn| conn.query_row(&format!("SELECT {column} FROM {table} WHERE id = ?1"), params![id], |row| row.get(0)).ok());
+        let Some(raw) = raw else { continue };
+        let text = unseal_text(&raw, shape, *owner, id, store);
+        let Ok(mut value) = serde_json::from_str::<Value>(&text) else { continue };
+        model_slots(shape, &mut value, Reach::Any, &mut |path, slot| {
+            if let Some(text) = slot.as_str().filter(|text| !text.is_empty() && *text != REDACTED && !is_marker(text)) {
+                slots.insert(path.to_string(), text.to_string());
+            }
+        });
+        break;
+    }
+    slots
+}
+
+/// What a model sends to the API client, before it is saved: wherever a credential slot holds the
+/// mask it was shown, the stored credential goes back in its place. A mask with nothing behind it
+/// — a new record, a slot that had no credential, a URL's password — is refused, because saving it
+/// would replace a credential with three dots.
+pub(crate) fn restore_masked(db: &Db, store: &dyn SecretStore, value: &mut Value) -> Result<(), String> {
+    const WHY: &str = "holds the mask ••• where a credential goes, and there is no stored credential to keep in its place. Send it back only on the record you read it from, or put a {{variable}} there";
+    match value {
+        Value::Array(items) => items.iter_mut().try_for_each(|item| restore_masked(db, store, item)),
+        Value::Object(map) => {
+            let id = map.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+            for (key, item) in map.iter_mut() {
+                if let Some(shape) = blob_shape(key) {
+                    let mut lost: Option<String> = None;
+                    with_blob(item, &mut |blob| {
+                        let mut masked = false;
+                        model_slots(shape, blob, Reach::Any, &mut |_, slot| masked |= slot.as_str() == Some(REDACTED));
+                        if blob.get("url").and_then(Value::as_str).is_some_and(|url| url.contains(&format!(":{REDACTED}@"))) {
+                            lost = Some("url".into());
+                        }
+                        if !masked {
+                            return false;
+                        }
+                        let stored = stored_slots(db, store, shape, &id);
+                        model_slots(shape, blob, Reach::Any, &mut |path, slot| {
+                            if slot.as_str() == Some(REDACTED) {
+                                match stored.get(path) {
+                                    Some(kept) => *slot = Value::String(kept.clone()),
+                                    None => lost = Some(path.to_string()),
+                                }
+                            }
+                        });
+                        true
+                    });
+                    if let Some(path) = lost {
+                        return Err(format!("{key}.{path} {WHY}"));
+                    }
+                } else if (key == "passphrase" && item.as_str() == Some(REDACTED)) || (key == "url" && item.as_str().is_some_and(|url| url.contains(&format!(":{REDACTED}@")))) {
+                    return Err(format!("{key} {WHY}"));
+                } else if key == "value" && item.as_str().is_some_and(|raw| raw.contains(&format!("\"{REDACTED}\"")) && serde_json::from_str::<Value>(raw).is_ok_and(|v| v.is_object())) {
+                    // The open tabs or the settings, whole, as text: nothing here says which
+                    // record each mask came from.
+                    return Err(format!("{key} {WHY}"));
+                }
+                restore_masked(db, store, item)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Every stored API credential, longest first — what `cf http` scrubs from a response before an agent
@@ -1408,6 +1661,146 @@ mod tests {
     }
 
     const SPEC: &str = r#"{"url":"https://api.example.com","auth":{"type":"bearer","bearer":{"token":"tok-123456"},"basic":{"username":"u","password":"{{pass}}"}},"mqtt":{"password":"mq-secret"}}"#;
+
+    /// The tree a model reads through the app's gateway: two requests with Basic auth of their
+    /// own (one sealed, one still a literal in its row), a folder with a bearer token, a secret
+    /// variable and a short password nothing would list.
+    fn tree_with_credentials(db: &Db, store: &MemoryStore) -> Value {
+        let qa = r#"{"url":"https://qa.example.com/v1","headers":[{"key":"Accept","value":"application/json"},{"key":"Authorization","value":"Basic cWE6cWEtcGFzcw=="},{"key":"Cookie","value":"sid={{session}}"}],"auth":{"type":"basic","basic":{"username":"svc-qa","password":"qa-Passw0rd"}}}"#;
+        let prod = r#"{"url":"https://admin:ur1-pass@prod.example.com/v1","auth":{"type":"basic","basic":{"username":"svc-prod","password":"x1"}}}"#;
+        let sealed = seal_text(qa, Shape::Spec, Owner::Request, "qa", store);
+        let conn = db.0.lock().unwrap();
+        conn.execute(
+            "INSERT INTO api_collections (id, workspace_id, name, auth, variables, created_at, updated_at) VALUES ('c1', 'w1', 'C', '{}', ?1, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            params![r#"[{"id":"v1","key":"apiKey","initialValue":"key-777777","currentValue":"","secret":true},{"id":"v2","key":"host","initialValue":"qa.example.com","currentValue":""}]"#],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO api_folders (id, collection_id, name, auth, created_at, updated_at) VALUES ('f1', 'c1', 'F', ?1, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')", params![r#"{"type":"bearer","bearer":{"token":"tok-folder-1"}}"#]).unwrap();
+        for (id, spec) in [("qa", sealed.text.as_str()), ("prod", prod)] {
+            conn.execute("INSERT INTO api_requests (id, collection_id, folder_id, name, url, spec, created_at, updated_at) VALUES (?1, 'c1', NULL, ?1, '', ?2, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')", params![id, spec]).unwrap();
+        }
+        let mut tree = super::super::api_queries::load_tree(&conn, "w1").unwrap();
+        drop(conn);
+        unseal_tree(&mut tree, store);
+        serde_json::to_value(&tree).unwrap()
+    }
+
+    /// The leak of 2026-11-25: `api_load_tree` hands the window the credentials back in place, and
+    /// a model calling it through the gateway read two requests' Basic passwords. Nothing a model
+    /// is shown holds one now — wherever it sat, however short it is.
+    #[test]
+    fn a_model_reads_the_tree_without_a_single_credential() {
+        let (db, store) = (fresh_db(), MemoryStore::default());
+        let mut tree = tree_with_credentials(&db, &store);
+        let before = tree.to_string();
+        for secret in ["qa-Passw0rd", "x1\"", "cWE6cWEtcGFzcw==", "ur1-pass", "tok-folder-1", "key-777777"] {
+            assert!(before.contains(&secret.replace('"', "\\\"")), "the window's tree has {secret}");
+        }
+
+        mask_for_model(&mut tree);
+        let shown = tree.to_string();
+        for secret in ["qa-Passw0rd", "cWE6cWEtcGFzcw==", "ur1-pass", "tok-folder-1", "key-777777"] {
+            assert!(!shown.contains(secret), "{secret} reached the model: {shown}");
+        }
+        let spec = |id: &str| -> Value {
+            let row = tree["requests"].as_array().unwrap().iter().find(|r| r["id"] == id).unwrap();
+            serde_json::from_str(row["spec"].as_str().unwrap()).unwrap()
+        };
+        // A two-character password is masked like any other: by where it is, not by what it is.
+        assert_eq!(spec("prod")["auth"]["basic"]["password"], REDACTED);
+        assert_eq!(spec("prod")["url"], format!("https://admin:{REDACTED}@prod.example.com/v1"));
+        // What is not a credential stays readable: who it logs in as, a plain header, a variable
+        // nobody marked secret, and a header that only points at one.
+        assert_eq!(spec("qa")["auth"]["basic"]["username"], "svc-qa");
+        assert_eq!(spec("qa")["headers"][0]["value"], "application/json");
+        assert_eq!(spec("qa")["headers"][1]["value"], REDACTED);
+        assert_eq!(spec("qa")["headers"][2]["value"], "sid={{session}}");
+        assert!(shown.contains("qa.example.com"));
+        // Masking twice changes nothing.
+        let once = tree.clone();
+        mask_for_model(&mut tree);
+        assert_eq!(tree, once);
+    }
+
+    /// The values the gateway scrubs out of every other answer — a response that echoes a
+    /// password, an error that quotes a header — now include the requests' own.
+    #[test]
+    fn a_requests_own_credentials_are_among_the_ones_scrubbed_everywhere() {
+        let (db, store) = (fresh_db(), MemoryStore::default());
+        tree_with_credentials(&db, &store);
+        let known = stored_secret_values(&db, &store).unwrap();
+        for secret in ["qa-Passw0rd", "Basic cWE6cWEtcGFzcw==", "tok-folder-1", "key-777777", "x1"] {
+            assert!(known.iter().any(|k| k == secret), "{secret} is not in {known:?}");
+        }
+        assert!(!known.iter().any(|k| k.contains("{{")), "a reference is not a credential: {known:?}");
+    }
+
+    /// A model that reads a request and saves it back to change its URL sends the mask where the
+    /// password was: the password it had is what gets saved.
+    #[test]
+    fn a_record_saved_back_with_the_mask_keeps_its_credential() {
+        let (db, store) = (fresh_db(), MemoryStore::default());
+        let mut tree = tree_with_credentials(&db, &store);
+        mask_for_model(&mut tree);
+        let mut request = tree["requests"].as_array().unwrap().iter().find(|r| r["id"] == "qa").unwrap().clone();
+        let mut spec: Value = serde_json::from_str(request["spec"].as_str().unwrap()).unwrap();
+        spec["url"] = json_text("https://qa.example.com/v2");
+        request["spec"] = json_text(&spec.to_string());
+        let mut args = serde_json::json!({ "request": request });
+        restore_masked(&db, &store, &mut args).unwrap();
+        let saved: Value = serde_json::from_str(args["request"]["spec"].as_str().unwrap()).unwrap();
+        assert_eq!(saved["url"], "https://qa.example.com/v2");
+        assert_eq!(saved["auth"]["basic"]["password"], "qa-Passw0rd");
+        assert_eq!(saved["headers"][1]["value"], "Basic cWE6cWEtcGFzcw==");
+
+        // A collection's secret variable and a folder's token come back the same way.
+        let mut collection = serde_json::json!({ "collection": tree["collections"][0].clone() });
+        restore_masked(&db, &store, &mut collection).unwrap();
+        assert!(collection["collection"]["variables"].as_str().unwrap().contains("key-777777"));
+        let mut folder = serde_json::json!({ "folder": tree["folders"][0].clone() });
+        restore_masked(&db, &store, &mut folder).unwrap();
+        assert!(folder["folder"]["auth"].as_str().unwrap().contains("tok-folder-1"));
+
+        // A mask with nothing behind it is refused rather than saved: a new request, and a URL.
+        let mut fresh = serde_json::json!({ "request": { "id": "nuevo", "spec": format!(r#"{{"auth":{{"basic":{{"username":"u","password":"{REDACTED}"}}}}}}"#) } });
+        assert!(restore_masked(&db, &store, &mut fresh).unwrap_err().contains("no stored credential"));
+        let mut url = serde_json::json!({ "request": { "id": "prod", "spec": format!(r#"{{"url":"https://admin:{REDACTED}@prod.example.com"}}"#) } });
+        assert!(restore_masked(&db, &store, &mut url).is_err());
+        // Nothing masked, nothing touched.
+        let mut plain = serde_json::json!({ "request": { "id": "qa", "spec": r#"{"url":"https://x","auth":{"basic":{"username":"u","password":"nueva-clave"}}}"# } });
+        let untouched = plain.clone();
+        restore_masked(&db, &store, &mut plain).unwrap();
+        assert_eq!(plain, untouched);
+    }
+
+    /// The open tabs and the settings reach a model as one string of JSON each.
+    #[test]
+    fn the_open_tabs_and_the_settings_are_masked_inside_their_text() {
+        let mut tabs = json_text(r#"{"tabs":[{"id":"t1","draft":{"url":"https://x","headers":[{"key":"Authorization","value":"Bearer live-token-1"}],"auth":{"type":"basic","basic":{"username":"u","password":"tab-pass-1"}},"mqtt":{"password":"mq-pass-1"}}}],"entityTabs":[{"id":"c1","draft":{"auth":{"type":"bearer","bearer":{"token":"ent-token-1"}},"variables":[{"id":"v","key":"k","initialValue":"var-secret-1","secret":true}]}}]}"#);
+        mask_for_model(&mut tabs);
+        let shown = tabs.as_str().unwrap();
+        for secret in ["live-token-1", "tab-pass-1", "mq-pass-1", "ent-token-1", "var-secret-1"] {
+            assert!(!shown.contains(secret), "{secret} reached the model: {shown}");
+        }
+        assert!(shown.contains(r#""username":"u""#));
+
+        let mut settings = json_text(r#"{"clientCerts":[{"id":"k1","host":"api.example.com","passphrase":"cert-pass-1"}],"timeout":30}"#);
+        mask_for_model(&mut settings);
+        assert!(!settings.as_str().unwrap().contains("cert-pass-1") && settings.as_str().unwrap().contains("api.example.com"));
+        // Text that is not a record is left exactly as it was.
+        let mut note = json_text("una nota cualquiera con ••• dentro");
+        mask_for_model(&mut note);
+        assert_eq!(note, "una nota cualquiera con ••• dentro");
+
+        // Saved back with the masks in it, either would lose every credential it held.
+        let (db, store) = (fresh_db(), MemoryStore::default());
+        let mut save = serde_json::json!({ "workspaceId": "w1", "value": tabs });
+        assert!(restore_masked(&db, &store, &mut save).is_err());
+    }
+
+    fn json_text(text: &str) -> Value {
+        Value::String(text.to_string())
+    }
 
     #[test]
     fn references_are_not_credentials() {

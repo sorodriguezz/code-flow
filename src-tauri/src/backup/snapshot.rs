@@ -222,6 +222,9 @@ pub const TABLES: &[&str] = &[
     "agent_team_repos",
     "agent_team_items",
     "agent_team_messages",
+    // A comparison of teams on one task (`team::lab`): which runs it set side by side and the
+    // verdict each got. After the runs it names; it points at them by id, not by foreign key.
+    "agent_team_evals",
     // The decision layer's log (`crew`, `decide`): which finite choices it made, and how sure.
     "agent_decisions",
     // The local AI platform: what the user approved as memory (with its history), the document
@@ -545,6 +548,7 @@ pub const GROUPS: &[Group] = &[
             "agent_team_repos",
             "agent_team_items",
             "agent_team_messages",
+            "agent_team_evals",
             "agent_decisions",
         ],
     },

@@ -199,6 +199,12 @@ fn ensure_parent(target: &str) -> Result<(), String> {
 /// A new worktree at `target` on a new `branch` that starts at `start`.
 pub fn add_worktree(repo: &str, target: &str, branch: &str, start: &str) -> Result<(), String> {
     ensure_parent(target)?;
+    // An attempt that failed half-way (the folder was taken, the disk was full) can leave the
+    // branch behind, and the next attempt then fails on «a branch named … already exists» for as
+    // long as anyone retries. A leftover with nothing of its own goes first; one that holds
+    // commits is somebody's work and stays, and the error says so.
+    let _ = git(repo, &["worktree", "prune"]);
+    delete_branch_if_contained(repo, branch, start);
     crate::git::worktree::add(repo, target, branch, true, Some(start))
 }
 
@@ -367,6 +373,32 @@ pub enum Landed {
 /// - `item`: the target fast-forwards to the integration branch (every item's commit kept);
 /// - `squash`: one commit with everything on the target;
 /// - `none`: everything on the target as uncommitted changes — which needs the target checked out.
+/// The first half of [`land`], on its own: the target merged into the integration branch, in the
+/// integration tree. Nothing of the user's moves. Returns the files in conflict — empty when the
+/// two agree — so a run over several repositories can find out that one of them will not land
+/// *before* it lands any of the others.
+pub fn sync_target(repo: &str, target: &str, integration_path: &str) -> Result<Vec<String>, String> {
+    if !branch_exists(repo, target) {
+        return Ok(Vec::new());
+    }
+    let out = git(integration_path, &["merge", "--no-edit", target])?;
+    if out.success {
+        return Ok(Vec::new());
+    }
+    let conflicts = unmerged_paths(integration_path);
+    if conflicts.is_empty() {
+        let _ = git(integration_path, &["merge", "--abort"]);
+        return Err(format!("git merge {target}: {}", out.detail()));
+    }
+    Ok(conflicts)
+}
+
+/// Whether the target already holds exactly what the integration branch does — a landing that was
+/// cut short after it moved the branch (the app closed in between) and must not be done twice.
+pub fn already_landed(repo: &str, target: &str, integration_branch: &str) -> bool {
+    branch_exists(repo, target) && git(repo, &["diff", "--quiet", target, integration_branch]).is_ok_and(|out| out.success)
+}
+
 pub fn land(repo: &str, target: &str, integration_path: &str, integration_branch: &str, commit: &str, message: &str, push: bool) -> Result<Landed, String> {
     if branch_exists(repo, target) {
         let out = git(integration_path, &["merge", "--no-edit", target])?;

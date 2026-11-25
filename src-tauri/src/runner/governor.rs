@@ -14,9 +14,11 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
+use super::host::{AppHost, Host};
 use crate::db::{queries, Db};
 
 pub const SETTING_KEY: &str = "agents_governor";
@@ -71,11 +73,93 @@ struct Counts {
     waiting: i64,
 }
 
-static COUNTS: LazyLock<Mutex<Counts>> = LazyLock::new(Default::default);
-static FREED: LazyLock<Notify> = LazyLock::new(Notify::new);
+/// The slots themselves: who holds one, who waits, and the bell that rings when one frees. One for
+/// the app ([`SLOTS`]); a test makes its own, so two tests never count each other's turns.
+#[derive(Default)]
+pub struct Slots {
+    counts: Mutex<Counts>,
+    freed: Notify,
+}
 
-fn counts() -> std::sync::MutexGuard<'static, Counts> {
-    COUNTS.lock().unwrap_or_else(|e| e.into_inner())
+impl Slots {
+    fn counts(&self) -> std::sync::MutexGuard<'_, Counts> {
+        self.counts.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn running(&self) -> i64 {
+        self.counts().total
+    }
+
+    pub fn waiting(&self) -> i64 {
+        self.counts().waiting
+    }
+
+    /// Waits for a slot for a turn on `model`, or for `cancel` — whichever comes first. `false` is
+    /// a wait that was called off: nothing was taken and nothing is owed. `changed` is called every
+    /// time the counts move, so whoever draws them can.
+    pub async fn take(&self, config: impl Fn() -> Config, model: &str, cancel: &CancellationToken, changed: impl Fn()) -> bool {
+        let mut announced = false;
+        loop {
+            // Armed before the look, so a slot freed between the look and the wait still rings.
+            let notified = self.freed.notified();
+            if cancel.is_cancelled() {
+                if announced {
+                    let mut c = self.counts();
+                    c.waiting = (c.waiting - 1).max(0);
+                }
+                changed();
+                return false;
+            }
+            {
+                let config = config();
+                let mut c = self.counts();
+                let on_model = c.by_model.get(model).copied().unwrap_or(0);
+                if admits(&config, c.total, on_model, model) {
+                    c.total += 1;
+                    *c.by_model.entry(model.to_string()).or_default() += 1;
+                    if announced {
+                        c.waiting = (c.waiting - 1).max(0);
+                    }
+                    drop(c);
+                    changed();
+                    return true;
+                }
+                if !announced {
+                    c.waiting += 1;
+                    announced = true;
+                }
+            }
+            changed();
+            tokio::select! {
+                _ = notified => {}
+                _ = cancel.cancelled() => {}
+            }
+        }
+    }
+
+    /// Gives a slot back and wakes whoever waits.
+    pub fn release(&self, model: &str) {
+        {
+            let mut c = self.counts();
+            c.total = (c.total - 1).max(0);
+            if let Some(n) = c.by_model.get_mut(model) {
+                *n = (*n - 1).max(0);
+            }
+        }
+        self.freed.notify_waiters();
+    }
+
+    /// A change of configuration may have made room: everyone waiting looks again.
+    pub fn wake(&self) {
+        self.freed.notify_waiters();
+    }
+}
+
+static SLOTS: LazyLock<Slots> = LazyLock::new(Slots::default);
+
+/// The app's own slots.
+pub fn app_slots() -> &'static Slots {
+    &SLOTS
 }
 
 /// Whether a turn on `model` may start now under `config`, given what runs.
@@ -84,35 +168,29 @@ pub fn admits(config: &Config, total: i64, on_model: i64, model: &str) -> bool {
 }
 
 /// Slots free overall right now — how many items a claim may take.
-pub fn free_slots(db: &Db) -> usize {
+pub fn free_slots(db: &Db, slots: &Slots) -> usize {
     let config = db.0.lock().map(|c| read_config(&c)).unwrap_or_default();
-    let used = counts().total;
+    // Turns already waiting for a slot are ahead of anything a new claim would add: counting them
+    // keeps two runs that look at the same free slot from both marking an item as theirs.
+    let used = slots.running() + slots.waiting();
     (config.max_turns - used).max(0) as usize
 }
 
 /// A held slot; dropping it frees the slot and wakes whoever waits.
-pub struct Permit {
-    app: AppHandle,
+pub struct Permit<H: Host> {
+    host: H,
     model: String,
 }
 
-impl Drop for Permit {
+impl<H: Host> Drop for Permit<H> {
     fn drop(&mut self) {
-        {
-            let mut c = counts();
-            c.total = (c.total - 1).max(0);
-            if let Some(n) = c.by_model.get_mut(&self.model) {
-                *n = (*n - 1).max(0);
-            }
-        }
-        FREED.notify_waiters();
-        let _ = self.app.emit("runner:slots", status_now(&self.app));
+        self.host.slots().release(&self.model);
+        announce(&self.host);
         // A freed slot may be what another run was waiting for: move every running run.
-        let app = self.app.clone();
+        let host = self.host.clone();
         tauri::async_runtime::spawn(async move {
             let ids: Vec<String> = {
-                let db = app.state::<Db>();
-                let conn = db.0.lock();
+                let conn = host.db().0.lock();
                 conn.ok()
                     .and_then(|c| {
                         let mut stmt = c.prepare("SELECT id FROM agent_team_runs WHERE status = 'running'").ok()?;
@@ -122,43 +200,27 @@ impl Drop for Permit {
                     .unwrap_or_default()
             };
             for id in ids {
-                super::kick(&app, &id);
+                super::kick_on(&host, &id);
             }
         });
     }
 }
 
-/// Waits for a slot for a turn on `model`.
-pub async fn acquire(app: &AppHandle, model: &str) -> Permit {
-    let mut announced = false;
-    loop {
-        let notified = FREED.notified();
-        let config = {
-            let db = app.state::<Db>();
-            let config = db.0.lock().map(|c| read_config(&c)).unwrap_or_default();
-            config
-        };
-        {
-            let mut c = counts();
-            let on_model = c.by_model.get(model).copied().unwrap_or(0);
-            if admits(&config, c.total, on_model, model) {
-                c.total += 1;
-                *c.by_model.entry(model.to_string()).or_default() += 1;
-                if announced {
-                    c.waiting = (c.waiting - 1).max(0);
-                }
-                drop(c);
-                let _ = app.emit("runner:slots", status_now(app));
-                return Permit { app: app.clone(), model: model.to_string() };
-            }
-            if !announced {
-                c.waiting += 1;
-                announced = true;
-            }
-        }
-        let _ = app.emit("runner:slots", status_now(app));
-        notified.await;
-    }
+fn announce<H: Host>(host: &H) {
+    host.emit("runner:slots", serde_json::to_value(status_of(host)).unwrap_or_default());
+}
+
+/// Waits for a slot for a turn on `model`. `None` when `cancel` fired first: the turn was called
+/// off while it queued — an abort, a deleted run — and must not start.
+pub async fn acquire_on<H: Host>(host: &H, model: &str, cancel: &CancellationToken) -> Option<Permit<H>> {
+    let config = || host.db().0.lock().map(|c| read_config(&c)).unwrap_or_default();
+    let changed = || announce(host);
+    host.slots().take(config, model, cancel, changed).await.then(|| Permit { host: host.clone(), model: model.to_string() })
+}
+
+/// [`acquire_on`] for the app.
+pub async fn acquire(app: &AppHandle, model: &str, cancel: &CancellationToken) -> Option<Permit<AppHost>> {
+    acquire_on(&AppHost(app.clone()), model, cancel).await
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -170,19 +232,15 @@ pub struct Status {
     pub per_model: HashMap<String, i64>,
 }
 
-fn status_now(app: &AppHandle) -> Status {
-    let config = {
-        let db = app.state::<Db>();
-        let config = db.0.lock().map(|c| read_config(&c)).unwrap_or_default();
-        config
-    };
-    let c = counts();
+fn status_of<H: Host>(host: &H) -> Status {
+    let config = host.db().0.lock().map(|c| read_config(&c)).unwrap_or_default();
+    let c = host.slots().counts();
     Status { max_turns: config.max_turns, running: c.total, waiting: c.waiting, by_model: c.by_model.clone(), per_model: config.per_model }
 }
 
 #[tauri::command]
 pub fn governor_status(app: AppHandle) -> Status {
-    status_now(&app)
+    status_of(&AppHost(app))
 }
 
 #[tauri::command]
@@ -192,10 +250,10 @@ pub fn governor_set(app: AppHandle, db: tauri::State<'_, Db>, config: Config) ->
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::set_setting(&conn, SETTING_KEY, &serde_json::to_string(&config).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     }
-    FREED.notify_waiters();
-    let status = status_now(&app);
-    let _ = app.emit("runner:slots", status.clone());
-    Ok(status)
+    SLOTS.wake();
+    let host = AppHost(app);
+    announce(&host);
+    Ok(status_of(&host))
 }
 
 #[cfg(test)]
@@ -209,6 +267,40 @@ mod tests {
         assert!(!admits(&config, 1, 1, "claude-opus-5-5"));
         assert!(admits(&config, 1, 0, "claude-sonnet-5-5"));
         assert!(!admits(&config, 3, 0, "claude-sonnet-5-5"));
+    }
+
+    #[tokio::test]
+    async fn a_turn_called_off_while_it_queues_takes_no_slot() {
+        let slots = std::sync::Arc::new(Slots::default());
+        let config = || Config { max_turns: 1, per_model: HashMap::new() };
+        let never = CancellationToken::new();
+        assert!(slots.take(config, "m", &never, || {}).await, "the first turn gets the only slot");
+
+        // The second one queues behind it…
+        let cancel = CancellationToken::new();
+        let waiter = {
+            let (slots, cancel) = (slots.clone(), cancel.clone());
+            tokio::spawn(async move { slots.take(config, "m", &cancel, || {}).await })
+        };
+        while slots.waiting() == 0 {
+            tokio::task::yield_now().await;
+        }
+        // …and is called off there: it never starts, and leaves nothing behind.
+        cancel.cancel();
+        assert!(!waiter.await.unwrap());
+        assert_eq!((slots.running(), slots.waiting()), (1, 0));
+
+        // A freed slot goes to whoever still waits.
+        let next = {
+            let slots = slots.clone();
+            tokio::spawn(async move { slots.take(config, "m", &CancellationToken::new(), || {}).await })
+        };
+        while slots.waiting() == 0 {
+            tokio::task::yield_now().await;
+        }
+        slots.release("m");
+        assert!(next.await.unwrap());
+        assert_eq!((slots.running(), slots.waiting()), (1, 0));
     }
 
     #[test]

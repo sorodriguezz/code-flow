@@ -95,6 +95,39 @@ pub fn over_budget(run: &Run, usd: f64, tokens: i64, minutes: f64) -> Option<Str
     None
 }
 
+/// What one more turn of this run is expected to cost: the average of what its tasks have spent so
+/// far. An estimate from the run's own history — engines only report a turn's cost once it is
+/// over, so there is no figure for a turn in flight to be had.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Reserve {
+    pub usd: f64,
+    pub tokens: f64,
+}
+
+impl Reserve {
+    pub fn of(spend: &HashMap<String, (f64, i64)>) -> Self {
+        let settled = spend.values().filter(|(usd, tokens)| *usd > 0.0 || *tokens > 0).count();
+        if settled == 0 {
+            return Self::default();
+        }
+        let (usd, tokens) = spend.values().fold((0.0, 0i64), |(u, t), (du, dt)| (u + du, t + dt));
+        Self { usd: usd / settled as f64, tokens: tokens as f64 / settled as f64 }
+    }
+
+    /// Why `turns` turns in flight do not fit in what is left of a budget, or `None` when they do.
+    pub fn short(&self, run: &Run, usd: f64, tokens: i64, turns: usize) -> Option<String> {
+        let p = &run.policy;
+        let turns = turns as f64;
+        if p.budget_usd > 0.0 && self.usd > 0.0 && usd + self.usd * turns > p.budget_usd {
+            return Some(format!("Lo que queda del presupuesto no alcanza para otro turno: van ${usd:.2} de ${:.2} y un turno de esta corrida cuesta cerca de ${:.2}.", p.budget_usd, self.usd));
+        }
+        if p.budget_tokens > 0 && self.tokens > 0.0 && tokens as f64 + self.tokens * turns > p.budget_tokens as f64 {
+            return Some(format!("Lo que queda de tokens no alcanza para otro turno: van {tokens} de {} y un turno de esta corrida usa cerca de {}.", p.budget_tokens, self.tokens.round()));
+        }
+        None
+    }
+}
+
 pub fn compute(run: &Run, items: &[Item], messages: &[Message], spend: &HashMap<String, (f64, i64)>, now: chrono::DateTime<chrono::Utc>) -> RunMetrics {
     let mut members: Vec<MemberMetrics> = run
         .members
@@ -220,6 +253,20 @@ mod tests {
         assert!(m.alerts.iter().any(|a| a.kind == "budget_warn"));
         assert!(m.alerts.iter().any(|a| a.kind == "ping_pong" && a.members.len() == 2));
         assert!(m.alerts.iter().any(|a| a.kind == "idle" && a.members == vec!["idle".to_string()]));
+    }
+
+    #[test]
+    fn what_is_in_flight_is_reserved_before_another_turn_starts() {
+        let run = run_with(Policy { budget_usd: 2.0, ..Default::default() });
+        // Nothing has settled: there is nothing to estimate from, and nothing is held back.
+        assert_eq!(Reserve::of(&HashMap::new()), Reserve::default());
+        assert!(Reserve::default().short(&run, 0.0, 0, 4).is_none());
+        // Three tasks at $0.40 each: $1.20 spent, a turn costs about $0.40.
+        let spend: HashMap<String, (f64, i64)> = (0..3).map(|i| (i.to_string(), (0.4, 1000))).collect();
+        let reserve = Reserve::of(&spend);
+        assert!((reserve.usd - 0.4).abs() < 1e-9);
+        assert!(reserve.short(&run, 1.2, 3000, 2).is_none(), "two more turns fit: $2.00");
+        assert!(reserve.short(&run, 1.2, 3000, 3).unwrap().contains("no alcanza"), "a third would end at $2.40");
     }
 
     #[test]

@@ -58,6 +58,10 @@ pub struct PlannedItem {
     pub requires: Vec<String>,
     #[serde(default)]
     pub replaces: String,
+    /// Keys named in `depende_de` that no task has — of this plan or of the run. The item is kept,
+    /// but it does not start until that is decided (`team::deps_ready`).
+    #[serde(default)]
+    pub missing_deps: Vec<String>,
 }
 
 /// What a lead's turn decided.
@@ -366,14 +370,17 @@ pub fn lead_reply(text: &str, roster: &[RosterEntry], repos: &[RepoEntry], exist
                 let value = string_of(raw, &["reemplaza", "replaces"]);
                 if value.is_empty() { value } else { key_slug(&value) }
             },
+            missing_deps: Vec::new(),
         });
     }
 
-    // Dependencies: unknown ones are dropped from the item (and reported) rather than dropping the
-    // item — a typo in one key should not lose the work.
+    // Dependencies: an unknown one is neither dropped in silence nor a reason to lose the item. A
+    // task meant to wait for `contrato-api` cannot be built right without it, so the item keeps the
+    // name in `missing_deps` and does not start until that is settled; a typo still loses no work.
     let known: Vec<String> = keys.clone();
     for item in &mut planned {
         let mut kept = Vec::new();
+        let mut missing = Vec::new();
         for dep in &item.depends_on {
             if dep == &item.key {
                 continue;
@@ -384,9 +391,13 @@ pub fn lead_reply(text: &str, roster: &[RosterEntry], repos: &[RepoEntry], exist
                 }
             } else {
                 rejected.push(format!("«{}»: la dependencia «{dep}» no existe", item.key));
+                if !missing.contains(dep) {
+                    missing.push(dep.clone());
+                }
             }
         }
         item.depends_on = kept;
+        item.missing_deps = missing;
     }
     // Cycles among the new items: drop the items on one, so what remains always has an order.
     let cyclic = cyclic_keys(&planned);

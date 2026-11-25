@@ -562,6 +562,17 @@ async fn turn(
                                 ai_runs::emit_line(ctx, "stdout", &line);
                             }
                         }
+                        // The same call over and over: the turn is told to stop, and ends as a
+                        // failure that says what it was doing — never as a Stop the user pressed.
+                        if cancelled_at.is_none() {
+                            if let Some(what) = translator.looped.clone() {
+                                if let Some(ctx) = ctx {
+                                    ai_runs::emit_line(ctx, "stdout", &note(&format!("Detenido: repetía la misma llamada ({what}).")));
+                                }
+                                cancelled_at = Some(Instant::now());
+                                let _ = connection.notify("session/cancel", json!({"sessionId": session})).await;
+                            }
+                        }
                         // The reply as it is written, when somebody is watching it (a chat turn).
                         let live = translator.take_live();
                         if let (Some(ctx), Some(sink)) = (ctx, inv.stream_deltas.as_ref()) {
@@ -586,7 +597,8 @@ async fn turn(
             _ = grace => {
                 // It did not stop when asked: the process goes, and the pool never sees it.
                 connection.kill();
-                return Turn::Done(Err(ai_runs::CANCELLED_MARKER.to_string()), false);
+                let error = translator.looped.as_deref().map(looped_error).unwrap_or_else(|| ai_runs::CANCELLED_MARKER.to_string());
+                return Turn::Done(Err(error), false);
             }
             limit = ai_runs::gone_quiet(&activity, idle_limit), if cancelled_at.is_none() => {
                 connection.kill();
@@ -602,7 +614,9 @@ async fn turn(
     let healthy = connection.alive();
     close(connection, &session).await;
 
+    let looped = translator.looped.clone();
     let result = match answer {
+        _ if looped.is_some() => Err(looped_error(looped.as_deref().unwrap_or_default())),
         None => Err(format!("{} se cerró en medio de la respuesta.", engine.label())),
         Some(Err(error)) => Err(failure(&error)),
         Some(Ok(result)) => finish(engine, &result, translator, session, model, cancelled_at.is_some()),
@@ -922,6 +936,53 @@ fn command_of(input: &Value) -> Option<String> {
 // ---------------------------------------------------------------------------------------------
 
 /// Turns `session/update`s into Claude-shaped log lines, and keeps the answer and the context fill.
+/// How many times in a row an agent may make the very same call before the turn is stopped.
+const SAME_CALL_STREAK: usize = 6;
+/// How many times it may look at the very same thing — read a file, run a search — without
+/// changing anything in between.
+const SAME_LOOK_LIMIT: usize = 10;
+
+/// Watches an agent's tool calls for the one thing a CLI's own turn never stops by itself: the
+/// same call, again and again. The local agent answers a repeat with «you already have this»
+/// (`local_agent`); an ACP agent runs its tools in its own process, so the app cannot answer for
+/// them — it can only see them go by, and stop the turn. Two patterns count: one call made
+/// [`SAME_CALL_STREAK`] times in a row, and one look repeated [`SAME_LOOK_LIMIT`] times with
+/// nothing changed in between (an edit or a command resets it: reading a file again after
+/// changing it is not a loop).
+#[derive(Default)]
+pub struct LoopGuard {
+    last: String,
+    streak: usize,
+    looks: HashMap<String, usize>,
+}
+
+impl LoopGuard {
+    /// One more call. `Some` is the turn being a loop, with what it kept doing.
+    pub fn see(&mut self, name: &str, input: &Value) -> Option<String> {
+        let key = format!("{name}:{input}");
+        if key == self.last {
+            self.streak += 1;
+        } else {
+            self.last = key.clone();
+            self.streak = 1;
+        }
+        let looks = matches!(name, "Read" | "Grep" | "WebFetch");
+        let seen = if looks {
+            let count = self.looks.entry(key).or_insert(0);
+            *count += 1;
+            *count
+        } else {
+            // Something may have changed: looking again is fair.
+            self.looks.clear();
+            0
+        };
+        (self.streak >= SAME_CALL_STREAK || seen >= SAME_LOOK_LIMIT).then(|| {
+            let what = ["file_path", "command", "pattern", "url"].iter().find_map(|field| input.get(*field).and_then(Value::as_str)).unwrap_or_default();
+            format!("{name} {}", short(what, 120)).trim().to_string()
+        })
+    }
+}
+
 struct Translator {
     /// The app's MCP servers by name, to name their tools `mcp__<server>__<tool>` as the UI expects.
     servers: Vec<String>,
@@ -937,11 +998,14 @@ struct Translator {
     /// Text and thinking fragments for the chat to type as they arrive (`ai:chat-delta`), taken
     /// after each update ([`Translator::take_live`]).
     live: Vec<(&'static str, String)>,
+    guard: LoopGuard,
+    /// What the agent kept calling, once it is a loop ([`LoopGuard`]).
+    looped: Option<String>,
 }
 
 impl Translator {
     fn new(servers: Vec<String>) -> Translator {
-        Translator { servers, answer: String::new(), block: String::new(), seen_tools: Default::default(), context_used: None, refused: Vec::new(), after_tool: false, live: Vec::new() }
+        Translator { servers, answer: String::new(), block: String::new(), seen_tools: Default::default(), context_used: None, refused: Vec::new(), after_tool: false, live: Vec::new(), guard: LoopGuard::default(), looped: None }
     }
 
     fn notification(&mut self, method: &str, params: &Value, session: &str) -> Vec<String> {
@@ -994,6 +1058,9 @@ impl Translator {
                 self.after_tool = true;
                 let mut lines = self.flush();
                 if let Some((name, input)) = self.tool(update) {
+                    if self.looped.is_none() {
+                        self.looped = self.guard.see(&name, &input);
+                    }
                     lines.push(json!({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": id, "name": name, "input": input}]}}).to_string());
                 }
                 lines
@@ -1068,6 +1135,12 @@ impl Translator {
 /// `mcp_codeflow_map_app_run` (agy) or `codeflow_map__app_run` (Grok) → `mcp__codeflow_map__app_run`,
 /// for one of `servers`; anything else unchanged. The longest server name first, so `a_b` is not
 /// read as server `a`.
+/// What a turn stopped by the [`LoopGuard`] ends with — an ordinary failure, so a team counts the
+/// attempt and tells the member what it was doing when it is tried again.
+fn looped_error(what: &str) -> String {
+    format!("El agente repetía la misma llamada una y otra vez ({what}) y se detuvo el turno: estaba en un bucle. Si de verdad necesita ese resultado, ya lo tiene; que cambie de enfoque.")
+}
+
 fn mcp_name(servers: &[String], name: &str) -> String {
     let mut servers: Vec<&String> = servers.iter().collect();
     servers.sort_by_key(|server| std::cmp::Reverse(server.len()));
@@ -1114,6 +1187,55 @@ pub(crate) async fn call_once(cmd: tokio::process::Command, method: &str, params
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_same_call_over_and_over_is_a_loop_and_looking_again_after_a_change_is_not() {
+        let read = |path: &str| json!({"file_path": path});
+        // Six times in a row, whatever the call.
+        let mut guard = LoopGuard::default();
+        for _ in 0..SAME_CALL_STREAK - 1 {
+            assert_eq!(guard.see("Bash", &json!({"command": "npm test"})), None);
+        }
+        assert_eq!(guard.see("Bash", &json!({"command": "npm test"})).as_deref(), Some("Bash npm test"));
+
+        // Read, edit, read, edit…: every look comes after a change. Not a loop, however long.
+        let mut guard = LoopGuard::default();
+        for _ in 0..40 {
+            assert_eq!(guard.see("Read", &read("src/a.ts")), None);
+            assert_eq!(guard.see("Edit", &read("src/a.ts")), None);
+        }
+
+        // The same two files read in turn, nothing changed in between: a loop at the tenth look
+        // at the first of them, though no call was ever made twice in a row.
+        let mut guard = LoopGuard::default();
+        for round in 1..SAME_LOOK_LIMIT {
+            assert_eq!(guard.see("Read", &read("src/a.ts")), None, "round {round}");
+            assert_eq!(guard.see("Read", &read("src/b.ts")), None, "round {round}");
+        }
+        assert_eq!(guard.see("Read", &read("src/a.ts")).as_deref(), Some("Read src/a.ts"));
+
+        // Different things each time are just work.
+        let mut guard = LoopGuard::default();
+        for n in 0..200 {
+            assert_eq!(guard.see("Read", &read(&format!("src/{n}.ts"))), None);
+        }
+    }
+
+    #[test]
+    fn a_turn_that_loops_ends_as_a_failure_not_as_a_stop() {
+        let mut translator = Translator::new(vec![]);
+        let call = |n: usize| json!({"sessionId": "s", "update": {"sessionUpdate": "tool_call", "toolCallId": format!("t{n}"), "kind": "read", "title": "Read", "locations": [{"path": "/r/a.ts"}]}});
+        for n in 0..SAME_CALL_STREAK {
+            translator.notification("session/update", &call(n), "s");
+        }
+        // The same call announced twice is one step, not two.
+        translator.notification("session/update", &call(0), "s");
+        let what = translator.looped.clone().expect("six identical reads in a row");
+        assert_eq!(what, "Read /r/a.ts");
+        let error = looped_error(&what);
+        assert!(!error.contains(ai_runs::CANCELLED_MARKER), "a loop counts as an attempt; a Stop hands it back");
+        assert!(error.contains("Read /r/a.ts"));
+    }
 
     fn policy(acts: bool, full: bool, grounding: bool, sandboxed: bool) -> Policy {
         Policy { acts, full, grounding, sandboxed, root: "/r".into(), servers: vec![] }

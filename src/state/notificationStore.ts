@@ -7,6 +7,7 @@ import { isMainWindow } from "../lib/windowIdentity";
 import { useUiStore, type MainView, type StoriesMode } from "./uiStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type { TranslationKey } from "../lib/i18n/translations";
+import { teamChatIdOf } from "../types/team";
 
 /**
  * Where a notification came from, named as the menu the user would go to for more.
@@ -487,6 +488,13 @@ export async function followTarget(
   } else if (kind === "agentTask") {
     const { useAgentsStore } = await import("./agentsStore");
     await useAgentsStore.getState().select(id);
+    // A team's chat is a floating window of the Agents view, not a task to select: unfold it.
+    const task = useAgentsStore.getState().tasks.find((candidate) => candidate.id === id);
+    const chatId = task ? teamChatIdOf(task) : null;
+    if (chatId) {
+      const { openTeamChatWindow } = await import("./teamChatStore");
+      await openTeamChatWindow(chatId);
+    }
   } else if (kind === "teamRun") {
     const [{ useTeamStore }, { useCrewStore }] = await Promise.all([import("./teamStore"), import("../components/crew/crewStore")]);
     useCrewStore.getState().setSpace("en-vivo");

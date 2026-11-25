@@ -145,6 +145,40 @@ pub struct ProviderCaps {
     /// Whether it can run as an ACP agent server (`crate::acp`) — what Settings › Proveedores offers
     /// the «ACP / CLI» choice for.
     pub acp: bool,
+    pub guarantees: Guarantees,
+}
+
+/// What the app can hold a provider's turn to — as opposed to what it only asks of the model. A
+/// team reads these before it hands a member work: a reviewer on an engine that does not enforce
+/// read-only can write, and an agent on an engine that publishes no consumption spends unseen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Guarantees {
+    /// «Read only» is the CLI's own limit: a member that must not write cannot.
+    pub read_only: bool,
+    /// What a turn consumed can be read: a plan window the app watches, or a model that runs here
+    /// and costs nothing.
+    pub metered: bool,
+    /// The app sees every tool call as it happens and stops a turn that repeats the same one
+    /// (`crate::acp::LoopGuard`, the local agent's own).
+    pub loop_guard: bool,
+    /// A stopped or failed turn picks its conversation up where it was.
+    pub resumes: bool,
+}
+
+/// What a member of a team needs from its provider that the provider does not give: `read_only`
+/// (it must not write and nothing stops it) and `meter` (nothing reads what it spends, and the
+/// run sets no other bound for it). Empty for an id that is not a provider.
+pub fn gaps(provider: &str, writes: bool, bounded: bool) -> Vec<&'static str> {
+    let Some(caps) = caps_of(provider) else { return Vec::new() };
+    let mut gaps = Vec::new();
+    if !writes && !caps.guarantees.read_only {
+        gaps.push("read_only");
+    }
+    if !caps.guarantees.metered && !bounded {
+        gaps.push("meter");
+    }
+    gaps
 }
 
 impl ProviderCaps {
@@ -175,6 +209,12 @@ pub fn caps_of(id: &str) -> Option<ProviderCaps> {
         app_scripts: scripts_reach(known).to_string(),
         app_scripts_default: crate::app_script::default_on(known),
         acp: engine.acp_args(false).is_some(),
+        guarantees: Guarantees {
+            read_only: engine.enforces_read_only(),
+            metered: engine.in_process() || crate::ai_quota::QUOTA_PROVIDERS.contains(known),
+            loop_guard: engine.in_process() || (engine.acp_args(false).is_some() && crate::acp::enabled_for(known)),
+            resumes: engine.resumes_sessions(),
+        },
     })
 }
 
@@ -205,6 +245,22 @@ pub fn read_only_ids() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_member_is_told_what_its_provider_cannot_be_held_to() {
+        // An engine that enforces read-only and publishes its consumption leaves nothing open.
+        assert!(gaps("claude", false, false).is_empty());
+        // One that only asks the model not to write cannot hold a reviewer to it…
+        let loose = all().into_iter().find(|caps| !caps.guarantees.read_only).expect("some provider only asks");
+        assert!(gaps(&loose.id, false, true).contains(&"read_only"));
+        // …which is nobody's problem when the member is there to write.
+        assert!(!gaps(&loose.id, true, true).contains(&"read_only"));
+        // An engine with no meter is a gap only while the run sets no bound of its own.
+        let blind = all().into_iter().find(|caps| !caps.guarantees.metered).expect("some provider publishes no consumption");
+        assert!(gaps(&blind.id, true, false).contains(&"meter"));
+        assert!(!gaps(&blind.id, true, true).contains(&"meter"));
+        assert!(gaps("nobody", false, false).is_empty());
+    }
 
     #[test]
     fn every_provider_says_what_scripts_can_do_there() {

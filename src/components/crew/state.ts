@@ -39,8 +39,10 @@ export function useAgentStates(): Map<string, AgentState> {
     for (const item of state.items) {
       const member = state.run.members.find((m) => m.id === item.member_id);
       if (!member) continue;
-      if (item.status === "running") map.set(member.agent_id, "thinking");
-      else if (item.status === "waiting" && map.get(member.agent_id) !== "thinking") map.set(member.agent_id, "waiting");
+      // Claimed but still queued for a slot, or finished and being verified: not thinking.
+      const phase = item.status === "running" ? item.intelligence?.phase : "";
+      if (item.status === "running" && phase !== "queued" && phase !== "verifying") map.set(member.agent_id, "thinking");
+      else if ((item.status === "waiting" || phase === "queued") && map.get(member.agent_id) !== "thinking") map.set(member.agent_id, "waiting");
     }
   }
   for (const chat of Object.values(chats)) {

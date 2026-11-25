@@ -642,10 +642,22 @@ async fn turn(
 ) -> Result<(String, i64, Option<String>), String> {
     cancelled(control)?;
     let mut stop = control.subscribe();
-    let _permit = tokio::select! {
-        permit = crate::runner::governor::acquire(app, &member.model) => permit,
-        _ = stop.changed() => return Err(crate::ai_runs::CANCELLED_MARKER.into()),
+    // The wait for a slot is called off through its own token rather than by dropping it: a wait
+    // dropped half-way would stay counted as waiting, and every claim after it would see one slot
+    // fewer than there are.
+    let slot = tokio_util::sync::CancellationToken::new();
+    let permit = {
+        let acquire = crate::runner::governor::acquire(app, &member.model, &slot);
+        tokio::pin!(acquire);
+        tokio::select! {
+            permit = &mut acquire => permit,
+            _ = stop.changed() => {
+                slot.cancel();
+                acquire.await
+            }
+        }
     };
+    let Some(_permit) = permit else { return Err(crate::ai_runs::CANCELLED_MARKER.into()) };
     cancelled(control)?;
     let run_id = format!("team-chat-{}", uid());
     let (task, session) = with_conn(app, |conn| {
@@ -860,6 +872,8 @@ pub struct ChatSummary {
     id: String,
     title: String,
     created_at: String,
+    /// How much there is in it: what tells a conversation worth keeping from one never used.
+    messages: i64,
 }
 
 pub fn history(conn: &Connection, team_id: &str) -> Result<Vec<ChatSummary>, String> {
@@ -874,8 +888,76 @@ pub fn history(conn: &Connection, team_id: &str) -> Result<Vec<ChatSummary>, Str
     rows.into_iter().map(|(id, created_at)| {
         let first: Option<String> = conn.query_row("SELECT data FROM agent_team_chat_messages WHERE chat_id = ?1 ORDER BY sequence LIMIT 1", [&id], |row| row.get(0)).optional().map_err(e2s)?;
         let title = first.and_then(|raw| serde_json::from_str::<Message>(&raw).ok()).map(|message| message.content.lines().next().unwrap_or("").chars().take(80).collect()).unwrap_or_default();
-        Ok(ChatSummary { id, title, created_at })
+        let messages = conn.query_row("SELECT COUNT(*) FROM agent_team_chat_messages WHERE chat_id = ?1", [&id], |row| row.get(0)).map_err(e2s)?;
+        Ok(ChatSummary { id, title, created_at, messages })
     }).collect()
+}
+
+/// Deletes a conversation with everything it made: its messages, the turns each member took in
+/// it, and their titles. What the members changed in the repositories stays — that is the
+/// repository's, not the chat's. Returns the members' conversations, whose attached files are
+/// left to the caller to remove once the database is released.
+///
+/// A conversation the team is answering is refused rather than stopped here: a turn that loses
+/// its chat halfway would go on editing with nowhere to report.
+pub fn delete(conn: &Connection, id: &str) -> Result<Vec<String>, String> {
+    let Some(raw) = conn
+        .query_row("SELECT data FROM agent_team_chats WHERE id = ?1", [id], |row| row.get::<_, String>(0))
+        .optional()
+        .map_err(e2s)?
+    else {
+        // Deleted from another window already.
+        return Ok(Vec::new());
+    };
+    let chat: Chat = serde_json::from_str(&raw).map_err(e2s)?;
+    if matches!(chat.status.as_str(), "running" | "cancelling") {
+        return Err("Detén la respuesta del equipo antes de eliminar la conversación.".into());
+    }
+    let batch = format!("{BATCH_PREFIX}{}:", chat.id);
+    let tx = conn.unchecked_transaction().map_err(e2s)?;
+    let tasks = {
+        let mut statement = tx
+            .prepare("SELECT id, project_id, conversation_id FROM agent_tasks WHERE id = ?1 OR substr(batch_id, 1, ?2) = ?3")
+            .map_err(e2s)?;
+        let rows = statement
+            .query_map(params![chat.task_id, batch.len() as i64, batch], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .map_err(e2s)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(e2s)?;
+        rows
+    };
+    let mut conversations = Vec::with_capacity(tasks.len());
+    for (task, project, conversation) in tasks {
+        queries::delete_chat_conversation(&tx, &project, &conversation).map_err(e2s)?;
+        crate::chat_lineage::forget(&tx, &conversation).map_err(e2s)?;
+        queries::delete_agent_task(&tx, &task).map_err(e2s)?;
+        conversations.push(conversation);
+    }
+    tx.execute("DELETE FROM agent_team_chat_messages WHERE chat_id = ?1", [id]).map_err(e2s)?;
+    tx.execute("DELETE FROM agent_team_chats WHERE id = ?1", [id]).map_err(e2s)?;
+    tx.commit().map_err(e2s)?;
+    Ok(conversations)
+}
+
+#[tauri::command]
+pub fn team_chat_delete(app: AppHandle, db: State<'_, Db>, chat_id: String) -> Result<(), String> {
+    let conversations = {
+        let conn = db.0.lock().map_err(e2s)?;
+        // Asked under the lock a new turn needs to begin, so one cannot start in between.
+        if RUNNING.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&chat_id) {
+            return Err("Detén la respuesta del equipo antes de eliminar la conversación.".into());
+        }
+        delete(&conn, &chat_id)?
+    };
+    // Best effort and outside the lock; the startup sweep collects whatever this misses.
+    for conversation in &conversations {
+        crate::commands::chat_attach::discard_repo_conversation_attachments(conversation);
+    }
+    // Its own event: "changed" makes every window read the conversation again, and it is gone.
+    let _ = app.emit("team-chat:deleted", serde_json::json!({ "chatId": chat_id }));
+    Ok(())
 }
 
 #[tauri::command]
@@ -961,6 +1043,19 @@ pub async fn team_chat_draft(db: State<'_, Db>, chat_id: String) -> Result<ChatD
     })
 }
 
+/// The user's words as the chat keeps them: followed by the note naming the files sent with them,
+/// and by nothing when there are none — a note with no file under it reads as a broken sentence.
+fn stored_question(message: &str, files: &[crate::commands::chat_attach::ChatAttachment]) -> String {
+    if files.is_empty() {
+        return message.trim().to_string();
+    }
+    let named: Vec<_> = files
+        .iter()
+        .map(|file| crate::ai::AiAttachment { path: file.path.clone(), name: file.name.clone(), is_image: file.is_image })
+        .collect();
+    format!("{}{}", message.trim(), crate::ai::attachment_note(&named))
+}
+
 #[tauri::command]
 pub fn team_chat_send(
     app: AppHandle,
@@ -995,16 +1090,7 @@ pub fn team_chat_send(
             .into_iter()
             .filter(|file| ids.contains(&file.id))
             .collect();
-        let note = crate::ai::attachment_note(
-            &files
-                .iter()
-                .map(|file| crate::ai::AiAttachment {
-                    path: file.path.clone(),
-                    name: file.name.clone(),
-                    is_image: file.is_image,
-                })
-                .collect::<Vec<_>>(),
-        );
+        let question = stored_question(&message, &files);
         let tx = conn.unchecked_transaction().map_err(e2s)?;
         chat.status = "running".into();
         chat.error.clear();
@@ -1013,7 +1099,7 @@ pub fn team_chat_send(
             &chat,
             "user",
             None,
-            &format!("{}{note}", message.trim()),
+            &question,
             0,
             None,
             false,

@@ -8,7 +8,7 @@ import { Suspense, lazy, useEffect } from "react";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useTeamStore } from "../../state/teamStore";
 import { isTeamTask, teamChatIdOf, TEAM_TASK_BATCH_PREFIX } from "../../types/team";
-import { TeamChatPane } from "./teams/TeamChatPane";
+import { openTeamChatWindow } from "../../state/teamChatStore";
 import { MemberChat } from "./live/MemberChat";
 import { AgentTaskDetail } from "../agents/AgentTaskDetail";
 import { Drawer } from "./kit/ui";
@@ -30,7 +30,13 @@ export function TaskPane({ taskId }: { taskId: string }) {
     if (runId && !useTeamStore.getState().states[runId]) void useTeamStore.getState().refresh(runId);
   }, [runId]);
   const chatId = task ? teamChatIdOf(task) : null;
-  if (chatId) return <TeamChatPane chatId={chatId} />;
+  // A team's chat is a floating window of its own, not this sheet: hand it over and step aside.
+  useEffect(() => {
+    if (!chatId) return;
+    void openTeamChatWindow(chatId);
+    close();
+  }, [chatId, close]);
+  if (chatId) return null;
   if (runId && memberId) return <MemberChat runId={runId} memberId={memberId} taskId={taskId} />;
   return (
     <Drawer onClose={close} width={780} label="task">

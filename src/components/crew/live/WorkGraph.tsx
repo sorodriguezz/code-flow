@@ -12,7 +12,7 @@ import type { TeamRunState } from "../../../types/team";
 import { AgentAvatar } from "../kit/Avatar";
 import { SPRING } from "../kit/ui";
 import { useL } from "../state";
-import { ITEM_KIND, ITEM_STATUS, itemColor } from "./look";
+import { ITEM_KIND, isWorking, itemColor, itemLook } from "./look";
 
 const W = 216;
 const H = 78;
@@ -74,9 +74,9 @@ export function WorkGraph({ state, selected, onSelect }: { state: TeamRunState; 
               const { x, y } = at(item.id);
               const member = state.run.members.find((m) => m.id === item.member_id);
               const agent = roster.find((a) => a.id === member?.agent_id);
-              const [es, en] = ITEM_STATUS[item.status] ?? ITEM_STATUS.pending;
+              const [es, en] = itemLook(item);
               const [kes, ken] = ITEM_KIND[item.kind] ?? ITEM_KIND.work;
-              const running = item.status === "running";
+              const running = isWorking(item);
               const dim = item.status === "skipped" || item.status === "cancelled";
               return (
                 <motion.button

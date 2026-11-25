@@ -23,6 +23,10 @@
 //! - **The run's workspace**: a `workspaceId` must be the run's, a `projectId` one of its
 //!   repositories, an absolute path inside one of them (or the temporary folder) once `..` and
 //!   links are resolved, and a relative path never climbs with `..`.
+//! - **The API client's credentials** are masked where they sit — a request's, a folder's or a
+//!   collection's auth, a secret variable, a sensitive header — in every answer of that area, and
+//!   put back from the store when a record returns with the mask in it (`db::api_secrets`). The
+//!   list below would not do: a request's own Basic password was in nobody's list (2026-11-25).
 //! - **What comes back** is scrubbed of every secret the app keeps and what the secret scan knows,
 //!   and cut at [`MAX_ANSWER`].
 //!
@@ -396,6 +400,9 @@ pub(crate) struct Admitted {
     pub risk: String,
     pub args: serde_json::Map<String, Value>,
     signature: String,
+    /// The API client's: its records carry credentials, masked on the way out and put back on the
+    /// way in (`db::api_secrets::mask_for_model`).
+    api: bool,
 }
 
 impl Admitted {
@@ -454,7 +461,7 @@ pub(crate) fn admit(scope: &Scope, name: &str, raw_args: Option<&Value>) -> Resu
             }
         }
     }
-    Ok(Admitted { name: name.to_string(), risk, args: call_args, signature: signature(command) })
+    Ok(Admitted { name: name.to_string(), risk, args: call_args, signature: signature(command), api: command.area == "api" || name.starts_with("api_") })
 }
 
 /// The actions of `containers_act` that only start, stop or reshape what is there, and can be
@@ -489,8 +496,19 @@ pub(crate) const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// started for the call is dropped. A failure's text is scrubbed like an answer: a command's error
 /// can quote the URL, the header or the connection string it failed on.
 pub(crate) async fn invoke_within(app: &AppHandle, admitted: &Admitted, timeout: std::time::Duration, cancel: tokio_util::sync::CancellationToken) -> Result<Value, String> {
-    let payload = json!({ "command": admitted.name, "args": Value::Object(admitted.args.clone()) });
-    crate::flows::bridge::ask(app, "app.invoke", payload, timeout, cancel).await.map_err(|error| scrub(app, &error))
+    let mut args = Value::Object(admitted.args.clone());
+    // The API client's credentials are never a model's to read: what it was shown is the mask, and
+    // a record it sends back to change something else keeps the credential it had.
+    if admitted.api && admitted.risk != "read" {
+        let db = app.state::<crate::db::Db>();
+        crate::db::api_secrets::restore_masked(&db, &crate::db::api_secrets::os_store(), &mut args).map_err(|why| format!("Not called: {} {why}.", admitted.name))?;
+    }
+    let payload = json!({ "command": admitted.name, "args": args });
+    let mut answer = crate::flows::bridge::ask(app, "app.invoke", payload, timeout, cancel).await.map_err(|error| scrub(app, &error))?;
+    if admitted.api {
+        crate::db::api_secrets::mask_for_model(&mut answer);
+    }
+    Ok(answer)
 }
 
 /// `app_call`: one command, with everything this module's header says bounds it.

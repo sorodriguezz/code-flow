@@ -1,59 +1,82 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type HTMLAttributes, type ReactNode } from "react";
 import { ListPlus, Loader2, MessageSquare, MessageSquarePlus, X } from "lucide-react";
-import { useTeamChatStore, teamChatBusy } from "../../../state/teamChatStore";
+import { openTeamChatWindow, useTeamChatStore, teamChatBusy } from "../../../state/teamChatStore";
+import { showingTeamChat, useTeamChatWindowStore } from "../../../state/teamChatWindowStore";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
 import { pushErrorToast } from "../../../state/toastStore";
 import { AgentComposer } from "../../agents/AgentTaskDetail";
 import { ChatMessageBubble } from "../../chat/ChatMessageBubble";
 import { AiRunLog } from "../../ai/AiRunLog";
 import { iconButtonClass } from "../../common/Button";
-import { Select } from "../../common/Select";
 import { teamChatDraft, teamChatHistory, type TeamChatSummary } from "../../../lib/tauri/teamCommands";
 import { AgentAvatar, TeamAvatar } from "../kit/Avatar";
-import { Btn, Drawer } from "../kit/ui";
+import { nextChat, TeamChatHistory } from "./TeamChatHistory";
+import { Btn } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
 import { scrollBehavior } from "../../../lib/motion";
 import type { ChatAttachment } from "../../../lib/tauri/chatCommands";
 
 /** The chat is the team's, in its workspace: the open repository only says where members prefer to
- *  work, and having none open is fine. */
+ *  work, and having none open is fine. It opens as the team's floating window (`TeamChatWindow`),
+ *  so the view behind it — the org chart, a run — stays in sight and in use. */
 export async function chatWithTeam(teamId: string, fresh = false, projectId: string | null = useWorkspaceStore.getState().activeProjectId): Promise<void> {
   try {
     const id = await useTeamChatStore.getState().open(teamId, projectId, fresh);
-    useCrewStore.getState().open({ kind: "teamChat", id });
+    useTeamChatWindowStore.getState().open(id, teamId);
   } catch (error) { pushErrorToast(String(error)); }
 }
 
-export function TeamChatPane({ chatId }: { chatId: string }) {
-  const l = useL();
-  const close = useCrewStore((s) => s.close);
-  return <Drawer onClose={close} width={820} label={l("Chat del equipo", "Team chat")}><TeamChatContent chatId={chatId} onClose={close} /></Drawer>;
-}
-
-/** Also used by an existing task opened in the workshop, so every entry point keeps coordination. */
-export function TeamChatContent({ chatId, onClose }: { chatId: string; onClose?: () => void }) {
+/**
+ * A team conversation: its header, its messages and its composer.
+ *
+ * Drawn by the floating window and by an existing task opened in the workshop, so every entry
+ * point keeps coordination. The window hands in what makes it a window: `grip` turns the header
+ * into its handle, `controls` are its buttons, and `shown` is false while it is minimised — the
+ * conversation stays mounted then, so a draft, the scroll and a turn in progress survive.
+ */
+export function TeamChatContent({ chatId, onClose, controls, grip, shown = true }: {
+  chatId: string;
+  onClose?: () => void;
+  controls?: ReactNode;
+  grip?: HTMLAttributes<HTMLDivElement>;
+  shown?: boolean;
+}) {
   const l = useL();
   const state = useTeamChatStore((s) => s.states[chatId]);
   const [loading, setLoading] = useState(!state);
   const [history, setHistory] = useState<TeamChatSummary[]>([]);
   const [preparing, setPreparing] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
+  const head = useRef<HTMLDivElement>(null);
+  /** Something arrived while this was folded away: go to it once it is back. */
+  const behind = useRef(false);
   const busy = teamChatBusy(state);
+  // Whoever decides if a finished turn must be announced asks whether this is in sight.
+  useEffect(() => (shown && head.current ? showingTeamChat(chatId, head.current) : undefined), [chatId, shown]);
   useEffect(() => {
     let active = true;
     void useTeamChatStore.getState().refresh(chatId).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [chatId]);
   // Events keep all windows current. Poll only while an exchange is running, also recovering an
-  // event missed while this drawer was closed or its window was being reloaded.
+  // event missed while this was closed or its window was being reloaded.
   useEffect(() => {
     if (!busy) return;
     const timer = window.setInterval(() => void useTeamChatStore.getState().refresh(chatId), 2500);
     return () => window.clearInterval(timer);
   }, [chatId, busy]);
   useEffect(() => {
+    if (!shown) {
+      behind.current = true;
+      return;
+    }
     scroll.current?.scrollTo({ top: scroll.current.scrollHeight, behavior: scrollBehavior() });
-  }, [state?.messages.length, state?.chat.activeRunId]);
+  }, [state?.messages.length, state?.chat.activeRunId]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!shown || !behind.current) return;
+    behind.current = false;
+    scroll.current?.scrollTo({ top: scroll.current.scrollHeight });
+  }, [shown]);
   const send = useCallback((text: string, files?: ChatAttachment[]) => useTeamChatStore.getState().send(chatId, text, files), [chatId]);
   const stop = useCallback(() => void useTeamChatStore.getState().cancel(chatId), [chatId]);
   const convert = async () => {
@@ -80,27 +103,54 @@ export function TeamChatContent({ chatId, onClose }: { chatId: string; onClose?:
   const repoNames = chat ? [...new Set(Object.values(chat.memberRepos ?? {}).map((r) => r.name))] : [];
   const where = repoNames.length > 1 ? l(`${repoNames.length} repositorios`, `${repoNames.length} repositories`) : (repoNames[0] ?? chat?.projectName ?? "");
   const active = chat?.members.find((m) => m.id === chat.activeMemberId);
+  const working = chat?.status === "cancelling" ? l("Deteniendo al equipo…", "Stopping the team…") : active ? l(`${active.name} está trabajando…`, `${active.name} is working…`) : l("El líder está coordinando…", "The lead is coordinating…");
+  const teamId = chat?.teamId;
   useEffect(() => {
-    if (!chat) return;
+    if (!teamId) return;
     let valid = true;
-    void teamChatHistory(chat.teamId).then((list) => { if (valid) setHistory(list); }).catch(() => {});
+    void teamChatHistory(teamId).then((list) => { if (valid) setHistory(list); }).catch(() => {});
     return () => { valid = false; };
-  }, [chat?.teamId, chatId, state?.messages.length]);
+  }, [teamId, chatId, state?.messages.length]);
+  /** Deletes one of the team's conversations. Deleting the one on screen turns the window to the
+   *  most recent of the others, and closes it when it was the last. */
+  const remove = async (item: TeamChatSummary) => {
+    const here = item.id === chatId;
+    const done = await useTeamChatStore.getState().remove(item.id, here ? nextChat(history, item.id) : undefined);
+    if (!done) return false;
+    setHistory((list) => list.filter((entry) => entry.id !== item.id));
+    // Not in a floating window (a task opened in the workshop): nothing else would close it.
+    if (here && !nextChat(history, item.id)) onClose?.();
+    return true;
+  };
+  // One conversation nobody has written in is nothing to go to nor to delete.
+  const manage = history.length > 1 || history.some((item) => item.messages > 0);
   return (
     <>
-      <div className="flex shrink-0 items-center gap-2.5 border-b border-[var(--cf-border)] px-4 py-3">
-        <TeamAvatar size={32} />
+      <div
+        ref={head}
+        {...grip}
+        className={`@container flex shrink-0 items-center gap-2.5 border-b border-[var(--cf-border)] px-4 py-3 ${grip ? "cursor-grab touch-none select-none active:cursor-grabbing" : ""}`}
+      >
+        <TeamAvatar size={32} state={busy ? "thinking" : "idle"} />
         <div className="min-w-0 flex-1">
           <b className="block truncate text-[13.5px]">{chat?.teamName ?? l("Chat del equipo", "Team chat")}</b>
-          {chat && <span className="block truncate text-[11.5px] text-[var(--cf-text-muted)]">{where} · {l(`Lidera ${lead?.name ?? ""}`, `Led by ${lead?.name ?? ""}`)}</span>}
+          {chat && (busy
+            ? <span className="block truncate text-[11.5px] font-medium text-[var(--cf-accent)]">{working}</span>
+            : <span className="block truncate text-[11.5px] text-[var(--cf-text-muted)]">{where} · {l(`Lidera ${lead?.name ?? ""}`, `Led by ${lead?.name ?? ""}`)}</span>)}
         </div>
-        {history.length > 1 && <Select value={chatId} size="sm" ariaLabel={l("Historial de chats del equipo", "Team chat history")} className="max-w-[120px] sm:max-w-[200px]" onChange={(id) => useCrewStore.getState().open({ kind: "teamChat", id })} options={history.map((item) => ({ value: item.id, label: item.title || new Date(item.createdAt).toLocaleString() }))} />}
-        {state?.messages.some((message) => message.role === "user") && (
-          <Btn small icon={ListPlus} disabled={busy || preparing} title={l("Abre el lanzador con el pedido, el contexto y los adjuntos del chat", "Opens the launcher with the request, chat context and attachments")} onClick={() => void convert()}>
-            {l("Convertir en tarea", "Convert to task")}
-          </Btn>
-        )}
-        {chat && <button type="button" disabled={busy} onClick={() => void chatWithTeam(chat.teamId, true)} title={l("Nueva conversación con el equipo", "New conversation with the team")} className={iconButtonClass({ size: "sm" })}><MessageSquarePlus className="h-4 w-4" /></button>}
+        <div className="flex min-w-0 shrink-0 items-center gap-1.5">
+          {/* In a window the team's name comes first: the history is down to its icon where it is narrow. */}
+          {manage && <TeamChatHistory chatId={chatId} items={history} busy={busy} compact={Boolean(controls)} onPick={(id) => void openTeamChatWindow(id)} onNew={() => { if (chat) void chatWithTeam(chat.teamId, true); }} onDelete={remove} />}
+          {state?.messages.some((message) => message.role === "user") && (
+            <Btn small icon={ListPlus} disabled={busy || preparing} aria-label={l("Convertir en tarea", "Convert to task")} title={l("Convertir en tarea: abre el lanzador con el pedido, el contexto y los adjuntos del chat", "Convert to task: opens the launcher with the request, chat context and attachments")} onClick={() => void convert()}>
+              <span className={controls ? "hidden @[640px]:inline" : ""}>{l("Convertir en tarea", "Convert to task")}</span>
+            </Btn>
+          )}
+          {/* The menu offers it too: in a narrow window that is where it lives, so the team's name keeps its room. */}
+          {chat && <span className={controls && manage ? "hidden shrink-0 @[440px]:inline-flex" : "inline-flex shrink-0"}><button type="button" disabled={busy} onClick={() => void chatWithTeam(chat.teamId, true)} title={l("Nueva conversación con el equipo", "New conversation with the team")} aria-label={l("Nueva conversación con el equipo", "New conversation with the team")} className={iconButtonClass({ size: "sm" })}><MessageSquarePlus className="h-4 w-4" /></button></span>}
+        </div>
+        {controls && <span aria-hidden className="h-4 w-px shrink-0 bg-[var(--cf-border)]" />}
+        {controls}
         {onClose && <button type="button" onClick={onClose} title={l("Cerrar", "Close")} aria-label={l("Cerrar chat del equipo", "Close team chat")} className={iconButtonClass({ size: "sm" })}><X className="h-4 w-4" /></button>}
       </div>
       {!state ? (
@@ -137,7 +187,7 @@ export function TeamChatContent({ chatId, onClose }: { chatId: string; onClose?:
                   )}
                 </div>;
               })}
-              {busy && <div className="flex items-center gap-2 text-[12px] text-[var(--cf-text-muted)]"><Loader2 className="h-3.5 w-3.5 animate-spin" />{chat?.status === "cancelling" ? l("Deteniendo al equipo…", "Stopping the team…") : active ? l(`${active.name} está trabajando…`, `${active.name} is working…`) : l("El líder está coordinando…", "The lead is coordinating…")}</div>}
+              {busy && <div className="flex items-center gap-2 text-[12px] text-[var(--cf-text-muted)]"><Loader2 className="h-3.5 w-3.5 animate-spin" />{working}</div>}
               {busy && chat?.activeRunId && <AiRunLog runId={chat.activeRunId} running />}
               {chat?.error && <p role="status" className="rounded-lg border border-[var(--cf-border)] p-3 text-[12px] text-[var(--cf-text-muted)]">{chat.error}</p>}
             </div>

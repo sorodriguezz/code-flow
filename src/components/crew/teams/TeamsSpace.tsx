@@ -20,6 +20,7 @@ import { isPersonalAgent } from "../../../lib/agents/personalAgents";
 import { AgentAvatar, TeamAvatar } from "../kit/Avatar";
 import { useDragSource } from "../kit/drag";
 import { Btn, Empty, Label, Seg, SPRING, field } from "../kit/ui";
+import { withSandboxDefault } from "../../../lib/agents/sandboxDefault";
 import { useCrewStore, useL } from "../state";
 import { useTeamDraft } from "./teamDraft";
 import { OrgCanvas } from "./OrgCanvas";
@@ -28,6 +29,7 @@ import { ChecksTab, FlowTab } from "./FlowTab";
 import { chatWithTeam } from "./TeamChatPane";
 import { ConfigurationExportButton, ConfigurationImportButton } from "../ConfigurationSharing";
 import { TEAM_CONFIGURATION } from "../../../lib/agents/shareConfiguration";
+import { ProposalBanner } from "./TeamProposalDialog";
 
 function PaletteAgent({ agent, inTeam }: { agent: WorkspaceAgent; inTeam: number }) {
   const l = useL();
@@ -274,7 +276,8 @@ export function TeamsSpace() {
     let n = teams.length + 1;
     const base = l("Equipo", "Team");
     while (teams.some((t) => t.name === `${base} ${n}`)) n++;
-    const saved = await useTeamStore.getState().saveTeam({ ...emptyTeam(workspaceId), name: `${base} ${n}` });
+    const blank = emptyTeam(workspaceId);
+    const saved = await useTeamStore.getState().saveTeam({ ...blank, policy: await withSandboxDefault(blank.policy), name: `${base} ${n}` });
     if (saved) crew.set({ selectedTeamId: saved.id, selectedMemberId: null });
   };
   const duplicate = async (team: Team) => {
@@ -370,6 +373,7 @@ function TeamList({ teams, actions, onDuplicate, onRemove }: { teams: Team[]; ac
         <span className="flex-1" />
         {actions}
       </div>
+      <ProposalBanner />
       <div className="grid min-h-0 flex-1 auto-rows-min grid-cols-[repeat(auto-fill,minmax(300px,1fr))] gap-3 overflow-y-auto p-3.5">
         {shown.map((t) => {
           const lead = t.members.find((m) => m.id === t.lead);

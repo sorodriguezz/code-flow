@@ -10,30 +10,123 @@
 //! (`send_chat_message`), so the only thing the webview contributed was the loop — and the loop is
 //! what moves here.
 //!
-//! Every change to a run goes through `team_cmd::changed`, which emits `team:changed` and calls
-//! [`kick`]. A kick claims whatever is ready (`team_cmd::claim_run`), runs headless items here
+//! Every change to a run goes through `engine::changed`, which emits `team:changed` and calls
+//! [`kick`]. A kick claims whatever is ready (`engine::claim_run`), runs headless items here
 //! under the [governor](governor), and hands terminal items to the main window, which owns the
 //! terminal bench. Windows only watch (`team:changed`, `runner:turn`) and send orders.
+//!
+//! # What it runs in
+//!
+//! Everything here takes a [`Host`] rather than the app: its database, its slots, how it tells the
+//! windows and how it runs a turn. The app is one host ([`AppHost`]); the tests bring another with a
+//! scripted engine ([`scripted`]) and drive whole runs through this same code — claim, slot, turn,
+//! settle, the next claim — with no window and no CLI.
 
 pub mod governor;
+pub mod host;
+#[cfg(test)]
+mod scripted;
+
+pub use host::{AppHost, Host, Turn};
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
-use crate::commands::team_cmd::{self, Dispatch};
-use crate::db::{queries, Db};
+use crate::db::queries;
+use crate::team::engine::{self, Dispatch};
+
+/// One headless dispatch from the moment it is claimed until its turn is over — queued for a slot
+/// or running. Registered *before* the wait for a slot, so stopping a run reaches a turn that has
+/// not started yet as surely as one that has.
+struct Flight {
+    team_run_id: String,
+    dispatch_id: String,
+    /// The turn's id in `ai_runs`: what stops the engine once it runs.
+    turn_id: String,
+    /// What stops the wait for a slot.
+    cancel: CancellationToken,
+}
+
+/// The dispatches in flight, by item id. The app has one ([`FLIGHTS`]); a test makes its own.
+#[derive(Default)]
+pub struct Flights {
+    map: Mutex<HashMap<String, Flight>>,
+    landed: Notify,
+}
+
+impl Flights {
+    fn map(&self) -> std::sync::MutexGuard<'_, HashMap<String, Flight>> {
+        self.map.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Registers a dispatch and returns what calls off its wait for a slot.
+    pub fn take_off(&self, item_id: &str, team_run_id: &str, dispatch_id: &str, turn_id: &str) -> CancellationToken {
+        let cancel = CancellationToken::new();
+        self.map().insert(
+            item_id.to_string(),
+            Flight { team_run_id: team_run_id.to_string(), dispatch_id: dispatch_id.to_string(), turn_id: turn_id.to_string(), cancel: cancel.clone() },
+        );
+        cancel
+    }
+
+    /// The dispatch is over. Only the dispatch that registered removes itself: a late one must not
+    /// take down the entry of the attempt that replaced it.
+    pub fn land(&self, item_id: &str, dispatch_id: &str) {
+        {
+            let mut map = self.map();
+            if map.get(item_id).is_some_and(|flight| flight.dispatch_id == dispatch_id) {
+                map.remove(item_id);
+            }
+        }
+        self.landed.notify_waiters();
+    }
+
+    /// Calls off every dispatch of a run: the queued ones stop waiting, and the turn ids of all of
+    /// them come back for the engine to be told.
+    pub fn cancel_run(&self, team_run_id: &str) -> Vec<String> {
+        self.map()
+            .values()
+            .filter(|flight| flight.team_run_id == team_run_id)
+            .map(|flight| {
+                flight.cancel.cancel();
+                flight.turn_id.clone()
+            })
+            .collect()
+    }
+
+    pub fn in_flight(&self, team_run_id: &str) -> usize {
+        self.map().values().filter(|flight| flight.team_run_id == team_run_id).count()
+    }
+
+    /// Waits until nothing of the run is in flight, or `limit` passes. `true` when it emptied: its
+    /// worktrees are nobody's any more and can go.
+    pub async fn wait_idle(&self, team_run_id: &str, limit: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + limit;
+        loop {
+            let landed = self.landed.notified();
+            if self.in_flight(team_run_id) == 0 {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, landed).await.is_err() {
+                return self.in_flight(team_run_id) == 0;
+            }
+        }
+    }
+}
+
+static FLIGHTS: LazyLock<Flights> = LazyLock::new(Flights::default);
 
 #[derive(Default)]
 struct State {
     /// Runs with a pump in flight, and those that were kicked again meanwhile.
     pumping: HashSet<String>,
     again: HashSet<String>,
-    /// Turn run id (`ai_runs`) of every headless item in flight, by item id, with its team run.
-    turns: HashMap<String, (String, String)>,
     quota_wakes: HashMap<String, i64>,
 }
 
@@ -63,6 +156,11 @@ struct TurnEvent<'a> {
 /// Moves a run: claims what is ready and starts it. Cheap and idempotent — a run that is not
 /// `running` claims nothing — so every change to a run calls it.
 pub fn kick(app: &AppHandle, run_id: &str) {
+    kick_on(&AppHost(app.clone()), run_id);
+}
+
+/// [`kick`] on any [`Host`].
+pub fn kick_on<H: Host>(host: &H, run_id: &str) {
     {
         let mut s = state();
         if s.pumping.contains(run_id) {
@@ -71,12 +169,12 @@ pub fn kick(app: &AppHandle, run_id: &str) {
         }
         s.pumping.insert(run_id.to_string());
     }
-    let app = app.clone();
+    let host = host.clone();
     let run_id = run_id.to_string();
     tauri::async_runtime::spawn(async move {
         loop {
-            pump_once(&app, &run_id).await;
-            schedule_quota_wake(&app, &run_id);
+            pump_once(&host, &run_id).await;
+            schedule_quota_wake(&host, &run_id);
             let mut s = state();
             if s.again.remove(&run_id) {
                 continue;
@@ -87,9 +185,9 @@ pub fn kick(app: &AppHandle, run_id: &str) {
     });
 }
 
-fn schedule_quota_wake(app: &AppHandle, run_id: &str) {
+fn schedule_quota_wake<H: Host>(host: &H, run_id: &str) {
     let now = chrono::Utc::now().timestamp();
-    let next = with_conn(app, |conn| {
+    let next = with_conn(host, |conn| {
         let run = crate::team::get_run(conn, run_id).ok().flatten()?;
         if run.status != "running" {
             return None;
@@ -111,7 +209,7 @@ fn schedule_quota_wake(app: &AppHandle, run_id: &str) {
         }
     }
     let Some(at) = next else { return };
-    let app = app.clone();
+    let host = host.clone();
     let run_id = run_id.to_string();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs((at - now) as u64)).await;
@@ -120,53 +218,51 @@ fn schedule_quota_wake(app: &AppHandle, run_id: &str) {
             state.quota_wakes.get(&run_id) == Some(&at) && state.quota_wakes.remove(&run_id).is_some()
         };
         if due {
-            kick(&app, &run_id);
+            kick_on(&host, &run_id);
         }
     });
 }
 
-async fn pump_once(app: &AppHandle, run_id: &str) {
-    let limit = {
-        let db = app.state::<Db>();
-        governor::free_slots(db.inner())
-    };
+async fn pump_once<H: Host>(host: &H, run_id: &str) {
+    let limit = governor::free_slots(host.db(), host.slots());
     if limit == 0 {
         return;
     }
-    let dispatches = {
-        let db = app.state::<Db>();
-        team_cmd::claim_run(db.inner(), run_id, Some(limit)).await
-    };
-    let dispatches = match dispatches {
+    let changed = || host.emit("team:changed", serde_json::json!({ "runId": run_id }));
+    let dispatches = match engine::claim_run(host.db(), run_id, Some(limit)).await {
         Ok(d) => d,
         Err(error) => {
+            // A claim that fails is the run not moving, and nobody watching a console: it stops
+            // where the user sees it, with what went wrong.
             eprintln!("runner: claim of {run_id} failed: {error}");
+            engine::engine_failure(host.db(), run_id, "", &format!("no se pudo repartir el trabajo: {error}"));
+            changed();
             return;
         }
     };
-    let _ = app.emit("team:changed", serde_json::json!({ "runId": run_id }));
+    changed();
     for dispatch in dispatches {
         if dispatch.run_in == crate::collab::team::RUN_IN_REMOTE {
             // A seat someone else took: it goes out with the shared run's next round and settles
             // when their machine answers (`collab::team`).
-            let queued = {
-                let db = app.state::<Db>();
-                crate::collab::team::queue_offer(db.inner(), run_id, &dispatch)
-            };
-            if let Err(error) = queued {
-                settle(app, run_id, &dispatch.item.id, "error", "", &format!("no se pudo entregar al puesto: {error}")).await;
+            if let Err(error) = crate::collab::team::queue_offer(host.db(), run_id, &dispatch) {
+                settle(host, run_id, &dispatch.item.id, &dispatch.item.intelligence.dispatch_id, "error", "", &format!("no se pudo entregar al puesto: {error}")).await;
             }
             continue;
         }
         if dispatch.run_in == "terminal" {
             // The bench lives in the main window, hidden or not; it opens the CLI and `cf done`
             // settles the item from there.
-            let _ = app.emit_to("main", "team:terminal-dispatch", serde_json::json!({ "runId": run_id, "dispatch": &dispatch }));
+            host.emit_to_main("team:terminal-dispatch", serde_json::json!({ "runId": run_id, "dispatch": &dispatch }));
             continue;
         }
-        let app = app.clone();
+        // In flight from here, before the task that waits for a slot even starts: an abort that
+        // lands in between still finds it.
+        let turn_id = format!("team-{}", uuid::Uuid::new_v4());
+        let cancel = FLIGHTS.take_off(&dispatch.item.id, run_id, &dispatch.item.intelligence.dispatch_id, &turn_id);
+        let host = host.clone();
         let run_id = run_id.to_string();
-        tauri::async_runtime::spawn(async move { run_headless(app, run_id, dispatch).await });
+        tauri::async_runtime::spawn(async move { run_headless(host, run_id, dispatch, turn_id, cancel).await });
     }
 }
 
@@ -184,42 +280,54 @@ fn last_engine_session(conn: &rusqlite::Connection, project_id: &str, conversati
 }
 
 /// Runs `f` on the database connection; `None` if the lock is poisoned.
-fn with_conn<T>(app: &AppHandle, f: impl FnOnce(&rusqlite::Connection) -> T) -> Option<T> {
-    let db = app.state::<Db>();
-    let guard = db.0.lock().ok()?;
+fn with_conn<H: Host, T>(host: &H, f: impl FnOnce(&rusqlite::Connection) -> T) -> Option<T> {
+    let guard = host.db().0.lock().ok()?;
     let out = f(&guard);
     drop(guard);
     Some(out)
 }
 
-async fn run_headless(app: AppHandle, team_run_id: String, dispatch: Dispatch) {
+async fn run_headless<H: Host>(host: H, team_run_id: String, dispatch: Dispatch, turn_id: String, cancel: CancellationToken) {
     let item_id = dispatch.item.id.clone();
+    let dispatch_id = dispatch.item.intelligence.dispatch_id.clone();
     let Some(task) = dispatch.task.clone() else {
-        settle(&app, &team_run_id, &item_id, "error", "", "el ítem no tiene tarea").await;
+        FLIGHTS.land(&item_id, &dispatch_id);
+        settle(&host, &team_run_id, &item_id, &dispatch_id, "error", "", "el ítem no tiene tarea").await;
         return;
     };
-    let _permit = governor::acquire(&app, &dispatch.model).await;
-    let turn_id = format!("team-{}", uuid::Uuid::new_v4());
-    state().turns.insert(item_id.clone(), (turn_id.clone(), team_run_id.clone()));
+    // Reserved for the whole flight: a Stop that arrives while the turn prepares is kept, not lost.
+    let _reservation = host.reserve(&turn_id);
+    let Some(_permit) = governor::acquire_on(&host, &dispatch.model, &cancel).await else {
+        // Called off while it queued: the turn never started and spent nothing.
+        FLIGHTS.land(&item_id, &dispatch_id);
+        settle(&host, &team_run_id, &item_id, &dispatch_id, "unstarted", "", "").await;
+        return;
+    };
+    // The slot may have taken a while: the run could have been paused, aborted or re-planned, and
+    // the item handed to another dispatch. Only the dispatch that is still the item's starts.
+    if !engine::turn_started(host.db(), &item_id, &dispatch_id) || cancel.is_cancelled() {
+        FLIGHTS.land(&item_id, &dispatch_id);
+        settle(&host, &team_run_id, &item_id, &dispatch_id, "unstarted", "", "").await;
+        return;
+    }
+    host.emit("team:changed", serde_json::json!({ "runId": team_run_id }));
     let emit = |phase: &str, ok: bool, error: &str| {
-        let _ = app.emit(
-            "runner:turn",
-            TurnEvent {
-                phase,
-                run_id: &turn_id,
-                team_run_id: &team_run_id,
-                item_id: &item_id,
-                task_id: &task.id,
-                workspace_id: &task.workspace_id,
-                project_id: &task.project_id,
-                title: &dispatch.title,
-                ok,
-                error,
-            },
-        );
+        let event = TurnEvent {
+            phase,
+            run_id: &turn_id,
+            team_run_id: &team_run_id,
+            item_id: &item_id,
+            task_id: &task.id,
+            workspace_id: &task.workspace_id,
+            project_id: &task.project_id,
+            title: &dispatch.title,
+            ok,
+            error,
+        };
+        host.emit("runner:turn", serde_json::to_value(event).unwrap_or_default());
     };
     emit("start", true, "");
-    let session = with_conn(&app, |c| last_engine_session(c, &task.project_id, &task.conversation_id)).flatten();
+    let session = with_conn(&host, |c| last_engine_session(c, &task.project_id, &task.conversation_id)).flatten();
     let mut message = dispatch.message.clone();
     if dispatch.item.intelligence.substitute.is_some() && !dispatch.item.worktree_path.is_empty() {
         let cwd = dispatch.cwd.clone();
@@ -231,48 +339,47 @@ async fn run_headless(app: AppHandle, team_run_id: String, dispatch: Dispatch) {
             }
         }
     }
-    with_conn(&app, |c| queries::update_agent_task_run(c, &task.id, "running", &task.model, task.turns, ""));
+    with_conn(&host, |c| queries::update_agent_task_run(c, &task.id, "running", &task.model, task.turns, ""));
     // The run's per-turn ceiling (`Policy::turn_minutes`): past it the turn is stopped like a
     // cancel, but settled as a failed attempt — a cancel hands the attempt back, and a turn that
     // never finishes would then be retried forever.
-    let limit = with_conn(&app, |c| crate::team::get_run(c, &team_run_id).ok().flatten().map(|run| run.policy.turn_minutes))
+    let limit = with_conn(&host, |c| crate::team::get_run(c, &team_run_id).ok().flatten().map(|run| run.policy.turn_minutes))
         .flatten()
         .unwrap_or(0);
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watchdog = (limit > 0).then(|| {
         let flag = timed_out.clone();
         let turn = turn_id.clone();
+        let (host, cancel) = (host.clone(), cancel.clone());
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(limit as u64 * 60)).await;
             flag.store(true, std::sync::atomic::Ordering::SeqCst);
-            crate::ai_runs::cancel(&turn);
+            host.stop(&turn);
+            cancel.cancel();
         })
     });
-    let reply = crate::commands::claude_cmd::send_chat_message(
-        app.clone(),
-        app.state::<Db>(),
-        task.project_id.clone(),
-        message,
-        session,
-        Some(task.conversation_id.clone()),
-        Some(turn_id.clone()),
-        Some(dispatch.provider.clone()),
-        Some(if dispatch.model.is_empty() { task.model.clone() } else { dispatch.model.clone() }),
-        Some(task.prompt.clone()),
-        dispatch.account_id.clone(),
-        None,
-        None,
-        None,
-        Some(dispatch.effort.clone()).filter(|e| !e.is_empty()),
-        Some(false),
-        None,
-        None,
-    )
-    .await;
+    let reply = host
+        .turn(Turn {
+            turn_id: turn_id.clone(),
+            team_run_id: team_run_id.clone(),
+            item_id: item_id.clone(),
+            project_id: task.project_id.clone(),
+            conversation_id: task.conversation_id.clone(),
+            session,
+            message,
+            prompt: task.prompt.clone(),
+            provider: dispatch.provider.clone(),
+            model: if dispatch.model.is_empty() { task.model.clone() } else { dispatch.model.clone() },
+            account_id: dispatch.account_id.clone(),
+            effort: Some(dispatch.effort.clone()).filter(|e| !e.is_empty()),
+            cwd: dispatch.cwd.clone(),
+            cancel: cancel.clone(),
+        })
+        .await;
     if let Some(watchdog) = watchdog {
         watchdog.abort();
     }
-    state().turns.remove(&item_id);
+    FLIGHTS.land(&item_id, &dispatch_id);
     let reply = if timed_out.load(std::sync::atomic::Ordering::SeqCst) {
         Err(format!("El turno superó {limit} minutos y se detuvo (límite por turno del equipo)."))
     } else {
@@ -281,49 +388,108 @@ async fn run_headless(app: AppHandle, team_run_id: String, dispatch: Dispatch) {
     match reply {
         Ok(reply) => {
             let model = reply.model.clone().unwrap_or_else(|| task.model.clone());
-            with_conn(&app, |c| queries::update_agent_task_run(c, &task.id, "idle", &model, task.turns + 1, ""));
+            with_conn(&host, |c| queries::update_agent_task_run(c, &task.id, "idle", &model, task.turns + 1, ""));
             emit("end", true, "");
-            settle(&app, &team_run_id, &item_id, "ok", &reply.text, "").await;
+            settle(&host, &team_run_id, &item_id, &dispatch_id, "ok", &reply.text, "").await;
         }
         Err(error) => {
             let cancelled = error.contains(crate::ai_runs::CANCELLED_MARKER);
             let busy = error.contains(crate::ai_locks::BUSY_MARKER);
             let status = if cancelled { "cancelled" } else if busy { "idle" } else { "error" };
             let last_error = if busy || cancelled { "" } else { error.as_str() };
-            with_conn(&app, |c| queries::update_agent_task_run(c, &task.id, status, &task.model, task.turns, last_error));
+            with_conn(&host, |c| queries::update_agent_task_run(c, &task.id, status, &task.model, task.turns, last_error));
             emit("end", false, &error);
             if busy {
                 // The conversation or the repository is taken for a moment: hand the attempt back
                 // and come again shortly rather than spinning.
-                settle(&app, &team_run_id, &item_id, "busy", "", &error).await;
+                settle(&host, &team_run_id, &item_id, &dispatch_id, "busy", "", &error).await;
                 tokio::time::sleep(Duration::from_secs(4)).await;
-                kick(&app, &team_run_id);
+                kick_on(&host, &team_run_id);
             } else if cancelled {
-                settle(&app, &team_run_id, &item_id, "cancelled", "", "").await;
+                settle(&host, &team_run_id, &item_id, &dispatch_id, "cancelled", "", "").await;
             } else {
-                settle(&app, &team_run_id, &item_id, "error", "", &error).await;
+                settle(&host, &team_run_id, &item_id, &dispatch_id, "error", "", &error).await;
             }
         }
     }
 }
 
-async fn settle(app: &AppHandle, team_run_id: &str, item_id: &str, outcome: &str, text: &str, error: &str) {
-    let db = app.state::<Db>();
-    if let Err(e) = team_cmd::settle_item(app, db.inner(), item_id, outcome, text, error).await {
-        eprintln!("runner: settling {item_id} of {team_run_id} failed: {e}");
+async fn settle<H: Host>(host: &H, team_run_id: &str, item_id: &str, dispatch_id: &str, outcome: &str, text: &str, error: &str) {
+    let changed = |run_id: &str| host.emit("team:changed", serde_json::json!({ "runId": run_id }));
+    // The checks may take minutes: the windows hear that the turn is over and what runs now.
+    match engine::settle_inner(host.db(), item_id, Some(dispatch_id), outcome, text, error, Some(&changed)).await {
+        Ok(state) => {
+            changed(&state.run.id);
+            // Whatever closed may have made something ready.
+            kick_on(host, &state.run.id);
+        }
+        Err(e) => {
+            // The turn is over but the run does not know: left alone, the item would sit «running»
+            // with nobody on it. It stops for the user instead, with the reason.
+            eprintln!("runner: settling {item_id} of {team_run_id} failed: {e}");
+            engine::engine_failure(host.db(), team_run_id, item_id, &format!("no se pudo registrar el resultado de un turno: {e}"));
+            changed(team_run_id);
+        }
     }
 }
 
-/// Stops every turn of a run that is in flight — what an abort or a delete has to do from any
-/// window, which only the window that started a turn could do before.
+/// Stops every turn of a run that is in flight — queued for a slot or running — which is what an
+/// abort or a delete has to do from any window. Returns how many there were.
 pub fn cancel_run(team_run_id: &str) -> usize {
-    let turns: Vec<String> = state().turns.values().filter(|(_, run)| run == team_run_id).map(|(turn, _)| turn.clone()).collect();
-    turns.iter().filter(|turn| crate::ai_runs::cancel(turn)).count()
+    let turns = FLIGHTS.cancel_run(team_run_id);
+    for turn in &turns {
+        crate::ai_runs::cancel(turn);
+    }
+    turns.len()
+}
+
+/// [`cancel_run`] through a [`Host`], which knows how its own engine is told to stop.
+pub fn cancel_run_on<H: Host>(host: &H, team_run_id: &str) -> usize {
+    let turns = FLIGHTS.cancel_run(team_run_id);
+    for turn in &turns {
+        host.stop(turn);
+    }
+    turns.len()
+}
+
+/// Waits until no turn of the run is in flight, up to `limit` — before its worktrees are removed,
+/// so no agent is left writing into a folder that is being deleted. `false` when some turn is
+/// still going: its folder stays.
+pub async fn wait_idle(team_run_id: &str, limit: Duration) -> bool {
+    FLIGHTS.wait_idle(team_run_id, limit).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stopping_a_run_reaches_a_turn_that_is_still_queued() {
+        let flights = Flights::default();
+        let queued = flights.take_off("item-1", "run-1", "d1", "turn-1");
+        let other = flights.take_off("item-2", "run-2", "d2", "turn-2");
+        assert_eq!(flights.cancel_run("run-1"), vec!["turn-1".to_string()]);
+        assert!(queued.is_cancelled(), "the queued turn of the stopped run is called off");
+        assert!(!other.is_cancelled(), "another run's turn is left alone");
+    }
+
+    #[tokio::test]
+    async fn a_run_is_idle_only_once_its_turns_have_landed() {
+        let flights = std::sync::Arc::new(Flights::default());
+        flights.take_off("item-1", "run-1", "d1", "turn-1");
+        assert!(!flights.wait_idle("run-1", Duration::from_millis(20)).await, "a turn still going keeps the run busy");
+        let waiter = {
+            let flights = flights.clone();
+            tokio::spawn(async move { flights.wait_idle("run-1", Duration::from_secs(5)).await })
+        };
+        tokio::task::yield_now().await;
+        // A dispatch that is no longer the item's does not land it…
+        flights.land("item-1", "stale");
+        assert_eq!(flights.in_flight("run-1"), 1);
+        // …the one that registered does.
+        flights.land("item-1", "d1");
+        assert!(waiter.await.unwrap());
+    }
 
     #[test]
     fn last_session_is_read_from_history() {

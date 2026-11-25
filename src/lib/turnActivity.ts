@@ -69,6 +69,9 @@ const BY_TOOL: Record<string, ActivityKind> = {
   notify: "app",
   open_in_editor: "app",
   add_task: "app",
+  // A team for the workspace, designed from the chat (`team::designer`).
+  team_brief: "app",
+  team_create: "app",
   // The whole app's gateway: a command found, one called, a script of them (`app_gateway`).
   app_commands: "app",
   app_call: "app",

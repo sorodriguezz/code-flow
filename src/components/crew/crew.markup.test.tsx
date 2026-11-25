@@ -13,7 +13,10 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {}, emit: as
 
 const { WorkGraph } = await import("./live/WorkGraph");
 const { GateCard } = await import("./live/RunParts");
+const { DoneChecklist } = await import("./live/DoneChecklist");
+const { itemLook, isWorking } = await import("./live/look");
 const { OrgCanvas } = await import("./teams/OrgCanvas");
+const { memberGaps } = await import("./teams/SafetyPanel");
 
 function member(id: string, extra: Partial<TeamMember> = {}): TeamMember & { provider: string; model: string; effort: string; prompt: string } {
   return { ...emptyMember(), id, name: id, agent_id: `agent-${id}`, provider: "claude", model: "sonnet", effort: "", prompt: "", ...extra };
@@ -67,6 +70,99 @@ describe("the gate", () => {
     expect(html).toContain("Write the endpoint");
     expect(html).toContain("Two steps.");
     expect(html).toMatch(/Aprobar el plan|Approve the plan/);
+  });
+});
+
+describe("where a running item really is", () => {
+  it("tells a queued turn and a verification apart from an agent at work", () => {
+    const queued = item("q", { status: "running", intelligence: { paths: [], criteria: [], evidence: [], recovery: null, substitute: null, phase: "queued" } });
+    const verifying = item("v", { status: "running", intelligence: { paths: [], criteria: [], evidence: [], recovery: null, substitute: null, phase: "verifying" } });
+    const working = item("w", { status: "running" });
+    expect(itemLook(queued)[0]).toBe("En cola");
+    expect(itemLook(verifying)[0]).toBe("Verificando");
+    expect(itemLook(working)[0]).toBe("Trabajando");
+    expect([queued, verifying, working].map(isWorking)).toEqual([false, false, true]);
+  });
+
+  it("lets the user decide a dependency that is in no plan", () => {
+    const html = renderToStaticMarkup(<GateCard state={run([item("front", { title: "Front" })], { status: "gated", gate: "deps:front", gate_note: "«Front» depende de «contrato-api», que no existe en el plan." })} />);
+    expect(html).toMatch(/Depende de una tarea que no existe|depends on a task that does not exist/);
+    expect(html).toMatch(/Seguir sin esa dependencia|Go on without that dependency/);
+    expect(html).toMatch(/Omitir la tarea|Skip the task/);
+  });
+});
+
+describe("the definition of done", () => {
+  const work = item("w", {
+    status: "done", commit_sha: "abc1234def", merged: true,
+    intelligence: {
+      paths: [], recovery: null, substitute: null,
+      criteria: ["El timeout es 60 s", "No rompe el login"],
+      evidence: [
+        { label: "El timeout es 60 s", result: "reported", detail: "config.ts:12", source: "agent" },
+        { label: "No rompe el login", result: "unverified", detail: "", source: "agent" },
+        { label: "pnpm test", result: "passed", detail: "42 passed", source: "check", sha: "abc1234def" },
+      ],
+    },
+  });
+
+  it("tells what the agent declared from what the app checked, and what has no evidence", () => {
+    const html = renderToStaticMarkup(<DoneChecklist state={run([work])} item={work} />);
+    expect(html).toMatch(/Lo declara el agente|Declared by the agent/);
+    expect(html).toMatch(/Sin evidencia|No evidence/);
+    expect(html).toMatch(/Lo comprobó CodeFlow · abc1234|Checked by CodeFlow · abc1234/);
+    expect(html).toMatch(/Integrado|Merged/);
+    // Four of the five rows hold: the criterion nobody showed evidence for does not.
+    expect(html).toMatch(/4 de 5|4 of 5/);
+  });
+
+  it("flags work that changed nothing and did not say why", () => {
+    const silent = item("s", { status: "done", intelligence: { paths: [], criteria: [], evidence: [], recovery: null, substitute: null, no_change: "undeclared" } });
+    const html = renderToStaticMarkup(<DoneChecklist state={run([silent])} item={silent} />);
+    expect(html).toMatch(/No cambió ningún archivo|It changed no file/);
+    expect(html).toMatch(/No dijo por qué|It did not say why/);
+  });
+
+  it("draws nothing for an item with nothing to show", () => {
+    const plan = item("p", { kind: "plan", status: "done" });
+    expect(renderToStaticMarkup(<DoneChecklist state={run([plan])} item={plan} />)).toBe("");
+  });
+});
+
+describe("checks that run isolated", () => {
+  it("asks how to go on when there is no container to run them in, the safe way first", () => {
+    const held = item("h", { status: "gated", intelligence: { paths: [], criteria: [], evidence: [], recovery: null, substitute: null, sandbox_hold: "Docker no responde." } });
+    const html = renderToStaticMarkup(<GateCard state={run([held], { status: "gated", gate: "sandbox:h", gate_note: "Docker no responde." })} />);
+    expect(html).toMatch(/No se pudo verificar con aislamiento|The checks could not run isolated/);
+    expect(html).toMatch(/Reintentar aislado|Try again, isolated/);
+    expect(html).toMatch(/Verificar en este equipo|Check on this computer/);
+    expect(html).toMatch(/Nada se ha ejecutado todavía|Nothing has run yet/);
+    // Two ways to go on: nothing to comment.
+    expect(html).not.toMatch(/Comentario \(opcional\)|Comment \(optional\)/);
+  });
+
+  it("says which image a check ran in", () => {
+    const done = item("d", {
+      status: "done", commit_sha: "abc1234def",
+      intelligence: { paths: [], criteria: [], recovery: null, substitute: null, evidence: [{ label: "npm test", result: "passed", detail: "", source: "check", sha: "abc1234def", sandbox: "node:22-bookworm-slim" }] },
+    });
+    const html = renderToStaticMarkup(<DoneChecklist state={run([done])} item={done} />);
+    expect(html).toMatch(/(aislado en|isolated in) node:22-bookworm-slim · abc1234/);
+  });
+});
+
+describe("what a provider can be held to", () => {
+  const caps = (readOnly: boolean, metered: boolean) => ({ id: "x", label: "X", inProcess: false, appScripts: "full" as const, appScriptsDefault: true, acp: false, guarantees: { readOnly, metered, loopGuard: false, resumes: true } });
+
+  it("flags a member that must not write on a provider that only asks, and spend nobody reads", () => {
+    expect(memberGaps(caps(true, true), false, false)).toEqual([]);
+    expect(memberGaps(caps(false, true), false, false)).toEqual(["read_only"]);
+    // A member that is there to write has nothing to enforce.
+    expect(memberGaps(caps(false, true), true, false)).toEqual([]);
+    expect(memberGaps(caps(true, false), true, false)).toEqual(["meter"]);
+    // A minutes cap on the run bounds an engine that publishes nothing.
+    expect(memberGaps(caps(true, false), true, true)).toEqual([]);
+    expect(memberGaps(undefined, false, false)).toEqual([]);
   });
 });
 

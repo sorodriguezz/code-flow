@@ -5,7 +5,7 @@
  */
 import { useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { BookOpen, Cpu, FolderTree, GitFork, ListTree, MessageSquare, Pencil, Plus, Search, SquareTerminal, Trophy, Workflow } from "lucide-react";
+import { BookOpen, Cpu, FolderTree, GitFork, ListTree, MessageSquare, Pencil, Plus, Scale, Search, SquareTerminal, Trophy, Workflow } from "lucide-react";
 import { useAgentsStore } from "../../../state/agentsStore";
 import { useChainStore } from "../../../state/chainStore";
 import { useBenchStore } from "../../../state/benchStore";
@@ -17,6 +17,7 @@ import { WorktreesView } from "../../agents/worktrees/WorktreesView";
 import { AvatarStack } from "../kit/Avatar";
 import { Btn, Chip, Empty, Label, Modal, Seg, SPRING, ToggleChip, field, type Tone } from "../kit/ui";
 import { money, useCrewStore, useL } from "../state";
+import { LabView } from "./LabView";
 
 /** The toolbar's height: the bench host in `CrewView` sits right under it. */
 export const WORKSHOP_BAR = 46;
@@ -209,6 +210,7 @@ export function WorkshopSpace({ benchMounted }: { benchMounted: boolean }) {
             { value: "worktrees", label: "Worktrees", icon: FolderTree, title: l("Las copias de trabajo de cada agente, una por tarea, con su rama: ábrelas, revisa sus cambios o bórralas.", "Each agent's working copies, one per task, with its branch: open them, review their changes or delete them.") },
             { value: "bench", label: l("Terminales", "Terminals"), icon: SquareTerminal, title: l("Las terminales abiertas de los agentes en modo terminal: míralos trabajar o escríbeles.", "The open terminals of agents in terminal mode: watch them work or type to them."), badge: terminals ? <span className="text-[10.5px] text-[var(--cf-text-faint)]">{terminals}</span> : undefined },
             { value: "races", label: l("Todo el trabajo", "All work"), icon: ListTree, title: l("Cada tarea, carrera, flujo y corrida de equipo, con su estado y su resultado.", "Every task, race, flow and team run, with its status and result.") },
+            { value: "lab", label: l("Comparar equipos", "Compare teams"), icon: Scale, title: l("La misma tarea para varios equipos desde el mismo commit: cuál pasa más verificaciones, cuánto cuesta y cuánto rehace.", "The same task for several teams from the same commit: which passes more checks, what it costs and how much it redoes.") },
           ]}
         />
         <span className="flex-1" />
@@ -224,6 +226,7 @@ export function WorkshopSpace({ benchMounted }: { benchMounted: boolean }) {
           it first mounts). */}
       {tab === "bench" && <div className="min-h-0 flex-1">{!benchMounted && <span className="grid h-full place-items-center text-[12px] text-[var(--cf-text-muted)]">…</span>}</div>}
       {tab === "races" && <WorkList />}
+      {tab === "lab" && <LabView />}
       {help && <WorktreesHelp onClose={() => setHelp(false)} />}
     </div>
   );

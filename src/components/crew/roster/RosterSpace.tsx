@@ -5,7 +5,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { BookMarked, Bot, Copy, Eye, FolderGit2, MessageSquare, Pencil, Plus, RefreshCw, Search, SquareTerminal, Trash2, Users, WandSparkles } from "lucide-react";
+import { BookMarked, Bot, Copy, Eye, FolderGit2, MessageSquare, Pencil, Plus, RefreshCw, Search, SquareTerminal, Trash2, Users, WandSparkles, Inbox } from "lucide-react";
 import { draftOf, useAgentsStore } from "../../../state/agentsStore";
 import { useLibraryStore } from "../../../state/libraryStore";
 import { useLanguageStore } from "../../../state/languageStore";
@@ -19,7 +19,8 @@ import type { WorkspaceAgent } from "../../../types/domain";
 import type { LibraryItem } from "../../../types/crew";
 import { AgentAvatar } from "../kit/Avatar";
 import { useDragSource, useDropTarget } from "../kit/drag";
-import { Btn, Chip, Empty, IconBtn, Modal, SPRING, field } from "../kit/ui";
+import { Btn, Chip, Empty, IconBtn, Modal, SPRING, field, Seg } from "../kit/ui";
+import { InboxBoard, useInboxWaiting } from "./InboxBoard";
 import { lNow, money, useAgentStates, useCrewStore, useL } from "../state";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
 import { ConfigurationExportButton, ConfigurationImportButton } from "../ConfigurationSharing";
@@ -234,6 +235,8 @@ export function RosterSpace() {
   const l = useL();
   const crew = useCrewStore();
   const roster = useAgentsStore((s) => s.roster);
+  const tab = useCrewStore((s) => s.rosterTab);
+  const waiting = useInboxWaiting();
   const [q, setQ] = useState("");
   const [sync, setSync] = useState<{ agent: WorkspaceAgent; template: LibraryItem } | null>(null);
   const personalAgents = roster.filter(isPersonalAgent);
@@ -248,6 +251,21 @@ export function RosterSpace() {
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2">
+        <Seg
+          size="sm"
+          value={tab}
+          onChange={(rosterTab) => crew.set({ rosterTab })}
+          options={[
+            { value: "agentes", label: l("Agentes", "Agents"), icon: Bot, title: l("Tus agentes: modelo, rol e instrucciones", "Your agents: model, role and instructions") },
+            {
+              value: "bandejas",
+              label: l("Bandejas", "Inboxes"),
+              icon: Inbox,
+              title: l("Qué tiene cada agente entre manos, en todas las corridas y el tablero, y qué espera de ti", "What each agent has in hand, across every run and the board, and what it waits on you for"),
+              badge: waiting ? <span className="grid h-[16px] min-w-[16px] place-items-center rounded-full bg-[var(--cf-warning)] px-1 text-[10px] font-semibold text-white">{waiting}</span> : undefined,
+            },
+          ]}
+        />
         <label className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--cf-text-faint)]" />
           <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={l("Buscar agentes", "Search agents")} title={l("Filtra por nombre, papel o modelo", "Filter by name, role or model")} className={`${field} !w-[220px] pl-8`} />
@@ -258,7 +276,9 @@ export function RosterSpace() {
         <Btn small kind="primary" icon={Plus} title={l("Crea un agente en blanco o desde una plantilla", "Creates an agent, blank or from a template")} onClick={() => crew.open({ kind: "wizard" })}>{l("Nuevo agente", "New agent")}</Btn>
       </div>
       <div className="flex min-h-0 flex-1 flex-col">
-          {personalAgents.length === EMPTY_AGENT_COUNT ? (
+          {tab === "bandejas" ? (
+            <InboxBoard query={q} />
+          ) : personalAgents.length === EMPTY_AGENT_COUNT ? (
             <Empty icon={Bot} title={l("Todavía no hay agentes", "No agents yet")} hint={l("Empieza por una plantilla (Tech lead, Backend, QA, Asesor…) y ajústala, o créalo en blanco.", "Start from a template (Tech lead, Backend, QA, Advisor…) and tweak it, or build one from scratch.")}>
               <div className="mt-2 flex gap-2">
                 <Btn kind="primary" icon={Plus} title={l("Abre el asistente: empieza eligiendo una plantilla o en blanco", "Opens the wizard: start from a template or blank")} onClick={() => crew.open({ kind: "wizard" })}>{l("Crear agente", "Create agent")}</Btn>

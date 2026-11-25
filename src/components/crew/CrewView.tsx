@@ -14,7 +14,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Inbox } from "./live/Inbox";
 import { AnimatePresence, motion } from "framer-motion";
-import { Activity, Bot, Hand, Kanban, Network, SquareTerminal, WandSparkles } from "lucide-react";
+import { Activity, Bot, CalendarClock, Hand, Kanban, Network, SquareTerminal, WandSparkles } from "lucide-react";
 import { iconButtonClass } from "../common/Button";
 import { useAgentsStore } from "../../state/agentsStore";
 import { useChainStore } from "../../state/chainStore";
@@ -37,11 +37,14 @@ import { DeciderDialog, GovernorDialog } from "./Settings";
 import { BoardSpace } from "./board/BoardSpace";
 import { CardDrawer } from "./board/CardDrawer";
 import { TeamsSpace } from "./teams/TeamsSpace";
-import { TeamChatPane } from "./teams/TeamChatPane";
+import { TeamChatWindows } from "./teams/TeamChatWindow";
 import { TeamTemplatesDialog } from "./teams/TeamTemplates";
 import { RosterSpace } from "./roster/RosterSpace";
 import { AgentWizard } from "./roster/AgentWizard";
+import { ForkDialog } from "./live/ForkDialog";
+import { TeamProposalDialog } from "./teams/TeamProposalDialog";
 import { LiveSpace } from "./live/LiveSpace";
+import { RoutinesSpace } from "./routines/RoutinesSpace";
 import { MemberChat } from "./live/MemberChat";
 import { WORKSHOP_BAR, WorkshopSpace } from "./workshop/WorkshopSpace";
 import { useCrewStore, useL, type Space } from "./state";
@@ -120,6 +123,8 @@ export function CrewView() {
       const key = e.key.toLowerCase();
       if (key !== "k" && key !== "n") return;
       if (useCrewStore.getState().overlay || useUiStore.getState().settingsOpen) return;
+      // Typing to a team in its window is not asking for the launcher.
+      if (e.target instanceof Element && e.target.closest("[data-team-chat-window]")) return;
       e.preventDefault();
       open({ kind: "launch" });
     };
@@ -159,6 +164,7 @@ export function CrewView() {
       title: l("Lo que se está ejecutando ahora: el canal del equipo, cada miembro trabajando y lo que espera tu respuesta.", "What is running now: the team's channel, each member at work and what waits for your answer."),
       badge: liveCount ? <span className="grid h-[17px] min-w-[17px] place-items-center rounded-full bg-[var(--cf-accent)] px-1 text-[10.5px] font-semibold text-[var(--cf-on-accent)]">{liveCount}</span> : undefined,
     },
+    { value: "rutinas", label: l("Rutinas", "Routines"), icon: CalendarClock, title: l("Los agentes y equipos que trabajan solos: por horario o cuando pasa algo. Se arman en Flujos; aquí ves cuáles tienes y cómo les fue.", "The agents and teams that work on their own: on a schedule or when something happens. They are built in Flows; here you see which you have and how they did.") },
     { value: "taller", label: l("Taller", "Workshop"), icon: SquareTerminal, title: l("Las terminales de los agentes que trabajan en modo terminal: míralos trabajar o escríbeles.", "The terminals of agents that work in terminal mode: watch them work or type to them.") },
   ];
 
@@ -223,6 +229,7 @@ export function CrewView() {
             {space === "equipos" && <TeamsSpace />}
             {space === "agentes" && <RosterSpace />}
             {space === "en-vivo" && <LiveSpace />}
+            {space === "rutinas" && <RoutinesSpace />}
             {space === "taller" && <WorkshopSpace benchMounted={benchMounted} />}
           </motion.div>
         </AnimatePresence>
@@ -231,6 +238,8 @@ export function CrewView() {
             <TerminalBench />
           </div>
         )}
+        {/* Over whichever space is open, and apart from the overlay: a chat stays while the rest is used. */}
+        <TeamChatWindows />
       </div>
 
       <Dock />
@@ -241,14 +250,15 @@ export function CrewView() {
       {overlay?.kind === "card" && <CardDrawer cardId={overlay.id} />}
       {overlay?.kind === "chat" && <MemberChat key={`${overlay.runId}:${overlay.memberId}:${overlay.taskId ?? ""}`} runId={overlay.runId} memberId={overlay.memberId} taskId={overlay.taskId} />}
       {overlay?.kind === "task" && <TaskPane taskId={overlay.id} />}
-      {overlay?.kind === "teamChat" && <TeamChatPane key={overlay.id} chatId={overlay.id} />}
       {overlay?.kind === "chain" && <ChainPane chainId={overlay.id} />}
       {overlay?.kind === "teamTemplates" && <TeamTemplatesDialog />}
+      {overlay?.kind === "teamProposal" && <TeamProposalDialog key={overlay.id} id={overlay.id} />}
       {overlay?.kind === "decider" && <DeciderDialog />}
       {overlay?.kind === "governor" && <GovernorDialog />}
       {overlay?.kind === "race" && <RacePane batchId={overlay.batchId} />}
       {overlay?.kind === "chainEditor" && <ChainEditorPane templateId={overlay.templateId} />}
       {overlay?.kind === "story" && <StoryPane />}
+      {overlay?.kind === "fork" && <ForkDialog key={`${overlay.runId}:${overlay.itemId ?? ""}`} runId={overlay.runId} itemId={overlay.itemId} />}
     </div>
     </CrewHost.Provider>
   );

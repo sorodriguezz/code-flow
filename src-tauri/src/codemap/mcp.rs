@@ -1208,6 +1208,8 @@ pub fn tools_for(acts: bool) -> Vec<Value> {
     all.extend(app_read_tools().into_iter().map(read_only));
     all.extend(infra_tools());
     all.extend(crate::app_gateway::tools(acts));
+    // A team for this workspace, designed from the chat (`team::designer`).
+    all.extend(crate::team::designer::schemas(acts));
     // The browser: reading a page for anyone, showing one to the user for a run that may act.
     all.extend(crate::browser_tools::schemas(acts));
     if acts {
@@ -1884,6 +1886,14 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
                      and read_reference_file reads a file of one. They are read-only, for comparison.",
                 );
             }
+            // A team is a thing this app makes: said once, so a request for one goes to the tools that
+            // know the workspace rather than to a guess at `team_save`'s record.
+            if !access.codi && !access.grounding {
+                instructions.push_str(
+                    " When the user wants a team of agents for this workspace — or asks which one they need — team_brief says what the \
+                     workspace has and how a team works, and team_create makes it, checked, with the agents it needs.",
+                );
+            }
             // When to write a script, said once where the run has one: the tool's own description
             // says how, and `app_call` points at it when a task turns into many calls.
             if access.scripts() {
@@ -1926,6 +1936,7 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
                 own.extend(crate::browser_tools::schemas(access.acts));
                 own.extend(infra_tools());
                 own.extend(crate::app_gateway::tools(access.acts));
+                own.extend(crate::team::designer::schemas(access.acts));
                 own
             } else if access.grounding {
                 grounding_tools()
@@ -1996,13 +2007,22 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
                 });
             }
             let about_a_reference = REFERENCE_TOOLS.contains(&name) || (MAP_TOOLS.contains(&name) && args.get("repo").and_then(Value::as_str).is_some_and(|r| !r.trim().is_empty()));
-            let workspace_app_tool = is_workspace_app_tool(name) || crate::app_gateway::is_tool(name) || crate::browser_tools::is_tool(name);
+            let workspace_app_tool = is_workspace_app_tool(name) || crate::app_gateway::is_tool(name) || crate::browser_tools::is_tool(name) || crate::team::designer::is_tool(name);
             if access.workspace && !WORKSPACE_TOOLS.contains(&name) && !DB_TOOLS.contains(&name) && !workspace_app_tool && !about_a_reference {
                 let why = if MAP_TOOLS.contains(&name) { "name a reference repository in repo — there is no single repository of its own here" } else { "there is no single repository here" };
                 return Some(text_result(id, format!("{name} is not available in the workspace chat: {why}"), true));
             }
             if access.grounding && !GROUNDING_TOOLS.contains(&name) && !REFERENCE_TOOLS.contains(&name) {
                 return Some(text_result(id, format!("{name} is not available to this run: it answers about the material it was given, with the map and the knowledge"), true));
+            }
+            if crate::team::designer::is_tool(name) {
+                let Some(app) = crate::ai_usage::app() else { return Some(text_result(id, "CodeFlow is not ready yet".to_string(), true)) };
+                let place = crate::agentcli::place::of(app, &access.root, &access.session);
+                let scope = crate::team::designer::Scope { workspace_id: place.workspace_id, project: place.project, acts: access.acts };
+                return Some(match crate::team::designer::call(&scope, name, &args).await {
+                    Ok(text) => text_result(id, text, false),
+                    Err(error) => text_result(id, error, true),
+                });
             }
             if crate::browser_tools::is_tool(name) {
                 return Some(match crate::browser_tools::call(&access.root, access.acts, name, &args).await {
@@ -2227,7 +2247,7 @@ mod tests {
         // so does the whole app (`app_gateway`).
         let own: Vec<String> = tool_names(&reply)
             .into_iter()
-            .filter(|n| !INFRA_TOOLS.contains(&n.as_str()) && !crate::chat_refs::is_tool(n) && !crate::app_gateway::is_tool(n) && !crate::browser_tools::is_tool(n) && n != PERMISSION_PROMPT_TOOL)
+            .filter(|n| !INFRA_TOOLS.contains(&n.as_str()) && !crate::chat_refs::is_tool(n) && !crate::app_gateway::is_tool(n) && !crate::browser_tools::is_tool(n) && !crate::team::designer::is_tool(n) && n != PERMISSION_PROMPT_TOOL)
             .collect();
         let expected: Vec<&str> = ["search_knowledge", "recall", "read_note", "memory_list", "read_memory"].into_iter().chain(WORKSPACE_APP_READ_TOOLS.iter().copied()).collect();
         assert_eq!(own, expected);
@@ -2242,6 +2262,34 @@ mod tests {
             assert_eq!(reply["result"]["isError"], true, "{name}: {reply}");
             assert!(reply["result"]["content"][0]["text"].as_str().unwrap().contains("workspace chat"), "{name}: {reply}");
         }
+    }
+
+    /// A team is designed where the workspace is in reach — a repository's chat and the workspace's
+    /// — and never by a run that judges someone else's material.
+    #[tokio::test]
+    async fn the_team_tools_ride_the_chats_and_not_a_run_that_judges() {
+        let listed = |access: Access, token: String| async move {
+            RUNS.lock().unwrap().insert(token.clone(), access);
+            let _grant = Grant { token: token.clone(), _full: None };
+            let mut headers = HeaderMap::new();
+            headers.insert("authorization", format!("Bearer {token}").parse().unwrap());
+            let (_, reply) = post(&headers, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
+            let tools = reply["result"]["tools"].as_array().cloned().unwrap_or_default();
+            let create = tools.iter().find(|t| t["name"] == crate::team::designer::CREATE_TOOL).cloned();
+            (tools.iter().any(|t| t["name"] == crate::team::designer::BRIEF_TOOL), create)
+        };
+        let token = |kind: &str| format!("team-tools-{kind}-{}", uuid::Uuid::new_v4().simple());
+
+        let t = token("workspace");
+        let (brief, create) = listed(Access { workspace: true, ..Access::new("/tmp/workspace-chat/w1", true, &t) }, t).await;
+        assert!(brief && create.is_some_and(|c| c["annotations"]["readOnlyHint"] == false));
+        // A turn that may not act still gets it: there it checks, and leaves a proposal for the user.
+        let t = token("plan");
+        let (brief, create) = listed(Access::new("/tmp/repo-chat", false, &t), t).await;
+        assert!(brief && create.is_some_and(|c| c["annotations"]["readOnlyHint"] == true && c["description"].as_str().unwrap().contains("as a proposal")));
+        let t = token("grounding");
+        let (brief, create) = listed(Access { grounding: true, ..Access::new("/tmp/repo-chat", false, &t) }, t).await;
+        assert!(!brief && create.is_none());
     }
 
     #[tokio::test]
@@ -2310,7 +2358,7 @@ mod tests {
         // as in the workspace chat's test. This counted them as they were added and went stale.
         let own: Vec<String> = tool_names(&reply)
             .into_iter()
-            .filter(|n| !INFRA_TOOLS.contains(&n.as_str()) && !crate::chat_refs::is_tool(n) && !crate::app_gateway::is_tool(n) && !crate::browser_tools::is_tool(n) && n != PERMISSION_PROMPT_TOOL)
+            .filter(|n| !INFRA_TOOLS.contains(&n.as_str()) && !crate::chat_refs::is_tool(n) && !crate::app_gateway::is_tool(n) && !crate::browser_tools::is_tool(n) && !crate::team::designer::is_tool(n) && n != PERMISSION_PROMPT_TOOL)
             .collect();
         let expected: Vec<&str> = MAP_TOOLS
             .iter()

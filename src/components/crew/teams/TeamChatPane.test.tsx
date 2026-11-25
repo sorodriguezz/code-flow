@@ -21,7 +21,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {}, emit: as
 vi.mock("../../../state/teamChatStore", () => {
   const store = (selector: (s: unknown) => unknown) => selector({ states: { chat: state } });
   store.getState = () => ({ send, cancel: async () => {}, refresh: async () => {} });
-  return { useTeamChatStore: store, teamChatBusy: (s: TeamChatState) => s.chat.status === "running" || s.chat.status === "cancelling" };
+  return { useTeamChatStore: store, openTeamChatWindow: async () => {}, teamChatBusy: (s: TeamChatState) => s.chat.status === "running" || s.chat.status === "cancelling" };
 });
 vi.mock("../state", () => {
   const store = (selector: (s: unknown) => unknown) => selector({ close: () => {} });
@@ -29,9 +29,8 @@ vi.mock("../state", () => {
   return { useL: () => (_es: string, en: string) => en, lNow: (_es: string, en: string) => en, useCrewStore: store };
 });
 vi.mock("../kit/ui", () => ({
-  Drawer: ({ children }: { children: ReactNode }) => <>{children}</>,
-  Btn: ({ children, onClick, disabled }: { children: ReactNode; onClick: () => void; disabled: boolean }) => {
-    if (children === "Convert to task" && !disabled) convert = onClick;
+  Btn: ({ children, onClick, disabled, ...rest }: { children: ReactNode; onClick: () => void; disabled: boolean; "aria-label"?: string }) => {
+    if (rest["aria-label"] === "Convert to task" && !disabled) convert = onClick;
     return <button disabled={disabled}>{children}</button>;
   },
 }));
@@ -44,8 +43,8 @@ vi.mock("../../chat/ChatMessageBubble", () => ({
   },
 }));
 
-const { TeamChatPane } = await import("./TeamChatPane");
-const render = () => renderToStaticMarkup(<TeamChatPane chatId="chat" />);
+const { TeamChatContent } = await import("./TeamChatPane");
+const render = (window?: { controls: ReactNode }) => renderToStaticMarkup(<TeamChatContent chatId="chat" onClose={() => {}} {...window} />);
 
 beforeEach(() => {
   send.mockClear();
@@ -95,5 +94,16 @@ describe("team chat pane", () => {
       kind: "launch", goal: "Agreed scope", assignee: { kind: "team", id: "team" },
       projectId: "repo", attachments: [{ id: "file" }],
     }));
+  });
+
+  it("says who is working in its header, and carries the window's own buttons", () => {
+    state.chat.status = "running";
+    state.chat.activeMemberId = "lead";
+    const html = render({ controls: <button>Minimise</button> });
+    // Where a window is narrow the header is what stays in sight: it names who works, not the lead.
+    expect(html).not.toContain("Led by Arquitecto");
+    expect(html.match(/Arquitecto is working/g)).toHaveLength(2);
+    expect(html).toContain("Minimise");
+    expect(html).toContain("Close team chat");
   });
 });
