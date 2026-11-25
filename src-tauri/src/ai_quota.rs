@@ -2,7 +2,7 @@
 //!
 //! [`crate::ai_usage`] answers "what have I spent", in tokens and dollars measured from what each
 //! run reported. This answers the question that one deliberately refused: "how far through my plan
-//! am I". It can now be answered for five of the engines, four of them by asking a back end with
+//! am I". It can now be answered for five of the engines, three of them by asking a back end with
 //! the credential the CLI already keeps on this machine:
 //!
 //! - **Claude Code** — `GET https://api.anthropic.com/api/oauth/usage`, the endpoint behind the
@@ -13,9 +13,10 @@
 //!   positions, not lengths, so they are re-labelled from `limit_window_seconds` (a free account's
 //!   "primary" is a month; a paid one's is five hours). Carries `plan_type` too, so this is the
 //!   one provider whose plan name arrives with its limits.
-//! - **Gemini / Antigravity (`agy`)** — `POST …/v1internal:retrieveUserQuota` on Google's Code
-//!   Assist back end, which answers with a bucket per model carrying `remainingFraction` and
-//!   `resetTime`.
+//! - **Gemini / Antigravity (`agy`)** — by running the CLI: `agy -p /usage --output-format json`,
+//!   weekly limits grouped the way agy's own panel shows them (see `mod gemini` for why the Code
+//!   Assist RPC this used to call is gone). Not through `agy acp`: there `/usage` is no command,
+//!   and the prompt goes to the model, which spends tokens answering it (tried 2026-11-24).
 //! - **opencode Go** — `GET https://opencode.ai/zen/go/v1/usage` with the `opencode-go` key from
 //!   opencode's own `auth.json`. Three dollar-denominated windows (5-hour rolling, weekly,
 //!   monthly), each already reported as a percentage consumed. Only the *Go* subscription has
@@ -25,8 +26,12 @@
 //! Everything else is **absent on purpose**, and absence here is a claim this module is willing to
 //! make.
 //!
-//! - **Grok Build** publishes no quota anything can ask for. Every quieter route was ruled out on a
-//!   signed-in account — no quota route in the binary, OIDC discovery with nothing past the
+//! - **Grok Build** — by its agent mode: `grok agent --no-leader stdio` over ACP, extension method
+//!   `_x.ai/billing`, which answers `creditUsagePercent`, the current period (weekly) with its end,
+//!   and the subscription tier — no session, no model call, no tokens (found 2026-11-24, grok
+//!   1.0.92; see `mod grok`). It starts a process, so it takes Gemini's rules ([`Trigger`],
+//!   `CLI_FRESH_FOR`). Before that, every quieter route had been ruled out on a
+//!   signed-in account — no quota route in the plain CLI, OIDC discovery with nothing past the
 //!   standard endpoints, `cli-chat-proxy.grok.com/v1/{usage,quota,limits,rate_limits,me,
 //!   subscription,account}` all 404 with a valid token, `/v1/models` with no rate-limit headers,
 //!   and `grok -p --output-format json` reporting `usage` and `total_cost_usd` with no limit field.
@@ -151,7 +156,7 @@ pub mod reason {
 
 /// Providers whose back end publishes a plan limit at all. Everything outside this list is absent
 /// from the panel entirely rather than shown empty — see the module docs.
-pub const QUOTA_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "opencode"];
+pub const QUOTA_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "grok", "opencode"];
 
 /// One engine to ask, as the caller resolved it.
 ///
@@ -244,8 +249,8 @@ const CLI_FRESH_FOR: Duration = Duration::from_secs(1800);
 
 fn fresh_for(provider: &str) -> Duration {
     match provider {
-        // The one that reads its quota by *running the CLI* rather than by asking a back end.
-        "gemini" => CLI_FRESH_FOR,
+        // The ones that read their quota by *running the CLI* rather than by asking a back end.
+        "gemini" | "grok" => CLI_FRESH_FOR,
         _ => FRESH_FOR,
     }
 }
@@ -510,14 +515,18 @@ async fn read_now(engine: &QuotaEngine) -> ProviderQuota {
     let fresh = match (provider, engine.account.is_some()) {
         ("claude", true) => claude::from_last_run(key),
         ("claude", false) => claude::quota().await,
-        ("codex", true) => match account_dir("CODEX_HOME") {
-            Some(dir) => codex::quota_at(dir.join("auth.json")).await,
-            None => failed("codex", reason::SIGNED_OUT),
-        },
-        ("codex", false) => codex::quota().await,
+        ("codex", true) => {
+            let direct = match account_dir("CODEX_HOME") {
+                Some(dir) => codex::quota_at(dir.join("auth.json")).await,
+                None => failed("codex", reason::SIGNED_OUT),
+            };
+            codex::or_app_server(direct, &engine.binary, engine.account.as_ref(), key).await
+        }
+        ("codex", false) => codex::or_app_server(codex::quota().await, &engine.binary, None, key).await,
         // The only one handed the binary: it is the only provider whose quota is read by launching
         // the CLI rather than by asking a back end.
         ("gemini", _) => gemini::quota(&engine.binary).await,
+        ("grok", _) => grok::quota(&engine.binary, engine.account.as_ref()).await,
         ("opencode", true) => match account_dir("XDG_DATA_HOME") {
             Some(dir) => opencode::quota_at(dir.join("opencode").join("auth.json")).await,
             None => failed("opencode", reason::SIGNED_OUT),
@@ -1239,6 +1248,98 @@ mod claude {
 // Gemini / Antigravity
 // ---------------------------------------------------------------------------------------------
 
+mod grok {
+    //! Read by **asking Grok's agent server**: `grok agent --no-leader stdio` speaks ACP, and its
+    //! extension method `_x.ai/billing` answers the plan's window without a session or a model call
+    //! (0.8 s on grok 1.0.92). The plain CLI has no such route (see the module docs). An added
+    //! account is read as itself — its `GROK_AUTH_PATH` rides on the command.
+
+    use super::*;
+
+    const DEADLINE: Duration = Duration::from_secs(45);
+
+    pub async fn quota(binary: &std::path::Path, account: Option<&crate::ai_accounts::AccountEnv>) -> ProviderQuota {
+        let mut command = crate::ai::aux_command(&binary.to_string_lossy());
+        command.args(["agent", "--no-leader", "stdio"]);
+        if let Some(account) = account {
+            account.apply(&mut command);
+        }
+        crate::proc::own_process_group(&mut command);
+        match crate::acp::call_once(command, "_x.ai/billing", serde_json::json!({}), DEADLINE).await {
+            Ok(answer) => match parse(&answer) {
+                Some((limits, plan)) => ProviderQuota {
+                    provider: "grok".to_string(),
+                    limits: tighten(limits),
+                    plan,
+                    error: String::new(),
+                    fetched_at: now_rfc3339(),
+                    account_id: None,
+                },
+                None => failed("grok", reason::UNREADABLE),
+            },
+            Err(error) if signed_out(&error) => failed("grok", reason::SIGNED_OUT),
+            Err(error) => failed("grok", &error),
+        }
+    }
+
+    fn signed_out(error: &str) -> bool {
+        let lower = error.to_ascii_lowercase();
+        ["auth", "sign in", "login", "unauthorized"].iter().any(|word| lower.contains(word))
+    }
+
+    /// `{"config": {"creditUsagePercent", "currentPeriod": {"type", "end"}}, "subscription_tier"}`
+    /// as limits and a plan name. `None` when there is no usage figure at all — "could not read",
+    /// never "no limits".
+    pub(super) fn parse(answer: &serde_json::Value) -> Option<(Vec<QuotaLimit>, String)> {
+        let config = answer.get("config")?;
+        let used = config.get("creditUsagePercent")?.as_f64()?;
+        let period = config.get("currentPeriod");
+        let kind = match period.and_then(|p| p.get("type")).and_then(serde_json::Value::as_str).unwrap_or("") {
+            t if t.contains("WEEK") => "weekly",
+            t if t.contains("MONTH") => "monthly",
+            t if t.contains("DAY") || t.contains("HOUR") => "session",
+            _ => "weekly",
+        };
+        let resets_at = period
+            .and_then(|p| p.get("end"))
+            .or_else(|| config.get("billingPeriodEnd"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let plan = answer.get("subscription_tier").and_then(serde_json::Value::as_str).unwrap_or("").to_ascii_lowercase();
+        Some((vec![QuotaLimit { kind: kind.to_string(), scope: String::new(), used_percent: used.clamp(0.0, 100.0), resets_at }], plan))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The real read: `cargo test --lib live_grok_quota -- --ignored --nocapture`.
+        #[tokio::test]
+        #[ignore]
+        async fn live_grok_quota() {
+            let read = quota(std::path::Path::new("grok"), None).await;
+            eprintln!("{read:?}");
+            assert!(read.error.is_empty(), "{}", read.error);
+            assert_eq!(read.limits[0].kind, "weekly");
+        }
+
+        #[test]
+        fn billing_reads_as_a_weekly_window_and_a_plan() {
+            let answer = serde_json::json!({"config": {"creditUsagePercent": 15.0, "currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY", "start": "2026-11-23T10:49:11.637+00:00", "end": "2026-11-30T10:49:11.637+00:00"}, "prepaidBalance": {"val": 0}}, "subscription_tier": "Free"});
+            let (limits, plan) = parse(&answer).unwrap();
+            assert_eq!(plan, "free");
+            assert_eq!(limits.len(), 1);
+            assert_eq!((limits[0].kind.as_str(), limits[0].used_percent), ("weekly", 15.0));
+            assert_eq!(limits[0].resets_at, "2026-11-30T10:49:11.637+00:00");
+            assert!(parse(&serde_json::json!({"config": {}})).is_none(), "no figure is not zero");
+            assert!(signed_out("Authentication required"));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+
 mod gemini {
     //! Read by **asking the CLI**, not its back end.
     //!
@@ -1776,6 +1877,83 @@ mod codex {
         }
     }
 
+    /// How often a failed direct read may fall back to `codex app-server` — it starts a process, and
+    /// a back end that is down for an hour must not mean a process a minute.
+    const APP_SERVER_EVERY: Duration = Duration::from_secs(30 * 60);
+
+    static APP_SERVER_TRIED: std::sync::LazyLock<Mutex<HashMap<String, Instant>>> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    /// `direct` when it read, else Codex's own app server (`account/rateLimits/read`, the official
+    /// route to the same windows — verified on codex 0.172.0, 2026-11-24), at most once per
+    /// [`APP_SERVER_EVERY`] per account. Not for a machine with no sign-in: there is nothing to ask.
+    /// The app server is the CLI itself, so a token it refreshes on the way is the CLI's own doing.
+    pub async fn or_app_server(direct: ProviderQuota, binary: &std::path::Path, account: Option<&crate::ai_accounts::AccountEnv>, key: &str) -> ProviderQuota {
+        if direct.error.is_empty() || direct.error == reason::SIGNED_OUT {
+            return direct;
+        }
+        {
+            let Ok(mut tried) = APP_SERVER_TRIED.lock() else { return direct };
+            if tried.get(key).is_some_and(|at| at.elapsed() < APP_SERVER_EVERY) {
+                return direct;
+            }
+            tried.insert(key.to_string(), Instant::now());
+        }
+        match from_app_server(binary, account).await {
+            Some(read) => read,
+            None => direct,
+        }
+    }
+
+    async fn from_app_server(binary: &std::path::Path, account: Option<&crate::ai_accounts::AccountEnv>) -> Option<ProviderQuota> {
+        let mut command = crate::ai::aux_command(&binary.to_string_lossy());
+        command.arg("app-server");
+        if let Some(account) = account {
+            account.apply(&mut command);
+        }
+        crate::proc::own_process_group(&mut command);
+        let connection = crate::acp::Connection::start(command).ok()?;
+        let timeout = Duration::from_secs(30);
+        let answer = tokio::time::timeout(timeout, async {
+            connection
+                .request("initialize", serde_json::json!({"clientInfo": {"name": "codeflow", "title": "CodeFlow", "version": env!("CARGO_PKG_VERSION")}}), timeout)
+                .await?;
+            connection.notify("initialized", serde_json::json!({})).await?;
+            connection.request("account/rateLimits/read", serde_json::json!({}), timeout).await
+        })
+        .await
+        .ok()?
+        .ok()?;
+        let (limits, plan) = parse_app_server(&answer)?;
+        Some(ProviderQuota { provider: "codex".to_string(), limits: tighten(limits), plan, error: String::new(), fetched_at: now_rfc3339(), account_id: None })
+    }
+
+    /// `account/rateLimits/read`: `rateLimits.primary`/`secondary` of `{usedPercent,
+    /// windowDurationMins, resetsAt}` (seconds since the epoch), and `planType`.
+    pub(super) fn parse_app_server(answer: &serde_json::Value) -> Option<(Vec<QuotaLimit>, String)> {
+        let limits = answer.get("rateLimits")?;
+        let windows: Vec<QuotaLimit> = ["primary", "secondary"]
+            .iter()
+            .filter_map(|slot| limits.get(*slot).filter(|w| w.is_object()))
+            .map(|window| {
+                let minutes = window.get("windowDurationMins").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                let resets = window
+                    .get("resetsAt")
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
+                    .map(|at| at.to_rfc3339())
+                    .unwrap_or_default();
+                QuotaLimit {
+                    kind: kind_for(minutes * 60).to_string(),
+                    scope: String::new(),
+                    used_percent: window.get("usedPercent").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+                    resets_at: resets,
+                }
+            })
+            .collect();
+        let plan = limits.get("planType").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+        Some((windows, plan))
+    }
+
     fn map_windows(parsed: UsageResponse) -> Vec<QuotaLimit> {
         let Some(rate_limit) = parsed.rate_limit else { return Vec::new() };
         [rate_limit.primary_window, rate_limit.secondary_window]
@@ -1825,6 +2003,16 @@ mod codex {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn the_app_server_s_rate_limits_read_like_the_usage_endpoint() {
+            let answer = serde_json::json!({"rateLimits": {"primary": {"usedPercent": 12, "windowDurationMins": 300, "resetsAt": 1795578061}, "secondary": {"usedPercent": 3, "windowDurationMins": 10080, "resetsAt": 1796164861}, "planType": "plus"}});
+            let (limits, plan) = parse_app_server(&answer).unwrap();
+            assert_eq!(plan, "plus");
+            assert_eq!(limits.iter().map(|l| (l.kind.as_str(), l.used_percent)).collect::<Vec<_>>(), [("session", 12.0), ("weekly", 3.0)]);
+            assert!(limits[0].resets_at.starts_with("2026-"));
+            assert!(parse_app_server(&serde_json::json!({})).is_none());
+        }
 
         /// A real answer from a free account: one monthly window, no secondary.
         const FREE: &str = r#"{

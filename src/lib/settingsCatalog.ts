@@ -329,6 +329,8 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "externalEditor", labelKey: "externalEditor.title", hintKey: "externalEditor.hint", icon: Code2, searchKey: "externalEditor.searchTerms" },
       // «Entorno»: which env files every repository's «Entorno» reads, and the folders it skips.
       { id: "repoEnv", labelKey: "env.settings.title", hintKey: "env.settings.hint", icon: Braces, searchKey: "env.settings.searchTerms" },
+      // «Políticas de seguridad»: what a container may be in each workspace (`containers::policy`).
+      { id: "policies", labelKey: "settings.policies.tab", hintKey: "settings.policies.tabHint", icon: ShieldCheck, searchKey: "settings.policies.searchTerms" },
     ],
   },
   {

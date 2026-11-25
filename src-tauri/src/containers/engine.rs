@@ -171,9 +171,27 @@ pub const PULL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 /// image not here yet, a project's `up` or `pull` — and [`ACTION_TIMEOUT`] for the rest.
 fn action_timeout(object: &str, action: &str) -> Duration {
     match (object, action) {
-        ("image", "pull" | "run") | ("project", "up" | "pull") => PULL_TIMEOUT,
+        // A push uploads what a pull downloads, and save, load and export move the same gigabytes
+        // through a file.
+        ("image", "pull" | "run" | "push" | "save" | "load") | ("container", "export" | "commit") | ("project", "up" | "pull") => PULL_TIMEOUT,
         _ => ACTION_TIMEOUT,
     }
+}
+
+/// A file of this computer for `save -o`, `load -i` or `export -o`: a full path, never a flag. The
+/// engine's CLI reads or writes it here even when the engine is another machine's — the archive
+/// travels over the engine's own connection.
+fn check_file(path: &str, must_exist: bool) -> Result<(), String> {
+    if path.is_empty() {
+        return Err("choose the file".into());
+    }
+    if !Path::new(path).is_absolute() || path.contains('\0') {
+        return Err(format!("{path} is not a full path"));
+    }
+    if must_exist && !Path::new(path).is_file() {
+        return Err(format!("{path} is not a file on this computer"));
+    }
+    Ok(())
 }
 
 // ------------------------------------------------------------------------------------- reading
@@ -873,6 +891,27 @@ pub fn action_args(engine: EngineKind, object: &str, action: &str, ids: &[String
             args.extend(["rename".into(), ids[0].clone(), name]);
         }
         ("container", "prune") => args.extend(["container".into(), "prune".into(), "-f".into()]),
+        // A container's filesystem as a new image — what was installed or changed by hand inside it.
+        ("container", "commit") => {
+            need_ids()?;
+            let reference = opt("reference");
+            if reference.is_empty() {
+                return Err("write the image the container becomes (name:tag)".into());
+            }
+            check_ref(&reference)?;
+            args.push("commit".into());
+            let message = opt("message");
+            if !message.is_empty() {
+                args.push(format!("--message={message}"));
+            }
+            args.extend([ids[0].clone(), reference]);
+        }
+        ("container", "export") => {
+            need_ids()?;
+            let path = opt("path");
+            check_file(&path, false)?;
+            args.extend(["export".into(), "-o".into(), path, ids[0].clone()]);
+        }
         ("image", "remove") => {
             need_ids()?;
             args.push("rmi".into());
@@ -888,6 +927,32 @@ pub fn action_args(engine: EngineKind, object: &str, action: &str, ids: &[String
             }
             check_ref(&reference)?;
             args.extend(["pull".into(), reference]);
+        }
+        ("image", "tag") => {
+            need_ids()?;
+            let reference = opt("reference");
+            if reference.is_empty() {
+                return Err("write the new name (registry/name:tag)".into());
+            }
+            check_ref(&reference)?;
+            args.extend(["tag".into(), ids[0].clone(), reference]);
+        }
+        ("image", "push") => {
+            need_ids()?;
+            args.extend(["push".into(), ids[0].clone()]);
+        }
+        // Several images into one archive, every tag of theirs kept: `load` brings them all back.
+        ("image", "save") => {
+            need_ids()?;
+            let path = opt("path");
+            check_file(&path, false)?;
+            args.extend(["save".into(), "-o".into(), path]);
+            args.extend(ids.iter().cloned());
+        }
+        ("image", "load") => {
+            let path = opt("path");
+            check_file(&path, true)?;
+            args.extend(["load".into(), "-i".into(), path]);
         }
         ("image", "prune") => {
             args.extend(["image".into(), "prune".into(), "-f".into()]);
@@ -932,6 +997,25 @@ pub fn action_args(engine: EngineKind, object: &str, action: &str, ids: &[String
             args.extend(ids.iter().cloned());
         }
         ("network", "prune") => args.extend(["network".into(), "prune".into(), "-f".into()]),
+        // The network is the id; the container comes in the options, as the detail of either names it.
+        ("network", "connect" | "disconnect") => {
+            need_ids()?;
+            let container = opt("container");
+            if container.is_empty() {
+                return Err("choose the container".into());
+            }
+            check_ref(&container)?;
+            args.extend(["network".into(), action.into()]);
+            if action == "connect" {
+                for alias in opt("aliases").split([',', ' ']).map(str::trim).filter(|a| !a.is_empty()) {
+                    check_ref(alias)?;
+                    args.push(format!("--alias={alias}"));
+                }
+            } else if flag("force") {
+                args.push("-f".into());
+            }
+            args.extend([ids[0].clone(), container]);
+        }
         ("project", "up" | "down" | "stop" | "start" | "restart" | "pull") => {
             need_ids()?;
             args.push("compose".into());
@@ -1319,6 +1403,41 @@ mod tests {
         assert_eq!(action_timeout("image", "run"), PULL_TIMEOUT);
         assert_eq!(action_timeout("container", "stop"), ACTION_TIMEOUT);
         assert_eq!(action_timeout("project", "down"), ACTION_TIMEOUT);
+        assert_eq!(action_timeout("image", "push"), PULL_TIMEOUT);
+        assert_eq!(action_timeout("container", "export"), PULL_TIMEOUT);
+        assert_eq!(action_timeout("image", "tag"), ACTION_TIMEOUT);
+    }
+
+    #[test]
+    fn images_and_containers_move_as_files_and_names() {
+        let one = |object: &str, action: &str, ids: &[&str], options: Value| {
+            let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+            action_args(EngineKind::Docker, object, action, &ids, &options)
+        };
+        assert_eq!(one("image", "tag", &["web:dev"], json!({"reference": "ghcr.io/me/web:1.2"})).unwrap(), vec!["tag", "web:dev", "ghcr.io/me/web:1.2"]);
+        assert_eq!(one("image", "push", &["ghcr.io/me/web:1.2"], json!({})).unwrap(), vec!["push", "ghcr.io/me/web:1.2"]);
+        let archive = if cfg!(windows) { r"C:\backups\web.tar" } else { "/backups/web.tar" };
+        assert_eq!(one("image", "save", &["web:1", "web:2"], json!({ "path": archive })).unwrap(), vec!["save", "-o", archive, "web:1", "web:2"]);
+        assert!(one("image", "load", &[], json!({ "path": archive })).unwrap_err().contains("not a file"), "a load reads a file that exists");
+        assert_eq!(one("container", "commit", &["db"], json!({"reference": "db:snap", "message": "-seeded"})).unwrap(), vec!["commit", "--message=-seeded", "db", "db:snap"]);
+        assert_eq!(one("container", "export", &["db"], json!({ "path": archive })).unwrap(), vec!["export", "-o", archive, "db"]);
+        assert_eq!(
+            one("network", "connect", &["cf-net"], json!({"container": "api", "aliases": "api.local, backend"})).unwrap(),
+            vec!["network", "connect", "--alias=api.local", "--alias=backend", "cf-net", "api"]
+        );
+        assert_eq!(one("network", "disconnect", &["cf-net"], json!({"container": "api", "force": true})).unwrap(), vec!["network", "disconnect", "-f", "cf-net", "api"]);
+        for (object, action, ids, options) in [
+            ("image", "tag", vec!["web"], json!({})),
+            ("image", "tag", vec!["web"], json!({"reference": "--force"})),
+            ("image", "save", vec!["web"], json!({"path": "relative.tar"})),
+            ("image", "save", vec![], json!({ "path": archive })),
+            ("container", "commit", vec!["db"], json!({})),
+            ("container", "export", vec!["db"], json!({})),
+            ("network", "connect", vec!["cf-net"], json!({})),
+            ("network", "connect", vec!["cf-net"], json!({"container": "api", "aliases": "-x"})),
+        ] {
+            assert!(one(object, action, &ids, options.clone()).is_err(), "{object} {action} {ids:?} {options} is refused");
+        }
     }
 
     #[test]

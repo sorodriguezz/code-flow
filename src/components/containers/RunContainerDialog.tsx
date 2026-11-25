@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { clipboardReadText } from "../../lib/tauri/commands";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { ChevronDown, ClipboardPaste, Copy, Eye, EyeOff, FolderOpen, Loader2, Play, Plus, X } from "lucide-react";
+import { ChevronDown, ClipboardPaste, Copy, Eye, EyeOff, FolderOpen, Loader2, Play, Plus, ShieldCheck, X } from "lucide-react";
 import { Button } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
@@ -10,6 +10,10 @@ import { Dialog, Field, FormSection, NO_ROWS } from "./ui";
 import { ImageCombo } from "./pageBits";
 import { containersRun, containersText } from "../../lib/tauri/containersCommands";
 import { listKey, useContainersStore } from "../../state/containersStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
+import { containersPolicyCheck } from "../../lib/tauri/containersSandboxCommands";
+import type { PolicyCheck } from "../../types/containersSandbox";
+import type { TranslationKey } from "../../lib/i18n/translations";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast, pushSuccessToast } from "../../state/toastStore";
 import type { ContainerRow, NetworkRow, RestartPolicy, RunSpec, RuntimeInfo, VolumeRow } from "../../types/containers";
@@ -18,8 +22,13 @@ import type { ContainerRow, NetworkRow, RestartPolicy, RunSpec, RuntimeInfo, Vol
  * «Ejecutar contenedor» — a `docker run -d` from a form, lite-dock's dialog: an image from this
  * engine or from Docker Hub (and the tag to run), the ports to publish (with the one another
  * container already holds pointed out, and a free one a click away), volumes, variables (a `.env`
- * pasted in one go), the restart policy, limits, and the command it all amounts to, to copy.
+ * pasted in one go), the restart policy, limits, the hardening options (user, read-only root,
+ * capabilities, no-new-privileges, seccomp, tmpfs, process limit) with a one-click hardened profile,
+ * a healthcheck, and the command it all amounts to, to copy.
  */
+
+/** A comma- or space-separated list as the form keeps it. */
+const words = (raw: string) => raw.split(/[\s,]+/).map((w) => w.trim()).filter(Boolean);
 
 type PortRow = { id: number; host: string; container: string; protocol: "tcp" | "udp" };
 type VolumeFormRow = { id: number; kind: "volume" | "bind"; source: string; target: string; readOnly: boolean };
@@ -60,7 +69,37 @@ export function RunContainerDialog({ runtime, context, initialImage = "", onClos
   const [memoryMb, setMemoryMb] = useState("");
   const [cpus, setCpus] = useState("");
   const [advanced, setAdvanced] = useState(false);
+  const [security, setSecurity] = useState(false);
+  const [user, setUser] = useState("");
+  const [readOnly, setReadOnly] = useState(false);
+  const [noNewPrivileges, setNoNewPrivileges] = useState(false);
+  const [capDrop, setCapDrop] = useState("");
+  const [capAdd, setCapAdd] = useState("");
+  const [tmpfs, setTmpfs] = useState("");
+  const [seccomp, setSeccomp] = useState("");
+  const [pidsLimit, setPidsLimit] = useState("");
+  const [shmMb, setShmMb] = useState("");
+  const [healthCmd, setHealthCmd] = useState("");
+  const [healthInterval, setHealthInterval] = useState("");
+  const [healthTimeout, setHealthTimeout] = useState("");
+  const [healthRetries, setHealthRetries] = useState("");
+  const [healthOff, setHealthOff] = useState(false);
   const [running, setRunning] = useState(false);
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const [policy, setPolicy] = useState<PolicyCheck | null>(null);
+  /** «Perfil endurecido»: what a service that needs nothing special runs with — every field stays editable. */
+  const harden = () => {
+    setSecurity(true);
+    if (!user.trim()) setUser("1000");
+    setReadOnly(true);
+    setNoNewPrivileges(true);
+    setCapDrop("ALL");
+    if (!capAdd.trim()) setCapAdd("NET_BIND_SERVICE");
+    if (!tmpfs.trim()) setTmpfs("/tmp:size=64m");
+    if (!pidsLimit.trim()) setPidsLimit("256");
+    if (!memoryMb.trim()) setMemoryMb("512");
+    if (!cpus.trim()) setCpus("1");
+  };
 
   useEffect(() => {
     for (const what of ["images", "volumes", "networks", "containers"]) void refreshList(runtime.id, what);
@@ -157,7 +196,38 @@ export function RunContainerDialog({ runtime, context, initialImage = "", onClos
     network,
     memoryMb: number(memoryMb),
     cpus: number(cpus),
+    readOnly,
+    user: user.trim(),
+    capDrop: words(capDrop),
+    capAdd: words(capAdd),
+    noNewPrivileges,
+    seccomp: seccomp.trim(),
+    tmpfs: words(tmpfs),
+    pidsLimit: number(pidsLimit),
+    shmSizeMb: number(shmMb),
+    health: { command: healthCmd.trim(), intervalS: number(healthInterval), timeoutS: number(healthTimeout), startPeriodS: null, retries: number(healthRetries), disabled: healthOff },
   };
+  // The workspace's security policy, checked as the form changes: what it forbids blocks «Ejecutar»,
+  // the rest is shown as advice. Settled first — a signature check may run cosign.
+  const specKey = JSON.stringify(spec);
+  useEffect(() => {
+    if (!spec.image) {
+      setPolicy(null);
+      return;
+    }
+    let alive = true;
+    const timer = setTimeout(() => {
+      containersPolicyCheck(workspaceId ?? null, runtime.id, context, spec)
+        .then((found) => alive && setPolicy(found))
+        .catch(() => alive && setPolicy(null));
+    }, 600);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [specKey, workspaceId, runtime.id, context]); // eslint-disable-line react-hooks/exhaustive-deps
+  const blocked = !!policy?.blocked;
+  const hardenedCount = [readOnly, noNewPrivileges, !!user.trim(), words(capDrop).length > 0, !!number(pidsLimit)].filter(Boolean).length;
 
   const program = runtime.id === "podman" ? "podman" : runtime.id === "nerdctl" ? "nerdctl" : "docker";
   // The flag the run itself passes for a context that is not the engine's own (`Target::global_args`):
@@ -179,13 +249,30 @@ export function RunContainerDialog({ runtime, context, initialImage = "", onClos
     if (spec.workdir) parts.push(`-w ${quote(spec.workdir)}`);
     if (spec.memoryMb) parts.push(`--memory ${Math.round(spec.memoryMb)}m`);
     if (spec.cpus) parts.push(`--cpus ${spec.cpus}`);
+    if (spec.pidsLimit) parts.push(`--pids-limit ${spec.pidsLimit}`);
+    if (spec.shmSizeMb) parts.push(`--shm-size ${Math.round(spec.shmSizeMb)}m`);
+    if (spec.user) parts.push(`--user ${quote(spec.user)}`);
+    if (spec.readOnly) parts.push("--read-only");
+    for (const m of spec.tmpfs ?? []) parts.push(`--tmpfs ${quote(m)}`);
+    for (const c of spec.capDrop ?? []) parts.push(`--cap-drop ${c.toUpperCase().replace(/^CAP_/, "")}`);
+    for (const c of spec.capAdd ?? []) parts.push(`--cap-add ${c.toUpperCase().replace(/^CAP_/, "")}`);
+    if (spec.noNewPrivileges) parts.push("--security-opt no-new-privileges");
+    if (spec.seccomp && spec.seccomp !== "default") parts.push(`--security-opt ${quote(`seccomp=${spec.seccomp}`)}`);
+    const h = spec.health;
+    if (h?.disabled) parts.push("--no-healthcheck");
+    else if (h) {
+      if (h.command) parts.push(`--health-cmd=${quote(h.command)}`);
+      if (h.intervalS) parts.push(`--health-interval=${h.intervalS}s`);
+      if (h.timeoutS) parts.push(`--health-timeout=${h.timeoutS}s`);
+      if (h.retries) parts.push(`--health-retries=${h.retries}`);
+    }
     parts.push(spec.image || "<imagen>");
     if (spec.command) parts.push(spec.command);
     return parts.join(" ");
-  }, [program, contextFlag, context, runtime.currentContext, spec.name, spec.autoRemove, spec.restart, spec.pull, spec.publishAll, spec.ports, spec.volumes, spec.env, spec.network, spec.workdir, spec.memoryMb, spec.cpus, spec.image, spec.command]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [program, contextFlag, context, runtime.currentContext, JSON.stringify(spec)]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const submit = async () => {
-    if (!spec.image || running) return;
+    if (!spec.image || running || blocked) return;
     setRunning(true);
     try {
       const id = await containersRun(runtime.id, context, spec);
@@ -213,7 +300,7 @@ export function RunContainerDialog({ runtime, context, initialImage = "", onClos
           <Button size="md" variant="ghost" onClick={onClose}>
             {t("common.cancel")}
           </Button>
-          <Button size="md" variant="primary" onClick={() => void submit()} disabled={!spec.image || running}>
+          <Button size="md" variant="primary" onClick={() => void submit()} disabled={!spec.image || running || blocked} title={blocked ? t("containers.m.run.policyBlocked") : undefined}>
             {running ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />}
             {running ? t("containers.m.run.running") : t("containers.m.run.run")}
           </Button>
@@ -480,6 +567,121 @@ export function RunContainerDialog({ runtime, context, initialImage = "", onClos
             </div>
           )}
         </FormSection>
+
+        <FormSection
+          title={t("containers.m.run.security")}
+          trailing={
+            <span className="flex items-center gap-3">
+              <button onClick={harden} className="flex items-center gap-1 text-[11.5px] text-[var(--cf-accent)] hover:underline" title={t("containers.m.run.hardenHint")}>
+                <ShieldCheck size={11} />
+                {t("containers.m.run.harden")}
+              </button>
+              <button onClick={() => setSecurity((v) => !v)} className="flex items-center gap-1 text-[11.5px] text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]" aria-expanded={security}>
+                <ChevronDown size={12} className={security ? "" : "-rotate-90"} />
+                {security ? t("containers.m.run.hide") : hardenedCount ? t("containers.m.run.securitySet", { count: hardenedCount }) : t("containers.m.run.show")}
+              </button>
+            </span>
+          }
+        >
+          {security && (
+            <>
+              <div className="grid grid-cols-3 gap-3">
+                <Field label={t("containers.m.run.user")} hint={t("containers.m.run.userHint")}>
+                  <input value={user} onChange={(e) => setUser(e.target.value)} placeholder={t("containers.m.run.userPlaceholder")} spellCheck={false} className={mono} />
+                </Field>
+                <Field label={t("containers.m.run.pidsLimit")} hint={t("containers.m.run.noLimit")}>
+                  <input value={pidsLimit} onChange={(e) => setPidsLimit(e.target.value)} placeholder="256" inputMode="numeric" className={input} />
+                </Field>
+                <Field label={t("containers.m.run.shm")} hint={t("containers.m.run.shmHint")}>
+                  <input value={shmMb} onChange={(e) => setShmMb(e.target.value)} placeholder="64" inputMode="numeric" className={input} />
+                </Field>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[12px] text-[var(--cf-text-muted)]">
+                <label className="flex items-center gap-2" title={t("containers.m.run.readOnlyRootHint")}>
+                  <Checkbox checked={readOnly} onChange={setReadOnly} />
+                  {t("containers.m.run.readOnlyRoot")}
+                </label>
+                <label className="flex items-center gap-2" title={t("containers.m.run.noNewPrivilegesHint")}>
+                  <Checkbox checked={noNewPrivileges} onChange={setNoNewPrivileges} />
+                  {t("containers.m.run.noNewPrivileges")}
+                </label>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <Field label={t("containers.m.run.capDrop")} hint={t("containers.m.run.capHint")}>
+                  <input value={capDrop} onChange={(e) => setCapDrop(e.target.value)} placeholder="ALL" spellCheck={false} className={mono} />
+                </Field>
+                <Field label={t("containers.m.run.capAdd")}>
+                  <input value={capAdd} onChange={(e) => setCapAdd(e.target.value)} placeholder="NET_BIND_SERVICE" spellCheck={false} className={mono} />
+                </Field>
+                <Field label={t("containers.m.run.tmpfs")} hint={t("containers.m.run.tmpfsHint")}>
+                  <input value={tmpfs} onChange={(e) => setTmpfs(e.target.value)} placeholder="/tmp:size=64m" spellCheck={false} className={mono} />
+                </Field>
+                <Field label={t("containers.m.run.seccomp")}>
+                  <div className="flex min-w-0 gap-1">
+                    <Select
+                      size="sm"
+                      value={seccomp === "" || seccomp === "unconfined" ? seccomp : "file"}
+                      onChange={async (value) => {
+                        if (value !== "file") return setSeccomp(value);
+                        const file = await openDialog({ title: t("containers.m.run.seccompPick"), filters: [{ name: "JSON", extensions: ["json"] }] }).catch(() => null);
+                        if (typeof file === "string") setSeccomp(file);
+                      }}
+                      options={[
+                        { value: "", label: t("containers.m.run.seccompDefault") },
+                        { value: "unconfined", label: t("containers.m.run.seccompOff") },
+                        { value: "file", label: seccomp && seccomp !== "unconfined" ? seccomp.split(/[\\/]/).pop() || seccomp : t("containers.m.run.seccompFile") },
+                      ]}
+                      ariaLabel={t("containers.m.run.seccomp")}
+                    />
+                    {seccomp && seccomp !== "unconfined" && (
+                      <button onClick={() => setSeccomp("")} aria-label={t("containers.remove")} className="shrink-0 rounded p-1 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
+                        <X size={13} />
+                      </button>
+                    )}
+                  </div>
+                </Field>
+              </div>
+              <div className="flex flex-col gap-2 border-t border-[var(--cf-border)] pt-3">
+                <span className="text-[11.5px] font-medium text-[var(--cf-text-muted)]">{t("containers.m.run.health")}</span>
+                <Field label={t("containers.m.run.healthCmd")} hint={t("containers.m.run.healthCmdHint")}>
+                  <input value={healthCmd} onChange={(e) => setHealthCmd(e.target.value)} placeholder="curl -fsS http://localhost:8080/health || exit 1" spellCheck={false} disabled={healthOff} className={mono} />
+                </Field>
+                <div className="grid grid-cols-3 gap-3">
+                  <Field label={t("containers.m.run.healthInterval")}>
+                    <input value={healthInterval} onChange={(e) => setHealthInterval(e.target.value)} placeholder="30" inputMode="decimal" disabled={healthOff} className={input} />
+                  </Field>
+                  <Field label={t("containers.m.run.healthTimeout")}>
+                    <input value={healthTimeout} onChange={(e) => setHealthTimeout(e.target.value)} placeholder="30" inputMode="decimal" disabled={healthOff} className={input} />
+                  </Field>
+                  <Field label={t("containers.m.run.healthRetries")}>
+                    <input value={healthRetries} onChange={(e) => setHealthRetries(e.target.value)} placeholder="3" inputMode="numeric" disabled={healthOff} className={input} />
+                  </Field>
+                </div>
+                <label className="flex items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+                  <Checkbox checked={healthOff} onChange={setHealthOff} />
+                  {t("containers.m.run.healthOff")}
+                </label>
+              </div>
+            </>
+          )}
+        </FormSection>
+
+        {policy && policy.violations.length > 0 && (
+          <div
+            className={`flex flex-col gap-1 rounded-md px-3 py-2 text-[12px] ${blocked ? "bg-[color-mix(in_srgb,var(--cf-danger)_10%,transparent)]" : "bg-[var(--cf-warning-soft)]"}`}
+          >
+            <span className={`font-medium ${blocked ? "text-[var(--cf-danger)]" : "text-[var(--cf-warning-text)]"}`}>
+              {blocked ? t("containers.m.run.policyBlocked") : t("containers.m.run.policyAdvice")}
+            </span>
+            {policy.violations.map((v, i) => (
+              <span key={`${v.rule}|${i}`} className="text-[var(--cf-text)]">
+                {v.blocking ? "✕ " : "· "}
+                {t(`containers.sandbox.rule.${v.rule}` as TranslationKey)}
+                {v.detail && <span className="ml-1 font-mono text-[11px] text-[var(--cf-text-muted)]">{v.detail}</span>}
+              </span>
+            ))}
+          </div>
+        )}
 
         <FormSection
           title={t("containers.m.run.equivalent")}

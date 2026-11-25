@@ -42,16 +42,23 @@ const SELF = /^(?:agentcli_|flows_bridge_|codi_act_result|codi_register|codi_ui_
 const BROWSER_PLUMBING = /^(?:browser_layout|browser_seen|browser_state|browser_go|browser_tab_new|browser_tab_select|browser_tab_close|browser_show|browser_focus_bar|preview_file_url)$/;
 
 /** Commands that run a program or a shell line the caller names — `reviewer_run`'s prepare/build/test,
- *  `codi_run_command`, a debugger, a language server, a container. Through `app_call` they run in the
- *  app's own process, outside the CLI's sandbox and its permission prompt, so a turn that may act
- *  still asks first (2026-11-18). */
-const EXECUTES = /^(?:reviewer_run|codi_run_command|scaffold_run|run_test_command|resolve_finding_with_ai|approve_hybrid_plan|debug_start|debug_start_adapter|lsp_start|containers_run|db_execute|db_apply_edits|db_restore_run|db_import_csv|db_backup_run)$/;
+ *  `codi_run_command`, a debugger, a language server, a container, a notebook's kernel, an expression
+ *  in a debuggee, a manifest applied to a cluster — or a stack, a branch environment or a Helm chart
+ *  brought up (2026-11-24). Through `app_call` they run in the app's own
+ *  process, outside the CLI's sandbox and its permission prompt, so a turn that may act still asks
+ *  first (2026-11-18; the kernel, the debuggee and the manifest 2026-11-24). */
+const EXECUTES = /^(?:reviewer_run|codi_run_command|scaffold_run|run_test_command|resolve_finding_with_ai|approve_hybrid_plan|debug_start|debug_start_adapter|lsp_start|containers_run|db_execute|db_apply_edits|db_restore_run|db_import_csv|db_backup_run|notebook_kernel_execute|debug_evaluate|containers_apply|containers_sandbox_create|containers_sandbox_exec|containers_market_up_job|containers_envs_create|containers_envs_clone|containers_envs_up|containers_helm_install|containers_helm_upgrade)$/;
 
 /** Commands whose effect leaves this machine or lands where the user did not look: a push, a line
  *  typed into one of the app's terminals (outside the shell policy the CLI's Bash is held to), a
  *  session or a file on a remote host, a request sent, a webhook opened to the internet. Named, not
- *  read off the name — `git_push` reads as an ordinary write (2026-11-18). */
-const OUTWARD = /^(?:git_push|write_terminal|remote_open_session|remote_write_text|api_send_http|flows_tunnel_set)$/;
+ *  read off the name — `git_push` reads as an ordinary write (2026-11-18), and so did its variants
+ *  (`git_push_branch`, `api_send_http_tracked`) until 2026-11-24. */
+const OUTWARD = /^(?:git_push(?:_branch|_tag|_all_tags)?|publish_push|deps_update_apply|write_terminal|remote_open_session|remote_write_text|remote_upload_file|api_send_http(?:_tracked)?|api_mqtt_publish|reviewer_apply_rules|flows_tunnel_set)$/;
+
+/** Reads that take what they read: a queue's message is gone for everybody else once received
+ *  (2026-11-24). */
+const CONSUMES = /^(?:remote_queue_receive)$/;
 
 /** Commands that start another model turn or agent run. Each is a bill and an actor of its own, so
  *  a turn does not set them off unasked (2026-11-18). */
@@ -59,8 +66,9 @@ const SPAWNS = /^(?:chat_send|send_chat_message|create_agent_task|codi_order|cod
 
 /** What hands a model a credential in all but name — an invitation token, a pairing code, a key's
  *  passphrase — or lets it widen what it may reach: its own access to a database, the phone remote,
- *  a host it names (2026-11-18). */
-const HANDS_OVER = /^(?:flows_share|supabase_share|remote_import_ppk|remotectl_(?!status$|list_).*|db_update_connection|db_create_connection|db_set_connection_scope|db_move_connection_to_workspace|remote_open_draft_session|remote_create_host|remote_update_host)$/;
+ *  a host it names (2026-11-18), the workspace's container security policy it is held to, or the
+ *  approval of a branch's devcontainer `initializeCommand` to run on this computer (2026-11-24). */
+const HANDS_OVER = /^(?:flows_share|supabase_share|remote_import_ppk|remotectl_(?!status$|list_).*|db_update_connection|db_create_connection|db_set_connection_scope|db_move_connection_to_workspace|remote_open_draft_session|remote_create_host|remote_update_host|containers_policy_save|containers_policy_reset|containers_envs_approve_init)$/;
 
 /** Commands that repoint a connection while keeping its stored token: a model that changed a
  *  server's address could have the app send that token wherever it said (2026-11-18). */
@@ -126,7 +134,7 @@ const NOUNS = [
 /** How risky a command is, from the words of its name — the area prefix (`ado_`, `db_`) says nothing. */
 export function riskOf(name) {
   if (SECRET.test(name) || SELF.test(name) || BROWSER_PLUMBING.test(name) || INVITATION.test(name) || MEMORY_PANE.test(name) || REPOINTS.test(name) || HANDS_OVER.test(name)) return "blocked";
-  if (EXECUTES.test(name) || OUTWARD.test(name) || SPAWNS.test(name)) return "destructive";
+  if (EXECUTES.test(name) || OUTWARD.test(name) || SPAWNS.test(name) || CONSUMES.test(name)) return "destructive";
   let plain = name;
   for (const [noun, word] of NOUNS) plain = plain.replace(noun, word);
   const words = plain.split("_").filter(Boolean);

@@ -7,11 +7,13 @@ import type {
   CloudSource,
   ContainerStats,
   ContainerSummary,
+  DiffEntry,
   DiskUsageRow,
   FileEntry,
   ForwardView,
   HubRepo,
   HubTag,
+  HardeningFinding,
   ImageLayer,
   KubeAdded,
   KubeAddRequest,
@@ -21,9 +23,13 @@ import type {
   AksStatus,
   KubeTools,
   KubeTopology,
+  LintFinding,
   RunSpec,
   RuntimeInfo,
+  SbomFormat,
+  ScanComparison,
   ScanResult,
+  ScanSummary,
   Scanner,
 } from "../../types/containers";
 
@@ -101,7 +107,9 @@ export interface SessionRequest {
   /** `aksStart`: `az aks start` for the cluster named by `target`, in `resourceGroup` and `subscription`. */
   /** `azureLogs`: an Azure resource's own log stream (`az webapp log tail`, `az containerapp logs show
    *  --follow`, `az container logs --follow`); `target` is the resource's id. */
-  kind: "logs" | "exec" | "projectLogs" | "pull" | "build" | "composeUp" | "composeDown" | "composeRestart" | "composePull" | "kubeLogin" | "aksStart" | "azureLogs";
+  /** `marketUp`: a service-catalogue stack's `compose up`, opened by `containersMarketUpJob` rather than
+   *  as a session; `target` is the stack's id. */
+  kind: "logs" | "exec" | "projectLogs" | "pull" | "build" | "composeUp" | "composeDown" | "composeRestart" | "composePull" | "composeBuild" | "kubeLogin" | "aksStart" | "azureLogs" | "localCluster" | "marketUp";
   runtime: string;
   context: string | null;
   namespace?: string | null;
@@ -120,6 +128,8 @@ export interface SessionRequest {
   tag?: string | null;
   resourceGroup?: string | null;
   subscription?: string | null;
+  /** `localCluster`: what kind, k3d or minikube does to the cluster named by `target`. */
+  localCluster?: import("../../types/containersLocal").LocalClusterSpec | null;
 }
 
 export const containersOpenSession = (request: SessionRequest) => invoke<string>("containers_open_session", { request });
@@ -197,6 +207,32 @@ export const containersScanner = () => invoke<Scanner | null>("containers_scanne
 
 /** Rejects with `"no scanner"`, `"remote"` or `"unsupported"` when there is nothing to run it with. */
 export const containersImageScan = (runtime: string, context: string | null, image: string) => invoke<ScanResult>("containers_image_scan", { runtime, context, image });
+
+/** The kept scans of an image, newest first. */
+export const containersScanHistory = (image: string) => invoke<ScanSummary[]>("containers_scan_history", { image });
+
+export const containersScanGet = (id: string) => invoke<ScanResult | null>("containers_scan_get", { id });
+
+export const containersScanCompare = (earlier: string, later: string) => invoke<ScanComparison>("containers_scan_compare", { earlier, later });
+
+/** Forgets every kept scan of an image; how many were dropped. */
+export const containersScanForget = (image: string) => invoke<number>("containers_scan_forget", { image });
+
+/** Trivy or Syft, when one is installed — what can write an SBOM. */
+export const containersSbomTool = () => invoke<Scanner | null>("containers_sbom_tool");
+
+/** Writes an image's SBOM to `path`; the tool that wrote it. Rejects like `containersImageScan`, or with `"no sbom tool"`. */
+export const containersImageSbom = (runtime: string, context: string | null, image: string, format: SbomFormat, path: string) =>
+  invoke<string>("containers_image_sbom", { runtime, context, image, format, path });
+
+export const containersContainerDiff = (runtime: string, context: string | null, id: string) => invoke<DiffEntry[]>("containers_container_diff", { runtime, context, id });
+
+export const containersHardening = (runtime: string, context: string | null, id: string) => invoke<HardeningFinding[]>("containers_hardening", { runtime, context, id });
+
+export const containersHadolint = () => invoke<string | null>("containers_hadolint_detect");
+
+/** Rejects with `"no hadolint"` when it is not installed. */
+export const containersDockerfileLint = (path: string) => invoke<LintFinding[]>("containers_dockerfile_lint", { path });
 
 export const containersDiskUsage = (runtime: string, context: string | null) => invoke<DiskUsageRow[]>("containers_disk_usage", { runtime, context });
 

@@ -18,7 +18,9 @@
 //! notification, a proposed memory, a draft task, and the saved credentials the app *uses* for it —
 //! a database connection, an API request, a Llavero entry — each use approved by the user in the
 //! window, nothing secret ever in the answer. Which of the two a token gets is fixed when its run
-//! starts ([`Access`]); a token written into a file (agy, Grok) only ever gets the queries.
+//! starts ([`Access`]); a token written into a file (agy, Grok) only ever gets the queries — and,
+//! for a run that may act in a sandbox's checkout, that sandbox's own two actions
+//! ([`Access::sandbox_acts`]).
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -94,6 +96,15 @@ struct Access {
     /// The run itself, when there was one: where `app_run` writes the records the chat draws its step
     /// from (`crate::app_script::MARK`).
     run_ctx: Option<RunLink>,
+    /// A file-configured run (agy, Grok on their CLI — [`FileClient`]) that may act: its token sits in
+    /// a file, so it gets the queries alone ([`acts`](Self::acts) false) — except, in a running
+    /// sandbox's checkout, that sandbox's `sandbox_exec` and `sandbox_write_file`
+    /// (`containers::agent_sandbox::tools`). Those reach nothing a process able to read the file
+    /// could not reach already: the checkout is a folder of this machine, and a command runs inside
+    /// the isolated container through the broker, recorded as evidence. Without them agy and Grok on
+    /// their CLI could look into their sandbox and never use it — the one place built for an agent to
+    /// run things. Every other action tool still needs [`acts`](Self::acts). See [`sandbox_acts`](Self::sandbox_acts).
+    sandbox_acts: bool,
 }
 
 /// [`Access::run_ctx`] — the run's handle, which has no `Debug` of its own.
@@ -122,7 +133,21 @@ impl Access {
             full: false,
             provider: None,
             run_ctx: crate::ai_runs::current().map(RunLink),
+            sandbox_acts: false,
         }
+    }
+
+    /// Whether this run is offered its sandbox's tools at all, when its folder is a running
+    /// sandbox's checkout: not a run over someone else's material, not a workspace chat (no one
+    /// checkout), not «Codi».
+    fn sandbox_reach(&self) -> bool {
+        !self.grounding && !self.workspace && !self.codi
+    }
+
+    /// Whether its sandbox's actions (`sandbox_exec`, `sandbox_write_file`) are on: a run that may
+    /// act, or a file-configured one that may — see [`Access::sandbox_acts`].
+    fn sandbox_acts(&self) -> bool {
+        self.sandbox_reach() && (self.acts || self.sandbox_acts)
     }
 
     /// Whether this run is offered `app_run`: its provider has scripts on, and it is not a run that
@@ -474,6 +499,14 @@ struct FileRun {
     holders: usize,
     token: String,
     excluded: bool,
+    /// Every run holding the file may act — what [`Access::sandbox_acts`] of the shared token is.
+    /// Once one that may not joins, it stays off until the file goes.
+    acts: bool,
+    /// Some run holding the file reads someone else's material — the shared token is then a
+    /// grounding one ([`Access::grounding`]) for every holder until the file goes. The file is one
+    /// per repository, so the strictest run decides, as for `acts`: a pull request's diff read by agy
+    /// must not reach the app's read tools because a chat in the same repository is open beside it.
+    grounding: bool,
 }
 
 static FILE_RUNS: LazyLock<Mutex<HashMap<(FileClient, std::path::PathBuf), FileRun>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -505,18 +538,22 @@ impl Drop for FileGrant {
     }
 }
 
-/// The map for an agy run in `cwd`, as a workspace plugin — see [`FileClient::Agy`].
-pub fn for_agy(cwd: &str) -> Option<FileGrant> {
-    for_file_client(FileClient::Agy, cwd)
+/// The map for an agy run in `cwd`, as a workspace plugin — see [`FileClient::Agy`]. `acts`: the run
+/// may act (not read-only, not over someone else's material) — the token still opens only the
+/// queries, and its sandbox's actions ([`Access::sandbox_acts`]). `grounding`: the run reads material
+/// someone else wrote — the token opens what [`for_repository`]'s grounding one does, and nothing of
+/// the app ([`FileRun::grounding`]).
+pub fn for_agy(cwd: &str, acts: bool, grounding: bool) -> Option<FileGrant> {
+    for_file_client(FileClient::Agy, cwd, acts, grounding)
 }
 
 /// The map for a Grok run in `cwd`, as the project's `.grok/config.toml` — see [`FileClient::Grok`].
-/// `None` when the repository has a `.grok/config.toml` of its own.
-pub fn for_grok(cwd: &str) -> Option<FileGrant> {
-    for_file_client(FileClient::Grok, cwd)
+/// `None` when the repository has a `.grok/config.toml` of its own. `acts`, `grounding`: as for [`for_agy`].
+pub fn for_grok(cwd: &str, acts: bool, grounding: bool) -> Option<FileGrant> {
+    for_file_client(FileClient::Grok, cwd, acts, grounding)
 }
 
-fn for_file_client(client: FileClient, cwd: &str) -> Option<FileGrant> {
+fn for_file_client(client: FileClient, cwd: &str, acts: bool, grounding: bool) -> Option<FileGrant> {
     if !enabled() {
         return None;
     }
@@ -531,7 +568,7 @@ fn for_file_client(client: FileClient, cwd: &str) -> Option<FileGrant> {
     };
     let app = crate::ai_usage::app()?;
     crate::flows::triggers::webhook::ensure_server(app).ok()?;
-    install_as(client, &root, crate::flows::triggers::webhook::port(), workspace)
+    install_for(client, &root, crate::flows::triggers::webhook::port(), workspace, acts, grounding)
 }
 
 /// Writes `client`'s file in `root`, or joins the runs already holding it. The token rides in the
@@ -544,7 +581,14 @@ fn install(client: FileClient, root: &std::path::Path, port: u16) -> Option<File
 }
 
 /// [`install`]; `workspace`: `root` is a workspace chat's folder, and the token opens that chat's tools.
+#[cfg(test)]
 fn install_as(client: FileClient, root: &std::path::Path, port: u16, workspace: bool) -> Option<FileGrant> {
+    install_for(client, root, port, workspace, false, false)
+}
+
+/// [`install_as`]; `acts`: the run may act — see [`Access::sandbox_acts`]; `grounding`: it reads
+/// someone else's material — see [`FileRun::grounding`].
+fn install_for(client: FileClient, root: &std::path::Path, port: u16, workspace: bool, acts: bool, grounding: bool) -> Option<FileGrant> {
     let mut runs = FILE_RUNS.lock().ok()?;
     let key = (client, root.to_path_buf());
     if !runs.contains_key(&key) && !client.free(root) {
@@ -554,14 +598,23 @@ fn install_as(client: FileClient, root: &std::path::Path, port: u16, workspace: 
         holders: 0,
         token: format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple()),
         excluded: false,
+        acts: false,
+        grounding: false,
     });
+    entry.acts = if entry.holders == 0 { acts } else { entry.acts && acts };
+    entry.grounding = if entry.holders == 0 { grounding } else { entry.grounding || grounding };
     entry.holders += 1;
     let token = entry.token.clone();
+    // A workspace chat's folder keeps its own tools: no grounding task runs there.
+    let grounding = entry.grounding && !workspace;
+    let sandbox_acts = entry.acts && !workspace && !grounding;
     drop(runs);
     // From here every way out releases this run's hold.
     let grant = FileGrant { client, root: root.to_path_buf() };
-    // Queries only: this token sits in a file in the repository while the run lasts.
-    RUNS.lock().ok()?.insert(token.clone(), Access { workspace, provider: Some(client.provider().to_string()), ..Access::new(&root.to_string_lossy(), false, &token) });
+    // Queries only: this token sits in a file in the repository while the run lasts — and its
+    // sandbox's actions, for runs that may act (`Access::sandbox_acts`).
+    // Inserted again by every run that joins, so a stricter one narrows the token the others hold.
+    RUNS.lock().ok()?.insert(token.clone(), Access { workspace, grounding, sandbox_acts, provider: Some(client.provider().to_string()), ..Access::new(&root.to_string_lossy(), false, &token) });
     client.write(root, &format!("http://127.0.0.1:{port}{PATH}/{token}"))?;
     if crate::git_exclude::exclude(root, &client.exclude_line()).unwrap_or(false) {
         if let Some(entry) = FILE_RUNS.lock().ok()?.get_mut(&key) {
@@ -1658,6 +1711,7 @@ async fn app_tool(access: &Access, name: &str, args: &Value) -> Option<Result<St
             workspace_id: place.workspace_id.clone(),
             project: place.project.clone(),
             scripts: access.scripts(),
+            with_call: true,
         };
         return Some(if name == crate::app_gateway::LIST_TOOL {
             Ok(crate::app_gateway::list(&scope, args))
@@ -1904,6 +1958,11 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
                 tools.extend(crate::chat_refs::tools(access.acts));
                 tools.push(permission_prompt_tool());
             }
+            // A run whose working tree is a running sandbox's checkout gets that sandbox's tools
+            // (`containers::agent_sandbox::tools`) — and no other sandbox's.
+            if access.sandbox_reach() && crate::containers::agent_sandbox::tools::bound(&access.root).is_some() {
+                tools.extend(crate::containers::agent_sandbox::tools::schemas(access.sandbox_acts()));
+            }
             result_reply(id, json!({"tools": tools}))
         }
         "tools/call" => {
@@ -1948,6 +2007,15 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
             if crate::browser_tools::is_tool(name) {
                 return Some(match crate::browser_tools::call(&access.root, access.acts, name, &args).await {
                     Ok(content) => result_reply(id, json!({"content": content, "isError": false})),
+                    Err(error) => text_result(id, error, true),
+                });
+            }
+            if crate::containers::agent_sandbox::tools::is_tool(name) {
+                if !access.sandbox_reach() {
+                    return Some(text_result(id, format!("{name} is not available to this run"), true));
+                }
+                return Some(match crate::containers::agent_sandbox::tools::call(&access.root, name, &args, access.sandbox_acts()).await {
+                    Ok(text) => text_result(id, text, false),
                     Err(error) => text_result(id, error, true),
                 });
             }
@@ -2394,6 +2462,108 @@ mod tests {
         assert!(std::fs::read_to_string(root.join(".grok/config.toml")).unwrap().contains("/mcp/code/"));
         drop(grant);
         assert!(!root.join(".grok").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The sandbox tools follow the token: none for a run over someone else's material, a
+    /// workspace chat or «Codi»; the reads for every other run; the two actions for a run that may
+    /// act — and for a file-configured run that may, whose token opens no other action.
+    #[test]
+    fn the_sandbox_tools_follow_the_token() {
+        let access = |acts: bool| Access::new("/tmp/sbx-repo", acts, "sandbox-decision-token-0123456789");
+        let cases = [
+            ("reader", access(false), true, false),
+            ("actor", access(true), true, true),
+            ("file token that may act", Access { sandbox_acts: true, ..access(false) }, true, true),
+            ("grounding", Access { grounding: true, ..access(false) }, false, false),
+            ("workspace chat", Access { workspace: true, ..access(true) }, false, false),
+            ("workspace file token", Access { workspace: true, sandbox_acts: true, ..access(false) }, false, false),
+            ("codi", Access { codi: true, ..access(true) }, false, false),
+        ];
+        for (label, access, reach, acts) in cases {
+            assert_eq!((access.sandbox_reach(), access.sandbox_acts()), (reach, acts), "{label}");
+        }
+    }
+
+    /// Through the server: a token that may not act is refused `sandbox_exec` before anything is
+    /// looked up; one that may (a file token's included) gets as far as finding no sandbox bound to
+    /// its folder — and that file token still cannot reach any other action tool.
+    #[tokio::test]
+    async fn a_sandbox_action_needs_a_token_that_may_act() {
+        let call = |name: &str, arguments: Value| json!({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": name, "arguments": arguments}});
+        let text = |reply: &Value| reply["result"]["content"][0]["text"].as_str().unwrap_or_default().to_string();
+        let exec = call(crate::containers::agent_sandbox::tools::EXEC, json!({"argv": ["ls"]}));
+        let (reader, _r) = with_access("/tmp/sbx-repo", false);
+        let (_, reply) = post(&reader, exec.clone()).await;
+        assert!(reply["result"]["isError"] == true && text(&reply).contains("may not act"), "{reply}");
+
+        let token = "sandbox-file-token-".to_string() + &uuid::Uuid::new_v4().simple().to_string();
+        RUNS.lock().unwrap().insert(token.clone(), Access { sandbox_acts: true, ..Access::new("/tmp/sbx-repo", false, &token) });
+        let _grant = Grant { token: token.clone(), _full: None };
+        let mut file = HeaderMap::new();
+        file.insert("authorization", format!("Bearer {token}").parse().unwrap());
+        let (_, reply) = post(&file, exec).await;
+        assert!(reply["result"]["isError"] == true && text(&reply).contains("no running sandbox"), "{reply}");
+        let (_, reply) = post(&file, call("db_write", json!({"connection": "prod", "sql": "delete from t"}))).await;
+        assert!(reply["result"]["isError"] == true && text(&reply).contains("read-only"), "{reply}");
+        let (_, reply) = post(&file, json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).await;
+        let names = tool_names(&reply);
+        for action in ["service_restart", "db_write", "http_request", "run_with_secret"] {
+            assert!(!names.contains(&action.to_string()), "{action} offered to a file token: {names:?}");
+        }
+    }
+
+    /// A file's token is shared by the runs in its repository: its sandbox actions are on while
+    /// every run holding it may act, never in a workspace chat's folder, and never `acts` itself.
+    #[test]
+    fn a_file_token_runs_its_sandbox_only_while_every_holder_may_act() {
+        let token_of = |root: &std::path::Path| {
+            let text = std::fs::read_to_string(root.join(".grok/config.toml")).unwrap();
+            let url = text.lines().find_map(|l| l.strip_prefix("url = \"")).and_then(|rest| rest.strip_suffix('"')).unwrap().to_string();
+            RUNS.lock().unwrap().get(url.rsplit('/').next().unwrap()).cloned().unwrap()
+        };
+        let root = scratch_repo("grok-sandbox-acts");
+        let first = install_for(FileClient::Grok, &root, 47811, false, true, false).unwrap();
+        let access = token_of(&root);
+        assert!(access.sandbox_acts && !access.acts, "{access:?}");
+        let second = install_for(FileClient::Grok, &root, 47811, false, false, false).unwrap();
+        assert!(!token_of(&root).sandbox_acts, "a holder that may not act turns it off");
+        drop((first, second));
+        let reader = install_as(FileClient::Grok, &root, 47811, false).unwrap();
+        assert!(!token_of(&root).sandbox_acts, "the file written for a run that may not act");
+        drop(reader);
+        let _ = std::fs::remove_dir_all(&root);
+
+        let folder = std::env::temp_dir().join(format!("codeflow-ws-sbx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let grant = install_for(FileClient::Grok, &folder, 47811, true, true, false).unwrap();
+        assert!(!token_of(&folder).sandbox_acts, "a workspace chat's folder has no one checkout");
+        drop(grant);
+        let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A run over someone else's material makes the shared file token a grounding one — for every
+    /// holder, until the file goes — so neither the app's read tools nor its sandbox reach it.
+    #[test]
+    fn a_grounding_run_narrows_the_file_token_until_the_file_goes() {
+        let token_of = |root: &std::path::Path| {
+            let text = std::fs::read_to_string(root.join(".grok/config.toml")).unwrap();
+            let url = text.lines().find_map(|l| l.strip_prefix("url = \"")).and_then(|rest| rest.strip_suffix('"')).unwrap().to_string();
+            RUNS.lock().unwrap().get(url.rsplit('/').next().unwrap()).cloned().unwrap()
+        };
+        let root = scratch_repo("grok-grounding");
+        let chat = install_for(FileClient::Grok, &root, 47811, false, true, false).unwrap();
+        let before = token_of(&root);
+        assert!(!before.grounding && before.sandbox_reach() && before.sandbox_acts(), "{before:?}");
+        let review = install_for(FileClient::Grok, &root, 47811, false, false, true).unwrap();
+        let during = token_of(&root);
+        assert!(during.grounding && !during.sandbox_reach() && !during.sandbox_acts() && !during.scripts(), "{during:?}");
+        drop(review);
+        assert!(token_of(&root).grounding, "it stays narrow while the file stays");
+        drop(chat);
+        let fresh = install_for(FileClient::Grok, &root, 47811, false, true, false).unwrap();
+        assert!(!token_of(&root).grounding, "a new file starts from its own run");
+        drop(fresh);
         let _ = std::fs::remove_dir_all(&root);
     }
 

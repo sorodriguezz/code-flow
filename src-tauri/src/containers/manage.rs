@@ -1,6 +1,6 @@
 //! The engine operations the manager adds beyond list-and-act: live stats for every running
-//! container, resource limits, creating volumes and networks, an image's layers, disk usage, and a
-//! remote Docker engine as a context.
+//! container, resource limits, creating volumes and networks, an image's layers, disk usage, what a
+//! container changed in its own filesystem, and a remote Docker engine as a context.
 //!
 //! Docker and nerdctl print `--format '{{json .}}'` as one object per line with Go-template keys and
 //! every value as text (`"MemUsage": "8.3MiB / 7.8GiB"`); Podman prints `--format json` as one array
@@ -37,6 +37,15 @@ pub struct ImageLayer {
     pub created_by: String,
     pub size: u64,
     pub comment: String,
+}
+
+/// One line of `diff`: a file the container added, changed or deleted against its image.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffEntry {
+    /// `added`, `changed` or `deleted`.
+    pub kind: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -215,6 +224,26 @@ pub fn parse_history(out: &str) -> Vec<ImageLayer> {
             }
         })
         .collect()
+}
+
+/// `diff`'s `A /x`, `C /etc`, `D /tmp/y` — Docker's and Podman's alike. Sorted by path, so a folder
+/// comes before what changed inside it.
+pub fn parse_diff(out: &str) -> Vec<DiffEntry> {
+    let mut entries: Vec<DiffEntry> = out
+        .lines()
+        .filter_map(|line| {
+            let (mark, path) = line.trim_end().split_once(' ')?;
+            let kind = match mark {
+                "A" => "added",
+                "C" => "changed",
+                "D" => "deleted",
+                _ => return None,
+            };
+            path.starts_with('/').then(|| DiffEntry { kind: kind.into(), path: path.to_string() })
+        })
+        .collect();
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    entries
 }
 
 pub fn parse_disk_usage(out: &str) -> Vec<DiskUsageRow> {
@@ -457,6 +486,14 @@ pub async fn image_history(target: &Target, image: &str) -> Result<Vec<ImageLaye
     Ok(parse_history(&run_ok(target, args, engine::LIST_TIMEOUT).await?))
 }
 
+/// What a container changed in its filesystem since it was made from its image.
+pub async fn container_diff(target: &Target, id: &str) -> Result<Vec<DiffEntry>, String> {
+    not_ctr(target, "diff")?;
+    let id = id.trim();
+    engine::check_ref(id)?;
+    Ok(parse_diff(&run_ok(target, vec!["diff".into(), id.into()], engine::ACTION_TIMEOUT).await?))
+}
+
 pub async fn disk_usage(target: &Target) -> Result<Vec<DiskUsageRow>, String> {
     let engine = not_ctr(target, "disk usage summary")?;
     let args: Vec<String> = vec!["system".into(), "df".into(), "--format".into(), json_format(engine).into()];
@@ -613,6 +650,13 @@ mod tests {
         // cgroup v1: no `io.stat`, so the engine's own disk totals stay.
         assert_eq!(parse_exact_counters("  eth0: 5 1 0 0 0 0 0 0 7 1 0 0 0 0 0 0").block, None);
         assert_eq!(parse_exact_counters("cat: /proc/net/dev: No such file"), ExactCounters::default());
+    }
+
+    #[test]
+    fn a_diff_reads_every_mark_and_sorts_by_path() {
+        let entries = parse_diff("C /etc\nA /etc/app.conf\nD /tmp/old file\nC /root\n\nwarning: noise\nA relative\n");
+        let pairs: Vec<(&str, &str)> = entries.iter().map(|e| (e.kind.as_str(), e.path.as_str())).collect();
+        assert_eq!(pairs, vec![("changed", "/etc"), ("added", "/etc/app.conf"), ("changed", "/root"), ("deleted", "/tmp/old file")]);
     }
 
     #[test]

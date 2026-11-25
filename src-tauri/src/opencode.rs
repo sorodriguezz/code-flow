@@ -61,6 +61,12 @@ const DEFAULT_BINARY: &str = "opencode";
 pub struct OpenCodeEngine;
 
 impl AiEngine for OpenCodeEngine {
+    /// `opencode acp` (2.4.1, verified 2026-11-24): its cost per turn rides on `usage_update`, and a
+    /// quota refusal comes back structured (`provider.quota`). See `crate::acp`.
+    fn acp_args(&self, _sandbox: bool) -> Option<Vec<String>> {
+        Some(vec!["acp".into()])
+    }
+
     fn id(&self) -> &'static str {
         "opencode"
     }

@@ -96,6 +96,13 @@ fn finish(mut cmd: Command, inv: &AiInvocation) -> Command {
 pub struct GrokEngine;
 
 impl AiEngine for GrokEngine {
+    /// `grok agent stdio` (1.0.92, verified 2026-11-24), with `--no-leader` so each server is ours alone
+    /// rather than a client of a shared leader the user's own terminal may also be driving. A
+    /// read-only turn stays on `-p`, whose `--tools` allow-list *enforces* it (`crate::acp::eligible`).
+    fn acp_args(&self, _sandbox: bool) -> Option<Vec<String>> {
+        Some(vec!["agent".into(), "--no-leader".into(), "stdio".into()])
+    }
+
     /// Grok reads project skills from both `.agents/skills` and `.claude/skills` (its guide's skills
     /// page, and `grok inspect` in a folder holding each). Pointed at the Claude one so a repository,
     /// which the app syncs there, needs no second copy — and so no skill is listed to it twice.

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Braces, Check, ChevronRight, CircleAlert, Copy, Loader2, OctagonX, X } from "lucide-react";
-import { failedCalls, highlightScript, scriptStatus, type AppScript, type CodeToken, type ScriptStatus } from "../../lib/appScript";
+import { failedCalls, highlightScript, scriptStatus, scriptTokens, type AppScript, type CodeToken, type ScriptStatus } from "../../lib/appScript";
+import { formatTokens } from "../../lib/contextWindow";
+import { useLocale } from "../chat/chatChrome";
 import { writeClipboardText } from "../../lib/clipboard";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -102,6 +104,7 @@ export function ScriptStep({ script, live, reading }: { script: AppScript; live:
               </div>
             </div>
           )}
+          <TokenLine script={script} />
           {script.logs && (
             <div className="mx-2.5 mb-2 min-w-0 rounded-md px-2 py-1.5 shadow-[inset_0_0_0_1px_var(--cf-border)]">
               <div className="mb-0.5 font-mono text-[9.5px] uppercase tracking-[0.08em] text-[var(--cf-text-faint)]">{t("ai.script.console")}</div>
@@ -113,6 +116,19 @@ export function ScriptStep({ script, live, reading }: { script: AppScript; live:
         </div>
       )}
     </div>
+  );
+}
+
+/** "Read ~42k tokens · ~600 reached the model" — what the script kept out of the context. */
+function TokenLine({ script }: { script: AppScript }) {
+  const t = useT();
+  const locale = useLocale();
+  const tokens = scriptTokens(script);
+  if (!tokens || tokens.read === 0) return null;
+  return (
+    <p className="mx-2.5 mb-2 font-mono text-[10px] tabular-nums text-[var(--cf-text-faint)]" title={t("ai.script.tokensHint")}>
+      {t("ai.script.tokens", { read: formatTokens(tokens.read, locale), returned: formatTokens(tokens.returned, locale) })}
+    </p>
   );
 }
 

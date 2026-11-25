@@ -636,6 +636,16 @@ pub fn live_processes() -> usize {
 /// Set once the app has begun to quit, and never cleared: nothing starts after that point.
 static STOPPING: AtomicBool = AtomicBool::new(false);
 
+/// Says which run a listed process is working for now — a warm agent server (`crate::acp`) serves
+/// one turn after another, and Stop of a run ends what that run is using.
+pub(crate) fn tag_process(pid: u32, run_id: Option<&str>) {
+    if let Ok(mut live) = live().lock() {
+        if let Some(entry) = live.get_mut(&pid) {
+            *entry = run_id.map(str::to_string);
+        }
+    }
+}
+
 /// A process on the list above, for as long as this guard lives — `ai::spawn_once` holds one from
 /// the moment its child exists until the child is gone, by every route out.
 pub(crate) struct LiveProcess(u32);

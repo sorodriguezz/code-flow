@@ -5,23 +5,34 @@
 //! bare `ctr`) and `kubectl` — so the panel shows exactly what a terminal would, and an action
 //! here is the command the user would have typed.
 //!
-//! - [`cli`] finds the tools (including where OrbStack, Docker Desktop, Rancher Desktop and Podman
-//!   put them without telling the shell) and runs them.
+//! - [`cli`] finds the tools (including where OrbStack, Docker Desktop, Rancher Desktop, Podman and
+//!   Kiri put them without telling the shell) and runs them.
 //! - [`engine`] reads and acts on the Docker-compatible engines, whatever JSON dialect they print.
 //! - [`kube`] does the same for a Kubernetes context.
 //! - [`session`] opens a container's logs or a shell inside it as a terminal session.
 //! - [`forward`] keeps `kubectl port-forward`s running.
+//! - [`marketplace`] provisions catalogue services as a Compose stack and wires them into the app.
+//! - [`local`] makes and lists the clusters kind, k3d and minikube run on this computer.
+//! - [`helm`] reads and changes a cluster's Helm releases.
+//! - [`envs`] runs one environment per branch — its own worktree, Compose project and host ports.
 
+pub mod agent_sandbox;
 pub mod azure;
 pub mod builds;
 pub mod cli;
 pub mod engine;
+pub mod envs;
 pub mod files;
 pub mod forward;
+pub mod hardening;
+pub mod helm;
 pub mod hub;
 pub mod kube;
 pub mod kubeconfig;
+pub mod local;
 pub mod manage;
+pub mod marketplace;
+pub mod policy;
 pub mod run;
 pub mod scan;
 pub mod session;
@@ -42,6 +53,8 @@ pub struct ContextInfo {
     pub detail: String,
     /// A Kubernetes context's own default namespace.
     pub namespace: String,
+    /// What provides a Docker context's engine, from its endpoint (`provider_of`): `Kiri`, `OrbStack`…
+    pub provider: Option<String>,
 }
 
 /// One runtime found on this computer.
@@ -82,7 +95,10 @@ pub fn glob_match(pattern: &str, value: &str) -> bool {
 /// Who provides a Docker endpoint, from its socket path.
 pub fn provider_of(endpoint: &str) -> Option<(&'static str, &'static str)> {
     let e = endpoint.to_lowercase();
-    if e.contains(".orbstack") {
+    // Kiri serves `~/.kiri/run/docker.sock` (`pipe/kiri` on Windows) and names its context `kiri`.
+    if e.contains("/.kiri/") || e.contains("pipe/kiri") || e.contains("/wsl/kiri/") {
+        Some(("Kiri", "kiri"))
+    } else if e.contains(".orbstack") {
         Some(("OrbStack", "orbstack"))
     } else if e.contains(".colima") {
         Some(("Colima", "colima"))
@@ -145,7 +161,8 @@ async fn detect_docker() -> Option<RuntimeInfo> {
                 }
             }
             if !name.is_empty() {
-                info.contexts.push(ContextInfo { name, detail: endpoint, namespace: String::new() });
+                let provider = provider_of(&endpoint).map(|(label, _)| label.to_string());
+                info.contexts.push(ContextInfo { name, detail: endpoint, namespace: String::new(), provider });
             }
         }
     }
@@ -208,7 +225,7 @@ async fn detect_podman() -> Option<RuntimeInfo> {
             if value.get("Default").and_then(Value::as_bool).unwrap_or(false) {
                 info.current_context = Some(name.clone());
             }
-            info.contexts.push(ContextInfo { detail: value.get("URI").and_then(Value::as_str).unwrap_or_default().to_string(), name, namespace: String::new() });
+            info.contexts.push(ContextInfo { detail: value.get("URI").and_then(Value::as_str).unwrap_or_default().to_string(), name, namespace: String::new(), provider: None });
         }
     }
     Some(info)
@@ -285,7 +302,7 @@ async fn detect_containerd() -> Option<RuntimeInfo> {
     if info.running {
         let target = engine::Target { runtime: id.into(), context: None };
         if let Ok(names) = engine::namespaces(&target).await {
-            info.contexts = names.into_iter().map(|name| ContextInfo { name, detail: String::new(), namespace: String::new() }).collect();
+            info.contexts = names.into_iter().map(|name| ContextInfo { name, detail: String::new(), namespace: String::new(), provider: None }).collect();
         }
     }
     Some(info)
@@ -313,7 +330,7 @@ async fn detect_kubernetes() -> Option<RuntimeInfo> {
     }
     match kube::contexts().await {
         Ok((contexts, current)) => {
-            info.contexts = contexts.into_iter().map(|c| ContextInfo { name: c.name, detail: c.cluster, namespace: c.namespace }).collect();
+            info.contexts = contexts.into_iter().map(|c| ContextInfo { name: c.name, detail: c.cluster, namespace: c.namespace, provider: None }).collect();
             info.current_context = current;
             if info.contexts.is_empty() {
                 info.problem = Some("no contexts".into());
@@ -330,7 +347,8 @@ pub async fn detect() -> Vec<RuntimeInfo> {
     [docker, podman, containerd, kubernetes].into_iter().flatten().collect()
 }
 
-/// Starts what provides a runtime: OrbStack, Docker Desktop, Colima, a Podman machine, Rancher Desktop.
+/// Starts what provides a runtime: OrbStack, Docker Desktop, Colima, a Podman machine, Rancher Desktop,
+/// Kiri.
 pub async fn start_runtime(how: &str) -> Result<String, String> {
     let run = |program: &str, args: &[&str], seconds: u64| {
         let program = program.to_string();
@@ -345,6 +363,14 @@ pub async fn start_runtime(how: &str) -> Result<String, String> {
         "colima" => run("colima", &["start"], 300).await,
         "podmanMachine" => run("podman", &["machine", "start"], 300).await,
         "rancherDesktop" => run("rdctl", &["start"], 60).await,
+        // `kiri start` is what Start in Kiri's window does. Without its CLI where we look, its app.
+        "kiri" => match cli::find("kiri") {
+            Some(_) => run("kiri", &["start"], 180).await,
+            #[cfg(target_os = "macos")]
+            None => cli::run_ok("open", &["-a".into(), "Kiri".into()], None, Duration::from_secs(20)).await,
+            #[cfg(not(target_os = "macos"))]
+            None => Err("Kiri's `kiri` command is not installed where it could be found".into()),
+        },
         "dockerDesktop" => {
             #[cfg(target_os = "macos")]
             {
@@ -484,6 +510,8 @@ mod tests {
         assert_eq!(provider_of("npipe:////./pipe/docker_engine").map(|p| p.0), Some("Docker Desktop"));
         assert_eq!(provider_of("unix:///Users/me/.colima/default/docker.sock").map(|p| p.1), Some("colima"));
         assert_eq!(provider_of("unix:///var/run/docker.sock"), None);
+        assert_eq!(provider_of("unix:///Users/me/.kiri/run/docker.sock"), Some(("Kiri", "kiri")));
+        assert_eq!(provider_of("npipe:////./pipe/kiri").map(|p| p.0), Some("Kiri"));
     }
 
     #[test]

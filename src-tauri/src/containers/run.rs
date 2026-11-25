@@ -62,6 +62,144 @@ pub struct RunSpec {
     pub network: String,
     pub memory_mb: Option<f64>,
     pub cpus: Option<f64>,
+    /// `--read-only`: the container's own filesystem cannot be written; volumes and tmpfs still can.
+    pub read_only: bool,
+    /// `--user`: `1000`, `1000:1000`, `app` or `app:staff`; empty keeps the image's.
+    pub user: String,
+    /// `--cap-drop` / `--cap-add`: `NET_ADMIN`, `CAP_NET_ADMIN` or `ALL`.
+    pub cap_drop: Vec<String>,
+    pub cap_add: Vec<String>,
+    /// `--security-opt no-new-privileges`: no setuid binary can raise what a process may do.
+    pub no_new_privileges: bool,
+    /// `--security-opt seccomp=…`: empty is the engine's default profile, `unconfined` none, or the
+    /// full path of a profile on this computer (the CLI reads it and sends its contents).
+    pub seccomp: String,
+    /// `--tmpfs /run` or `--tmpfs /tmp:size=64m,mode=1777`, one per row.
+    pub tmpfs: Vec<String>,
+    pub pids_limit: Option<f64>,
+    pub shm_size_mb: Option<f64>,
+    pub health: RunHealth,
+}
+
+/// A container's healthcheck, replacing the image's (`HEALTHCHECK` in its Dockerfile).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RunHealth {
+    /// Run by the container's shell (`CMD-SHELL`); empty keeps the image's check.
+    pub command: String,
+    pub interval_s: Option<f64>,
+    pub timeout_s: Option<f64>,
+    pub start_period_s: Option<f64>,
+    pub retries: Option<f64>,
+    /// `--no-healthcheck`: turns the image's own check off. Wins over a command.
+    pub disabled: bool,
+}
+
+/// A Linux capability as the engines take it, upper case and without its `CAP_` (both spellings are
+/// read by every engine; one is shown). `ALL` is every one.
+pub fn capability(raw: &str) -> Result<String, String> {
+    let upper = raw.trim().to_ascii_uppercase();
+    let name = upper.strip_prefix("CAP_").unwrap_or(&upper);
+    let valid = !name.is_empty() && name.len() <= 32 && name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && name.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    if valid {
+        Ok(name.to_string())
+    } else {
+        Err(format!("{raw} is not a Linux capability (NET_ADMIN, SYS_TIME, ALL…)"))
+    }
+}
+
+/// `--user`'s value: a name or number, and optionally `:` a group's.
+fn check_user(user: &str) -> Result<(), String> {
+    let part = |p: &str| p.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') && p.len() <= 64 && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    let valid = match user.split_once(':') {
+        Some((who, group)) => part(who) && part(group),
+        None => part(user),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("{user} is not a user (1000, 1000:1000, app or app:staff)"))
+    }
+}
+
+/// One `--tmpfs`, or `None` for an empty row: a path in the container and its mount options.
+fn tmpfs_arg(raw: &str) -> Result<Option<String>, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let (path, options) = raw.split_once(':').unwrap_or((raw, ""));
+    if !path.starts_with('/') || path.contains(|c: char| c.is_whitespace() || c.is_control()) {
+        return Err(format!("{path} is not a path inside the container (it starts with /)"));
+    }
+    if raw.contains(':') && (options.is_empty() || !options.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '=' | ',' | '.' | '_' | '-'))) {
+        return Err(format!("{options} are not tmpfs options (size=64m,mode=1777)"));
+    }
+    Ok(Some(raw.to_string()))
+}
+
+/// `--security-opt seccomp=…`, or `None` for the engine's default profile.
+fn seccomp_opt(raw: &str) -> Result<Option<String>, String> {
+    let raw = raw.trim();
+    match raw {
+        "" | "default" => Ok(None),
+        "unconfined" => Ok(Some("seccomp=unconfined".into())),
+        path => {
+            if !Path::new(path).is_absolute() || path.contains('\0') {
+                return Err(format!("{path} is not a full path to a seccomp profile"));
+            }
+            if !Path::new(path).is_file() {
+                return Err(format!("{path} is not a file on this computer"));
+            }
+            Ok(Some(format!("seccomp={path}")))
+        }
+    }
+}
+
+/// A count of seconds as the engines take a duration: `30s`, `1.5s`.
+fn seconds(value: f64, what: &str) -> Result<String, String> {
+    if !value.is_finite() || value <= 0.0 || value > 86_400.0 {
+        return Err(format!("{value} is not a {what} in seconds (more than 0, at most a day)"));
+    }
+    let text = format!("{:.3}", value);
+    Ok(format!("{}s", text.trim_end_matches('0').trim_end_matches('.')))
+}
+
+/// A whole number from a form's number field, within `range`.
+fn whole(value: f64, what: &str, range: std::ops::RangeInclusive<f64>) -> Result<u64, String> {
+    if !value.is_finite() || value.fract() != 0.0 || !range.contains(&value) {
+        return Err(format!("{value} is not a {what} ({} to {})", range.start(), range.end()));
+    }
+    Ok(value as u64)
+}
+
+/// The healthcheck's flags, in the order `docker run --help` lists them.
+fn health_args(health: &RunHealth) -> Result<Vec<String>, String> {
+    if health.disabled {
+        return Ok(vec!["--no-healthcheck".into()]);
+    }
+    let command = health.command.trim();
+    let mut args = Vec::new();
+    if !command.is_empty() {
+        if command.contains('\0') {
+            return Err("the healthcheck holds a NUL character".into());
+        }
+        // Joined with `=`: a check that starts with `-` stays the flag's value.
+        args.push(format!("--health-cmd={command}"));
+    }
+    if let Some(s) = health.interval_s {
+        args.push(format!("--health-interval={}", seconds(s, "healthcheck interval")?));
+    }
+    if let Some(s) = health.timeout_s {
+        args.push(format!("--health-timeout={}", seconds(s, "healthcheck timeout")?));
+    }
+    if let Some(s) = health.start_period_s {
+        args.push(format!("--health-start-period={}", seconds(s, "start period")?));
+    }
+    if let Some(n) = health.retries {
+        args.push(format!("--health-retries={}", whole(n, "number of retries", 1.0..=100.0)?));
+    }
+    Ok(args)
 }
 
 /// `80` or `8000-8010`: each port 1 to 65535, a range low to high.
@@ -356,6 +494,39 @@ pub fn run_args(engine: EngineKind, spec: &RunSpec) -> Result<Vec<String>, Strin
     if let Some(cpus) = spec.cpus {
         args.extend(["--cpus".into(), cpus_value(cpus)?]);
     }
+    if let Some(pids) = spec.pids_limit {
+        args.extend(["--pids-limit".into(), whole(pids, "process limit", 1.0..=4_194_304.0)?.to_string()]);
+    }
+    if let Some(mb) = spec.shm_size_mb {
+        args.extend(["--shm-size".into(), memory_value(mb)?]);
+    }
+    let user = spec.user.trim();
+    if !user.is_empty() {
+        check_user(user)?;
+        args.extend(["--user".into(), user.into()]);
+    }
+    if spec.read_only {
+        args.push("--read-only".into());
+    }
+    for raw in &spec.tmpfs {
+        if let Some(tmpfs) = tmpfs_arg(raw)? {
+            args.extend(["--tmpfs".into(), tmpfs]);
+        }
+    }
+    // Dropped before added, as the engines apply them: `--cap-drop ALL --cap-add NET_BIND_SERVICE`
+    // is the hardened way to keep one.
+    for (flag, list) in [("--cap-drop", &spec.cap_drop), ("--cap-add", &spec.cap_add)] {
+        for raw in list.iter().filter(|c| !c.trim().is_empty()) {
+            args.extend([flag.into(), capability(raw)?]);
+        }
+    }
+    if spec.no_new_privileges {
+        args.extend(["--security-opt".into(), "no-new-privileges".into()]);
+    }
+    if let Some(opt) = seccomp_opt(&spec.seccomp)? {
+        args.extend(["--security-opt".into(), opt]);
+    }
+    args.extend(health_args(&spec.health)?);
     // After the image everything is the container's: a `--flag` there is the command's own.
     args.push(image.into());
     args.extend(split_command(&spec.command)?);
@@ -467,6 +638,7 @@ mod tests {
             network: "cf-net".into(),
             memory_mb: Some(512.0),
             cpus: Some(1.5),
+            ..Default::default()
         };
         assert_eq!(
             args(&full),
@@ -595,6 +767,64 @@ mod tests {
         assert_eq!(args(&s), vec!["run", "-d", "--memory", "1024m", "--cpus", "0.25", "redis"]);
         s.cpus = Some(0.0);
         assert!(run_args(EngineKind::Docker, &s).is_err());
+    }
+
+    #[test]
+    fn the_hardened_options_in_their_place() {
+        let mut s = spec("node:22");
+        s.memory_mb = Some(512.0);
+        s.pids_limit = Some(256.0);
+        s.shm_size_mb = Some(64.0);
+        s.user = "1000:1000".into();
+        s.read_only = true;
+        s.tmpfs = vec!["/tmp:size=64m,mode=1777".into(), " ".into(), "/run".into()];
+        s.cap_drop = vec!["all".into()];
+        s.cap_add = vec!["CAP_NET_BIND_SERVICE".into(), "".into()];
+        s.no_new_privileges = true;
+        s.seccomp = "unconfined".into();
+        s.health = RunHealth { command: "curl -f http://localhost:3000/health || exit 1".into(), interval_s: Some(30.0), timeout_s: Some(2.5), start_period_s: None, retries: Some(3.0), disabled: false };
+        assert_eq!(
+            args(&s),
+            vec![
+                "run", "-d", "--memory", "512m", "--pids-limit", "256", "--shm-size", "64m", "--user", "1000:1000", "--read-only", "--tmpfs", "/tmp:size=64m,mode=1777", "--tmpfs", "/run",
+                "--cap-drop", "ALL", "--cap-add", "NET_BIND_SERVICE", "--security-opt", "no-new-privileges", "--security-opt", "seccomp=unconfined",
+                "--health-cmd=curl -f http://localhost:3000/health || exit 1", "--health-interval=30s", "--health-timeout=2.5s", "--health-retries=3", "node:22",
+            ]
+        );
+        s.health.disabled = true;
+        assert!(args(&s).contains(&"--no-healthcheck".to_string()) && !args(&s).iter().any(|a| a.starts_with("--health-")), "off wins over a command");
+    }
+
+    #[test]
+    fn the_hardened_options_refuse_what_no_engine_reads() {
+        let refused = |edit: &dyn Fn(&mut RunSpec)| {
+            let mut s = spec("redis");
+            edit(&mut s);
+            run_args(EngineKind::Docker, &s).is_err()
+        };
+        assert!(refused(&|s| s.user = "-u".into()));
+        assert!(refused(&|s| s.user = "app:".into()));
+        assert!(refused(&|s| s.user = "a b".into()));
+        assert!(refused(&|s| s.cap_add = vec!["net admin".into()]));
+        assert!(refused(&|s| s.cap_drop = vec!["CAP_".into()]));
+        assert!(refused(&|s| s.tmpfs = vec!["tmp".into()]));
+        assert!(refused(&|s| s.tmpfs = vec!["/tmp:".into()]));
+        assert!(refused(&|s| s.tmpfs = vec!["/tmp:size=1m;rm".into()]));
+        assert!(refused(&|s| s.seccomp = "profile.json".into()));
+        assert!(refused(&|s| s.seccomp = "/nowhere/at/all.json".into()));
+        assert!(refused(&|s| s.pids_limit = Some(0.0)));
+        assert!(refused(&|s| s.pids_limit = Some(1.5)));
+        assert!(refused(&|s| s.shm_size_mb = Some(1.0)));
+        assert!(refused(&|s| s.health.interval_s = Some(0.0)));
+        assert!(refused(&|s| s.health.retries = Some(0.0)));
+        assert!(refused(&|s| s.health.command = "nul\0".into()));
+        assert_eq!(capability("sys_time").unwrap(), "SYS_TIME");
+        assert_eq!(seconds(90.0, "x").unwrap(), "90s");
+        assert_eq!(seccomp_opt("default").unwrap(), None);
+        let profile = std::env::temp_dir().join(format!("cf-seccomp-{}.json", std::process::id()));
+        std::fs::write(&profile, "{}").unwrap();
+        assert_eq!(seccomp_opt(profile.to_str().unwrap()).unwrap(), Some(format!("seccomp={}", profile.display())));
+        let _ = std::fs::remove_file(profile);
     }
 
     #[test]

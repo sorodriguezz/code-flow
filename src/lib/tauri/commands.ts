@@ -1667,6 +1667,8 @@ export interface ProviderCaps {
   appScripts: "full" | "read" | "none";
   /** Scripts are on for it until the user says otherwise. */
   appScriptsDefault: boolean;
+  /** It can run as an ACP agent server — Settings offers «ACP / CLI» for it. */
+  acp: boolean;
 }
 
 /** Every provider's capabilities, in settings order. Fixed per build. */
@@ -1675,6 +1677,10 @@ export const providerCaps = () => invoke<ProviderCaps[]>("provider_caps");
 /** The setting that switches CodeFlow scripts for one provider: `on` or `off`; unset is its default.
  *  Read by `app_script::enabled_for`. */
 export const appScriptsKey = (providerId: string) => `app_scripts:${providerId}`;
+
+/** The setting that picks how a provider's turns run: `acp` (an agent server, the default) or `cli`
+ *  (one process per turn). Read by `acp::enabled_for`. */
+export const agentTransportKey = (providerId: string) => `ai_transport:${providerId}`;
 
 /** Mirrors `ai::AiFailure` — one failed run, classified. See `aiClassifyFailure`. */
 export interface AiFailure {

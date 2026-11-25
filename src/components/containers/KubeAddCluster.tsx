@@ -7,6 +7,7 @@ import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
 import { chipClass, fieldClass, rowClass } from "../common/recipes";
 import { Dialog, Field } from "./ui";
+import { LocalClusterPane } from "./KubeLocalClusters";
 import { containersKubeAccounts, containersKubeAdd, containersKubeClouds, containersKubeTest, containersKubeTools } from "../../lib/tauri/containersCommands";
 import { currentPlatform } from "../../lib/platform";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -18,13 +19,15 @@ import type { CloudAccount, CloudCluster, CloudSource, KubeAdded, KubeAddRequest
  * «Agregar clúster» — a Kubernetes cluster from anywhere into the Contenedores panel: a kubeconfig
  * file, Azure AKS, AWS EKS or Google GKE through their own CLIs, or a server typed in. Everything
  * lands in CodeFlow's own kubeconfig (`kubeconfig.rs`), which every kubectl the app runs reads after
- * the user's; "also in ~/.kube/config" puts it where a terminal's kubectl sees it too.
+ * the user's; "also in ~/.kube/config" puts it where a terminal's kubectl sees it too. «Local» is the
+ * other way round: kind, k3d or minikube make a cluster on this computer (`KubeLocalClusters`), and
+ * write its context into the user's own kubeconfig themselves.
  *
  * The dialog stays open after an add — `onAdded` fires at once so the panel can read its contexts
  * again — to show what the add warned about and to test the first new context from here.
  */
 
-type Source = "file" | CloudSource | "manual";
+type Source = "file" | CloudSource | "manual" | "local";
 type Tool = keyof KubeTools;
 
 /** The picker's options, in its order: each source's name and the line its tooltip adds. */
@@ -34,6 +37,7 @@ const SOURCES: Array<{ value: Source; label: TranslationKey; title: TranslationK
   { value: "eks", label: "containers.kube.add.source.eks", title: "containers.kube.add.source.eksHint" },
   { value: "gke", label: "containers.kube.add.source.gke", title: "containers.kube.add.source.gkeHint" },
   { value: "manual", label: "containers.kube.add.source.manual", title: "containers.kube.add.source.manualHint" },
+  { value: "local", label: "containers.local.source", title: "containers.local.sourceHint" },
 ];
 const ACCOUNT_LABELS: Record<CloudSource, TranslationKey> = {
   aks: "containers.kube.add.account.aks",
@@ -519,7 +523,7 @@ export function KubeAddCluster({ onClose, onAdded }: { onClose: () => void; onAd
   };
 
   // A cloud's accounts are read the first time its tab is shown, once its CLI is known to be there.
-  const cloud = source === "file" || source === "manual" ? null : source;
+  const cloud = source === "file" || source === "manual" || source === "local" ? null : source;
   const cloudState = cloud ? clouds[cloud] : null;
   useEffect(() => {
     if (!cloud || !tools || !tools[CLI[cloud]] || !cloudState || cloudState.accounts !== null || cloudState.loadingAccounts) return;
@@ -562,6 +566,8 @@ export function KubeAddCluster({ onClose, onAdded }: { onClose: () => void; onAd
         toUserConfig,
       };
     }
+    // A local cluster is made by its own pane, as a job: nothing is added from here.
+    if (source === "local") return null;
     const state = clouds[source];
     const picked = state.picked;
     if (!picked) return null;
@@ -622,7 +628,11 @@ export function KubeAddCluster({ onClose, onAdded }: { onClose: () => void; onAd
 
   const sourceOptions = SOURCES.map((option) => ({ value: option.value, label: t(option.label), title: t(option.title) }));
 
-  const footer = added ? (
+  const footer = source === "local" && !added ? (
+    <Button size="md" variant="ghost" onClick={onClose}>
+      {t("common.close")}
+    </Button>
+  ) : added ? (
     <>
       <Button size="md" variant="ghost" onClick={another}>
         {t("containers.kube.add.another")}
@@ -731,6 +741,7 @@ export function KubeAddCluster({ onClose, onAdded }: { onClose: () => void; onAd
             />
           )}
           {source === "manual" && <ManualPane state={manual} onPatch={(patch) => setManual((m) => ({ ...m, ...patch }))} onSubmit={() => void submit()} />}
+          {source === "local" && <LocalClusterPane onStarted={onClose} />}
           {problem && <ErrorLine text={problem} />}
         </div>
       )}

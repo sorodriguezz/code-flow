@@ -890,6 +890,13 @@ How to work:\n",
     if grants.run {
         system.push_str("- run_command runs a shell command in the project root; use it to run tests or builds when that helps. A command that deletes or overwrites something waits for the user's approval — if they say no, do not look for another way to do it. Never run interactive commands.\n");
     }
+    if offered.contains(&crate::containers::agent_sandbox::tools::READ_FILE) {
+        system.push_str(if offered.contains(&crate::containers::agent_sandbox::tools::EXEC) {
+            "- This project folder is the checkout of an isolated sandbox container, mounted there at /workspace: sandbox_exec runs a command inside it (builds, tests) where it cannot touch this computer, sandbox_logs and sandbox_ports show its output and ports. Every command there is recorded for the user.\n"
+        } else {
+            "- This project folder is the checkout of an isolated sandbox container, mounted there at /workspace: sandbox_logs and sandbox_ports show its output and ports.\n"
+        });
+    }
     let app: Vec<&str> = offered.iter().copied().filter(|name| matches!(*name, "service_logs" | "terminal_output" | "db_write" | "http_request" | "run_with_secret")).collect();
     if !app.is_empty() {
         system.push_str("- Some tools reach the CodeFlow app around the project (the services it runs, its terminals). The ones that use something the user saved — a database write, an API request, a keyring entry — ask the user first and never show you the secret; if the user says no, accept it.\n");
@@ -958,7 +965,9 @@ async fn agent(
         .with_repos(inv.extra_dirs)
         .with_model(&session.live.model)
         .with_given_memories(memory_count)
-        .with_full_access(inv.full_access && !inv.read_only);
+        .with_full_access(inv.full_access && !inv.read_only)
+        // The run's sandbox, when its folder is one's checkout — never for a run judging material.
+        .with_sandbox(!grounding);
     log(ctx, json!({ "event": "note", "text": format!("access {}", toolbox.level().as_str()) }));
     // The same switch that keeps the map from the CLI agents (Settings › Herramientas de IA › MCP).
     let toolbox = if crate::codemap::mcp::enabled() { toolbox } else { toolbox.without_map() };
@@ -1542,6 +1551,19 @@ mod tests {
         assert!(skilled.contains("exactly the format the task asks"), "a judging run answers in its task's format");
         assert!(skilled.contains("material you were given names the files"), "no listing follows");
         assert!(!skilled.contains("general programming question"), "a task's request is always about the project");
+    }
+
+    /// The sandbox is mentioned only where its tools are offered, and its command only to a run
+    /// that has `sandbox_exec`.
+    #[test]
+    fn the_sandbox_is_described_only_to_a_run_that_has_it() {
+        let grants = Grants { write: true, run: false, reach: Reach::Project };
+        let without = agent_system(grants, &["read_file"], true, false, false);
+        assert!(!without.contains("sandbox"), "{without}");
+        let reads = agent_system(grants, &["read_file", "sandbox_read_file", "sandbox_logs", "sandbox_ports"], true, false, false);
+        assert!(reads.contains("sandbox_logs") && !reads.contains("sandbox_exec"), "{reads}");
+        let acts = agent_system(grants, &["read_file", "sandbox_read_file", "sandbox_logs", "sandbox_ports", "sandbox_exec", "sandbox_write_file"], true, false, false);
+        assert!(acts.contains("sandbox_exec runs a command inside it"), "{acts}");
     }
 
     /// A conversation is told that a general question needs no tools, and — when its turn came

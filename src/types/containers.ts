@@ -8,6 +8,8 @@ export interface ContextInfo {
   detail: string;
   /** A Kubernetes context's own default namespace. */
   namespace: string;
+  /** What provides a Docker context's engine, from its endpoint: `Kiri`, `OrbStack`… */
+  provider?: string | null;
 }
 
 export interface RuntimeInfo {
@@ -218,6 +220,32 @@ export interface RunSpec {
   network: string;
   memoryMb: number | null;
   cpus: number | null;
+  /** The container's own filesystem cannot be written; volumes and tmpfs still can. */
+  readOnly?: boolean;
+  /** `1000`, `1000:1000`, `app`; empty keeps the image's. */
+  user?: string;
+  capDrop?: string[];
+  capAdd?: string[];
+  noNewPrivileges?: boolean;
+  /** `""` the engine's default profile, `unconfined`, or a profile's full path. */
+  seccomp?: string;
+  /** `/tmp` or `/tmp:size=64m,mode=1777`. */
+  tmpfs?: string[];
+  pidsLimit?: number | null;
+  shmSizeMb?: number | null;
+  health?: RunHealth;
+}
+
+/** A healthcheck replacing the image's (`containers::run::RunHealth`). */
+export interface RunHealth {
+  /** Run by the container's shell; empty keeps the image's check. */
+  command: string;
+  intervalS: number | null;
+  timeoutS: number | null;
+  startPeriodS: number | null;
+  retries: number | null;
+  /** Turns the image's check off; wins over a command. */
+  disabled: boolean;
 }
 
 export interface ContainerStats {
@@ -524,4 +552,75 @@ export interface Finding {
 export interface ScanResult {
   scanner: string;
   findings: Finding[];
+  /** The kept scan's id; empty when it could not be kept. */
+  id: string;
+  /** RFC 3339. */
+  scannedAt: string;
+  /** The image's id at the time (`sha256:…`). */
+  imageId: string;
+}
+
+/** One kept scan of an image, without its findings (`containers::scan::ScanSummary`). */
+export interface ScanSummary {
+  id: string;
+  image: string;
+  imageId: string;
+  scanner: string;
+  scannedAt: string;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  unknown: number;
+}
+
+/** What a later scan found that an earlier one did not, and what it no longer finds. */
+export interface ScanComparison {
+  added: Finding[];
+  fixed: Finding[];
+  kept: number;
+}
+
+export type SbomFormat = "cyclonedx" | "spdx";
+
+/** A file a container added, changed or deleted against its image. */
+export interface DiffEntry {
+  kind: "added" | "changed" | "deleted";
+  path: string;
+}
+
+export type HardeningRule =
+  | "privileged"
+  | "engineSocket"
+  | "hostMount"
+  | "hostNetwork"
+  | "hostPid"
+  | "hostIpc"
+  | "dangerousCap"
+  | "seccompOff"
+  | "apparmorOff"
+  | "devices"
+  | "rootUser"
+  | "newPrivileges"
+  | "writableRoot"
+  | "noMemoryLimit"
+  | "noCpuLimit"
+  | "noPidsLimit"
+  | "noHealthcheck"
+  | "allInterfaces";
+
+/** What in a container's configuration weakens its isolation (`containers::hardening`). */
+export interface HardeningFinding {
+  rule: HardeningRule;
+  severity: "high" | "medium" | "low";
+  /** A path, a capability, a port — or empty. */
+  detail: string;
+}
+
+/** One problem hadolint found in a Dockerfile. */
+export interface LintFinding {
+  line: number;
+  code: string;
+  level: "error" | "warning" | "info" | "style" | string;
+  message: string;
 }

@@ -8,6 +8,9 @@ import {
   Boxes,
   Box,
   Hammer,
+  ShieldCheck,
+  GitBranchPlus,
+  Store,
   HardDrive,
   Layers,
   LayoutDashboard,
@@ -16,6 +19,7 @@ import {
   List,
   Plus,
   RefreshCw,
+  ShipWheel,
   Unplug,
   Waypoints,
   type LucideIcon,
@@ -50,6 +54,9 @@ const ENGINE_SECTIONS: { id: EngineSection; icon: LucideIcon; label: Translation
   { id: "networks", icon: Network, label: "containers.section.networks" },
   { id: "compose", icon: Blocks, label: "containers.m.section.compose" },
   { id: "build", icon: Hammer, label: "containers.m.section.build" },
+  { id: "envs", icon: GitBranchPlus, label: "containers.envs.title" },
+  { id: "market", icon: Store, label: "containers.market.title" },
+  { id: "sandboxes", icon: ShieldCheck, label: "containers.sandbox.nav" },
 ];
 
 /** The kinds, in the groups `kubectl api-resources` would put them in. */
@@ -151,7 +158,7 @@ function useOpenProvider() {
   const setNav = useContainersStore((s) => s.setNav);
   return (id: RuntimeId | "azure") => {
     const { prefs, runtimes } = useContainersStore.getState();
-    const known = new Set<string>(id === "kubernetes" ? ["overview", "topology", ...KUBE_GROUPS.flatMap((g) => g.kinds)] : id === "azure" ? AZURE_SECTIONS.map((s) => s.id) : ENGINE_SECTIONS.map((s) => s.id));
+    const known = new Set<string>(id === "kubernetes" ? ["overview", "topology", "helm", ...KUBE_GROUPS.flatMap((g) => g.kinds)] : id === "azure" ? AZURE_SECTIONS.map((s) => s.id) : ENGINE_SECTIONS.map((s) => s.id));
     const last = prefs.sections?.[id];
     if (id !== "azure" && !runtimes.some((r) => r.id === id)) return;
     setNav({ runtime: id, section: last && known.has(last) ? last : FIRST_SECTION(id) });
@@ -319,7 +326,7 @@ function EngineNav({ runtime }: { runtime: RuntimeInfo }) {
   };
   return (
     <div>
-      <PanelHead title={runtimeLabel(runtime.id, t)} detail={runtime.provider ?? undefined}>
+      <PanelHead title={runtimeLabel(runtime.id, t)} detail={runtime.contexts.find((c) => c.name === context)?.provider ?? runtime.provider ?? undefined}>
         <AiVisibilityToggle kind="engines" id={runtime.id} name={runtimeLabel(runtime.id, t)} />
       </PanelHead>
       {!runtime.running && <EngineStopped runtime={runtime} />}
@@ -329,7 +336,7 @@ function EngineNav({ runtime }: { runtime: RuntimeInfo }) {
             size="sm"
             value={context ?? ""}
             onChange={(next) => setContext(runtime.id, next)}
-            options={runtime.contexts.map((c) => ({ value: c.name, label: c.name }))}
+            options={runtime.contexts.map((c) => ({ value: c.name, label: c.provider && c.provider.toLowerCase() !== c.name.toLowerCase() ? `${c.name} · ${c.provider}` : c.name }))}
             ariaLabel={t("containers.context")}
           />
         </div>
@@ -425,6 +432,7 @@ function KubeNav({ runtime, onAddCluster }: { runtime: RuntimeInfo; onAddCluster
       {context && (
         <NavRow icon={Waypoints} label={t("containers.topo.title")} selected={here && nav.section === "topology"} onClick={() => setNav({ runtime: "kubernetes", section: "topology" })} />
       )}
+      {context && <NavRow icon={ShipWheel} label={t("containers.helm.title")} selected={here && nav.section === "helm"} onClick={() => setNav({ runtime: "kubernetes", section: "helm" })} />}
       {context &&
         KUBE_GROUPS.map((group) => (
           <div key={group.label}>

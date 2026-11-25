@@ -27,6 +27,7 @@
 //! | `ai_tokens` | input, output, cache_read, cache_write | [`ai_spend`] |
 //! | `git` | commit, push, rebase… | `git_ops.rs` through [`git`] |
 //! | `git_lines` | added, removed, files | [`commit_stats`] |
+//! | `ai_scripts` | `script.*`, `direct.*` | [`app_script`], [`app_call`] — tokens *estimated* from bytes |
 //!
 //! # Attribution
 //!
@@ -43,7 +44,7 @@ use std::sync::Mutex;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-pub const KINDS: [&str; 17] = [
+pub const KINDS: [&str; 18] = [
     "view",
     "feature",
     "session",
@@ -61,6 +62,7 @@ pub const KINDS: [&str; 17] = [
     "ai_tokens",
     "git",
     "git_lines",
+    "ai_scripts",
 ];
 
 /// The workspace and repository backend events are filed under when they bring none.
@@ -206,7 +208,7 @@ pub fn record(conn: &Connection, events: &[UsageEvent]) -> rusqlite::Result<()> 
         let hour = event.hour.filter(|hour| *hour < 24).unwrap_or(this_hour);
         let (hour_seconds, hour_events) = match (event.kind.as_str(), key) {
             ("session", "active") => (seconds, 0),
-            ("view", _) | ("session", _) => (0, 0),
+            ("view", _) | ("session", _) | ("ai_scripts", _) => (0, 0),
             _ => (0, count),
         };
         if hour_seconds > 0 || hour_events > 0 {
@@ -288,6 +290,46 @@ pub fn commit_stats(repo_path: &str, oid: &str) {
             backend_event("git_lines", "files", &repo, files, 0, 0, 0.0),
             backend_event("git_lines", "added", &repo, added, 0, 0, 0.0),
             backend_event("git_lines", "removed", &repo, removed, 0, 0, 0.0),
+        ];
+        let _ = record(conn, &rows);
+    });
+}
+
+/// Bytes to tokens, roughly: what a model's tokenizer averages over JSON and English. An estimate —
+/// the providers bill the turn, not the tool result, so the real count of one answer is not known.
+const BYTES_PER_TOKEN: u64 = 4;
+
+fn estimated_tokens(bytes: u64) -> i64 {
+    bytes.div_ceil(BYTES_PER_TOKEN) as i64
+}
+
+/// One CodeFlow script (`app_script::run`): how many calls, how long, what it read and what of it
+/// reached the model. Read beside [`app_call`], it says what scripts save and where they do not.
+///
+/// - `script.runs` — count, seconds; `script.calls` — count;
+/// - `script.read` — tokens of every answer the script read (estimated);
+/// - `script.returned` — tokens of what the model got back (estimated).
+pub fn app_script(root: &str, calls: usize, ms: u64, read_bytes: u64, returned_bytes: u64) {
+    with_db(|conn| {
+        let repo = repo_for_path(conn, root);
+        let rows = [
+            backend_event("ai_scripts", "script.runs", &repo, 1, (ms / 1000) as i64, 0, 0.0),
+            backend_event("ai_scripts", "script.calls", &repo, calls as i64, 0, 0, 0.0),
+            backend_event("ai_scripts", "script.read", &repo, 0, 0, estimated_tokens(read_bytes), 0.0),
+            backend_event("ai_scripts", "script.returned", &repo, 0, 0, estimated_tokens(returned_bytes), 0.0),
+        ];
+        let _ = record(conn, &rows);
+    });
+}
+
+/// One `app_call`: `direct.calls` — count; `direct.returned` — tokens of its answer (estimated),
+/// all of which the model reads.
+pub fn app_call(root: &str, returned_bytes: u64) {
+    with_db(|conn| {
+        let repo = repo_for_path(conn, root);
+        let rows = [
+            backend_event("ai_scripts", "direct.calls", &repo, 1, 0, 0, 0.0),
+            backend_event("ai_scripts", "direct.returned", &repo, 0, 0, estimated_tokens(returned_bytes), 0.0),
         ];
         let _ = record(conn, &rows);
     });

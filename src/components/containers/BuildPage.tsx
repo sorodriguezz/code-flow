@@ -11,6 +11,7 @@ import { SecurityTab } from "./SecurityTab";
 import { CopyText } from "./pageBits";
 import { CountBar, Dialog, EmptyLine, Field, FilterChips, LoadingLine, MutedNote, NO_ROWS, PageHead, PageTabs, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
 import { RunContainerDialog } from "./RunContainerDialog";
+import { DockerfileLint } from "./DockerfileLint";
 import { fmtDuration } from "./format";
 import { buildSteps, relativeTo, shortReference, validImageTag, type BuildStep } from "./pageModel";
 import { containersBuildDetail, containersBuildRemove, containersBuilds } from "../../lib/tauri/containersCommands";
@@ -489,6 +490,7 @@ function BuildDialog({ runtime, context, initial, onClose }: { runtime: RuntimeI
             </button>
           </div>
         </Field>
+        <DockerfileLint folder={folder} dockerfile={dockerfile} />
         <Field label={t("containers.m.run.tag")} hint={tag.trim() && !tagOk ? t("containers.m.build.tagInvalid") : undefined}>
           <input value={tag} onChange={(e) => setTag(e.target.value)} placeholder={t("containers.m.build.tagPlaceholder")} spellCheck={false} className={mono} />
         </Field>

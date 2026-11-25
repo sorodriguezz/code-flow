@@ -24,6 +24,7 @@ import { Select } from "../common/Select";
 import { SessionPane } from "./SessionPane";
 import { LogAnalysisPanel, LogTools } from "./LogTools";
 import { ContainerFiles } from "./ContainerFiles";
+import { ChangesTab, HardeningTab } from "./ContainerAudit";
 import { ContainerStats } from "./ContainerStats";
 import { NO_ROWS } from "./ui";
 import { confirmAction } from "../../state/confirmStore";
@@ -123,7 +124,7 @@ function Gone() {
 
 // --------------------------------------------------------------------------------- container
 
-type ContainerTab = "logs" | "terminal" | "stats" | "files" | "config";
+type ContainerTab = "logs" | "terminal" | "stats" | "files" | "hardening" | "changes" | "config";
 
 /** The fallback for a list not read yet — see `ui.tsx`, where it now lives. */
 export { NO_ROWS };
@@ -197,6 +198,8 @@ function ContainerDetail({ selection }: { selection: ContainerSelection }) {
         { id: "terminal", label: t("containers.tab.terminal") },
         { id: "stats", label: t("containers.m.tab.stats") },
         { id: "files", label: t("containers.m.tab.files") },
+        { id: "hardening", label: t("containers.m.tab.hardening") },
+        { id: "changes", label: t("containers.m.tab.changes") },
         { id: "config", label: t("containers.m.tab.config") },
       ];
   const current = ctr ? "config" : tab;
@@ -326,6 +329,8 @@ function ContainerDetail({ selection }: { selection: ContainerSelection }) {
         ))}
         {body === "stats" && <ContainerStats runtime={selection.runtime} context={selection.context} id={row.id} running={running} memoryLimit={null} cpuLimit={null} />}
         {body === "files" && <ContainerFiles runtime={selection.runtime} context={selection.context} id={row.id} running={running} />}
+        {body === "hardening" && <HardeningTab runtime={selection.runtime} context={selection.context} id={row.id} />}
+        {body === "changes" && <ChangesTab runtime={selection.runtime} context={selection.context} id={row.id} />}
         {body === "config" && (raw ? <InspectView selection={selection} object="container" id={row.id} /> : <ContainerInfo selection={selection} row={row} />)}
       </div>
     </>

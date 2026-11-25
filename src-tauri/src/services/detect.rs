@@ -718,6 +718,72 @@ fn compose_variants(dir: &Path) -> Vec<(String, String)> {
     out
 }
 
+/// One Compose stack a repository can be brought up from, as files rather than a command line: what
+/// Contenedores' per-branch environments start (`containers::envs`), from the same places and the
+/// same variants [`compose_candidates`] proposes to Services.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposeStack {
+    /// The folder the stack sits in, relative to the root (`""` the root itself) — its project folder.
+    pub dir: String,
+    /// The files, in `-f` order, relative to the root: the base file, then the variant over it.
+    pub files: Vec<String>,
+    /// `""` for the base file alone; else the variant's word (`dev`, `local`).
+    pub variant: String,
+    pub services: Vec<String>,
+    /// Host ports the files publish — a hint read by indentation; the effective ones come from
+    /// `docker compose config`.
+    pub ports: Vec<u16>,
+    pub score: u32,
+}
+
+/// Every Compose stack of a repository's root and its usual stack folders, best first.
+pub fn compose_stacks(root: &Path) -> Vec<ComposeStack> {
+    let mut out = Vec::new();
+    for dir_rel in ["", "docker", "infra", "deploy", ".devcontainer"] {
+        let here = if dir_rel.is_empty() { root.to_path_buf() } else { root.join(dir_rel) };
+        let rel = |file: &str| if dir_rel.is_empty() { file.to_string() } else { format!("{dir_rel}/{file}") };
+        let base = COMPOSE_FILES.iter().copied().find(|f| here.join(f).is_file());
+        let base_services = base.and_then(|f| std::fs::read_to_string(here.join(f)).ok()).map(|t| compose_services(&t)).unwrap_or_default();
+        if let Some(file) = base.filter(|_| !base_services.is_empty()) {
+            out.push(ComposeStack {
+                dir: dir_rel.to_string(),
+                files: vec![rel(file)],
+                variant: String::new(),
+                services: base_services.iter().map(|s| s.0.clone()).collect(),
+                ports: base_services.iter().flat_map(|s| s.1.iter().copied()).collect(),
+                score: if dir_rel.is_empty() { 75 } else { 65 },
+            });
+        }
+        for (file, variant) in compose_variants(&here) {
+            let Ok(text) = std::fs::read_to_string(here.join(&file)) else { continue };
+            let mut services = base_services.clone();
+            for (service, ports) in compose_services(&text) {
+                match services.iter_mut().find(|s| s.0 == service) {
+                    Some(existing) => existing.1.extend(ports.into_iter().filter(|p| !existing.1.contains(p)).collect::<Vec<_>>()),
+                    None => services.push((service, ports)),
+                }
+            }
+            if services.is_empty() {
+                continue;
+            }
+            let mut files: Vec<String> = base.map(|b| vec![rel(b)]).unwrap_or_default();
+            files.push(rel(&file));
+            let everyday = matches!(variant.as_str(), "dev" | "development" | "local");
+            out.push(ComposeStack {
+                dir: dir_rel.to_string(),
+                files,
+                variant,
+                services: services.iter().map(|s| s.0.clone()).collect(),
+                ports: services.iter().flat_map(|s| s.1.iter().copied()).collect(),
+                score: if everyday { 70 } else { 50 },
+            });
+        }
+    }
+    out.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.files.cmp(&b.files)));
+    out
+}
+
 /// A compose file's services and the host ports each publishes, read by indentation.
 ///
 /// Not a YAML parser, and it does not need to be one: `services:` is a top-level map whose keys are
@@ -1584,6 +1650,23 @@ mod tests {
         let db = found.iter().find(|c| c.command == "docker compose up db").unwrap();
         assert_eq!(db.ports, vec![5432]);
         assert!(found.iter().any(|c| c.command == "docker compose up worker"));
+    }
+
+    #[test]
+    fn compose_stacks_are_files_with_their_variants_and_folders() {
+        let dir = scratch(&[
+            ("docker-compose.yml", "services:\n  db:\n    image: postgres\n    ports:\n      - \"5432:5432\"\n"),
+            ("docker-compose.dev.yml", "services:\n  mail:\n    image: mailhog/mailhog\n"),
+            (".devcontainer/compose.yaml", "services:\n  app:\n    image: node\n"),
+        ]);
+        let stacks = compose_stacks(dir.path());
+        assert_eq!(stacks[0].files, vec!["docker-compose.yml"]);
+        assert_eq!(stacks[0].ports, vec![5432]);
+        let dev = stacks.iter().find(|s| s.variant == "dev").unwrap();
+        assert_eq!(dev.files, vec!["docker-compose.yml", "docker-compose.dev.yml"]);
+        assert_eq!(dev.services, vec!["db", "mail"]);
+        let inner = stacks.iter().find(|s| s.dir == ".devcontainer").unwrap();
+        assert_eq!(inner.files, vec![".devcontainer/compose.yaml"]);
     }
 
     #[test]

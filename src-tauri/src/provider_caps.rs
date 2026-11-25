@@ -142,6 +142,9 @@ pub struct ProviderCaps {
     pub app_scripts: String,
     /// Whether scripts are on for it until the user says otherwise (`app_script::default_on`).
     pub app_scripts_default: bool,
+    /// Whether it can run as an ACP agent server (`crate::acp`) — what Settings › Proveedores offers
+    /// the «ACP / CLI» choice for.
+    pub acp: bool,
 }
 
 impl ProviderCaps {
@@ -171,15 +174,18 @@ pub fn caps_of(id: &str) -> Option<ProviderCaps> {
         update_args: install.and_then(|row| row.update_args).map(|args| args.iter().map(|arg| arg.to_string()).collect()),
         app_scripts: scripts_reach(known).to_string(),
         app_scripts_default: crate::app_script::default_on(known),
+        acp: engine.acp_args(false).is_some(),
     })
 }
 
 /// [`ProviderCaps::app_scripts`]: how each provider gets CodeFlow's tools — per run over MCP
-/// (`ai.rs`: Claude Code, Codex, opencode, Cline), from a file that only ever holds a query token
-/// (agy, Grok: `codemap::mcp::for_file_client`), in-process (the local agent), or not at all.
+/// (`ai.rs`: Claude Code, Codex, opencode, Cline; agy and Grok over ACP, `crate::acp`), from a file
+/// that only ever holds a query token (agy and Grok on their CLI: `codemap::mcp::for_file_client`),
+/// in-process (the local agent), or not at all.
 fn scripts_reach(id: &str) -> &'static str {
     match id {
         "claude" | "codex" | "opencode" | "cline" => "full",
+        "gemini" | "grok" if crate::acp::enabled_for(id) => "full",
         "gemini" | "grok" => "read",
         id if id == crate::local_agent::PROVIDER_ID => "full",
         _ => "none",
@@ -209,7 +215,11 @@ mod tests {
         }
         assert_eq!(caps_of(crate::custom::PROVIDER_ID).unwrap().app_scripts, "none");
         assert!(!caps_of(crate::local_agent::PROVIDER_ID).unwrap().app_scripts_default);
-        assert_eq!(caps_of("grok").unwrap().app_scripts, "read");
+        // Over ACP (the default) agy and Grok take the app's servers per session, with the run's own
+        // permissions; only on their CLI is the token a file's, which never acts.
+        assert_eq!(caps_of("grok").unwrap().app_scripts, "full");
+        assert!(caps_of("gemini").unwrap().acp && caps_of("grok").unwrap().acp && caps_of("opencode").unwrap().acp);
+        assert!(!caps_of("claude").unwrap().acp);
     }
 
     #[test]

@@ -60,7 +60,6 @@ import { isCancellation, newRunId, snapshotTrace, useAiRunStore, type AiRunLine 
 import { parseTrace, traceIdOf } from "../lib/turnTrace";
 import { repeatsStatus } from "../lib/agentLog";
 import { newLaneReader, readRunLine, type LaneMark } from "../lib/subagentLanes";
-import { providerCapabilities } from "../lib/aiProviders";
 import { leavesContextAsIs, passesCompactThreshold } from "../lib/contextWindow";
 import { usePreferencesStore } from "./preferencesStore";
 import { translate } from "./languageStore";
@@ -1484,11 +1483,6 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       });
     };
 
-    // Always asked for. The backend honours it only where the engine can actually produce deltas and
-    // ignores it everywhere else, so the check here is about what the *frontend* then does with the
-    // answer — reveal it, or leave it alone because it already arrived a word at a time.
-    const streams = providerCapabilities(provider).streamsTokens;
-
     // Captured before the await, like the workspace stamp beside it: the user is free to remove a
     // chip while the turn is in flight, and the turn must be sent with what was staged when they
     // pressed send — not with whatever the list happens to hold when the promise is constructed.
@@ -1525,7 +1519,9 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         // whether text *actually* arrived: an engine that claims to type but produced no deltas
         // (the flag says Claude, the run says otherwise) would otherwise leave the answer blank,
         // and revealing it is the strictly safer of the two failures.
-        const typed = streams && streamed.length > 0;
+        // So the flag no longer gates it: Gemini, Grok and opencode type over ACP and not on their
+        // classic CLI, and the text that arrived is what says which this turn was.
+        const typed = streamed.length > 0;
         // The backend's id replaces the placeholder in both the buffers and the message, so
         // everything downstream of here talks about the row that actually exists.
         adoptMessageId(conversationId, pendingAnswerId, messageId);

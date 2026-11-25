@@ -30,6 +30,7 @@ import { RailSection } from "./settingsNav";
 import { ThisWorkspaceSettings } from "./ThisWorkspaceSettings";
 import { ExternalEditorSettings } from "./ExternalEditorSettings";
 import { RepoEnvSettings } from "./RepoEnvSettings";
+import { SecurityPoliciesSettings } from "./SecurityPoliciesSettings";
 import { riseDelay } from "../../lib/rise";
 import type { Project, Workspace } from "../../types/domain";
 import { fieldClass } from "../common/recipes";
@@ -190,6 +191,7 @@ export function ProjectsSection() {
           {tab === "current" && <ThisWorkspaceSettings />}
           {tab === "externalEditor" && <ExternalEditorSettings />}
           {tab === "repoEnv" && <RepoEnvSettings />}
+          {tab === "policies" && <SecurityPoliciesSettings />}
         </>
       )}
     </RailSection>

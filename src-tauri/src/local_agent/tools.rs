@@ -33,6 +33,19 @@
 //! every approved memory is already in the message, no app tool at all for a run judging material
 //! someone else wrote. See [`offered`].
 //!
+//! # The run's own sandbox, as every agent has it
+//!
+//! A run whose folder is a running agent sandbox's checkout (`containers::agent_sandbox`) is offered
+//! `sandbox_read_file`, `sandbox_logs` and `sandbox_ports`, and — when it may change files —
+//! `sandbox_exec` and `sandbox_write_file`: the very definitions and the very calls the MCP server
+//! gives Claude Code (`agent_sandbox::tools`), so the binding (this folder's sandbox and no other),
+//! the evidence each call leaves and the refusals are one piece of code. "May act" is
+//! [`Grants::write`] — not read-only, edits allowed — the MCP server's rule for a CLI's run, and the
+//! one this agent's own `write_file` already answers to. Not `run`: that opt-in is for a command on
+//! this computer, and a sandbox command runs in its container, isolated from it. Like over MCP, no
+//! question in «Restringido» either. Never for a run judging someone else's material, nor a
+//! workspace chat's folder ([`Toolbox::with_sandbox`]).
+//!
 //! # A destructive command waits for the user
 //!
 //! `run_command` checks every line against `cf guard`'s rules (`crate::shell_rules`, the file Claude
@@ -132,6 +145,9 @@ pub struct Inventory {
     /// The workspace's contexts a chat lists by name instead of including (`context::on_demand`):
     /// with any, `read_context` is offered to a conversation.
     pub contexts: usize,
+    /// The folder is a running agent sandbox's checkout and the run may use it
+    /// ([`Toolbox::with_sandbox`]): its sandbox tools are offered — see the module docs.
+    pub sandbox: bool,
 }
 
 /// One request to the app on the run's behalf.
@@ -197,6 +213,10 @@ pub fn offered(grants: Grants, map: bool, checks: bool, inventory: &Inventory, g
     }
     if grants.run {
         names.push("run_command");
+    }
+    // The run's sandbox, whatever its reach — a fix in one needs it most; its actions as `write_file`.
+    if inventory.sandbox {
+        names.extend(crate::containers::agent_sandbox::tools::offered(grants.write));
     }
     if grants.reach >= Reach::Observe {
         if inventory.services {
@@ -288,6 +308,8 @@ pub struct Toolbox {
     /// A workspace chat's repositories ([`Toolbox::with_repos`]): the run works in the chat's own
     /// folder, and reaches each of these by its name or its absolute path.
     repos: Vec<Repo>,
+    /// The folder is a workspace chat's, not a repository — no one checkout for a sandbox to be.
+    workspace_chat: bool,
 }
 
 /// One repository a workspace chat's run can reach from the chat's own folder: a toolbox of its
@@ -361,7 +383,16 @@ impl Toolbox {
             inventory,
             given_memories: 0,
             repos: Vec::new(),
+            workspace_chat,
         })
+    }
+
+    /// Offers the run its sandbox's tools when its folder is a running sandbox's checkout (see the
+    /// module docs). `on`: the run may have them at all — false for one judging someone else's
+    /// material, which the MCP server gives none either. Off until this is called.
+    pub fn with_sandbox(mut self, on: bool) -> Self {
+        self.inventory.sandbox = on && !self.workspace_chat && crate::containers::agent_sandbox::tools::bound(&self.root_str).is_some();
+        self
     }
 
     /// The repositories of a workspace chat (`AiInvocation::extra_dirs`), each reachable from this
@@ -549,7 +580,13 @@ impl Toolbox {
                 .map(|t| json!({"type": "function", "function": {"name": name, "description": t["description"], "parameters": t["inputSchema"]}}));
         }
         if SCRIPT_TOOLS.contains(&name) {
-            return crate::app_gateway::tools(self.grants.reach == Reach::Act)
+            return crate::app_gateway::tools_for(self.grants.reach == Reach::Act, false)
+                .into_iter()
+                .find(|t| t["name"] == name)
+                .map(|t| json!({ "type": "function", "function": { "name": name, "description": t["description"], "parameters": t["inputSchema"] } }));
+        }
+        if crate::containers::agent_sandbox::tools::is_tool(name) {
+            return crate::containers::agent_sandbox::tools::schemas(self.grants.write)
                 .into_iter()
                 .find(|t| t["name"] == name)
                 .map(|t| json!({ "type": "function", "function": { "name": name, "description": t["description"], "parameters": t["inputSchema"] } }));
@@ -805,7 +842,11 @@ impl Toolbox {
                 outcome.content = format!("{warning}{}", outcome.content);
             }
         }
-        if matches!(name, "edit_file" | "write_file" | "run_command" | "run_check") || name == crate::ai_memory::tools::WRITE || ACT_TOOLS.contains(&name) {
+        if matches!(name, "edit_file" | "write_file" | "run_command" | "run_check")
+            || name == crate::ai_memory::tools::WRITE
+            || ACT_TOOLS.contains(&name)
+            || crate::containers::agent_sandbox::tools::is_action(name)
+        {
             crate::tool_gateway::audit(crate::tool_gateway::Action {
                 root: &self.root_str,
                 run_ref: crate::ai_runs::current().map(|ctx| ctx.run_id),
@@ -823,6 +864,12 @@ impl Toolbox {
     }
 
     async fn dispatch(&self, name: &str, args: &Value, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Outcome {
+        if crate::containers::agent_sandbox::tools::is_tool(name) {
+            if !self.offered().contains(&name) {
+                return Outcome::err(format!("there is no tool named {name:?}"));
+            }
+            return self.sandbox_tool(name, args, cancel).await;
+        }
         if crate::ai_memory::tools::is_tool(name) {
             if !self.offered().contains(&name) {
                 return Outcome::err(format!("there is no tool named {name:?}"));
@@ -926,6 +973,34 @@ impl Toolbox {
         }
     }
 
+    /// One of the run's sandbox tools, answered by `agent_sandbox::tools::call` as the MCP server
+    /// answers it — bound to this folder's sandbox, acting only when the run may write. Stop ends the
+    /// wait like any other; what the sandbox already ran stays in its evidence.
+    async fn sandbox_tool(&self, name: &str, args: &Value, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Outcome {
+        let asked = crate::containers::agent_sandbox::tools::call(&self.root_str, name, args, self.grants.write);
+        let answer = tokio::select! {
+            answer = asked => answer,
+            _ = crate::ai_runs::cancelled(cancel) => return Outcome::err("stopped"),
+        };
+        let text = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or_default().trim().to_string();
+        let argv = args.get("argv").and_then(Value::as_array).map(|list| list.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+        let subject = match name {
+            crate::containers::agent_sandbox::tools::EXEC if !argv.is_empty() => argv,
+            crate::containers::agent_sandbox::tools::EXEC => text("command"),
+            crate::containers::agent_sandbox::tools::READ_FILE | crate::containers::agent_sandbox::tools::WRITE_FILE => text("path"),
+            _ => String::new(),
+        };
+        let summary = if subject.is_empty() { name.to_string() } else { format!("{name} · {}", subject.chars().take(80).collect::<String>()) };
+        match answer {
+            Ok(content) => Outcome::ok(clip_middle(&content, APP_OUTPUT_CHARS), summary),
+            Err(error) => {
+                let mut outcome = Outcome::err(format!("{name}: {error}"));
+                outcome.summary = format!("{summary} · {}", error.chars().take(80).collect::<String>());
+                outcome
+            }
+        }
+    }
+
     /// One app tool, through the door: the verb's answer, or its refusal — the user's words when the
     /// approval was what said no. Never the credential it used: `agentcli`'s vault verbs scrub it.
     async fn app(&self, name: &str, call: AppCall, cancel: &mut Option<tokio::sync::watch::Receiver<bool>>) -> Outcome {
@@ -960,6 +1035,7 @@ impl Toolbox {
             workspace_id: place.workspace_id.clone().or_else(|| self.workspace_id.clone()),
             project: place.project.clone(),
             scripts: true,
+            with_call: false,
         };
         if name == crate::app_gateway::LIST_TOOL {
             let query = args.get("query").and_then(Value::as_str).unwrap_or("areas").to_string();
@@ -1634,6 +1710,7 @@ fn is_outside_text(name: &str) -> bool {
         || OBSERVE_TOOLS.contains(&name)
         || matches!(name, "db_write" | "http_request" | "run_with_secret")
         || name == crate::app_gateway::RUN_TOOL
+        || (crate::containers::agent_sandbox::tools::is_tool(name) && name != crate::containers::agent_sandbox::tools::WRITE_FILE)
 }
 
 /// The `cf` verb behind an app tool and its arguments, built exactly as `codemap::mcp::app_tool`
@@ -2103,6 +2180,7 @@ mod tests {
             memories: 3,
             references: 0,
             contexts: 0,
+            sandbox: false,
         };
 
     /// CodeFlow scripts reach a local model only once switched on, and never a run that may not
@@ -2192,6 +2270,51 @@ mod tests {
         for name in ["open_in_editor", "notify", "propose_memory"] {
             assert!(bare.contains(&name), "{name}: {bare:?}");
         }
+    }
+
+    /// The run's sandbox, as the MCP server offers it: the reads to any run in its checkout, the two
+    /// actions only to one that may change files — and nothing where the folder is no sandbox's.
+    #[test]
+    fn the_sandbox_tools_are_offered_in_its_checkout_and_act_only_with_write() {
+        use crate::containers::agent_sandbox::tools::{EXEC, LOGS, PORTS, READ_FILE, WRITE_FILE};
+        let bound = Inventory { sandbox: true, ..Default::default() };
+        let observe = Grants { write: false, run: false, reach: Reach::Observe };
+        let act = Grants { write: true, run: false, reach: Reach::Act };
+        for (grants, acts) in [(READ, false), (observe, false), (WRITE, true), (act, true)] {
+            let names = offered(grants, true, false, &bound, 0);
+            for read in [READ_FILE, LOGS, PORTS] {
+                assert!(names.contains(&read), "{read} for {grants:?}: {names:?}");
+            }
+            for action in [EXEC, WRITE_FILE] {
+                assert_eq!(names.contains(&action), acts, "{action} for {grants:?}: {names:?}");
+            }
+            assert!(!offered(grants, true, false, &Inventory::default(), 0).iter().any(|n| n.starts_with("sandbox_")), "no sandbox, no tools");
+        }
+    }
+
+    /// A call goes to `agent_sandbox::tools::call` only when it was offered; one not offered does not
+    /// exist, and an offered action still finds no sandbox where the folder is none's.
+    #[tokio::test]
+    async fn a_sandbox_call_is_answered_as_the_mcp_server_answers_it() {
+        let dir = temp_repo();
+        let exec = json!({ "argv": ["npm", "test"] });
+        let plain = toolbox(&dir, WRITE).with_sandbox(true);
+        assert!(!names(&plain).iter().any(|n| n.starts_with("sandbox_")), "a plain repository is no sandbox's checkout");
+        let out = plain.call("sandbox_exec", &exec, &mut None).await;
+        assert!(!out.ok && out.content.contains("no tool named"), "{}", out.content);
+
+        let bound = Inventory { sandbox: true, ..Default::default() };
+        let reader = toolbox(&dir, READ).with_inventory(bound);
+        assert!(names(&reader).contains(&"sandbox_read_file".to_string()));
+        let out = reader.call("sandbox_exec", &exec, &mut None).await;
+        assert!(!out.ok && out.content.contains("no tool named"), "{}", out.content);
+
+        let writer = toolbox(&dir, WRITE).with_inventory(bound);
+        let schema = writer.schemas().into_iter().find(|t| t["function"]["name"] == "sandbox_exec").expect("offered");
+        assert!(schema["function"]["parameters"]["properties"]["argv"].is_object(), "{schema}");
+        let out = writer.call("sandbox_exec", &exec, &mut None).await;
+        assert!(!out.ok && out.content.contains("no running sandbox"), "{}", out.content);
+        assert!(out.summary.contains("npm test"), "{}", out.summary);
     }
 
     #[test]

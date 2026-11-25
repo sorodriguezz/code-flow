@@ -20,6 +20,7 @@ import { boardLabelKey } from "../../lib/boardLabel";
 import { Tooltip } from "../common/Tooltip";
 import type { StoryDraft } from "../../types/domain";
 import { fieldClass } from "../common/recipes";
+import { StoryEnvironment } from "./StoryEnvironment";
 
 function sameEdits(a: StoryEdits, b: StoryEdits): boolean {
   return (
@@ -63,6 +64,8 @@ export function StoryCard({
   const [draft, setDraft] = useState<StoryEdits>(() => editsFrom(story));
   const [updatingBoard, setUpdatingBoard] = useState(false);
   const board = t(boardLabelKey(useStoriesStore((s) => s.batches.find((b) => b.id === batchId)?.board_provider)));
+  const batchWorkspace = useStoriesStore((s) => s.batches.find((b) => b.id === batchId)?.workspace_id ?? "");
+  const batchProject = useStoriesStore((s) => s.batches.find((b) => b.id === batchId)?.project_id ?? null);
 
   // The row can be replaced underneath the card — a publish rewrites every story of the batch, and
   // a re-generation replaces the unpublished ones outright. Following the row is only safe while
@@ -245,6 +248,9 @@ export function StoryCard({
               </Tooltip>
             </div>
           )}
+
+          {/* «Crear ambiente de ingeniería»: a branch, a worktree and an agent sandbox for this story. */}
+          {batchWorkspace && <StoryEnvironment storyId={story.id} title={draft.title} workspaceId={batchWorkspace} projectId={batchProject} />}
 
           {/* What is wrong with the story *as a story* — INVEST, not Gherkin. First, because it is
               the part a refinement session argues about, and because a story that fails "valuable"

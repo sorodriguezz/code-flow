@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyScriptRecord, highlightScript, isScriptTool, scriptStatus, SCRIPT_MARK, type AppScript } from "./appScript";
+import { applyScriptRecord, highlightScript, isScriptTool, scriptSavings, scriptStatus, scriptTokens, SCRIPT_MARK, type AppScript } from "./appScript";
 import { parseRunSteps } from "./runSteps";
 import { formatAgentLogLine } from "./agentLog";
 import { turnActivity } from "./turnActivity";
@@ -105,5 +105,33 @@ describe("the script's code, highlighted", () => {
     expect(tokens.find((t) => t.kind === "string")?.text).toBe('"list_services"');
     expect(tokens.find((t) => t.kind === "comment")?.text).toBe("// all");
     expect(tokens.filter((t) => t.kind === "keyword").map((t) => t.text)).toEqual(["const", "return"]);
+  });
+});
+
+describe("what a script saves", () => {
+  it("reads the bytes the end record carries as estimated tokens", () => {
+    const scripts = new Map<string, AppScript>();
+    applyScriptRecord(scripts, start("t1"));
+    const running = scripts.get("t1")!;
+    expect(scriptTokens(running)).toBeNull();
+    const done = applyScriptRecord(scripts, end("t1", { readBytes: 40_000, returnedBytes: 801 }))?.script;
+    expect(done && scriptTokens(done)).toEqual({ read: 10_000, returned: 201 });
+    // A record written before these were counted has none to show.
+    const old = applyScriptRecord(new Map(), end("t2"))?.script;
+    expect(old && scriptTokens(old)).toBeNull();
+  });
+
+  it("adds up a window's counters, scripts beside single calls", () => {
+    const rows = [
+      { kind: "ai_scripts", key: "script.runs", count: 3, tokens: 0 },
+      { kind: "ai_scripts", key: "script.calls", count: 41, tokens: 0 },
+      { kind: "ai_scripts", key: "script.read", count: 0, tokens: 90_000 },
+      { kind: "ai_scripts", key: "script.returned", count: 0, tokens: 1_200 },
+      { kind: "ai_scripts", key: "direct.calls", count: 5, tokens: 0 },
+      { kind: "ai_scripts", key: "direct.returned", count: 0, tokens: 7_500 },
+      { kind: "ai", key: "script.read", count: 0, tokens: 1 },
+    ];
+    expect(scriptSavings(rows)).toEqual({ runs: 3, calls: 41, read: 90_000, returned: 1_200, directCalls: 5, direct: 7_500 });
+    expect(scriptSavings([]).runs).toBe(0);
   });
 });

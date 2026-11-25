@@ -25,11 +25,13 @@ vi.mock("../lib/tauri/containersCommands", () => ({
   containersOpenSession: () => new Promise<string>((resolve, reject) => opened.push({ resolve, reject })),
 }));
 vi.mock("../lib/tauri/commands", () => ({ closeTerminal: (id: string) => closeTerminal(id) }));
+const marketUpJob = vi.fn((_id: string) => Promise.resolve("s-market"));
+vi.mock("../lib/tauri/containersMarketCommands", () => ({ containersMarketUpJob: (id: string) => marketUpJob(id) }));
 vi.mock("./terminalStore", () => ({ disownTerminalBacklog: vi.fn() }));
 vi.mock("./containersStore", () => ({ useContainersStore: { getState: () => ({ refreshList }) } }));
 vi.mock("./toastStore", () => ({ pushSuccessToast: (text: string) => pushSuccessToast(text) }));
 
-const { jobBacklog, useContainersJobsStore } = await import("./containersJobsStore");
+const { jobBacklog, onJobEnd, useContainersJobsStore } = await import("./containersJobsStore");
 
 const pull = (target: string): SessionRequest => ({ kind: "pull", runtime: "docker", context: "orbstack", target });
 const store = () => useContainersJobsStore.getState();
@@ -148,5 +150,23 @@ describe("a job outlives the page that started it", () => {
     expect(titles).not.toContain("Job 0");
     expect(store().jobs.filter((j) => j.ended)).toHaveLength(6);
     expect(closeTerminal).toHaveBeenCalledWith("done-0");
+  });
+});
+
+describe("a service-catalogue stack's up job", () => {
+  it("is opened by its own command, by stack id, and its kind's end handler hears how it ended", async () => {
+    useContainersJobsStore.setState({ jobs: [], shown: null, folded: false, history: [] });
+    opened.length = 0;
+    const ended = vi.fn();
+    onJobEnd("marketUp", ended);
+    const key = await store().start("Levantando dev", { kind: "marketUp", runtime: "docker", context: null, target: "stack-1" }, { meta: { name: "dev" } });
+    expect(marketUpJob).toHaveBeenCalledWith("stack-1");
+    expect(opened).toHaveLength(0);
+    expect(store().jobs.find((j) => j.key === key)).toMatchObject({ sessionId: "s-market", title: "Levantando dev" });
+    exit({ id: "s-market", code: 1 });
+    expect(ended).toHaveBeenCalledTimes(1);
+    expect(ended.mock.calls[0][0]).toMatchObject({ request: { kind: "marketUp", target: "stack-1" } });
+    expect(ended.mock.calls[0].slice(1)).toEqual([1, null]);
+    store().close(key);
   });
 });

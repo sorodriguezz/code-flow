@@ -32,6 +32,7 @@ import {
 import { AI_PROVIDERS, isAgenticProvider, modelDisplayLabel, type AiProviderOption } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { AppScriptsSettings } from "./AppScriptsSettings";
+import { AgentTransportSettings } from "./AgentTransportSettings";
 import { openExternalUrl } from "../../lib/tauri/commands";
 import { useAiProviderStore } from "../../state/aiProviderStore";
 import { useProviderStatusStore } from "../../state/providerStatusStore";
@@ -1146,6 +1147,7 @@ export function ProvidersSection() {
         <AutomationField />
       </div>
       <BackupModelsField />
+      <AgentTransportSettings />
       <AppScriptsSettings />
       {AI_PROVIDERS.filter((p) => p.available).map((provider) => (
         <ProviderRow key={provider.id} provider={provider} />

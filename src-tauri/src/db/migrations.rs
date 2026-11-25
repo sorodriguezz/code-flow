@@ -2093,6 +2093,16 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     // Shared workspace chats: sessions, their worktrees and the last agreed state per file (`collab`).
     crate::collab::store::migrate(conn)?;
     crate::collab::team::migrate(conn)?;
+    // Contenedores › Seguridad: the kept vulnerability scans of each image (`containers::scan`).
+    crate::containers::scan::migrate(conn)?;
+    // Contenedores › Catálogo de servicios: the provisioned stacks (`containers::marketplace`).
+    crate::containers::marketplace::migrate(conn)?;
+    // Contenedores › Entornos: one environment per branch (`containers::envs`).
+    crate::containers::envs::store::migrate(conn)?;
+    // Contenedores › Sandboxes: the workspaces' security policies (`containers::policy`), and the
+    // agent sandboxes with their evidence (`containers::agent_sandbox::store`).
+    crate::containers::policy::migrate(conn)?;
+    crate::containers::agent_sandbox::store::migrate(conn)?;
     Ok(())
 }
 

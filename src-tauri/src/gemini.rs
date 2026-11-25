@@ -119,6 +119,17 @@ impl AiEngine for GeminiEngine {
         true
     }
 
+    /// `agy acp` (1.5.16, verified 2026-11-24): streaming, per-turn usage, sessions shared with `-p`
+    /// both ways, the app's MCP servers per session. `--sandbox` confines its terminal for a server
+    /// that serves read-only turns, as it does for `-p`. See `crate::acp`.
+    fn acp_args(&self, sandbox: bool) -> Option<Vec<String>> {
+        let mut args = vec!["acp".to_string()];
+        if sandbox {
+            args.push("--sandbox".into());
+        }
+        Some(args)
+    }
+
     fn commit_message_model(&self) -> &'static str {
         COMMIT_MESSAGE_MODEL
     }

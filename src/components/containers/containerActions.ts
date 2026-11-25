@@ -19,7 +19,15 @@ import {
   Undo2,
   ArrowUpFromLine,
   ArrowDownToLine,
+  Archive,
+  Camera,
+  Cable,
+  Unplug,
+  Tag,
+  Upload,
+  HardDriveDownload,
 } from "lucide-react";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
 import type { MenuItem } from "../common/ContextMenu";
 import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
@@ -45,6 +53,17 @@ function where(runtime: RuntimeId, context: string | null, t: T): string {
 
 function copy(text: string) {
   void navigator.clipboard.writeText(text).catch(() => {});
+}
+
+/** A file name from an image or container name: what the save dialog proposes. */
+function fileStem(name: string): string {
+  return name.replace(/^sha256:/, "").replace(/[^\w.-]+/g, "_").slice(0, 80) || "image";
+}
+
+/** `name:tag` with an optional registry and path — what `tag` and `commit` take. */
+export function validImageReference(value: string): string | null {
+  const v = value.trim();
+  return v && !v.startsWith("-") && !/\s/.test(v) && /^[a-z0-9][a-z0-9._\-/:@]*$/i.test(v) ? null : "invalid";
 }
 
 function projectOptions(rows: ContainerRow[]) {
@@ -98,7 +117,48 @@ export function engineMenu(args: {
           }),
       });
     }
-    items.push({ label: t("containers.copyId"), icon: Copy, separated: ctr, onClick: () => copy(row.id) });
+    if (!ctr) {
+      items.push({
+        label: t("containers.commit"),
+        icon: Camera,
+        onClick: () =>
+          void promptAction(t("containers.commitPrompt", { name: row.name }), {
+            initial: `${fileStem(row.name).toLowerCase()}:snapshot`,
+            confirmLabel: t("containers.commitConfirm"),
+            validate: (v) => (validImageReference(v) ? t("containers.imageRefInvalid") : null),
+          }).then((reference) => {
+            if (reference) void act({ runtime, context, object, action: "commit", ids: [row.id], options: { reference: reference.trim() }, label: t("containers.done.commit", { name: reference.trim() }), refresh: ["images"] });
+          }),
+      });
+      items.push({
+        label: t("containers.export"),
+        icon: Archive,
+        onClick: () =>
+          void saveDialog({ defaultPath: `${fileStem(row.name)}.tar`, filters: [{ name: "tar", extensions: ["tar"] }] })
+            .catch(() => null)
+            .then((path) => {
+              if (path) void act({ runtime, context, object, action: "export", ids: [row.id], options: { path }, label: t("containers.done.export", { name: row.name }), refresh: [] });
+            }),
+      });
+      items.push({
+        label: t("containers.networkConnect"),
+        icon: Cable,
+        separated: true,
+        onClick: () =>
+          void promptAction(t("containers.networkConnectPrompt", { name: row.name }), { placeholder: "cf-net", confirmLabel: t("containers.networkConnectConfirm") }).then((network) => {
+            if (network?.trim()) void act({ runtime, context, object: "network", action: "connect", ids: [network.trim()], options: { container: row.id }, label: t("containers.done.networkConnect", { name: row.name, network: network.trim() }), refresh: ["containers", "networks"] });
+          }),
+      });
+      items.push({
+        label: t("containers.networkDisconnect"),
+        icon: Unplug,
+        onClick: () =>
+          void promptAction(t("containers.networkDisconnectPrompt", { name: row.name }), { placeholder: "cf-net", confirmLabel: t("containers.networkDisconnectConfirm") }).then((network) => {
+            if (network?.trim()) void act({ runtime, context, object: "network", action: "disconnect", ids: [network.trim()], options: { container: row.id }, label: t("containers.done.networkDisconnect", { name: row.name, network: network.trim() }), refresh: ["containers", "networks"] });
+          }),
+      });
+    }
+    items.push({ label: t("containers.copyId"), icon: Copy, separated: true, onClick: () => copy(row.id) });
     items.push({ label: t("containers.copyName"), icon: Copy, onClick: () => copy(row.name) });
     items.push({
       label: t("containers.remove"),
@@ -172,6 +232,42 @@ export function engineMenu(args: {
           void useContainersJobsStore
             .getState()
             .start(t("containers.m.images.pulling", { name: ref }), { kind: "pull", runtime, context, target: ref }, { refresh: ["images"], done: t("containers.done.pull", { name: ref }), runImage: ref }),
+      });
+    }
+    if (!ctr) {
+      items.push({
+        label: t("containers.image.tag"),
+        icon: Tag,
+        separated: items.length > 0,
+        onClick: () =>
+          void promptAction(t("containers.image.tagPrompt", { name: ref }), {
+            initial: image.dangling ? "" : image.reference,
+            placeholder: "ghcr.io/org/app:1.0",
+            confirmLabel: t("containers.image.tagConfirm"),
+            validate: (v) => (validImageReference(v) ? t("containers.imageRefInvalid") : null),
+          }).then((reference) => {
+            if (reference && reference.trim() !== ref) void act({ runtime, context, object: "image", action: "tag", ids: [ref], options: { reference: reference.trim() }, label: t("containers.done.tag", { name: reference.trim() }) });
+          }),
+      });
+      if (!image.dangling) {
+        items.push({
+          label: t("containers.image.push"),
+          icon: Upload,
+          onClick: () =>
+            void confirmAction(t("containers.image.pushConfirm", { name: ref }), false, t("containers.image.push")).then((ok) => {
+              if (ok) void act({ runtime, context, object: "image", action: "push", ids: [ref], label: t("containers.done.push", { name: ref }), refresh: [] });
+            }),
+        });
+      }
+      items.push({
+        label: t("containers.image.save"),
+        icon: HardDriveDownload,
+        onClick: () =>
+          void saveDialog({ defaultPath: `${fileStem(ref)}.tar`, filters: [{ name: "tar", extensions: ["tar"] }] })
+            .catch(() => null)
+            .then((path) => {
+              if (path) void act({ runtime, context, object: "image", action: "save", ids: [ref], options: { path }, label: t("containers.done.save", { name: ref }), refresh: [] });
+            }),
       });
     }
     items.push({ label: t("containers.copyId"), icon: Copy, separated: items.length > 0, onClick: () => copy(image.id) });

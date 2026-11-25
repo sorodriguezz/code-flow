@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Box, Download, MoreHorizontal, Play, Trash2 } from "lucide-react";
+import { Box, Download, FolderInput, MoreHorizontal, Play, Trash2 } from "lucide-react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
 import { ContextMenu, type MenuItem } from "../common/ContextMenu";
@@ -156,6 +157,19 @@ export function ImagesPage({ runtime }: { runtime: RuntimeInfo }) {
         >
           <Trash2 size={13} />
           {t("containers.m.cleanUp")}
+        </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          title={t("containers.m.images.loadHint")}
+          onClick={async () => {
+            const picked = await openDialog({ multiple: false, filters: [{ name: "tar", extensions: ["tar", "gz", "tgz"] }] }).catch(() => null);
+            if (typeof picked === "string") void act({ runtime: runtime.id, context, object: "image", action: "load", ids: [], options: { path: picked }, label: t("containers.m.images.loaded") });
+          }}
+          disabled={!runtime.running || ctr}
+        >
+          <FolderInput size={13} />
+          {t("containers.m.images.load")}
         </Button>
         <Button size="sm" variant="primary" onClick={() => setPulling(true)} disabled={!runtime.running || ctr}>
           <Download size={13} />

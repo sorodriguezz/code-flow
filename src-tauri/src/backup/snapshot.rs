@@ -58,6 +58,9 @@ pub const TABLES: &[&str] = &[
     "review_contexts",
     "workspace_prompts",
     "workspace_git_identity",
+    // Contenedores › Políticas de seguridad: what each workspace allows a container to be — set
+    // by the user, like the rest of a workspace's configuration (`containers::policy`).
+    "container_security_policies",
     "workspace_ai_accounts",
     "review_engine_config",
     "workspace_skills",
@@ -282,6 +285,14 @@ pub const TABLES: &[&str] = &[
 /// writing it down compulsory.
 #[allow(dead_code)]
 pub const NEVER_BACKED_UP: &[&str] = &[
+    // Scans of the images of *this* machine's engines: another machine has other images, and a
+    // scan there is a command away.
+    "container_scans",
+    // Agent sandboxes and their evidence: a row names a container of this machine's engine and a
+    // checkout on its disk, neither of which exists where a backup is restored
+    // (`containers::agent_sandbox::store`).
+    "agent_sandboxes",
+    "agent_sandbox_evidence",
     // The Notes search index and FTS5's own shadow tables: derived from `notes`, rebuilt by the
     // migration whenever the two disagree — a restore included.
     "notes_fts",
@@ -332,6 +343,14 @@ pub const NEVER_BACKED_UP: &[&str] = &[
     "collab_runs",
     "collab_run_seats",
     "collab_run_jobs",
+    // Provisioned service stacks: each row names a folder under this machine's state root and a
+    // container engine of this computer, neither of which a backup carries. Restored elsewhere, a
+    // stack would list containers that are not there and a Compose file that is not either.
+    "container_market_stacks",
+    // Per-branch environments: each row names a git worktree on this machine's disk and a Compose
+    // project of this computer's engine. Restored elsewhere it would list checkouts and containers
+    // that do not exist there.
+    "container_envs",
 ];
 
 // ---------------------------------------------------------------------------
@@ -362,6 +381,7 @@ pub const CORE_TABLES: &[&str] = &[
     "review_contexts",
     "workspace_prompts",
     "workspace_git_identity",
+    "container_security_policies",
     "workspace_ai_accounts",
     "review_engine_config",
     "workspace_skills",

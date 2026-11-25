@@ -6,6 +6,7 @@ import { RowAction, StateDot, ago } from "./containerBits";
 import { AiVisibilityToggle } from "./AiVisibility";
 import { kubeMenu } from "./containerActions";
 import { KubeTestLine, kubeHintText } from "./KubeAddCluster";
+import { LocalClustersSection } from "./KubeLocalClusters";
 import { DataTable, EmptyLine, LiveMark, LoadingLine, NO_ROWS, PageHead, PageToolbar, SearchField, Td, Th, trClass } from "./ui";
 import { firstRead } from "./pageModel";
 import { containersKubeAksStatus, containersKubeRemove, containersKubeUseAzureCli } from "../../lib/tauri/containersCommands";
@@ -503,6 +504,7 @@ export function KubeOverviewPage({ runtime, onAddCluster }: { runtime: RuntimeIn
           </tbody>
         </DataTable>
       )}
+      <LocalClustersSection />
     </div>
   );
 }

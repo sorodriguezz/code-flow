@@ -5,6 +5,7 @@ import { ContainersPage } from "./ContainersPage";
 import { ContainersDetail } from "./ContainersDetail";
 import { KubeKindPage, KubeOverviewPage } from "./KubePage";
 import { KubeTopologyPage } from "./KubeTopologyPage";
+import { HelmPage } from "./HelmPage";
 import { AzurePane } from "./AzurePages";
 import { KubeAddCluster } from "./KubeAddCluster";
 import { AddEngineDialog } from "./AddEngineDialog";
@@ -14,6 +15,9 @@ import { VolumesPage } from "./VolumesPage";
 import { NetworksPage } from "./NetworksPage";
 import { ComposePage } from "./ComposePage";
 import { BuildPage } from "./BuildPage";
+import { SandboxesPage } from "./SandboxesPage";
+import { EnvsPage } from "./EnvsPage";
+import { MarketPage } from "./MarketPage";
 import { JobsPanel } from "./JobsPanel";
 import { StateDot, useInterval } from "./containerBits";
 import { EmptyLine } from "./ui";
@@ -141,6 +145,8 @@ export function ContainersPane() {
         <KubeOverviewPage runtime={runtime} onAddCluster={() => setDialog("cluster")} />
       ) : nav.section === "topology" ? (
         <KubeTopologyPage />
+      ) : nav.section === "helm" ? (
+        <HelmPage />
       ) : (
         <KubeKindPage kind={nav.section} />
       );
@@ -188,6 +194,12 @@ function EnginePage({ section, runtimeId }: { section: string; runtimeId: string
       return <ComposePage runtime={runtime} />;
     case "build":
       return <BuildPage runtime={runtime} />;
+    case "envs":
+      return <EnvsPage runtime={runtime} />;
+    case "market":
+      return <MarketPage runtime={runtime} />;
+    case "sandboxes":
+      return <SandboxesPage runtime={runtime} />;
     default:
       return <ContainersPage runtime={runtime} />;
   }

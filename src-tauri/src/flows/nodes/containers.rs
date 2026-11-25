@@ -118,6 +118,18 @@ fn need(params: &Value, name: &str, what: &str) -> Result<String, NodeError> {
     }
 }
 
+/// What a «Contenedor» run node would start, as the security policy reads it: its image and its
+/// host folders. The node sets no user, no limits and no network, so a policy that requires those
+/// refuses it — which is the policy's point.
+fn policy_spec(image: &str, params: &Value) -> crate::containers::run::RunSpec {
+    use crate::containers::run::{RunSpec, RunVolume};
+    let volumes = pairs(params, "volumes")
+        .into_iter()
+        .map(|(host, inside)| RunVolume { kind: "bind".into(), source: super::expand_path(&host).to_string_lossy().into_owned(), target: inside, read_only: false })
+        .collect();
+    RunSpec { image: image.to_string(), volumes, ..Default::default() }
+}
+
 /// A container or an image named by a field — refused when it could be read as a flag: the field is
 /// often an expression (`{{ $json.name }}`), and an upstream item's data is not ours to vouch for.
 fn need_ref(params: &Value, name: &str, what: &str) -> Result<String, NodeError> {
@@ -213,6 +225,9 @@ async fn container(ctx: &NodeCtx) -> Result<Ports, NodeError> {
             }
             "ctrRun" => {
                 let image = need_ref(&params, "image", "image to run")?;
+                // The workspace's security policy, when it holds flows to it: a hard block.
+                let checked = policy_spec(&image, &params);
+                cancellable(ctx, crate::containers::policy::enforce_for_flow(&ctx.run.workspace_id, &target, &checked)).await?;
                 let detach = flag(&params, "detach");
                 let mark = new_mark(RUN_LABEL);
                 let mut args = vec!["run".to_string(), "--label".into(), mark.clone()];
@@ -419,5 +434,17 @@ mod tests {
         assert!(!glob_match("api-*", "web"));
         assert!(glob_match("", "anything"));
         assert!(glob_match("*db*", "shop-db-1"));
+    }
+
+    #[test]
+    fn a_run_node_is_judged_by_its_image_and_host_folders() {
+        use crate::containers::policy::{self, Facts, SecurityPolicy};
+        let params = json!({"volumes": [{"name": "/var/run/docker.sock", "value": "/var/run/docker.sock"}]});
+        let spec = policy_spec("alpine:3", &params);
+        assert_eq!(spec.image, "alpine:3");
+        let found = policy::check_spec(&SecurityPolicy::default(), &spec, &Facts::default());
+        assert!(policy::blocks(&found), "the engine's socket is refused: {found:?}");
+        let limits = SecurityPolicy { require_limits: true, ..Default::default() };
+        assert!(policy::blocks(&policy::check_spec(&limits, &policy_spec("alpine:3", &json!({})), &Facts::default())), "a node sets no limits");
     }
 }

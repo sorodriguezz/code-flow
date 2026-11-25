@@ -63,6 +63,10 @@ pub fn set_setting(
     // Mirrored for the git layer, which reads no database (see `git::checkpoint::setting_changed`).
     crate::git::checkpoint::setting_changed(&key, Some(&value));
     crate::ai_locks::setting_changed(&key, Some(&value));
+    // A provider switched between ACP and its CLI: the warm agent servers are of the old choice.
+    if key.starts_with("ai_transport:") {
+        crate::acp::clear_pool();
+    }
     let _ = webview.emit(
         "settings:changed",
         SettingChanged { key: &key, origin: webview.label() },

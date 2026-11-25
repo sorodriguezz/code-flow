@@ -1623,6 +1623,15 @@ pub trait AiEngine: Send + Sync {
         false
     }
 
+    /// The arguments that start this CLI as an Agent Client Protocol server on stdio, when it has
+    /// one — `agy acp`, `grok agent stdio`, `opencode acp`. A turn then goes over ACP instead of a
+    /// `-p` process (`crate::acp`, which says which turns stay on the CLI). `sandbox`: the server is
+    /// for read-only turns and should be started with whatever confines its terminal. `None`, the
+    /// default, is a CLI driven one process per turn.
+    fn acp_args(&self, _sandbox: bool) -> Option<Vec<String>> {
+        None
+    }
+
     /// Whether this engine can run an agentic tool loop (read/edit/write files, MCP).
     ///
     /// Every engine the app ships answers `true` today — a local model reached through
@@ -2208,6 +2217,10 @@ impl AiEngine for AccountEngine {
     }
     fn in_process(&self) -> bool {
         self.inner.in_process()
+    }
+
+    fn acp_args(&self, sandbox: bool) -> Option<Vec<String>> {
+        self.inner.acp_args(sandbox)
     }
     fn usage_probe_args(&self, session_id: &str) -> Option<Vec<String>> {
         self.with(|e| e.usage_probe_args(session_id))
@@ -2877,6 +2890,44 @@ const BACKGROUND_WAIT_VAR: &str = "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS";
 /// silent by design until it answers — see [`AiEngine::quiet_while_working`]. `None` is "no watchdog".
 /// One function because two places need the same figure: the watchdog, and the banner that tells the
 /// card when a quiet run will be stopped.
+/// [`run_idle_limit`], for the ACP transport's own watchdog (`crate::acp`).
+pub(crate) fn idle_limit_for(engine: &dyn AiEngine) -> Option<std::time::Duration> {
+    run_idle_limit(engine)
+}
+
+/// Whether `task` reads material someone else wrote — see [`GROUNDING_TASKS`].
+pub(crate) fn is_grounding_task(task: &str) -> bool {
+    GROUNDING_TASKS.contains(&task)
+}
+
+/// The command that starts `engine` as an ACP server (`crate::acp`): `binary` resolved as a run
+/// resolves it, `args` from [`AiEngine::acp_args`], and everything [`spawn_once`] puts on a CLI's
+/// process — the widened `PATH`, a team's `cf`, the account, no console window, its own process
+/// group (Stop and the pool end its helpers too).
+pub(crate) fn acp_command(engine: &dyn AiEngine, binary: &str, args: &[String], team_cf: &crate::team::CfEnv) -> Command {
+    let mut dirs = search_dirs();
+    let program = resolve_binary(binary, &dirs);
+    let mut cmd = crate::proc::command(&program);
+    cmd.args(args);
+    if let Some(dir) = team_cf.cf_dir.clone() {
+        dirs.push(dir);
+    }
+    apply_path(&mut cmd, &dirs);
+    for (key, value) in &team_cf.vars {
+        cmd.env(key, value);
+    }
+    if let Some(account) = engine.account() {
+        account.apply(&mut cmd);
+    }
+    // Started from the home folder: a server outlives the turn that started it, and each session
+    // names its own working directory.
+    if let Some(home) = dirs::home_dir() {
+        cmd.current_dir(home);
+    }
+    crate::proc::own_process_group(&mut cmd);
+    cmd
+}
+
 fn run_idle_limit(engine: &dyn AiEngine) -> Option<std::time::Duration> {
     ai_runs::idle_limit().map(|limit| if engine.quiet_while_working() { limit * 3 } else { limit })
 }
@@ -3132,6 +3183,9 @@ async fn run_engine(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) 
     // every copy after that is the same list paid for again and kept in the session's history. A
     // skill added mid-conversation is listed from the next session on.
     let resumes = inv.resume_session_id.is_some() && engine.resumes_sessions();
+    // Over ACP or as a `-p` process — decided before the MCP grants below, which differ: an agent
+    // server takes the app's servers per session, a CLI needs agy's and Grok's written into files.
+    let over_acp = crate::acp::eligible(engine, &inv);
     if let Some(cwd) = inv.cwd.filter(|_| !resumes && !inv.text_only) {
         inv.skills_note = skills_note(cwd, engine.native_skills_dir());
     }
@@ -3145,17 +3199,27 @@ async fn run_engine(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) 
     // headlessly, agy denies the call, and on a live run the model then gave up with an empty reply —
     // worse than no map; a read-only Grok run denies every MCP tool (`grok.rs`). Allow-rules live in
     // the user's own settings, which this never writes. A workspace chat's folder gets one too, with
-    // the workspace chat's tools (`codemap::mcp::for_file_client`).
+    // the workspace chat's tools (`codemap::mcp::for_file_client`). `file_acts`: the MCP server's
+    // "may act" (`for_repository` below) — the file's token still opens only the queries, and in a
+    // sandbox's checkout that sandbox's own actions (`codemap::mcp::Access::sandbox_acts`).
+    // `file_grounding`: a run over someone else's material gets a grounding token — the map, the
+    // knowledge and the memories, nothing of the app (`codemap::mcp::FileRun::grounding`).
+    let file_grounding = GROUNDING_TASKS.contains(&inv.task);
+    let file_acts = !inv.read_only && !file_grounding;
     let _file_map_grant = match inv.cwd {
-        Some(cwd) if inv.auto_approve_edits && !inv.read_only => match engine.id() {
-            "gemini" => crate::codemap::mcp::for_agy(cwd),
-            "grok" => crate::codemap::mcp::for_grok(cwd),
+        Some(cwd) if inv.auto_approve_edits && !inv.read_only && !over_acp => match engine.id() {
+            "gemini" => crate::codemap::mcp::for_agy(cwd, file_acts, file_grounding),
+            "grok" => crate::codemap::mcp::for_grok(cwd, file_acts, file_grounding),
             _ => None,
         },
         _ => None,
     };
     let _map_grant = match inv.cwd {
-        Some(cwd) if matches!(engine.id(), "claude" | "codex" | "opencode" | "cline") && !inv.app_mcp.iter().any(|s| s.name == crate::codemap::mcp::SERVER_NAME) => {
+        Some(cwd)
+            if (matches!(engine.id(), "claude" | "codex" | "opencode" | "cline") || (over_acp && matches!(engine.id(), "gemini" | "grok")))
+                && !inv.text_only
+                && !inv.app_mcp.iter().any(|s| s.name == crate::codemap::mcp::SERVER_NAME) =>
+        {
             // A run that is not read-only also gets the app's action tools (`codemap::mcp::Access`) —
             // except a run that reads someone else's material, which gets the queries alone.
             let grounding = GROUNDING_TASKS.contains(&inv.task);
@@ -3186,6 +3250,35 @@ async fn run_engine(engine: &dyn AiEngine, binary: &str, inv: AiInvocation<'_>) 
         record_usage(engine, &inv, &outcome, "", None);
         crate::provider_state::note_outcome(engine.id(), &outcome);
         return outcome;
+    }
+
+    // An agent server (`crate::acp`): the same banner, Stop and usage row; the CLI below only when
+    // the server will not start, for this turn.
+    let mut _fallback_map_grant = None;
+    if over_acp {
+        let servers = crate::codemap::mcp::loadable(&inv.app_mcp, inv.read_only || inv.text_only);
+        match crate::acp::run(engine, binary, &inv, &servers, &ctx, &mut cancel).await {
+            crate::acp::Outcome::Ran(outcome) => {
+                record_usage(engine, &inv, &outcome, "", None);
+                crate::provider_state::note_outcome(engine.id(), &outcome);
+                return outcome;
+            }
+            crate::acp::Outcome::Unavailable(reason) => {
+                if let Some(ctx) = &ctx {
+                    let note = serde_json::json!({"type": "codeflow", "event": "note", "text": format!("ACP no disponible ({reason}); se usa la CLI.")});
+                    ai_runs::emit_line(ctx, "stdout", &note.to_string());
+                }
+                // The CLI takes agy's and Grok's map from a file, which was skipped for ACP.
+                _fallback_map_grant = match inv.cwd {
+                    Some(cwd) if inv.auto_approve_edits && !inv.read_only => match engine.id() {
+                        "gemini" => crate::codemap::mcp::for_agy(cwd, file_acts, file_grounding),
+                        "grok" => crate::codemap::mcp::for_grok(cwd, file_acts, file_grounding),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+            }
+        }
     }
 
     // One attempt, and a second only for the engines that ask for it — see

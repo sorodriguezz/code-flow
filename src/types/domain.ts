@@ -1391,7 +1391,8 @@ export type UsageKind =
   | "ai_outcome"
   | "ai_tokens"
   | "git"
-  | "git_lines";
+  | "git_lines"
+  | "ai_scripts";
 
 export interface UsageEvent {
   kind: UsageKind;

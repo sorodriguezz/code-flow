@@ -115,7 +115,9 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     icon: Gem,
     available: true,
     defaultBinary: "agy",
-    streamsTokens: false,
+    // Types live over ACP, the default transport (`src-tauri/src/acp.rs`); on the classic CLI the
+    // answer still arrives whole and is revealed.
+    streamsTokens: true,
     // Resumes *this* conversation: since agy 1.1.10 the run reports its conversation id and the
     // next turn passes it to `--conversation` (see `gemini.rs`). It used to be the fixed `agy-last`
     // sentinel and "whatever it ran last", which is what `resumeIsAmbiguous` warned about; the
@@ -157,7 +159,9 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     icon: Zap,
     available: true,
     defaultBinary: "grok",
-    streamsTokens: false,
+    // Types live over ACP, the default transport (`src-tauri/src/acp.rs`); on the classic CLI the
+    // answer still arrives whole and is revealed.
+    streamsTokens: true,
     // The one engine that gives a headless caller a real conversation id back, so a reopened Grok
     // chat resumes the exact conversation rather than "the last one" — the opposite of Gemini.
     resumesSessions: true,
@@ -180,7 +184,9 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     icon: SquareTerminal,
     available: true,
     defaultBinary: "opencode",
-    streamsTokens: false,
+    // Types live over ACP, the default transport (`src-tauri/src/acp.rs`); on the classic CLI the
+    // answer still arrives whole and is revealed.
+    streamsTokens: true,
     resumesSessions: true,
     headlessSlashCommands: false,
     acceptsImages: false,

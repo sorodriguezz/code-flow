@@ -57,6 +57,9 @@ pub struct SessionRequest {
     pub resource_group: Option<String>,
     #[serde(default)]
     pub subscription: Option<String>,
+    /// `localCluster`: what kind, k3d or minikube makes, starts, stops or deletes (see `local`).
+    #[serde(default)]
+    pub local_cluster: Option<super::local::LocalClusterSpec>,
 }
 
 /// bash where the image has it, sh otherwise — the probe a person would type.
@@ -77,6 +80,8 @@ fn compose_action(kind: &str) -> Option<&'static str> {
         "composeDown" => Some("down"),
         "composeRestart" => Some("restart"),
         "composePull" => Some("pull"),
+        // `up` that builds the images again and replaces the containers — an environment's rebuild.
+        "composeBuild" => Some("up"),
         _ => None,
     }
 }
@@ -167,6 +172,9 @@ fn compose_args(kind: engine::EngineKind, action: &str, request: &SessionRequest
     if action == "up" {
         args.push("-d".into());
     }
+    if request.kind == "composeBuild" {
+        args.extend(["--build".into(), "--force-recreate".into()]);
+    }
     Ok(args)
 }
 
@@ -187,6 +195,15 @@ pub fn command_line(request: &SessionRequest) -> Result<(String, Vec<String>), S
         // An Azure resource's own log stream — App Service, Container Apps, Container Instances —
         // followed with `az`; the target is the resource's id.
         return super::azure::log_command(&request.target, true, tail);
+    }
+    if request.kind == "localCluster" {
+        // A cluster on this computer made, started, stopped or deleted by its own tool — minutes of
+        // pulling and booting, shown as it goes. The target is the cluster's name.
+        let spec = request.local_cluster.as_ref().ok_or("say which local cluster and what to do with it")?;
+        if spec.name.trim() != request.target.trim() {
+            return Err("the session's target is not the cluster it names".into());
+        }
+        return super::local::command_line(spec);
     }
     if request.kind == "aksStart" {
         // An AKS cluster that was stopped (its API server's name then resolves to nothing): Azure's
@@ -309,6 +326,7 @@ fn label(request: &SessionRequest) -> String {
         "pull" | "build" => request.kind.clone(),
         "kubeLogin" => "sign-in".to_string(),
         "aksStart" => return "az aks start".to_string(),
+        "localCluster" => return request.local_cluster.as_ref().map(|s| format!("{} {}", s.tool, s.action)).unwrap_or_default(),
         "azureLogs" => return format!("az logs {}", super::azure::parse_id(&request.target).map(|p| p.3).unwrap_or_default()),
         kind => match compose_action(kind) {
             Some(action) => format!("compose {action}"),
@@ -322,6 +340,11 @@ pub fn open(app: AppHandle, registry: &TerminalRegistry, request: &SessionReques
     let request = &files_still_here(request);
     let (program, args) = command_line(request)?;
     let label = label(request);
+    let mut env: Vec<(String, String)> = [("PATH".to_string(), super::cli::search_path())].into_iter().chain(super::cli::engine_env_now()).collect();
+    if request.kind == "localCluster" {
+        // The tool writes the cluster's context where a terminal's would: the user's own kubeconfig.
+        super::local::session_env(&mut env);
+    }
     terminal::open_pty(
         app,
         registry,
@@ -332,10 +355,108 @@ pub fn open(app: AppHandle, registry: &TerminalRegistry, request: &SessionReques
         None,
         terminal::Origin { cwd: String::new(), profile: label, owner: None },
         terminal::PtyHooks {
-            env: [("PATH".to_string(), super::cli::search_path())].into_iter().chain(super::cli::engine_env_now()).collect(),
+            env,
             ..Default::default()
         },
     )
+}
+
+/// A job whose command its caller built rather than a [`SessionRequest`] — the service catalogue's
+/// `compose up`, whose passwords no request from the page may carry — with variables only this one
+/// process gets, and the caller's own hooks on its output and its end.
+///
+/// **`secret_env` is held in memory only.** It goes into the child's environment at spawn and is
+/// dropped there: it is not on the command line (which `ps` shows anyone on the machine), not in the
+/// session's label (which the terminal list and the jobs panel show), not written to a file, and the
+/// session is not recorded. [`open_prepared`] refuses a job whose arguments or label carry a value.
+pub struct PreparedJob {
+    pub program: String,
+    pub args: Vec<String>,
+    /// What the terminal list calls it: the command, never its secrets.
+    pub label: String,
+    pub secret_env: Vec<(String, String)>,
+    pub on_output: Option<std::sync::Arc<dyn Fn(u64, &str) + Send + Sync>>,
+    /// Once, when it has ended: its exit code, `None` when it was closed from this side (cancelled)
+    /// or its code could not be collected. Runs before the panel hears that it ended.
+    pub on_exit: Option<Box<dyn FnOnce(Option<i32>) + Send>>,
+}
+
+/// Refuses a job that would show a secret: a value on its command line or in its label. A value of
+/// eight characters or more may not appear anywhere in them; a shorter one (a hand-edited `dev`) may
+/// not be a whole argument — it could not be told apart from a word of the command otherwise.
+pub fn check_secrets_hidden(args: &[String], label: &str, secret_env: &[(String, String)]) -> Result<(), String> {
+    for (key, value) in secret_env {
+        if value.is_empty() {
+            continue;
+        }
+        let shown = |text: &str| if value.chars().count() >= 8 { text.contains(value.as_str()) } else { text == value || text.contains(&format!("{key}={value}")) };
+        if args.iter().any(|a| shown(a)) || shown(label) {
+            return Err(format!("the job would show the value of {key}: refused"));
+        }
+    }
+    Ok(())
+}
+
+/// The environment a prepared job runs with: the panel's own (`PATH`, the engine's variables), then
+/// its secrets, which win over a variable of the same name.
+pub fn prepared_env(base: Vec<(String, String)>, secret_env: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = base.into_iter().filter(|(name, _)| !secret_env.iter().any(|(secret, _)| secret == name)).collect();
+    env.extend(secret_env);
+    env
+}
+
+pub fn open_prepared(app: AppHandle, registry: &TerminalRegistry, job: PreparedJob) -> Result<String, String> {
+    let PreparedJob { program, args, label, secret_env, on_output, on_exit } = job;
+    check_secrets_hidden(&args, &label, &secret_env)?;
+    let base: Vec<(String, String)> = [("PATH".to_string(), super::cli::search_path())].into_iter().chain(super::cli::engine_env_now()).collect();
+    terminal::open_pty(
+        app,
+        registry,
+        &program,
+        &args,
+        None,
+        // Not recorded, like every job here.
+        None,
+        terminal::Origin { cwd: String::new(), profile: label, owner: None },
+        terminal::PtyHooks {
+            env: prepared_env(base, secret_env),
+            on_output,
+            on_exit,
+            ..Default::default()
+        },
+    )
+}
+
+#[cfg(test)]
+mod prepared_tests {
+    use super::*;
+
+    fn secret() -> Vec<(String, String)> {
+        vec![("CF_POSTGRES_SECRET".to_string(), "Pg9secretValueAbcdEFGH12".to_string())]
+    }
+
+    #[test]
+    fn a_job_never_shows_its_secrets() {
+        let args: Vec<String> = ["compose", "-p", "shop", "up", "-d"].iter().map(|a| a.to_string()).collect();
+        assert!(check_secrets_hidden(&args, "docker compose up · shop", &secret()).is_ok());
+        let mut leaking = args.clone();
+        leaking.push("--env=Pg9secretValueAbcdEFGH12".into());
+        assert!(check_secrets_hidden(&leaking, "docker compose up", &secret()).unwrap_err().contains("CF_POSTGRES_SECRET"));
+        assert!(check_secrets_hidden(&args, "up Pg9secretValueAbcdEFGH12", &secret()).is_err(), "nor in its label");
+        // A short hand-edited value is refused as a whole argument, not as a piece of one.
+        let short = vec![("CF_MYSQL_SECRET".to_string(), "dev".to_string())];
+        assert!(check_secrets_hidden(&["compose".into(), "-p".into(), "dev-shop".into()], "docker compose up · dev-shop", &short).is_ok());
+        assert!(check_secrets_hidden(&["dev".into()], "x", &short).is_err());
+        assert!(check_secrets_hidden(&["CF_MYSQL_SECRET=dev".into()], "x", &short).is_err());
+        assert!(check_secrets_hidden(&args, "x", &[("CF_X_SECRET".into(), String::new())]).is_ok());
+    }
+
+    #[test]
+    fn a_job_s_secrets_are_in_its_environment_and_win() {
+        let base = vec![("PATH".to_string(), "/usr/bin".to_string()), ("CF_POSTGRES_SECRET".to_string(), "stale".to_string())];
+        let env = prepared_env(base, secret());
+        assert_eq!(env, vec![("PATH".to_string(), "/usr/bin".to_string()), ("CF_POSTGRES_SECRET".to_string(), "Pg9secretValueAbcdEFGH12".to_string())]);
+    }
 }
 
 #[cfg(test)]
@@ -361,6 +482,7 @@ mod tests {
             tag: None,
             resource_group: None,
             subscription: None,
+            local_cluster: None,
         }
     }
 
@@ -574,5 +696,19 @@ mod tests {
 
         let _ = crate::containers::cli::run("docker", &["rmi".into(), "cf-test-build:1".into()], None, engine::PULL_TIMEOUT).await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_cluster_sessions_name_their_cluster() {
+        let mut bare = request("localCluster", "kind");
+        bare.target = "dev".into();
+        assert!(command_line(&bare).is_err(), "no spec, nothing to run");
+        let mut other = bare.clone();
+        other.local_cluster = Some(crate::containers::local::LocalClusterSpec { tool: "kind".into(), action: "delete".into(), name: "prod".into(), workers: 0, version: None, ingress_port: None });
+        assert!(command_line(&other).unwrap_err().contains("target"));
+        let mut flag = other.clone();
+        flag.target = "--help".into();
+        assert!(command_line(&flag).is_err());
+        assert_eq!(label(&other), "kind delete");
     }
 }

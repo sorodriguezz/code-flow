@@ -38,6 +38,10 @@ export interface AppScript {
   interrupted: boolean;
   returned?: string;
   logs?: string;
+  /** Bytes of every answer the script read — what single calls would have handed the model. */
+  readBytes?: number;
+  /** Bytes of what reached the model: the return value and the trace. */
+  returnedBytes?: number;
 }
 
 export type ScriptStatus = "running" | "ok" | "partial" | "failed" | "stopped" | "timeout";
@@ -110,6 +114,8 @@ export function applyScriptRecord(scripts: Map<string, AppScript>, raw: string):
       script.interrupted = record.interrupted === true;
       script.returned = str(record.returned);
       script.logs = str(record.logs);
+      script.readBytes = num(record.readBytes);
+      script.returnedBytes = num(record.returnedBytes);
       break;
     default:
       return null;
@@ -123,6 +129,46 @@ export function scriptStatus(script: AppScript): ScriptStatus {
   if (script.ok) return script.calls.some((call) => !call.ok) ? "partial" : "ok";
   if (script.interrupted) return /time/i.test(script.error ?? "") ? "timeout" : "stopped";
   return "failed";
+}
+
+/**
+ * Bytes to tokens, roughly — the backend's rule (`usage_stats::BYTES_PER_TOKEN`). An estimate: the
+ * providers bill the turn, not one tool result.
+ */
+export function estimateTokens(bytes: number): number {
+  return Math.ceil(Math.max(0, bytes) / 4);
+}
+
+/** What a finished script read and what of it reached the model, in estimated tokens — `null` before
+ *  it ends, or for a record from before these were counted. */
+export function scriptTokens(script: AppScript): { read: number; returned: number } | null {
+  if (!script.done || script.readBytes === undefined || script.returnedBytes === undefined) return null;
+  return { read: estimateTokens(script.readBytes), returned: estimateTokens(script.returnedBytes) };
+}
+
+/** A window of `ai_scripts` counters (Settings › Estadísticas' rows), as what scripts save. */
+export interface ScriptSavings {
+  runs: number;
+  calls: number;
+  /** Estimated tokens the scripts read. */
+  read: number;
+  /** Estimated tokens the scripts handed the model. */
+  returned: number;
+  directCalls: number;
+  /** Estimated tokens single calls handed the model. */
+  direct: number;
+}
+
+export function scriptSavings(rows: { kind: string; key: string; count: number; tokens: number }[]): ScriptSavings {
+  const of = (key: string) => rows.find((row) => row.kind === "ai_scripts" && row.key === key);
+  return {
+    runs: of("script.runs")?.count ?? 0,
+    calls: of("script.calls")?.count ?? 0,
+    read: of("script.read")?.tokens ?? 0,
+    returned: of("script.returned")?.tokens ?? 0,
+    directCalls: of("direct.calls")?.count ?? 0,
+    direct: of("direct.returned")?.tokens ?? 0,
+  };
 }
 
 /** The calls that failed — what a `partial` pill counts. */

@@ -27,8 +27,9 @@
 //! **Who gets it.** A provider setting, `app_scripts:<provider>` ([`enabled_for`]): on by default
 //! for the CLIs, off for the local models, whose small models write worse code.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use rquickjs::{CatchResultExt, Context, Function, Promise, Runtime};
@@ -38,7 +39,12 @@ use tokio::sync::oneshot;
 
 /// What the model reads about the tool. It is the whole of the guidance on *when*: the rest is the
 /// hint `app_call` adds when a task turns into many calls (`app_gateway::script_hint`).
-pub const DESCRIPTION: &str = "Run a short JavaScript script over CodeFlow's commands (the ones app_commands lists) and get back only what it returns. Use it when a task needs 3 or more calls, a loop, one answer feeding the next call, or filtering a large answer; for one or two calls use app_call. The code is the body of an async function: `const svc = app.call(\"list_services\", { workspaceId: app.workspaceId });` returns the answer (await is optional) and throws on failure; `return` what the user needs — small. app.workspaceId, app.projectId and app.root say where this run is. console.log is returned too. No files, network or timers. Destructive commands are refused here: call them with app_call, so the user can approve each. Limits: 40 calls, 5 minutes.";
+pub const DESCRIPTION: &str = "Run a short JavaScript script over CodeFlow's commands (the ones app_commands lists) and get back only what it returns. Use it when a task needs 3 or more calls, a loop, one answer feeding the next call, or filtering a large answer; for one or two calls use app_call. The code is the body of an async function: `const svc = app.call(\"list_services\", { workspaceId: app.workspaceId });` returns the answer (await is optional) and throws on failure; `return` what the user needs — small. app.workspaceId, app.projectId and app.root say where this run is. console.log is returned too. No files, network or timers. Destructive commands are refused here: call them with app_call, so the user can approve each. Limits: 40 calls and 5 minutes a script, 200 calls a turn.";
+
+/// [`DESCRIPTION`] for a run that has no `app_call` — a local model's (`app_gateway::tools_for`):
+/// the script is its one door to the app, so nothing here sends it to another, and a destructive
+/// command is the user's to do.
+pub const DESCRIPTION_SCRIPT_ONLY: &str = "Run a short JavaScript script over CodeFlow's commands (the ones app_commands lists) and get back only what it returns — for one call too: a one-line script. The code is the body of an async function: `const svc = app.call(\"list_services\", { workspaceId: app.workspaceId });` returns the answer (await is optional) and throws on failure; `return` what the user needs — small. app.workspaceId, app.projectId and app.root say where this run is. console.log is returned too. No files, network or timers. Destructive commands are refused: tell the user what to do in CodeFlow instead. Limits: 40 calls and 5 minutes a script, 200 calls a turn.";
 
 /// The prefix of the records in a run's log — read by `src/lib/appScript.ts`.
 pub const MARK: &str = "⎔ ";
@@ -46,7 +52,9 @@ pub const MARK: &str = "⎔ ";
 /// How far one script may go.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
-    /// `app.call`s, failed ones included.
+    /// `app.call`s, failed ones included. The first call past it is refused — catchable, so the script
+    /// can return what it has — and the next one ends the script: a `try`/`catch` loop does not go on
+    /// knocking until the clock runs out.
     pub calls: usize,
     /// Wall time, the calls included: a deadline the interrupt handler and every call check.
     pub time: Duration,
@@ -55,6 +63,33 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Limits { calls: 40, time: Duration::from_secs(300) }
+    }
+}
+
+/// The `app.call`s all of one turn's scripts may make together. A script has its own 40, and a model
+/// that ran script after script would get 40 more each time: this is the ceiling over them — five
+/// full scripts, far past a task's need and short of a loop that never ends (2026-11-24).
+pub const TURN_CALLS: usize = 200;
+/// A turn the app cannot name (a CLI's run with no link to one) is its session, until it has made no
+/// script call for this long.
+const TURN_IDLE: Duration = Duration::from_secs(30 * 60);
+
+/// Calls made by scripts per turn (its run id, or its session): when the last was, and how many.
+static TURN_SPENT: LazyLock<Mutex<HashMap<String, (Instant, usize)>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// What is left of `turn`'s [`TURN_CALLS`].
+fn turn_left(turn: &str) -> usize {
+    let Ok(mut spent) = TURN_SPENT.lock() else { return TURN_CALLS };
+    let now = Instant::now();
+    spent.retain(|_, (at, _)| now.duration_since(*at) < TURN_IDLE);
+    TURN_CALLS.saturating_sub(spent.get(turn).map(|(_, n)| *n).unwrap_or(0))
+}
+
+fn turn_spend(turn: &str, calls: usize) {
+    if let Ok(mut spent) = TURN_SPENT.lock() {
+        let entry = spent.entry(turn.to_string()).or_insert((Instant::now(), 0));
+        entry.0 = Instant::now();
+        entry.1 += calls;
     }
 }
 
@@ -98,6 +133,9 @@ pub struct Outcome {
     pub ms: u64,
     /// It ran out of time or was stopped, rather than throwing.
     pub interrupted: bool,
+    /// The bytes of every answer the script read — what calling one command at a time would have
+    /// handed the model, and the script kept out of its context.
+    pub read_bytes: u64,
 }
 
 impl Outcome {
@@ -157,7 +195,7 @@ pub async fn execute(code: &str, context: Value, host: Host, on_call: OnCall, st
 }
 
 fn refused(why: &str, started: Instant) -> Outcome {
-    Outcome { value: None, error: Some(why.to_string()), calls: Vec::new(), logs: String::new(), ms: started.elapsed().as_millis() as u64, interrupted: false }
+    Outcome { value: None, error: Some(why.to_string()), calls: Vec::new(), logs: String::new(), ms: started.elapsed().as_millis() as u64, interrupted: false, read_bytes: 0 }
 }
 
 /// The JavaScript around the model's code: `app` and `console`, then the code as the body of an
@@ -200,6 +238,8 @@ fn run_in_thread(code: &str, context: &Value, host: Host, on_call: OnCall, stop:
     let calls: Arc<Mutex<Vec<CallRecord>>> = Arc::new(Mutex::new(Vec::new()));
     let logs: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let timed_out = Arc::new(AtomicBool::new(false));
+    let spent = Arc::new(AtomicBool::new(false));
+    let read = Arc::new(AtomicU64::new(0));
     let finish = |value: Option<Value>, error: Option<String>, interrupted: bool| Outcome {
         value,
         error,
@@ -207,6 +247,7 @@ fn run_in_thread(code: &str, context: &Value, host: Host, on_call: OnCall, stop:
         logs: logs.lock().map(|l| l.clone()).unwrap_or_default(),
         ms: started.elapsed().as_millis() as u64,
         interrupted,
+        read_bytes: read.load(Ordering::Relaxed),
     };
 
     let runtime = match Runtime::new() {
@@ -216,9 +257,9 @@ fn run_in_thread(code: &str, context: &Value, host: Host, on_call: OnCall, stop:
     runtime.set_memory_limit(MEMORY_LIMIT);
     runtime.set_max_stack_size(JS_STACK);
     {
-        let (stop, timed_out) = (stop.clone(), timed_out.clone());
+        let (stop, timed_out, spent) = (stop.clone(), timed_out.clone(), spent.clone());
         runtime.set_interrupt_handler(Some(Box::new(move || {
-            if stop.load(Ordering::Relaxed) {
+            if stop.load(Ordering::Relaxed) || spent.load(Ordering::Relaxed) {
                 return true;
             }
             if Instant::now() >= deadline {
@@ -236,11 +277,12 @@ fn run_in_thread(code: &str, context: &Value, host: Host, on_call: OnCall, stop:
     let answer: Result<String, String> = context_js.with(|ctx| {
         let install = || -> rquickjs::Result<()> {
             let globals = ctx.globals();
-            let (calls, stop, timed_out) = (calls.clone(), stop.clone(), timed_out.clone());
+            let (calls, stop, timed_out, spent, read) = (calls.clone(), stop.clone(), timed_out.clone(), spent.clone(), read.clone());
             globals.set(
                 "__cf_call",
                 Function::new(ctx.clone(), move |command: String, args: String| -> String {
-                    one_call(&command, &args, &host, &on_call, &calls, &stop, &timed_out, deadline, limits)
+                    let bounds = Bounds { stop: &stop, timed_out: &timed_out, spent: &spent, read: &read, deadline, limits };
+                    one_call(&command, &args, &host, &on_call, &calls, &bounds)
                 })?,
             )?;
             let logs = logs.clone();
@@ -279,6 +321,9 @@ fn run_in_thread(code: &str, context: &Value, host: Host, on_call: OnCall, stop:
     if stop.load(Ordering::Relaxed) {
         return finish(None, Some("The script was stopped.".into()), true);
     }
+    if spent.load(Ordering::Relaxed) {
+        return finish(None, Some(format!("The script kept calling after its limit of {} calls and was ended: return what you have once a call says the limit is reached, or split the work.", limits.calls)), true);
+    }
     if timed_out.load(Ordering::Relaxed) && answer.is_err() {
         return finish(None, Some(format!("The script ran out of time ({} s).", limits.time.as_secs())), true);
     }
@@ -300,26 +345,34 @@ fn run_in_thread(code: &str, context: &Value, host: Host, on_call: OnCall, stop:
     }
 }
 
-/// One `app.call`, inside the sandbox's thread: bounded, recorded, and answered as JSON text —
-/// `{"ok": answer}` or `{"error": why}`.
-#[allow(clippy::too_many_arguments)]
-fn one_call(
-    command: &str,
-    args: &str,
-    host: &Host,
-    on_call: &OnCall,
-    calls: &Mutex<Vec<CallRecord>>,
-    stop: &AtomicBool,
-    timed_out: &AtomicBool,
+/// What bounds one script's calls, as `__cf_call` sees it.
+struct Bounds<'a> {
+    stop: &'a AtomicBool,
+    timed_out: &'a AtomicBool,
+    /// Set by a call past the limit after the refused one: the interrupt handler ends the script.
+    spent: &'a AtomicBool,
+    /// The bytes of the answers handed into the script, added up ([`Outcome::read_bytes`]).
+    read: &'a AtomicU64,
     deadline: Instant,
     limits: Limits,
-) -> String {
+}
+
+/// One `app.call`, inside the sandbox's thread: bounded, recorded, and answered as JSON text —
+/// `{"ok": answer}` or `{"error": why}`.
+fn one_call(command: &str, args: &str, host: &Host, on_call: &OnCall, calls: &Mutex<Vec<CallRecord>>, bounds: &Bounds) -> String {
+    let Bounds { stop, timed_out, spent, read, deadline, limits } = *bounds;
     let began = Instant::now();
     let args: Value = serde_json::from_str(args).unwrap_or_else(|_| json!({}));
     let made = calls.lock().map(|c| c.len()).unwrap_or(usize::MAX);
-    let result = if stop.load(Ordering::Relaxed) {
-        Err("the script was stopped".to_string())
-    } else if began >= deadline {
+    // Past the limit and already told once: no record, no event, and the script ends at its next
+    // instruction — a loop that catches the refusal does not fill the run's log until the clock runs out.
+    if made > limits.calls || stop.load(Ordering::Relaxed) || timed_out.load(Ordering::Relaxed) {
+        if made > limits.calls {
+            spent.store(true, Ordering::SeqCst);
+        }
+        return json!({ "error": "the script is over its bounds" }).to_string();
+    }
+    let result = if began >= deadline {
         timed_out.store(true, Ordering::Relaxed);
         Err(format!("the script ran out of time ({} s)", limits.time.as_secs()))
     } else if made >= limits.calls {
@@ -333,6 +386,7 @@ fn one_call(
             if text.len() > MAX_VALUE {
                 Err(format!("the answer is too large for a script ({} MB): ask for less — a filter, a page, one item", text.len() / (1024 * 1024)))
             } else {
+                read.fetch_add(text.len() as u64, Ordering::Relaxed);
                 Ok(text)
             }
         }
@@ -390,8 +444,13 @@ fn seconds(ms: u64) -> String {
     }
 }
 
-/// What the model reads: the return value (or why the script stopped), then the trace — one line a
-/// call, so it knows what ran without having read the answers — and what it logged.
+/// What the model reads: the return value (or why the script stopped), then the trace — and what it
+/// logged.
+///
+/// **The trace is the model's, not the window's.** The window has every call with its arguments and
+/// time from the records ([`MARK`]); the model needs to know what ran and what went wrong. So the
+/// calls that went through are counted by command — `service_log ×10` — and only a failed one gets a
+/// line of its own, with its arguments and why (2026-11-24). Forty calls cost one line, not forty.
 pub fn render(outcome: &Outcome) -> String {
     let mut out = String::new();
     match (&outcome.value, &outcome.error) {
@@ -399,7 +458,7 @@ pub fn render(outcome: &Outcome) -> String {
             out.push_str("The script stopped: ");
             out.push_str(error);
             if let Some(at) = outcome.failed_at() {
-                out.push_str(&format!(" (call {} of the trace below)", at + 1));
+                out.push_str(&format!(" (call #{} below)", at + 1));
             }
         }
         (Some(Value::String(text)), None) => out.push_str(text),
@@ -421,17 +480,45 @@ pub fn render(outcome: &Outcome) -> String {
         seconds(outcome.ms),
         if outcome.ok() { "" } else { " · stopped" }
     ));
-    for call in &outcome.calls {
-        let mark = if call.ok { "✓" } else { "✗" };
+    let tally = tally(outcome.calls.iter().filter(|call| call.ok).map(|call| call.command.as_str()));
+    if !tally.is_empty() {
+        out.push_str(&format!("\n✓ {tally}"));
+    }
+    let failed: Vec<(usize, &CallRecord)> = outcome.calls.iter().enumerate().filter(|(_, call)| !call.ok).collect();
+    for (index, call) in failed.iter().take(MAX_FAILED_LINES) {
         let about = if call.about.is_empty() { String::new() } else { format!(" {}", call.about) };
         let why = call.error.as_deref().map(|e| format!(": {e}")).unwrap_or_default();
-        out.push_str(&format!("\n{mark} {}{about} · {}{why}", call.command, seconds(call.ms)));
+        out.push_str(&format!("\n✗ #{} {}{about}{why}", index + 1, call.command));
+    }
+    if failed.len() > MAX_FAILED_LINES {
+        out.push_str(&format!("\n✗ … {} more failed", failed.len() - MAX_FAILED_LINES));
     }
     if !outcome.logs.is_empty() {
         out.push_str("\nconsole:\n");
         out.push_str(&outcome.logs);
     }
     out
+}
+
+/// Failed calls the model is told one by one; past these, how many more.
+const MAX_FAILED_LINES: usize = 8;
+/// Commands a tally names; past these, how many more.
+const MAX_TALLIED: usize = 10;
+
+/// `list_services, service_log ×10, services_restart ×2` — commands in the order first called.
+fn tally<'a>(commands: impl Iterator<Item = &'a str>) -> String {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for command in commands {
+        match counts.iter_mut().find(|(name, _)| *name == command) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((command, 1)),
+        }
+    }
+    let mut parts: Vec<String> = counts.iter().take(MAX_TALLIED).map(|(name, n)| if *n == 1 { name.to_string() } else { format!("{name} ×{n}") }).collect();
+    if counts.len() > MAX_TALLIED {
+        parts.push(format!("+{} more", counts.len() - MAX_TALLIED));
+    }
+    parts.join(", ")
 }
 
 /// The record lines the run's log carries — see [`MARK`]. `start` has the code; each call follows as
@@ -475,22 +562,54 @@ pub async fn run(app: &tauri::AppHandle, scope: &crate::app_gateway::Scope<'_>, 
     let code = args.get("code").and_then(Value::as_str).unwrap_or_default().to_string();
     let title = args.get("title").and_then(Value::as_str).map(|t| short(t, 80)).filter(|t| !t.is_empty()).unwrap_or_else(|| "script".into());
     let id = uuid::Uuid::new_v4().simple().to_string();
+    // The turn's ceiling over all its scripts: refused before anything runs once it is spent.
+    let turn = run.as_ref().map(|ctx| ctx.run_id.clone()).unwrap_or_else(|| scope.session.to_string());
+    let left = turn_left(&turn);
+    if left == 0 {
+        return Err(format!(
+            "Not run: this turn's scripts already made {TURN_CALLS} calls. Answer with what you have, and ask the user before going on — or do what is left with single calls."
+        ));
+    }
     if let Some(ctx) = &run {
         crate::ai_runs::emit_record(ctx, &record(json!({ "id": id, "phase": "start", "title": title, "code": code, "acts": scope.acts })));
     }
 
-    let (root, session, acts) = (scope.root.to_string(), scope.session.to_string(), scope.acts);
+    let (root, session, acts, with_call) = (scope.root.to_string(), scope.session.to_string(), scope.acts, scope.with_call);
     let (workspace_id, project) = (scope.workspace_id.clone(), scope.project.clone());
     let context = json!({ "workspaceId": workspace_id, "projectId": project.as_ref().map(|p| p.id.clone()), "root": root });
+    let limits = Limits { calls: Limits::default().calls.min(left), ..Limits::default() };
+    // The script's clock, as its calls see it: a call is given what is left of it, never the
+    // gateway's own three minutes on top (2026-11-24).
+    let deadline = Instant::now() + limits.time;
+    // Stop, and the request going away, reach a call in flight — not only the next one: the window
+    // is told to drop what it started (`flows::bridge::ask`).
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
     let handle = tokio::runtime::Handle::current();
     let host_app = app.clone();
+    let host_cancel = cancel.clone();
     let host: Host = Arc::new(move |command: &str, args: Value| {
-        let scope = crate::app_gateway::Scope { root: &root, session: &session, acts, workspace_id: workspace_id.clone(), project: project.clone(), scripts: true };
+        let scope = crate::app_gateway::Scope { root: &root, session: &session, acts, workspace_id: workspace_id.clone(), project: project.clone(), scripts: true, with_call };
         let admitted = crate::app_gateway::admit(&scope, command, Some(&args))?;
         if admitted.destructive() {
-            return Err(format!("{command} is destructive and does not run inside a script: call it with app_call, so the user can approve it"));
+            return Err(if with_call {
+                format!("{command} is destructive and does not run inside a script: call it with app_call, so the user can approve it")
+            } else {
+                format!("{command} is destructive and does not run inside a script: tell the user what to do in CodeFlow instead")
+            });
         }
-        let value = handle.block_on(crate::app_gateway::invoke(&host_app, &admitted))?;
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(format!("the script ran out of time ({} s)", limits.time.as_secs()));
+        }
+        let timeout = left.min(crate::app_gateway::CALL_TIMEOUT);
+        let value = handle.block_on(crate::app_gateway::invoke_within(&host_app, &admitted, timeout, host_cancel.clone())).map_err(|error| {
+            if error == crate::ai_runs::CANCELLED_MARKER {
+                "the script was stopped".to_string()
+            } else {
+                error
+            }
+        })?;
         Ok(crate::app_gateway::scrub_value(&host_app, value))
     });
     let live = run.clone();
@@ -505,24 +624,31 @@ pub async fn run(app: &tauri::AppHandle, scope: &crate::app_gateway::Scope<'_>, 
     // The run's Stop reaches the script too.
     let mut cancelled = run.as_ref().and_then(|ctx| crate::ai_runs::subscribe(&ctx.run_id));
     let watcher = cancelled.take().map(|mut rx| {
-        let stop = stop.clone();
+        let (stop, cancel) = (stop.clone(), cancel.clone());
         tokio::spawn(async move {
-            if *rx.borrow() {
+            let halt = || {
                 stop.store(true, Ordering::SeqCst);
+                cancel.cancel();
+            };
+            if *rx.borrow() {
+                halt();
                 return;
             }
             while rx.changed().await.is_ok() {
                 if *rx.borrow() {
-                    stop.store(true, Ordering::SeqCst);
+                    halt();
                     break;
                 }
             }
         })
     });
-    let outcome = execute(&code, context, host, on_call, stop, Limits::default()).await;
+    let outcome = execute(&code, context, host, on_call, stop, limits).await;
     if let Some(watcher) = watcher {
         watcher.abort();
     }
+    turn_spend(&turn, outcome.calls.len());
+    let text = crate::app_gateway::clip(render(&outcome));
+    crate::usage_stats::app_script(scope.root, outcome.calls.len(), outcome.ms, outcome.read_bytes, text.len() as u64);
 
     if let Some(ctx) = &run {
         crate::ai_runs::emit_record(
@@ -537,10 +663,12 @@ pub async fn run(app: &tauri::AppHandle, scope: &crate::app_gateway::Scope<'_>, 
                 "interrupted": outcome.interrupted,
                 "returned": preview(&outcome),
                 "logs": if outcome.logs.is_empty() { None } else { Some(short(&outcome.logs, 600)) },
+                // What the script read, and what of it reached the model — the card's "kept out".
+                "readBytes": outcome.read_bytes,
+                "returnedBytes": text.len(),
             })),
         );
     }
-    let text = crate::app_gateway::clip(render(&outcome));
     if outcome.ok() {
         Ok(text)
     } else {
@@ -602,6 +730,8 @@ mod tests {
         let text = render(&outcome);
         assert!(text.starts_with("[{\"name\":\"worker\""), "{text}");
         assert!(text.contains("— app_run: 5 calls"), "{text}");
+        assert!(text.contains("✓ list_services, service_log ×2, services_restart ×2"), "one line for the calls that went through: {text}");
+        assert_eq!(text.lines().filter(|l| l.starts_with('✓')).collect::<Vec<_>>(), ["✓ list_services, service_log ×2, services_restart ×2"], "no per-call lines or times: {text}");
         assert!(!text.contains("line 3"), "the logs stayed in the sandbox: {text}");
     }
 
@@ -612,7 +742,9 @@ mod tests {
         assert!(outcome.error.as_deref().unwrap().contains("delete_service"), "{:?}", outcome.error);
         assert_eq!(outcome.failed_at(), Some(1));
         assert!(!outcome.calls[1].ok);
-        assert!(render(&outcome).contains("(call 2 of the trace below)"));
+        let text = render(&outcome);
+        assert!(text.contains("(call #2 below)"), "{text}");
+        assert!(text.contains("\n✗ #2 delete_service w: "), "a failed call has its own line: {text}");
     }
 
     #[tokio::test]
@@ -635,6 +767,63 @@ mod tests {
         let outcome = execute("while (true) {}", json!({}), host(), quiet(), Arc::new(AtomicBool::new(false)), limits).await;
         assert!(outcome.interrupted);
         assert!(outcome.error.as_deref().unwrap().contains("ran out of time"), "{:?}", outcome.error);
+    }
+
+    #[tokio::test]
+    async fn a_script_that_catches_the_limit_and_keeps_calling_is_ended() {
+        let limits = Limits { calls: 3, time: Duration::from_secs(30) };
+        let seen = Arc::new(Mutex::new(0usize));
+        let sink = seen.clone();
+        let on_call: OnCall = Arc::new(move |_, _| *sink.lock().unwrap() += 1);
+        let code = "let n = 0; while (true) { try { app.call(\"list_services\", {}); } catch (_) {} n++; } return n;";
+        let outcome = execute(code, json!({}), host(), on_call, Arc::new(AtomicBool::new(false)), limits).await;
+        assert!(outcome.interrupted);
+        assert!(outcome.error.as_deref().unwrap().contains("kept calling after its limit of 3"), "{:?}", outcome.error);
+        assert_eq!(outcome.calls.len(), 4, "the three calls and the one refusal, nothing after");
+        assert_eq!(*seen.lock().unwrap(), 4, "no event per knock past the limit");
+        assert!(outcome.ms < 5_000, "ended at once, not by the clock: {} ms", outcome.ms);
+
+        // Told once, a script may still return what it has.
+        let code = "const got = []; for (let i = 0; i < 5; i++) { try { got.push(app.call(\"list_services\", {}).length); } catch (_) { break; } } return got;";
+        let outcome = execute(code, json!({}), host(), quiet(), Arc::new(AtomicBool::new(false)), limits).await;
+        assert!(outcome.ok(), "{:?}", outcome.error);
+        assert_eq!(outcome.value, Some(json!([3, 3, 3])));
+    }
+
+    #[test]
+    fn a_turn_s_scripts_share_one_ceiling_and_an_idle_one_is_forgotten() {
+        let turn = format!("turn-{}", uuid::Uuid::new_v4().simple());
+        assert_eq!(turn_left(&turn), TURN_CALLS);
+        turn_spend(&turn, 40);
+        turn_spend(&turn, 40);
+        assert_eq!(turn_left(&turn), TURN_CALLS - 80);
+        turn_spend(&turn, TURN_CALLS);
+        assert_eq!(turn_left(&turn), 0);
+        let other = format!("turn-{}", uuid::Uuid::new_v4().simple());
+        assert_eq!(turn_left(&other), TURN_CALLS, "another turn starts whole");
+        if let Some(long_ago) = Instant::now().checked_sub(TURN_IDLE + Duration::from_secs(1)) {
+            TURN_SPENT.lock().unwrap().get_mut(&turn).unwrap().0 = long_ago;
+            assert_eq!(turn_left(&turn), TURN_CALLS);
+        }
+    }
+
+    #[tokio::test]
+    async fn what_a_script_read_is_counted() {
+        let outcome = go(r#"app.call("list_services", {}); try { app.call("nope", {}); } catch (_) {} return 1;"#).await;
+        assert_eq!(outcome.read_bytes as usize, json!({ "ok": services() }).to_string().len(), "only the answer that came in");
+    }
+
+    #[test]
+    fn a_tally_counts_commands_in_the_order_first_called() {
+        assert_eq!(tally(["a", "b", "b", "a", "c"].into_iter()), "a ×2, b ×2, c");
+        let many: Vec<String> = (0..12).map(|i| format!("c{i}")).collect();
+        assert!(tally(many.iter().map(String::as_str)).ends_with("c9, +2 more"));
+    }
+
+    #[test]
+    fn the_script_only_description_never_sends_a_model_to_app_call() {
+        assert!(!DESCRIPTION_SCRIPT_ONLY.contains("app_call"));
+        assert!(DESCRIPTION.contains("app_call"));
     }
 
     #[tokio::test]

@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { closeTerminal } from "../lib/tauri/commands";
 import { onTerminalExit, onTerminalOutput } from "../lib/tauri/events";
 import { containersOpenSession, type SessionRequest } from "../lib/tauri/containersCommands";
+import { containersMarketUpJob } from "../lib/tauri/containersMarketCommands";
 import { useContainersStore } from "./containersStore";
 import { disownTerminalBacklog } from "./terminalStore";
 import { pushSuccessToast } from "./toastStore";
@@ -72,6 +73,21 @@ interface JobsState {
   setFolded: (folded: boolean) => void;
 }
 
+/**
+ * What a kind of job does once it has ended, besides `options` — registered once by the module that
+ * owns that kind (the service catalogue settles its toasts and reloads the modules a stack wired into),
+ * never by a page, which may be gone by then. Not called for a job closed before it ended.
+ */
+type JobEndHandler = (job: ContainerJob, code: number | null, error: string | null) => void;
+const endHandlers = new Map<SessionRequest["kind"], JobEndHandler>();
+export function onJobEnd(kind: SessionRequest["kind"], handler: JobEndHandler) {
+  endHandlers.set(kind, handler);
+}
+
+/** A job's session: most are a `SessionRequest` the backend turns into a command; a service-catalogue
+ *  stack's `up` is opened by its own command, which reads its passwords from the Llavero itself. */
+const openSession = (request: SessionRequest) => (request.kind === "marketUp" ? containersMarketUpJob(request.target) : containersOpenSession(request));
+
 /** Ended jobs kept in the panel before the oldest go — a running one is never dropped. */
 const KEEP_ENDED = 6;
 const HISTORY = 20;
@@ -123,6 +139,7 @@ export const useContainersJobsStore = create<JobsState>((set, get) => {
     const containers = useContainersStore.getState();
     for (const what of job.options.refresh ?? []) void containers.refreshList(job.request.runtime as RuntimeId, what);
     if (code === 0 && job.options.done) pushSuccessToast(job.options.done);
+    endHandlers.get(job.request.kind)?.(job, code, error);
   };
 
   const listen = () => {
@@ -169,7 +186,7 @@ export const useContainersJobsStore = create<JobsState>((set, get) => {
       waiting++;
       try {
         await listen();
-        const id = await containersOpenSession(request);
+        const id = await openSession(request);
         // This store keeps the session's history; the router must not hold a second copy for a
         // first pane that may never come.
         disownTerminalBacklog(id);

@@ -17,9 +17,12 @@
 //!   doors the model is itself held at (answering its own approval, the window's replies).
 //! - **A plan turn** calls `read` commands only.
 //! - **`destructive`** ones — deleting, resetting, quitting, and anything that changes what a model
-//!   may do (settings, access, trust) — run only after the user's yes in the window.
+//!   may do (settings, access, trust) — run only after the user's yes in the window. Where one
+//!   command does very different things by an argument (`containers_act`'s `action`), the call is
+//!   judged by it ([`risk_of_call`]).
 //! - **The run's workspace**: a `workspaceId` must be the run's, a `projectId` one of its
-//!   repositories, an absolute path inside one of them (or the temporary folder).
+//!   repositories, an absolute path inside one of them (or the temporary folder) once `..` and
+//!   links are resolved, and a relative path never climbs with `..`.
 //! - **What comes back** is scrubbed of every secret the app keeps and what the secret scan knows,
 //!   and cut at [`MAX_ANSWER`].
 //!
@@ -78,10 +81,24 @@ pub fn is_tool(name: &str) -> bool {
 /// The tools' definitions. Short: they ride along on every turn. `acts`: a turn that may act —
 /// otherwise `app_call` and `app_run` run reads only, and say so.
 pub fn tools(acts: bool) -> Vec<Value> {
-    vec![
+    tools_for(acts, true)
+}
+
+/// [`tools`] for a run that has `app_call` (`with_call`) or only the script — a local model's
+/// (`local_agent::tools`). Without it, no description may send the model to `app_call`: a small model
+/// told to use a tool it was never given invents the call, retries it, and pays for every try
+/// (2026-11-24).
+pub fn tools_for(acts: bool, with_call: bool) -> Vec<Value> {
+    let list_description = if with_call {
+        "Everything CodeFlow can do, as commands you can call with app_call: "
+    } else {
+        "Everything CodeFlow can do, as commands a script calls with app.call in app_run: "
+    };
+    let run_description = if with_call { crate::app_script::DESCRIPTION } else { crate::app_script::DESCRIPTION_SCRIPT_ONLY };
+    let mut all = vec![
         json!({
             "name": LIST_TOOL,
-            "description": "Everything CodeFlow can do, as commands you can call with app_call: boards (Azure, Jira, Linear, Monday), pull requests of every provider, remote hosts and buckets, the code reviewer and its findings, dependency alerts, flows, notes, services, containers, databases, the API client, settings… Search by words; without a query, the areas. Use it when no other tool covers what you need.",
+            "description": format!("{list_description}boards (Azure, Jira, Linear, Monday), pull requests of every provider, remote hosts and buckets, the code reviewer and its findings, dependency alerts, flows, notes, services, containers, databases, the API client, settings… Search by words; without a query, the areas. Use it when no other tool covers what you need."),
             "inputSchema": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Words of what you want, e.g. \"jira issue\", \"remote files\", \"review findings\""},
                 "area": {"type": "string", "description": "Only this area (as listed)"}
@@ -99,14 +116,18 @@ pub fn tools(acts: bool) -> Vec<Value> {
         }),
         json!({
             "name": RUN_TOOL,
-            "description": crate::app_script::DESCRIPTION,
+            "description": run_description,
             "inputSchema": {"type": "object", "properties": {
                 "title": {"type": "string", "description": "What the script does, in a few words of the user's language — shown to the user as the step's name"},
                 "code": {"type": "string", "description": "The body of an async JavaScript function: use app.call(command, args), return what the user needs"}
             }, "required": ["title", "code"]},
             "annotations": {"readOnlyHint": !acts, "destructiveHint": false, "idempotentHint": false, "openWorldHint": true}
         }),
-    ]
+    ];
+    if !with_call {
+        all.retain(|tool| tool["name"] != CALL_TOOL);
+    }
+    all
 }
 
 /// Where a run is: what `app_call` keeps it to.
@@ -119,6 +140,9 @@ pub struct Scope<'a> {
     /// `app_run` is on for this run's provider: `app_call` may point a model at it when a task is
     /// turning into many calls ([`script_hint`]).
     pub scripts: bool,
+    /// The run also has `app_call` — a CLI's does, a local model's does not ([`tools_for`]). A
+    /// script's refusals say where to go instead accordingly.
+    pub with_call: bool,
 }
 
 fn signature(command: &Command) -> String {
@@ -280,16 +304,55 @@ fn outside(scope: &Scope, area: &str, args: &serde_json::Map<String, Value>, roo
                 }
             }
             _ if area != "remote" && is_path_key(key) && std::path::Path::new(text).is_absolute() => {
-                let temp = std::env::temp_dir();
-                let inside = roots.iter().any(|root| std::path::Path::new(text).starts_with(root)) || std::path::Path::new(text).starts_with(&temp);
+                let path = resolved(std::path::Path::new(text));
+                let temp = resolved(&std::env::temp_dir());
+                let inside = roots.iter().any(|root| path.starts_with(resolved(std::path::Path::new(root)))) || path.starts_with(&temp);
                 if !inside {
                     return Some(format!("{key} {text} is outside this run's workspace"));
                 }
+            }
+            // A relative path is the command's to place; one that climbs (`../../etc`) could be
+            // placed anywhere, so it is not taken.
+            _ if area != "remote" && is_path_key(key) && std::path::Path::new(text).components().any(|c| c == std::path::Component::ParentDir) => {
+                return Some(format!("{key} {text} climbs out with `..`: give the absolute path inside this run's workspace"));
             }
             _ => {}
         }
     }
     None
+}
+
+/// `path` as the filesystem will take it, for comparing against a root: `.` and `..` folded away
+/// (`Path::starts_with` compares components, and `/repo/../etc` starts with `/repo`), and links
+/// followed as far as the path exists — a link inside the workspace to `/etc` leads to `/etc`. A tail
+/// that does not exist yet (a file about to be written) is kept as written, already folded.
+/// (2026-11-24.)
+fn resolved(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let mut folded = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                folded.pop();
+            }
+            other => folded.push(other.as_os_str()),
+        }
+    }
+    let mut existing = folded.as_path();
+    let mut tail: Vec<&std::ffi::OsStr> = Vec::new();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(existing) {
+            return tail.iter().rev().fold(real, |acc, part| acc.join(part));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name);
+                existing = parent;
+            }
+            _ => return folded,
+        }
+    }
 }
 
 /// Why remote host `id` is not this run's workspace's, or `None` — also when there is no workspace
@@ -366,6 +429,7 @@ pub(crate) fn admit(scope: &Scope, name: &str, raw_args: Option<&Value>) -> Resu
         },
         Some(_) => return Err("args must be an object".into()),
     };
+    let risk = risk_of_call(command, &call_args);
     let missing: Vec<&str> = command.args.iter().filter(|a| !a.optional && !call_args.contains_key(&a.name)).map(|a| a.name.as_str()).collect();
     if !missing.is_empty() {
         return Err(format!("missing arguments: {} — {}", missing.join(", "), signature(command)));
@@ -386,18 +450,47 @@ pub(crate) fn admit(scope: &Scope, name: &str, raw_args: Option<&Value>) -> Resu
         if let Some(id) = call_args.get("connectionId").and_then(Value::as_str) {
             let spec = crate::ai_usage::with_conn(|conn| crate::db::datasource_queries::get_connection(conn, id).ok().flatten().map(|row| row.spec)).flatten();
             if let Some(spec) = spec {
-                db_gate(crate::agentcli::AiAccess::of_spec(&spec), command.risk == "destructive").map_err(|why| format!("Not called: {why}."))?;
+                db_gate(crate::agentcli::AiAccess::of_spec(&spec), risk == "destructive").map_err(|why| format!("Not called: {why}."))?;
             }
         }
     }
-    Ok(Admitted { name: name.to_string(), risk: command.risk.clone(), args: call_args, signature: signature(command) })
+    Ok(Admitted { name: name.to_string(), risk, args: call_args, signature: signature(command) })
+}
+
+/// The actions of `containers_act` that only start, stop or reshape what is there, and can be
+/// undone by the opposite action. Any other — `remove`, `delete`, `prune`, `kill`, `down`, `undo`, an
+/// action added later — waits for the user's yes.
+const CONTAINER_ACTIONS_UNDONE: &[&str] = &["start", "stop", "restart", "pause", "unpause", "rename", "scale", "suspend", "resume", "cordon", "uncordon", "trigger", "up", "useContext"];
+
+/// How risky this call is: the catalogue's risk, read off the name, raised by what the arguments say
+/// where one command does very different things — `containers_act` starts a container or deletes a
+/// cluster's pods by its `action` (2026-11-24).
+fn risk_of_call(command: &Command, args: &serde_json::Map<String, Value>) -> String {
+    if command.name == "containers_act" {
+        let action = args.get("action").and_then(Value::as_str).unwrap_or_default();
+        if !CONTAINER_ACTIONS_UNDONE.contains(&action) {
+            return "destructive".into();
+        }
+    }
+    command.risk.clone()
 }
 
 /// The call itself: the window's own `invoke` (`flows::bridge`), its answer as the window got it —
 /// not yet scrubbed (see [`scrub`] and [`scrub_value`]).
 pub(crate) async fn invoke(app: &AppHandle, admitted: &Admitted) -> Result<Value, String> {
+    invoke_within(app, admitted, CALL_TIMEOUT, tokio_util::sync::CancellationToken::new()).await
+}
+
+/// The longest one command is waited for.
+pub(crate) const CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// [`invoke`], given up after `timeout` or when `cancel` fires — a script's Stop and what is left of
+/// its clock (`app_script::run`). Giving up tells the window too (`flows::bridge::ask`), so what it
+/// started for the call is dropped. A failure's text is scrubbed like an answer: a command's error
+/// can quote the URL, the header or the connection string it failed on.
+pub(crate) async fn invoke_within(app: &AppHandle, admitted: &Admitted, timeout: std::time::Duration, cancel: tokio_util::sync::CancellationToken) -> Result<Value, String> {
     let payload = json!({ "command": admitted.name, "args": Value::Object(admitted.args.clone()) });
-    crate::flows::bridge::ask(app, "app.invoke", payload, std::time::Duration::from_secs(180), tokio_util::sync::CancellationToken::new()).await
+    crate::flows::bridge::ask(app, "app.invoke", payload, timeout, cancel).await.map_err(|error| scrub(app, &error))
 }
 
 /// `app_call`: one command, with everything this module's header says bounds it.
@@ -417,9 +510,10 @@ pub async fn call(app: &AppHandle, scope: &Scope<'_>, args: &Value) -> Result<St
         other => serde_json::to_string_pretty(&other).unwrap_or_default(),
     };
     let text = scrub(app, &text);
-    let cut = text.len() > MAX_ANSWER;
+    let size = Size::of(text.len());
     let mut text = clip(text);
-    if let Some(hint) = script_hint(scope, cut) {
+    crate::usage_stats::app_call(scope.root, text.len() as u64);
+    if let Some(hint) = script_hint(scope, size) {
         text.push_str(hint);
     }
     Ok(text)
@@ -433,10 +527,39 @@ const STREAK_GAP: std::time::Duration = std::time::Duration::from_secs(90);
 /// The call of a streak that suggests a script — once a streak, so it is a nudge and not a nag.
 const STREAK_HINT_AT: u32 = 3;
 
+/// An answer of this many bytes (~3k tokens) is one a script would have filtered: the model now
+/// carries it for the rest of the turn.
+const LARGE_ANSWER: usize = 12_000;
+
+/// How big an `app_call` answer was — what decides, beside how many calls came in a row, whether
+/// the next step is better done as a script. Not how many calls a task takes: three small answers
+/// are cheaper read directly than written into a script, and one log of fifty thousand lines is not.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Size {
+    Small,
+    /// Past [`LARGE_ANSWER`], whole.
+    Large,
+    /// Past [`MAX_ANSWER`]: the model got only its start.
+    Cut,
+}
+
+impl Size {
+    fn of(bytes: usize) -> Size {
+        if bytes > MAX_ANSWER {
+            Size::Cut
+        } else if bytes > LARGE_ANSWER {
+            Size::Large
+        } else {
+            Size::Small
+        }
+    }
+}
+
 /// A line after `app_call`'s answer pointing at `app_run`, when the run has it and this is where a
-/// script would have been cheaper: the answer was cut, or calls are piling up one after another.
-/// Said by the app, on evidence, rather than left to the model's reading of a tool description.
-fn script_hint(scope: &Scope, cut: bool) -> Option<&'static str> {
+/// script would have been cheaper: the answer was cut or large, or calls are piling up one after
+/// another. Said by the app, on evidence, rather than left to the model's reading of a tool
+/// description.
+fn script_hint(scope: &Scope, size: Size) -> Option<&'static str> {
     if !scope.scripts {
         return None;
     }
@@ -449,12 +572,14 @@ fn script_hint(scope: &Scope, cut: bool) -> Option<&'static str> {
         entry.1 += 1;
         entry.1
     };
-    hint_for(cut, count)
+    hint_for(size, count)
 }
 
-fn hint_for(cut: bool, count: u32) -> Option<&'static str> {
-    if cut {
+fn hint_for(size: Size, count: u32) -> Option<&'static str> {
+    if size == Size::Cut {
         Some("\n[Tip: app_run can make this call and filter its answer in a script, so only what you need comes back.]")
+    } else if size == Size::Large {
+        Some("\n[Tip: this answer was large and stays in your context. Next time, app_run can read it and return only the part you need.]")
     } else if count == STREAK_HINT_AT {
         Some("\n[Tip: several app_call in a row — if more are coming, app_run does them in one script and hands you only what it returns.]")
     } else {
@@ -463,30 +588,43 @@ fn hint_for(cut: bool, count: u32) -> Option<&'static str> {
 }
 
 /// Every value the app keeps as a secret, and what the secret scan recognises, out of `text`.
-fn scrub(app: &AppHandle, text: &str) -> String {
+pub(crate) fn scrub(app: &AppHandle, text: &str) -> String {
+    scrub_text(&known_secrets(app), text)
+}
+
+/// The secrets the app keeps, longest first, so one that contains another goes whole.
+fn known_secrets(app: &AppHandle) -> Vec<String> {
+    let Some(db) = app.try_state::<crate::db::Db>() else { return Vec::new() };
+    let mut secrets = crate::db::api_secrets::stored_secrets(&db);
+    secrets.retain(|s| s.chars().count() >= 4);
+    secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    secrets
+}
+
+fn scrub_text(secrets: &[String], text: &str) -> String {
     let mut out = text.to_string();
-    if let Some(db) = app.try_state::<crate::db::Db>() {
-        let mut secrets = crate::db::api_secrets::stored_secrets(&db);
-        secrets.retain(|s| s.chars().count() >= 4);
-        secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
-        for secret in secrets {
+    for secret in secrets {
+        if out.contains(secret.as_str()) {
             out = out.replace(secret.as_str(), "[secret]");
         }
     }
     crate::secret_scan::redact(&out).0
 }
 
-/// [`scrub`] over a JSON answer, for a script to keep working with: the same secrets taken out of
-/// its text, read back as JSON — or as the scrubbed text, should taking a secret out have left
-/// something that no longer parses.
+/// [`scrub`] over a JSON answer, for a script to keep working with: every string in it — keys too —
+/// scrubbed as itself. Not the answer's JSON text at once: there a secret with a quote, a backslash
+/// or a line break in it is written escaped, does not match, and goes through (2026-11-24).
 pub(crate) fn scrub_value(app: &AppHandle, value: Value) -> Value {
+    let secrets = known_secrets(app);
+    scrub_with(&secrets, value)
+}
+
+fn scrub_with(secrets: &[String], value: Value) -> Value {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) => value,
-        Value::String(text) => Value::String(scrub(app, &text)),
-        other => {
-            let text = scrub(app, &other.to_string());
-            serde_json::from_str(&text).unwrap_or(Value::String(text))
-        }
+        Value::String(text) => Value::String(scrub_text(secrets, &text)),
+        Value::Array(items) => Value::Array(items.into_iter().map(|item| scrub_with(secrets, item)).collect()),
+        Value::Object(map) => Value::Object(map.into_iter().map(|(key, item)| (scrub_text(secrets, &key), scrub_with(secrets, item))).collect()),
     }
 }
 
@@ -513,7 +651,7 @@ mod tests {
     fn the_catalogue_loads_and_hides_what_cannot_be_called() {
         assert!(CATALOG.len() > 1000, "{}", CATALOG.len());
         assert!(CATALOG.iter().any(|c| c.name == "get_github_token" && c.risk == "blocked"));
-        let scope = Scope { root: "/tmp/r", session: "s", acts: false, workspace_id: Some("w".into()), project: None, scripts: false };
+        let scope = Scope { root: "/tmp/r", session: "s", acts: false, workspace_id: Some("w".into()), project: None, scripts: false, with_call: true };
         let listed = list(&scope, &json!({"query": "github token"}));
         assert!(!listed.contains("get_github_token("), "{listed}");
         assert!(listed.contains("Plan mode"), "{listed}");
@@ -521,7 +659,7 @@ mod tests {
 
     #[test]
     fn a_call_stays_in_the_workspace() {
-        let scope = Scope { root: "/Users/me/repo", session: "s", acts: true, workspace_id: Some("w1".into()), project: None, scripts: false };
+        let scope = Scope { root: "/Users/me/repo", session: "s", acts: true, workspace_id: Some("w1".into()), project: None, scripts: false, with_call: true };
         let roots = vec!["/Users/me/repo".to_string()];
         let args = |v: Value| v.as_object().unwrap().clone();
         assert!(outside(&scope, "git", &args(json!({"workspaceId": "w2"})), &roots).is_some());
@@ -540,6 +678,68 @@ mod tests {
     }
 
     #[test]
+    fn a_path_that_climbs_or_links_out_of_the_workspace_is_outside() {
+        let scope = Scope { root: "/Users/me/repo", session: "s", acts: true, workspace_id: None, project: None, scripts: false, with_call: true };
+        let roots = vec!["/Users/me/repo".to_string()];
+        let args = |v: Value| v.as_object().unwrap().clone();
+        assert!(outside(&scope, "git", &args(json!({"path": "/Users/me/repo/../../../etc/passwd"})), &roots).is_some());
+        assert!(outside(&scope, "git", &args(json!({"path": "/Users/me/repo/./src/../lib"})), &roots).is_none());
+        assert!(outside(&scope, "git", &args(json!({"path": "../../etc/passwd"})), &roots).unwrap().contains(".."));
+        assert!(outside(&scope, "git", &args(json!({"path": "src/main.rs"})), &roots).is_none());
+
+        // A link inside the workspace that leads out of it.
+        let base = std::env::temp_dir().join(format!("cf-gw-{}", uuid::Uuid::new_v4().simple()));
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc", repo.join("out")).unwrap();
+            let repo_text = repo.to_string_lossy().to_string();
+            let scope = Scope { root: &repo_text, session: "s", acts: true, workspace_id: None, project: None, scripts: false, with_call: true };
+            let roots = vec![repo_text.clone()];
+            let inside = repo.join("new-file.txt").to_string_lossy().to_string();
+            let linked = repo.join("out").join("hosts").to_string_lossy().to_string();
+            assert!(outside(&scope, "git", &args(json!({"path": inside})), &roots).is_none());
+            assert!(outside(&scope, "git", &args(json!({"path": linked})), &roots).is_some());
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn containers_act_is_as_risky_as_its_action() {
+        let act = CATALOG.iter().find(|c| c.name == "containers_act").expect("containers_act");
+        let with = |action: &str| json!({"runtime": "docker", "object": "container", "action": action, "ids": ["a"]}).as_object().unwrap().clone();
+        assert_eq!(risk_of_call(act, &with("restart")), "write");
+        assert_eq!(risk_of_call(act, &with("remove")), "destructive");
+        assert_eq!(risk_of_call(act, &with("delete")), "destructive");
+        assert_eq!(risk_of_call(act, &with("something_new")), "destructive", "an action not known to be undoable asks");
+        // What runs code, pushes or consumes is the user's yes, whatever its name reads like.
+        for name in ["notebook_kernel_execute", "git_push_branch", "api_send_http_tracked", "containers_apply", "remote_queue_receive"] {
+            assert_eq!(CATALOG.iter().find(|c| c.name == name).map(|c| c.risk.as_str()), Some("destructive"), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_run_without_app_call_is_never_told_to_use_it() {
+        let tools = tools_for(true, false);
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert_eq!(names, [LIST_TOOL, RUN_TOOL]);
+        assert!(tools.iter().all(|t| !t["description"].as_str().unwrap_or_default().contains("app_call")), "{tools:?}");
+        assert_eq!(tools_for(true, true).len(), 3);
+    }
+
+    #[test]
+    fn every_string_of_an_answer_is_scrubbed_escaped_ones_too() {
+        let secrets = vec!["pa\"ss\nw0rd".to_string()];
+        let answer = json!({"url": "https://x?k=pa\"ss\nw0rd", "rows": [{"note": "pa\"ss\nw0rd here"}], "pa\"ss\nw0rd": 1, "n": 2});
+        let clean = scrub_with(&secrets, answer);
+        let text = clean.to_string();
+        assert!(!text.contains("w0rd"), "{text}");
+        assert_eq!(clean["rows"][0]["note"], "[secret] here");
+        assert_eq!(clean["n"], 2);
+    }
+
+    #[test]
     fn a_long_answer_is_cut_on_a_character_boundary_and_says_so() {
         let long = "ñ".repeat(MAX_ANSWER);
         let cut = clip(long);
@@ -550,7 +750,7 @@ mod tests {
 
     #[test]
     fn plan_mode_admits_reads_and_refuses_the_rest_before_anything_runs() {
-        let plan = Scope { root: "/tmp/r", session: "s", acts: false, workspace_id: Some("w".into()), project: None, scripts: true };
+        let plan = Scope { root: "/tmp/r", session: "s", acts: false, workspace_id: Some("w".into()), project: None, scripts: true, with_call: true };
         let read = CATALOG.iter().find(|c| c.risk == "read" && c.args.iter().all(|a| a.optional)).expect("a read command without arguments");
         assert!(admit(&plan, &read.name, None).is_ok());
         let write = CATALOG.iter().find(|c| c.risk == "write").expect("a write command");
@@ -562,14 +762,18 @@ mod tests {
 
     #[test]
     fn the_script_hint_comes_once_a_streak_or_when_an_answer_was_cut() {
-        assert!(hint_for(true, 1).unwrap().contains("app_run"));
-        assert!(hint_for(false, 1).is_none());
-        assert!(hint_for(false, 2).is_none());
-        assert!(hint_for(false, STREAK_HINT_AT).unwrap().contains("app_run"));
-        assert!(hint_for(false, STREAK_HINT_AT + 1).is_none());
+        assert!(hint_for(Size::Cut, 1).unwrap().contains("app_run"));
+        assert!(hint_for(Size::Large, 1).unwrap().contains("large"));
+        assert!(hint_for(Size::Small, 1).is_none());
+        assert!(hint_for(Size::Small, 2).is_none());
+        assert!(hint_for(Size::Small, STREAK_HINT_AT).unwrap().contains("app_run"));
+        assert!(hint_for(Size::Small, STREAK_HINT_AT + 1).is_none());
+        assert_eq!(Size::of(500), Size::Small);
+        assert_eq!(Size::of(LARGE_ANSWER + 1), Size::Large);
+        assert_eq!(Size::of(MAX_ANSWER + 1), Size::Cut);
         // A run without scripts is never pointed at one.
-        let off = Scope { root: "/tmp/r", session: "hint-off", acts: true, workspace_id: None, project: None, scripts: false };
-        assert!((0..5).all(|_| script_hint(&off, true).is_none()));
+        let off = Scope { root: "/tmp/r", session: "hint-off", acts: true, workspace_id: None, project: None, scripts: false, with_call: true };
+        assert!((0..5).all(|_| script_hint(&off, Size::Cut).is_none()));
     }
 
     #[test]

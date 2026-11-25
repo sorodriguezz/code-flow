@@ -3,8 +3,9 @@
 //! **Found, not configured.** A GUI app inherits a `PATH` imported from the login shell
 //! (`shell_env`), which covers Homebrew and most installers — but the container tools are the ones
 //! that most often live somewhere no profile mentions: OrbStack's `~/.orbstack/bin`, Docker
-//! Desktop's bundle, Rancher Desktop's `~/.rd/bin`, Podman's `/opt/podman/bin`. Those are added
-//! behind `PATH`, never in front of it, so the user's own choice of `docker` still wins.
+//! Desktop's bundle, Rancher Desktop's `~/.rd/bin`, Podman's `/opt/podman/bin`, the `docker` Kiri's
+//! app carries. Those are added behind `PATH`, never in front of it, so the user's own choice of
+//! `docker` still wins.
 //!
 //! **The engine the terminal talks to.** Which engine or cluster a tool reaches is chosen in a
 //! profile too — `export DOCKER_HOST=…` for Colima, `KUBECONFIG=a:b` for a second cluster file — and
@@ -49,7 +50,7 @@ impl Output {
 fn extra_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(home) = dirs::home_dir() {
-        for rel in [".orbstack/bin", ".docker/bin", ".rd/bin", ".local/bin", ".krew/bin", "bin"] {
+        for rel in [".orbstack/bin", ".docker/bin", ".rd/bin", ".kiri/bin", ".local/bin", ".krew/bin", "bin"] {
             dirs.push(home.join(rel));
         }
         // The clouds' CLIs and the kubectl plugins they sign in with, where their own installers put
@@ -68,6 +69,9 @@ fn extra_dirs() -> Vec<PathBuf> {
             "/Applications/OrbStack.app/Contents/MacOS/xbin",
             "/Applications/Rancher Desktop.app/Contents/Resources/resources/darwin/bin",
             "/opt/podman/bin",
+            // Kiri's app: its `kiri` and the docker CLI, Compose and buildx its full DMG bundles.
+            "/Applications/Kiri.app/Contents/MacOS",
+            "/Applications/Kiri.app/Contents/Resources/bin",
         ] {
             dirs.push(PathBuf::from(dir));
         }

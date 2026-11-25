@@ -61,7 +61,7 @@ export interface ListState {
 }
 
 /** What an engine's page lists — lite-dock's views, without its engine settings. */
-export type EngineSection = "overview" | "containers" | "images" | "volumes" | "networks" | "compose" | "build";
+export type EngineSection = "overview" | "containers" | "images" | "volumes" | "networks" | "compose" | "build" | "market" | "envs" | "sandboxes";
 
 /** Where the manager is: a runtime, and one of its sections (an `EngineSection`, or a Kubernetes kind). */
 export interface ContainersNav {
@@ -488,8 +488,9 @@ export const useContainersStore = create<ContainersState>((set, get) => ({
         if (nav.runtime !== "kubernetes") continue;
         const context = get().contextOf("kubernetes");
         if (!context || get().reach[context]?.ok === false) continue;
-        // The topology page reads its own graph (`KubeTopologyPage`), not a kind's list.
-        if (nav.section && nav.section !== "overview" && nav.section !== "topology") jobs.push(get().refreshList("kubernetes", nav.section));
+        // The topology page reads its own graph (`KubeTopologyPage`), not a kind's list; Helm's page
+        // reads its releases (`HelmPage`).
+        if (nav.section && nav.section !== "overview" && nav.section !== "topology" && nav.section !== "helm") jobs.push(get().refreshList("kubernetes", nav.section));
         continue;
       }
       // Every engine's containers, for the counts beside it; the rest only for the engine on screen.

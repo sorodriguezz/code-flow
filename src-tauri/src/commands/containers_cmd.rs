@@ -278,10 +278,82 @@ pub async fn containers_scanner_detect() -> Option<containers::scan::Scanner> {
     tokio::task::spawn_blocking(containers::scan::detect).await.ok().flatten()
 }
 
-/// An image's known vulnerabilities, from that scanner run locally against the engine's copy.
+/// An image's known vulnerabilities, from that scanner run locally against the engine's copy — kept
+/// in the image's history, whose id the result carries.
 #[tauri::command]
-pub async fn containers_image_scan(runtime: String, context: Option<String>, image: String) -> Result<containers::scan::ScanResult, String> {
-    containers::scan::scan(&engine::Target { runtime, context }, &image).await
+pub async fn containers_image_scan(db: State<'_, Db>, runtime: String, context: Option<String>, image: String) -> Result<containers::scan::ScanResult, String> {
+    let mut result = containers::scan::scan(&engine::Target { runtime, context }, &image).await?;
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    // A scan that could not be kept is still the answer the page asked for.
+    if let Err(e) = containers::scan::record(&conn, image.trim(), &mut result) {
+        crate::applog::error(&format!("containers: could not keep the scan of {image}: {e}"));
+    }
+    Ok(result)
+}
+
+/// The kept scans of an image, newest first, counted by severity.
+#[tauri::command]
+pub fn containers_scan_history(db: State<'_, Db>, image: String) -> Result<Vec<containers::scan::ScanSummary>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    containers::scan::history(&conn, image.trim()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn containers_scan_get(db: State<'_, Db>, id: String) -> Result<Option<containers::scan::ScanResult>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    containers::scan::get(&conn, &id).map_err(|e| e.to_string())
+}
+
+/// What scan `later` found that `earlier` did not, and what it no longer finds.
+#[tauri::command]
+pub fn containers_scan_compare(db: State<'_, Db>, earlier: String, later: String) -> Result<containers::scan::ScanComparison, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let load = |id: &str| containers::scan::get(&conn, id).map_err(|e| e.to_string())?.ok_or_else(|| format!("scan {id} is no longer kept"));
+    let (earlier, later) = (load(&earlier)?, load(&later)?);
+    Ok(containers::scan::compare(&earlier.findings, &later.findings))
+}
+
+#[tauri::command]
+pub fn containers_scan_forget(db: State<'_, Db>, image: String) -> Result<usize, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    containers::scan::delete_history(&conn, image.trim()).map_err(|e| e.to_string())
+}
+
+/// What can write an SBOM on this computer (Trivy or Syft), if anything.
+#[tauri::command]
+pub async fn containers_sbom_tool() -> Option<containers::scan::Scanner> {
+    tokio::task::spawn_blocking(containers::scan::sbom_tool).await.ok().flatten()
+}
+
+/// An image's SBOM written to `path` as `format` (`cyclonedx` or `spdx`); the tool that wrote it.
+#[tauri::command]
+pub async fn containers_image_sbom(runtime: String, context: Option<String>, image: String, format: String, path: String) -> Result<String, String> {
+    containers::scan::sbom(&engine::Target { runtime, context }, &image, &format, &path).await
+}
+
+/// What a container added, changed and deleted in its filesystem against its image.
+#[tauri::command]
+pub async fn containers_container_diff(runtime: String, context: Option<String>, id: String) -> Result<Vec<containers::manage::DiffEntry>, String> {
+    containers::manage::container_diff(&engine::Target { runtime, context }, &id).await
+}
+
+/// What in a container's configuration weakens its isolation, most severe first.
+#[tauri::command]
+pub async fn containers_hardening(runtime: String, context: Option<String>, id: String) -> Result<Vec<containers::hardening::HardeningFinding>, String> {
+    let doc_text = engine::inspect(&engine::Target { runtime, context }, "container", &id).await?;
+    let doc: Value = serde_json::from_str(&doc_text).map_err(|e| format!("could not read the container's inspect: {e}"))?;
+    Ok(containers::hardening::audit(&doc))
+}
+
+/// Where `hadolint` is on this computer, if it is.
+#[tauri::command]
+pub async fn containers_hadolint_detect() -> Option<String> {
+    tokio::task::spawn_blocking(containers::hardening::hadolint).await.ok().flatten()
+}
+
+#[tauri::command]
+pub async fn containers_dockerfile_lint(path: String) -> Result<Vec<containers::hardening::LintFinding>, String> {
+    containers::hardening::lint_dockerfile(&path).await
 }
 
 #[tauri::command]

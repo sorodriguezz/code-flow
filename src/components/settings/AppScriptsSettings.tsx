@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 import { Braces } from "lucide-react";
-import { appScriptsKey, getSetting, getSettings, providerCaps, setSetting, type ProviderCaps } from "../../lib/tauri/commands";
+import { appScriptsKey, getSetting, getSettings, providerCaps, setSetting, usageReport, type ProviderCaps } from "../../lib/tauri/commands";
+import { scriptSavings, type ScriptSavings } from "../../lib/appScript";
+import { formatTokens } from "../../lib/contextWindow";
+import { useLocale } from "../chat/chatChrome";
+import { PROVIDER_CAPS_CHANGED } from "./AgentTransportSettings";
 import { providerDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { Segmented } from "../common/Segmented";
@@ -23,6 +27,8 @@ export function AppScriptsSettings() {
   const [caps, setCaps] = useState<ProviderCaps[] | null>(null);
   const [choices, setChoices] = useState<Record<string, Choice>>({});
   const [mapOff, setMapOff] = useState(false);
+  const [savings, setSavings] = useState<ScriptSavings | null>(null);
+  const locale = useLocale();
 
   useEffect(() => {
     let live = true;
@@ -46,8 +52,25 @@ export function AppScriptsSettings() {
         if (live) setCaps([]);
       }
     })();
+    // What scripts can do on agy and Grok depends on their transport: re-read when it changes.
+    const reread = () => {
+      void providerCaps()
+        .then((all) => {
+          if (live) setCaps(all);
+        })
+        .catch(() => {});
+    };
+    window.addEventListener(PROVIDER_CAPS_CHANGED, reread);
+    // What scripts read and handed the model over the last 30 days, every workspace — beside what
+    // single calls handed it, so the saving is a measure and not a promise.
+    void usageReport(null, null, 30)
+      .then((report) => {
+        if (live) setSavings(scriptSavings(report.keys));
+      })
+      .catch(() => {});
     return () => {
       live = false;
+      window.removeEventListener(PROVIDER_CAPS_CHANGED, reread);
     };
   }, []);
 
@@ -75,6 +98,20 @@ export function AppScriptsSettings() {
           <p className="mt-0.5 max-w-[68ch] text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t("settings.appScriptsHint")}</p>
         </div>
       </div>
+      {savings && savings.runs > 0 && (
+        <p className="max-w-[68ch] text-[11.5px] leading-snug text-[var(--cf-text-muted)]" title={t("settings.appScriptsSavingsHint")}>
+          {t("settings.appScriptsSavings", {
+            runs: String(savings.runs),
+            read: formatTokens(savings.read, locale),
+            returned: formatTokens(savings.returned, locale),
+          })}
+          {savings.directCalls > 0 &&
+            ` ${t("settings.appScriptsSavingsDirect", {
+              calls: String(savings.directCalls),
+              avg: formatTokens(Math.round(savings.direct / savings.directCalls), locale),
+            })}`}
+        </p>
+      )}
       {mapOff && (
         <p className="rounded-md bg-[color-mix(in_oklab,var(--cf-warning)_10%,transparent)] px-2.5 py-1.5 text-[11.5px] leading-snug text-[var(--cf-warning)]">
           {t("settings.appScriptsMapOff")}

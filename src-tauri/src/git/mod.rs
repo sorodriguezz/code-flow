@@ -2,6 +2,7 @@ pub mod bisect;
 pub mod blame;
 pub mod blobs;
 pub mod branch;
+pub mod branch_worktree;
 pub mod checkpoint;
 pub mod cli;
 pub mod conflict;
