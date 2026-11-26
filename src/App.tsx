@@ -15,6 +15,8 @@ import { AddDependencyModal } from "./components/editor/AddDependencyModal";
 import { GraphView } from "./components/git/GraphView";
 import { ChangesPanel } from "./components/git/ChangesPanel";
 import { AiPanel } from "./components/ai/AiPanel";
+import { useTeamChatWindowStore } from "./state/teamChatWindowStore";
+import { useTeamCallStore } from "./state/teamCallStore";
 import { DockSlot } from "./components/services/DockSlot";
 import { beginEdgeResize, slideTiming, useEdgeSlide, type EdgeSlide } from "./lib/useEdgeSlide";
 import { SwitcherLock } from "./components/layout/SwitcherLock";
@@ -156,6 +158,7 @@ const ArchitectureView = lazy(() =>
   import("./components/architecture/ArchitectureView").then((m) => ({ default: m.ArchitectureView })),
 );
 const ChatView = lazy(() => import("./components/chat/ChatView").then((m) => ({ default: m.ChatView })));
+const TeamChatWindows = lazy(() => import("./components/crew/teams/TeamChatWindow").then((m) => ({ default: m.TeamChatWindows })));
 const ToolboxView = lazy(() => import("./components/toolbox/ToolboxView").then((m) => ({ default: m.ToolboxView })));
 const ContainersView = lazy(() => import("./components/containers/ContainersView").then((m) => ({ default: m.ContainersView })));
 
@@ -587,6 +590,28 @@ function MainContent() {
  * through its own store subscriptions (checked: no `getState()` read on a render path), so skipping
  * them when only `App` changed cannot leave one stale.
  */
+/**
+ * The floating chats and the call (`crew/teams/TeamChatWindow`), fetched and mounted the first time
+ * there is one to draw and kept from then on — a folded window holds a draft and a turn in progress,
+ * so it is never unmounted for being out of sight. Boot does not pay for it.
+ */
+const FloatingChats = memo(function FloatingChats() {
+  const wanted = useTeamChatWindowStore((s) => s.windows.length > 0);
+  const calling = useTeamCallStore((s) => s.call !== null);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    if (wanted || calling) setMounted(true);
+  }, [wanted, calling]);
+  if (!mounted) return null;
+  return (
+    <ErrorBoundary resetKey="floating-chats">
+      <Suspense fallback={null}>
+        <TeamChatWindows />
+      </Suspense>
+    </ErrorBoundary>
+  );
+});
+
 const ShellTitleBar = memo(TitleBar);
 const ShellSidebar = memo(Sidebar);
 const ShellMainContent = memo(MainContent);
@@ -1398,6 +1423,11 @@ export default function App() {
               freely — which is all `min-h-0` was ever here for. */}
           <div ref={sheetRef} data-tour="main-content" className="cf-sheet cf-ambient-bg min-h-[120px] flex-1">
             <ShellMainContent />
+            {/* Over whichever view is showing, and no view's own: a chat with a team or an agent, or
+                a call, started from the assistant's panel floats here, and one started in Agents is
+                still here after walking away. The sheet is the positioning parent and clips it
+                (`.cf-ambient-bg` is `relative` and isolates; `.cf-sheet` hides overflow). */}
+            <FloatingChats />
           </div>
           {/* The dock appears and goes; it no longer grows from zero height. Animating a height
               re-laid the whole column out on every frame — the view above it included — which is

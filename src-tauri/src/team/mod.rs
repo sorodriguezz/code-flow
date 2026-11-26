@@ -20,6 +20,7 @@
 //! runs them (headless turn or a CLI in a terminal), then reports each one back to the engine ([`engine`]).
 
 pub mod artifacts;
+pub mod call;
 pub mod chat;
 pub mod gitops;
 pub mod coordination;
@@ -219,7 +220,16 @@ pub struct Policy {
     /// (`provider_caps::gaps`): `off`, `warn` (it starts and says so) or `block` (it does not
     /// start until the team is changed).
     pub guarantees: String,
+    /// What a member's turn may do without asking: `restricted` (a destructive shell command or
+    /// app command waits for the user's yes, as in the chat's «Restringido») or `full` (the chat's
+    /// «Completo»: nothing is asked — `ai::AiInvocation::full_access`). A member that may not
+    /// edit stays read-only either way. Only the user sets `full`, in the team's editor: a team
+    /// designed by a model or imported from a file starts restricted ([`Policy::untrusted`]).
+    pub permissions: String,
 }
+
+/// [`Policy::permissions`]: nothing is asked.
+pub const FULL_PERMISSIONS: &str = "full";
 
 impl Default for Policy {
     fn default() -> Self {
@@ -270,6 +280,7 @@ impl Default for Policy {
             sandbox: "off".into(),
             sandbox_image: String::new(),
             guarantees: "warn".into(),
+            permissions: "restricted".into(),
         }
     }
 }
@@ -295,6 +306,7 @@ impl Policy {
         self.dod = pick(&self.dod, &["off", "warn", "block"], "warn");
         self.sandbox = pick(&self.sandbox, &["off", "checks"], "off");
         self.guarantees = pick(&self.guarantees, &["off", "warn", "block"], "warn");
+        self.permissions = pick(&self.permissions, &["restricted", FULL_PERMISSIONS], "restricted");
         self.sandbox_image = self.sandbox_image.trim().chars().take(200).collect();
         self.max_notes_per_item = self.max_notes_per_item.clamp(0, 32);
         self.sub_lead_rounds = self.sub_lead_rounds.clamp(1, 12);
@@ -315,6 +327,18 @@ impl Policy {
                 c.repo = "*".into();
             }
         }
+        self
+    }
+
+    /// Whether the members' turns ask the user nothing — see [`Policy::permissions`].
+    pub fn full_access(&self) -> bool {
+        self.permissions == FULL_PERMISSIONS
+    }
+
+    /// A policy that did not come from the user's own hand in the editor — a model's design, a
+    /// shared file: whatever it says, its members ask before anything destructive.
+    pub fn untrusted(mut self) -> Self {
+        self.permissions = "restricted".into();
         self
     }
 
@@ -1573,6 +1597,16 @@ mod tests {
         let p = Policy { max_parallel: 99, commit: "weird".into(), ..Default::default() }.sane();
         assert_eq!(p.max_parallel, MAX_PARALLEL_CAP);
         assert_eq!(p.commit, "item");
+    }
+
+    #[test]
+    fn full_permissions_are_only_what_the_user_chose() {
+        assert!(!Policy::default().full_access(), "a team nobody touched asks before anything destructive");
+        let legacy: Policy = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.permissions, "restricted", "a team saved before the setting existed");
+        assert!(Policy { permissions: "full".into(), ..Default::default() }.sane().full_access());
+        assert!(!Policy { permissions: "todo".into(), ..Default::default() }.sane().full_access(), "an unknown value is restricted");
+        assert!(!Policy { permissions: "full".into(), ..Default::default() }.untrusted().full_access(), "a design or a shared file never brings it");
     }
 }
 

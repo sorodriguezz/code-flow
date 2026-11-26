@@ -133,13 +133,14 @@ describe("team chat", () => {
       source: "agents", titleKey: "notifications.teamChatDone", params: { team: "Squad" }, workspaceId: "ws", status: "success",
       // What was asked, without the files it came with.
       detail: "Revisa el esquema",
-      target: { view: "agents", projectId: "repo", select: { kind: "agentTask", id: "task" } },
+      // The conversation's own window, which floats over any view: no view is named.
+      target: { select: { kind: "teamChat", id: "chat" } },
     }));
     expect(useTeamChatWindowStore.getState().windows[0].unread).toBe("done");
     const [toast] = useToastStore.getState().toasts;
     expect(toast.type).toBe("success");
     toast.action?.run();
-    expect(api.follow).toHaveBeenCalledWith("ws", { view: "agents", projectId: "repo", select: { kind: "agentTask", id: "task" } });
+    expect(api.follow).toHaveBeenCalledWith("ws", { select: { kind: "teamChat", id: "chat" } });
 
     // Once: what arrives later about the same finished turn says nothing more.
     useTeamChatStore.getState().accept(answered(4));

@@ -24,7 +24,8 @@ export function SpeechActivity() {
     if (!store.loaded) void store.load();
   }, []);
 
-  if (!speaking) return null;
+  // An agent speaking in a call is the call's to show: its own mark in the bar says who.
+  if (!speaking || speaking.origin.startsWith("call:")) return null;
   const preview = speaking.text.length > 140 ? `${speaking.text.slice(0, 140)}…` : speaking.text;
   return (
     <Tooltip label={t(speaking.phase === "preparing" ? "speech.barPreparing" : "speech.barSpeaking")} description={preview}>

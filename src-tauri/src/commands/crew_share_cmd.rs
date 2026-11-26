@@ -138,6 +138,8 @@ fn import_configuration(conn: &Connection, workspace_id: &str, agents: Vec<Share
             incoming.policy.conflicts = map_member(&incoming.policy.conflicts);
             incoming.policy.review.reviewer = map_member(&incoming.policy.review.reviewer);
             incoming.policy.review.of = incoming.policy.review.of.iter().map(|id| map_member(id)).collect();
+            // A file someone else wrote never brings «Completo» with it: that is chosen here.
+            incoming.policy = incoming.policy.untrusted();
             let saved = team::save_team(&transaction, incoming)?;
             Some(saved)
         }

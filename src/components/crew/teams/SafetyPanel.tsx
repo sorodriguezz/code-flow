@@ -1,6 +1,10 @@
 /**
- * «Aislamiento y garantías»: where the app runs a team's checks, and what each member's provider
- * can really be held to.
+ * «Permisos y aislamiento»: what a team's agents may do without asking, where the app runs its
+ * checks, and what each member's provider can really be held to.
+ *
+ * The permissions are the chat's two, for the whole team: «Restringido» (the default — anything
+ * destructive waits for a yes) or «Completo» (nothing is asked), for a proof of concept or a
+ * throwaway repository. Only chosen here: a team a model designs or a file brings starts restricted.
  *
  * Two things a team used to take on faith. A check is code an agent just wrote, run by the app:
  * here the team chooses whether it runs on this computer or in a container that cannot touch it.
@@ -9,7 +13,7 @@
  * starts, not after.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, CheckCircle2, CircleSlash, Container, Gauge, MonitorSmartphone, PencilLine, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CircleSlash, Container, Gauge, MonitorSmartphone, PencilLine, RefreshCw, ShieldAlert, ShieldCheck } from "lucide-react";
 import { useAgentsStore } from "../../../state/agentsStore";
 import { providerCaps, type ProviderCaps } from "../../../lib/tauri/commands";
 import { teamSandboxStatus, type TeamSandboxStatus } from "../../../lib/tauri/teamCommands";
@@ -56,6 +60,8 @@ export function SafetyPanel({ team, set, open, onToggle }: { team: Team; set: (p
   const p = team.policy;
   const sandbox = p.sandbox ?? "off";
   const guarantees = p.guarantees ?? "warn";
+  const permissions = p.permissions ?? "restricted";
+  const full = permissions === "full";
   const [status, setStatus] = useState<TeamSandboxStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [caps, setCaps] = useState<ProviderCaps[] | null>(capsCache);
@@ -97,11 +103,33 @@ export function SafetyPanel({ team, set, open, onToggle }: { team: Team; set: (p
 
   return (
     <Panel
-      title={<span className="inline-flex items-center gap-1.5">{l("Aislamiento y garantías", "Isolation and guarantees")}{badge && <span title={l("Hay algo que revisar aquí", "There is something to look at here")} className="h-[6px] w-[6px] rounded-full bg-[var(--cf-warning)]" />}</span>}
+      title={<span className="inline-flex items-center gap-1.5">{l("Permisos y aislamiento", "Permissions and isolation")}{full && <span title={l("Los agentes de este equipo no preguntan antes de nada", "This team's agents ask before nothing")} className="rounded-full bg-[color-mix(in_oklab,var(--cf-warning)_16%,transparent)] px-1.5 py-[1px] text-[10px] font-medium text-[var(--cf-warning)]">{l("Completo", "Full")}</span>}{badge && <span title={l("Hay algo que revisar aquí", "There is something to look at here")} className="h-[6px] w-[6px] rounded-full bg-[var(--cf-warning)]" />}</span>}
       icon={Container}
       open={open}
       onToggle={onToggle}
     >
+      <div className={`flex flex-col gap-2 rounded-[10px] border bg-[var(--cf-surface-raised)] p-2.5 ${full ? "border-[color-mix(in_oklab,var(--cf-warning)_45%,var(--cf-border))]" : "border-[var(--cf-border)]"}`}>
+        <span className="text-[12.5px] font-medium">{l("Permisos de los agentes", "Agent permissions")}</span>
+        <Seg
+          size="sm"
+          full
+          value={permissions}
+          onChange={(value) => set({ permissions: value })}
+          options={[
+            { value: "restricted" as const, label: l("Restringido", "Restricted"), icon: ShieldCheck, title: l("Trabajan solos, pero lo destructivo espera tu sí", "They work on their own, but anything destructive waits for your yes") },
+            { value: "full" as const, label: l("Completo", "Full"), icon: ShieldAlert, title: l("No preguntan nada: pensado para una prueba de concepto o un repositorio desechable", "They ask nothing: meant for a proof of concept or a throwaway repository") },
+          ]}
+        />
+        <span className={`flex items-start gap-1.5 text-[11.5px] leading-snug ${full ? "text-[var(--cf-warning)]" : "text-[var(--cf-text-muted)]"}`}>
+          {full && <AlertTriangle className="mt-[1px] h-3.5 w-3.5 shrink-0" />}
+          <span>
+            {full
+              ? l("Los agentes no te preguntan nada: ejecutan comandos destructivos (rm -rf, force-push, borrar una tabla…), usan credenciales guardadas y hacen acciones de la app que borran o sobrescriben, también dentro de un script. Vale para las corridas que empieces desde ahora y para el chat con el equipo; una corrida en marcha sigue como empezó. Un miembro de solo lectura sigue sin escribir.", "The agents ask you nothing: they run destructive commands (rm -rf, force-push, dropping a table…), use saved credentials and take app actions that delete or overwrite, inside a script too. It applies to the runs you start from now on and to the chat with the team; a run under way goes on as it started. A read-only member still does not write.")
+              : l("Los agentes ejecutan comandos y editan solos, pero un comando destructivo, usar una credencial guardada o una acción de la app que borra o sobrescribe espera tu sí. Dentro de un script esas acciones no corren: el agente las pide de una en una.", "The agents run commands and edit on their own, but a destructive command, using a saved credential or an app action that deletes or overwrites waits for your yes. Inside a script those actions do not run: the agent asks for them one at a time.")}
+          </span>
+        </span>
+      </div>
+
       <div className="flex flex-col gap-2 rounded-[10px] border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-2.5">
         <span className="text-[12.5px] font-medium">{l("Dónde corren las verificaciones", "Where the checks run")}</span>
         <Seg

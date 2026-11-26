@@ -91,7 +91,13 @@ export interface TeamPolicy {
   sandbox_image?: string;
   /** What a run does about a member whose provider cannot be held to what the team needs of it. */
   guarantees?: TeamDod;
+  /** What a member's turn may do without asking: `restricted` (destructive commands and app
+   *  actions wait for your yes, as the chat's «Restringido») or `full` (the chat's «Completo»:
+   *  nothing is asked). Only set here, in the team's editor. */
+  permissions?: TeamPermissions;
 }
+
+export type TeamPermissions = "restricted" | "full";
 
 export type TeamDod = "off" | "warn" | "block";
 export type TeamSandbox = "off" | "checks";
@@ -460,6 +466,7 @@ export function defaultPolicy(): TeamPolicy {
     sandbox: "off",
     sandbox_image: "",
     guarantees: "warn",
+    permissions: "restricted",
   };
 }
 

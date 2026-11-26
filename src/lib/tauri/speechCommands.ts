@@ -22,9 +22,14 @@ export interface DownloadableVoice {
   gender: VoiceGender;
   installed: boolean;
   /** Kokoro's voices are one download for all of them (`speech::kokoro`); a cloned voice
-   *  (`speech::clone`) reads any language — its `lang` is `multi`. */
-  engine: "piper" | "kokoro" | "clone";
+   *  (`speech::clone`) and a natural one (`speech::pocket`, one install for all of them, no
+   *  `gender`) read any language — their `lang` is `multi`. */
+  engine: "piper" | "kokoro" | "clone" | "pocket";
 }
+
+/** Brings the model natural voice `voice` needs to read `lang` (`es` · `en`), when it is not on
+ *  this computer yet; answers at once when it is. */
+export const speechPocketPrepare = (lang: string, voice: string) => invoke<void>("speech_pocket_prepare", { lang, voice });
 
 /** `speech_cmd::SpeechStatus`. */
 export interface SpeechStatus {

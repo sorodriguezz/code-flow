@@ -1899,7 +1899,11 @@ pub fn read_note(conn: &Connection, workspace_id: Option<&str>, note_id: &str, c
         body
     };
     let place = if book.is_empty() { String::new() } else { format!(" · book «{book}»") };
-    Ok(wrap_untrusted(&format!("note:{id} — {title}{place} · updated {updated_at}\n\n{body}")))
+    // What it follows and what follows it (`crate::note_relations`), so one note read is not the
+    // whole story: the earlier meeting it continues, and what is still open between them.
+    let (related, _) = crate::secret_scan::redact(&crate::note_relations::for_model(conn, workspace_id, id, cloud));
+    let related = if related.is_empty() { String::new() } else { format!("\n\n---\n{related}") };
+    Ok(wrap_untrusted(&format!("note:{id} — {title}{place} · updated {updated_at}\n\n{body}{related}")))
 }
 
 /// Retrieved text is data, never instructions: a README that says "ignore previous instructions"

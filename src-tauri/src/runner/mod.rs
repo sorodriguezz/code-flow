@@ -343,9 +343,11 @@ async fn run_headless<H: Host>(host: H, team_run_id: String, dispatch: Dispatch,
     // The run's per-turn ceiling (`Policy::turn_minutes`): past it the turn is stopped like a
     // cancel, but settled as a failed attempt — a cancel hands the attempt back, and a turn that
     // never finishes would then be retried forever.
-    let limit = with_conn(&host, |c| crate::team::get_run(c, &team_run_id).ok().flatten().map(|run| run.policy.turn_minutes))
+    // And whether its members ask nothing (`Policy::permissions`). A run that cannot be read is
+    // restricted.
+    let (limit, full_access) = with_conn(&host, |c| crate::team::get_run(c, &team_run_id).ok().flatten().map(|run| (run.policy.turn_minutes, run.policy.full_access())))
         .flatten()
-        .unwrap_or(0);
+        .unwrap_or((0, false));
     let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watchdog = (limit > 0).then(|| {
         let flag = timed_out.clone();
@@ -373,6 +375,7 @@ async fn run_headless<H: Host>(host: H, team_run_id: String, dispatch: Dispatch,
             account_id: dispatch.account_id.clone(),
             effort: Some(dispatch.effort.clone()).filter(|e| !e.is_empty()),
             cwd: dispatch.cwd.clone(),
+            full_access,
             cancel: cancel.clone(),
         })
         .await;

@@ -1,19 +1,25 @@
 /**
- * The team chats open as floating windows in the Agents view: one per team, at most one unfolded
- * and the rest minimised to the shelf at the bottom. Apart from the view's single overlay on
- * purpose — a chat that stays open must not be what keeps a card, a launcher or a member's sheet
- * from opening.
+ * The conversations with teams and with single agents open as floating windows over whichever view
+ * is on screen: one per team and one per agent, at most one unfolded and the rest minimised to the
+ * shelf at the bottom. Apart from every view's own overlay on purpose — a chat that stays open
+ * must not be what keeps a card, a launcher or a member's sheet from opening.
  *
- * Free of the chat store so that store can tell this one when a turn ends.
+ * Free of the chat stores so those can tell this one when a turn ends.
  */
 import { create } from "zustand";
 import type { Rect } from "../lib/floatingRect";
 
 export interface TeamChatWindow {
-  /** Stable while the window lives, whichever of the team's conversations it shows. */
+  /** Stable while the window lives, whichever of its owner's conversations it shows. */
   key: string;
+  /** Whose conversation it is: a team's, or one agent's. */
+  kind: "team" | "agent";
+  /** The conversation: a team chat's id, or the task that is the agent's conversation. */
   chatId: string;
+  /** The team — or, for an agent's window, the agent: there is one window for each. */
   teamId: string;
+  /** An agent's window says which workspace it is of; a team's conversation says it itself. */
+  workspaceId: string;
   minimized: boolean;
   /** A turn ended while nobody was looking: how it ended. */
   unread: "" | "done" | "error";
@@ -50,6 +56,9 @@ interface TeamChatWindowState extends Frame {
   /** Unfolds the team's window on `chatId` — making it, or turning the one it has to that
    *  conversation — and minimises whichever was unfolded. */
   open: (chatId: string, teamId: string) => void;
+  /** The same for one agent: its window, on the task `taskId` that is the conversation. An agent
+   *  that is gone (`agentId` empty) has a window per conversation. */
+  openAgent: (taskId: string, agentId: string, workspaceId: string) => void;
   minimize: (key: string) => void;
   restore: (key: string) => void;
   close: (key: string) => void;
@@ -64,18 +73,23 @@ interface TeamChatWindowState extends Frame {
 
 let made = 0;
 
+/** `windows` with the one of `owner` unfolded on `chatId` — made when it has none — and every
+ *  other folded. */
+function unfold(windows: TeamChatWindow[], kind: TeamChatWindow["kind"], chatId: string, owner: string, workspaceId: string): TeamChatWindow[] {
+  const folded = windows.map((w) => (w.minimized ? w : { ...w, minimized: true }));
+  const at = folded.findIndex((w) => w.kind === kind && (w.chatId === chatId || (owner !== "" && w.teamId === owner)));
+  if (at === -1) return [...folded, { key: `chat-window-${++made}`, kind, chatId, teamId: owner, workspaceId, minimized: false, unread: "" }];
+  folded[at] = { ...folded[at], chatId, teamId: owner, workspaceId, minimized: false, unread: "" };
+  return folded;
+}
+
 export const useTeamChatWindowStore = create<TeamChatWindowState>((set, get) => ({
   windows: [],
   ...(typeof window === "undefined" ? { rect: null, maximized: false } : readFrame()),
 
-  open: (chatId, teamId) =>
-    set((s) => {
-      const folded = s.windows.map((w) => (w.minimized ? w : { ...w, minimized: true }));
-      const at = folded.findIndex((w) => w.chatId === chatId || w.teamId === teamId);
-      if (at === -1) return { windows: [...folded, { key: `chat-window-${++made}`, chatId, teamId, minimized: false, unread: "" }] };
-      folded[at] = { ...folded[at], chatId, teamId, minimized: false, unread: "" };
-      return { windows: folded };
-    }),
+  open: (chatId, teamId) => set((s) => ({ windows: unfold(s.windows, "team", chatId, teamId, "") })),
+
+  openAgent: (taskId, agentId, workspaceId) => set((s) => ({ windows: unfold(s.windows, "agent", taskId, agentId, workspaceId) })),
 
   minimize: (key) => set((s) => ({ windows: s.windows.map((w) => (w.key === key ? { ...w, minimized: true } : w)) })),
 

@@ -20,6 +20,7 @@ import { isCancellation, newRunId, useAiRunStore } from "../../../state/aiRunSto
 import { useMeetingsStore } from "../../../state/meetingsStore";
 import { useLanguageStore, useT } from "../../../state/languageStore";
 import { notify } from "../../../state/notificationStore";
+import { useNoteRelationsStore } from "../../../state/noteRelationsStore";
 import { pushErrorToast, useToastStore } from "../../../state/toastStore";
 import { useUiStore } from "../../../state/uiStore";
 
@@ -97,6 +98,12 @@ export function MeetingAi({
       if (!request.question && onInsert(`${markdown}\n`)) {
         store.setAi(meeting.id, null);
         useToastStore.getState().pushToast(t("meetings.ai.inserted", { what: request.label }), "success");
+        // The minutes are in the note: have the same engine say which earlier notes this meeting
+        // continues and what it settled (`note_relations`). After the save, which trails the insert.
+        if (useMeetingsStore.getState().settings.relate) {
+          const noteId = meeting.noteId;
+          window.setTimeout(() => void useNoteRelationsStore.getState().analyze(noteId, { quiet: true }), 2500);
+        }
       } else {
         store.setAi(meeting.id, { runId, label: request.label, question: request.question, status: "ready", markdown });
       }

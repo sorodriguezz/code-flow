@@ -140,7 +140,7 @@ fn save(conn: &Connection, chat: &mut Chat) -> Result<(), String> {
     Ok(())
 }
 
-fn append(
+pub(in crate::team) fn append(
     conn: &Connection,
     chat: &Chat,
     role: &str,
@@ -598,7 +598,7 @@ pub fn recover(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-type Control = Arc<tokio::sync::watch::Sender<bool>>;
+pub(in crate::team) type Control = Arc<tokio::sync::watch::Sender<bool>>;
 static RUNNING: LazyLock<Mutex<HashMap<String, Control>>> = LazyLock::new(Default::default);
 struct Registration(String);
 impl Drop for Registration {
@@ -619,7 +619,7 @@ fn with_conn<T, R: tauri::Runtime>(
     f(&conn)
 }
 
-fn changed<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) {
+pub(in crate::team) fn changed<R: tauri::Runtime>(app: &AppHandle<R>, id: &str) {
     let _ = app.emit("team-chat:changed", serde_json::json!({ "chatId": id }));
 }
 
@@ -631,7 +631,7 @@ fn cancelled(control: &Control) -> Result<(), String> {
     }
 }
 
-async fn turn(
+pub(in crate::team) async fn turn(
     app: &AppHandle,
     chat_id: &str,
     member: &MemberSnap,
@@ -660,9 +660,12 @@ async fn turn(
     let Some(_permit) = permit else { return Err(crate::ai_runs::CANCELLED_MARKER.into()) };
     cancelled(control)?;
     let run_id = format!("team-chat-{}", uid());
-    let (task, session) = with_conn(app, |conn| {
+    let (task, session, full_access) = with_conn(app, |conn| {
         let mut chat = get(conn, chat_id)?;
         let task = task_for(conn, &chat, member)?;
+        // The team's own choice, as it is now: «Completo» there is «Completo» in its chat too
+        // (`Policy::permissions`). A turn that only reads stays one.
+        let full_access = !read_only && super::get_team(conn, &chat.team_id).ok().flatten().is_some_and(|team| team.policy.full_access());
         chat.active_member_id = member.member.id.clone();
         chat.active_run_id = run_id.clone();
         conn.execute(
@@ -675,7 +678,7 @@ async fn turn(
             .map_err(e2s)?;
         let session = conn.query_row("SELECT engine_session_id FROM activity_log WHERE session_id = ?1 AND engine_session_id IS NOT NULL AND engine_session_id <> '' ORDER BY created_at DESC LIMIT 1",
             [&task.conversation_id], |row| row.get::<_, String>(0)).optional().map_err(e2s)?;
-        Ok((task, session))
+        Ok((task, session, full_access))
     })?;
     changed(app, chat_id);
     let started = std::time::Instant::now();
@@ -697,7 +700,7 @@ async fn turn(
         Some(member.effort.clone()),
         Some(false),
         None,
-        None,
+        full_access.then(|| crate::commands::chat_cmd::FULL_PERMISSIONS.to_string()),
     );
     tokio::pin!(reply_future);
     let mut retry_cancel = tokio::time::interval(std::time::Duration::from_millis(50));

@@ -269,7 +269,8 @@ fn current_phase() -> Phase {
 /// One utterance: transcribed, and acted on when it is for Codi. `held`: said with the push-to-talk
 /// key down — an order whole, name or not.
 fn hear(app: &AppHandle, settings: &Settings, listener: Listener, samples: &[f32], lang: &str, held: bool) {
-    let quiet = crate::commands::dictation_cmd::dictating() || crate::commands::meetings_cmd::recording(app);
+    // A call with a team is a conversation of its own: what is said in it is for the team.
+    let quiet = crate::commands::dictation_cmd::dictating() || crate::commands::meetings_cmd::recording(app) || crate::team::call::commands::in_call();
     let text = match transcribe(listener, samples, lang, &settings.wake_words) {
         Ok(text) => text,
         Err(error) => {

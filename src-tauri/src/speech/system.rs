@@ -79,6 +79,19 @@ pub fn pick(voices: &[SystemVoice], lang: &str) -> Option<String> {
         .map(|(_, voice)| voice.id.clone())
 }
 
+/// The voices of `voices` that read `lang` and are somebody's voice — no novelty ones — best
+/// sounding first, each person once: «Paulina» and «Paulina (Premium)» are one, and the better
+/// recording of the two is kept.
+pub fn of_language(voices: &[SystemVoice], lang: &str) -> Vec<SystemVoice> {
+    let named = |voice: &SystemVoice, name: &str| voice.name == name || voice.name.starts_with(&format!("{name} "));
+    let person = |voice: &SystemVoice| voice.name.split(" (").next().unwrap_or(&voice.name).trim().to_lowercase();
+    let mut found: Vec<&SystemVoice> =
+        voices.iter().filter(|voice| voice.lang.to_ascii_lowercase().starts_with(lang) && !NOVELTY.iter().any(|name| named(voice, name))).collect();
+    found.sort_by_key(|voice| (quality(&voice.name), PREFERRED.iter().position(|name| named(voice, name)).unwrap_or(PREFERRED.len())));
+    let mut seen = std::collections::HashSet::new();
+    found.into_iter().filter(|voice| seen.insert(person(voice))).cloned().collect()
+}
+
 #[cfg(target_os = "macos")]
 fn listed() -> Vec<SystemVoice> {
     let Ok(output) = crate::proc::std_command("say").arg("-v").arg("?").output() else { return Vec::new() };

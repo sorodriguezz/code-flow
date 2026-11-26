@@ -32,6 +32,7 @@ import { MeetingAi } from "./MeetingAi";
 import { MeetingRoster, type RosterPurpose } from "./MeetingRoster";
 import { currentTurn, missingVoices, speakerTurn } from "./roster";
 import { MicCheck } from "./MicCheck";
+import { MicPicker } from "./MicPicker";
 import { transcriptFile, type TranscriptFormat } from "./transcriptExport";
 import { writeFileBytes } from "../../../lib/tauri/commands";
 import { channelsOf, clock, duration, speakerColor, speakerName } from "./meetingLabels";
@@ -289,7 +290,11 @@ function StartStrip({ noteId, workspaceId }: { noteId: string; workspaceId: stri
         </button>
       </div>
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
-        <MicCheck />
+        {/* Changed here, the meter beside it goes on with the new microphone at once. */}
+        <span className="flex shrink-0 items-center gap-2">
+          <MicPicker onChange={() => void meetingsMonitor(true, kind === "virtual").catch(() => {})} />
+          <MicCheck />
+        </span>
         {kind === "virtual" && <MicCheck channel="system" />}
       </div>
       <p className="text-[11.5px] text-[var(--cf-text-muted)]">{modeHint[effective]}</p>

@@ -35,6 +35,7 @@ pub mod kokoro;
 pub mod level;
 pub mod piper;
 pub mod player;
+pub mod pocket;
 pub mod pronounce;
 pub mod segments;
 pub mod sherpa;
@@ -46,7 +47,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::db::{queries, Db};
@@ -150,6 +151,87 @@ impl ByLanguage {
     }
 }
 
+/// A voice of the caller's own for one utterance: whose it is, how high and how fast. A call with
+/// a team gives every agent one, so they are told apart by ear.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Voice {
+    /// `system:<name>`, `cloud:<service>:<voice>`, or the id of a downloaded or cloned voice. Empty —
+    /// or one that is not there any more — is the reading aloud's own.
+    pub id: String,
+    /// 1 is the voice as it is; above it is higher. Held to [`Voice::PITCH`].
+    pub pitch: f32,
+    /// Times the user's own rate. Held to [`Voice::RATE`].
+    pub rate: f32,
+}
+
+impl Default for Voice {
+    fn default() -> Self {
+        Self { id: String::new(), pitch: 1.0, rate: 1.0 }
+    }
+}
+
+impl Voice {
+    /// A little either way and no more: the pitch moves by playing faster or slower, which moves
+    /// everything else about the voice with it, and past a few percent it stops being understood
+    /// (the user, 2026-11-25, on hearing the first casting: «muchas no se entienden si se van a los
+    /// extremos»).
+    pub const PITCH: (f32, f32) = (0.94, 1.06);
+    /// How fast it speaks, 1 being the voice as it was recorded.
+    pub const RATE: (f32, f32) = (0.8, 1.3);
+
+    /// A downloaded or cloned voice as it is.
+    pub fn downloaded(id: String) -> Self {
+        Self { id, ..Self::default() }
+    }
+
+    pub fn pitch(&self) -> f32 {
+        if self.pitch.is_finite() { self.pitch.clamp(Self::PITCH.0, Self::PITCH.1) } else { 1.0 }
+    }
+
+    pub fn rate(&self) -> f32 {
+        if self.rate.is_finite() { self.rate.clamp(Self::RATE.0, Self::RATE.1) } else { 1.0 }
+    }
+
+    /// The settings this utterance is said with: the user's, with this voice in place of theirs
+    /// for `lang`. A voice that cannot be used leaves theirs.
+    fn apply(&self, settings: &mut Settings, lang: &str) {
+        let place = |voices: &mut ByLanguage, id: &str| {
+            if lang == "es" {
+                voices.es = id.to_string();
+            } else {
+                voices.en = id.to_string();
+            }
+        };
+        if let Some(name) = self.id.strip_prefix("system:") {
+            settings.engine = "system".into();
+            place(&mut settings.system_voices, name);
+        } else if let Some((service, voice)) = self.id.strip_prefix("cloud:").and_then(|rest| rest.split_once(':')) {
+            if cloud::key_name(service).is_some() {
+                settings.engine = "cloud".into();
+                settings.cloud_service = service.to_string();
+                settings.cloud_voice = voice.to_string();
+            }
+        } else if voice_installed(&self.id) {
+            settings.engine = "local".into();
+            place(&mut settings.local_voices, &self.id);
+        }
+        // Its own speed, not the reading speed's: that one is set for listening to long answers
+        // read aloud — slowed to 0.75 it made every agent of a call drag its words (the user,
+        // 2026-11-25). A call sets how fast its voices speak itself (`team_call_rate`).
+        settings.rate = self.rate();
+    }
+}
+
+/// `samples` at `rate`, `pitch` times higher and as much shorter — played at the same rate. Said
+/// that much slower first ([`speak`]), the length comes out as written and only the pitch moved.
+pub fn shift_pitch(samples: &[f32], rate: u32, pitch: f32) -> Vec<f32> {
+    if (pitch - 1.0).abs() < 0.005 {
+        return samples.to_vec();
+    }
+    player::resample(samples, rate, ((rate as f32) / pitch).round().max(1.0) as u32)
+}
+
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub engine: String,
@@ -201,6 +283,7 @@ pub fn synthesize_into(settings: &Settings, text: &str, lang: &str, on_chunk: &m
         // of the other language saying it with the wrong sounds.
         "local" => match local_voice(settings, lang) {
             Some(id) if clone::is_cloned(&id) => clone::synthesize(&id, text, lang, settings.xtts_accepted, on_chunk),
+            Some(id) if pocket::voice(&id).is_some() => pocket::synthesize(&id, text, lang, on_chunk),
             Some(id) if kokoro::voice(&id).is_some() => kokoro::synthesize(&id, text, settings.rate, on_chunk),
             Some(id) => piper::synthesize(&id, text, settings.rate, on_chunk),
             None => whole(system::synthesize(text, &system_voice(settings, lang), settings.rate)),
@@ -210,8 +293,10 @@ pub fn synthesize_into(settings: &Settings, text: &str, lang: &str, on_chunk: &m
     }
 }
 
-/// All of `text` said by downloaded voice `id` — Piper's or Kokoro's — as one buffer and its rate,
-/// for a caller that saves it rather than plays it (a flow's «Voz descargada»). Blocking.
+/// All of `text` said by downloaded voice `id` — Piper's, Kokoro's, a cloned one or a natural one —
+/// as one buffer and its rate, for a caller that saves it rather than plays it (a flow's «Voz
+/// descargada»). Blocking; a natural voice asked for a language it has not read here yet brings
+/// its model down first.
 pub fn say_with_voice(id: &str, text: &str, speed: f32) -> Result<(Vec<f32>, u32), String> {
     let lang = language_of(text).unwrap_or("es");
     let spoken = pronounce::prepare(&flatten_lines(text), lang, true, &pronounce::remembered());
@@ -231,6 +316,9 @@ pub fn say_with_voice(id: &str, text: &str, speed: f32) -> Result<(Vec<f32>, u32
     let mut synth = |piece: &str, on_chunk: &mut dyn FnMut(&[f32], u32) -> bool| {
         if clone::is_cloned(id) {
             clone::synthesize(id, piece, lang, true, on_chunk)
+        } else if pocket::voice(id).is_some() {
+            pocket::prepare_language(lang, id)?;
+            pocket::synthesize(id, piece, lang, on_chunk)
         } else if kokoro::voice(id).is_some() {
             kokoro::synthesize(id, piece, speed, on_chunk)
         } else {
@@ -259,7 +347,28 @@ fn render(
     synth: &mut dyn FnMut(&str, &mut dyn FnMut(&[f32], u32) -> bool) -> Result<(), String>,
     on_piece: &mut dyn FnMut(&[f32], u32) -> bool,
 ) -> Result<(), String> {
-    let pieces = if whole { vec![segments::Segment { text: text.to_string(), pause_ms: 0 }] } else { segments::split(text) };
+    render_pieces(&mut pieces_of(text, whole).into_iter(), rate, keep_going, synth, on_piece)
+}
+
+/// `text` in the pieces it is said in: its sentences, or itself for a service that reads a whole
+/// text best.
+fn pieces_of(text: &str, whole: bool) -> Vec<segments::Segment> {
+    if whole {
+        vec![segments::Segment { text: text.to_string(), pause_ms: 0 }]
+    } else {
+        segments::split(text)
+    }
+}
+
+/// [`render`] over pieces that may still be on their way: an utterance said while it is being
+/// written hands them over as its sentences arrive.
+fn render_pieces(
+    pieces: &mut dyn Iterator<Item = segments::Segment>,
+    rate: f32,
+    keep_going: &dyn Fn() -> bool,
+    synth: &mut dyn FnMut(&str, &mut dyn FnMut(&[f32], u32) -> bool) -> Result<(), String>,
+    on_piece: &mut dyn FnMut(&[f32], u32) -> bool,
+) -> Result<(), String> {
     let mut leveler = level::Leveler::default();
     for piece in pieces {
         if !keep_going() {
@@ -303,7 +412,10 @@ pub fn first_voice_for(lang: &str) -> Option<&'static str> {
 /// A downloaded voice is ready: Piper's own files, Kokoro's one model for all of its voices, or a
 /// cloned voice with its engine installed.
 pub fn voice_installed(id: &str) -> bool {
-    piper::installed(id) || (kokoro::voice(id).is_some() && kokoro::installed()) || (clone::is_cloned(id) && clone::ready(id))
+    piper::installed(id)
+        || (kokoro::voice(id).is_some() && kokoro::installed())
+        || (clone::is_cloned(id) && clone::ready(id))
+        || (pocket::voice(id).is_some() && pocket::installed())
 }
 
 /// The downloaded voices of both engines, as `(id, lang)`, in the catalogue's order — Piper's, then
@@ -320,6 +432,16 @@ pub fn local_voice(settings: &Settings, lang: &str) -> Option<String> {
     let chosen = settings.local_voices.get(lang);
     if clone::is_cloned(chosen) && clone::ready(chosen) {
         return Some(chosen.to_string());
+    }
+    // A natural voice (`pocket`) says either language, and it is only ever chosen — for the reading
+    // aloud, for Codi, for an agent, or handed out by a call — never fallen into. A language whose
+    // model has not come down yet is read by the voice below while it does.
+    if pocket::voice(chosen).is_some() && pocket::installed() {
+        let lang = language(lang);
+        if pocket::speaks(lang) {
+            return Some(chosen.to_string());
+        }
+        pocket::prepare_in_background(lang, chosen);
     }
     let reads = |(id, voice_lang): &(&'static str, &'static str)| language(voice_lang) == lang && voice_installed(id);
     downloadable_voices()
@@ -398,8 +520,12 @@ struct Job {
     origin: String,
     /// `es` · `en`: what [`language_of`] read in the text, else the caller's.
     lang: &'static str,
-    /// A downloaded voice this utterance is said with instead of the reading aloud's (Codi's own).
-    voice: Option<String>,
+    /// A voice of its own this utterance is said with instead of the reading aloud's (Codi's, an
+    /// agent's in a call).
+    voice: Option<Voice>,
+    /// The sentences of an utterance that is still being written, as they are ([`say_stream`]):
+    /// `text` is empty then, and the utterance ends when the sender is dropped.
+    incoming: Option<std::sync::mpsc::Receiver<String>>,
     generation: u64,
     /// Told how it ended, for a caller that waits ([`say_and_wait`]). Dropped unsent when the job
     /// is — «Callar», or a burst pushing it out of the queue — which the receiver reads as stopped.
@@ -445,13 +571,34 @@ fn queue(app: &AppHandle) -> Arc<Queue> {
 /// too short to tell. `interrupt` cuts what is playing and what waits first (a test, a «Leer en voz
 /// alta» the user just asked for). Returns the utterance's id.
 pub fn say(app: &AppHandle, text: &str, origin: &str, interrupt: bool, fallback: &str) -> u64 {
-    enqueue(app, text, origin, interrupt, None, fallback, None, None)
+    enqueue(app, text, origin, interrupt, None, fallback, None, None, None)
+}
+
+/// «Probar» on a voice chosen for an agent: `text` with `voice`, now.
+pub fn try_voice(app: &AppHandle, text: &str, fallback: &str, voice: Voice) -> u64 {
+    enqueue(app, text, "test", true, None, fallback, None, Some(voice), None)
+}
+
+/// Says, in `lang` with `voice` and after whatever is being said, words that are still being
+/// written — one participant's in a call: send each sentence as it is finished and drop the sender
+/// at the end. The voice starts on the first while the rest are on their way, and the receiver is
+/// told how it ended.
+pub fn say_stream(
+    app: &AppHandle,
+    origin: &str,
+    lang: &'static str,
+    voice: Voice,
+) -> (std::sync::mpsc::Sender<String>, tokio::sync::oneshot::Receiver<Said>) {
+    let (sentences, incoming) = std::sync::mpsc::channel();
+    let (done, receiver) = tokio::sync::oneshot::channel();
+    enqueue(app, "", origin, false, Some(lang), lang, Some(done), Some(voice), Some(incoming));
+    (sentences, receiver)
 }
 
 /// [`say`] with voice `voice` (a downloaded or cloned one's id) when it is ready, else the reading
 /// aloud's — «Probar» on a voice chosen for Codi.
 pub fn say_voice(app: &AppHandle, text: &str, origin: &str, interrupt: bool, fallback: &str, voice: String) -> u64 {
-    enqueue(app, text, origin, interrupt, None, fallback, None, Some(voice).filter(|id| voice_installed(id)))
+    enqueue(app, text, origin, interrupt, None, fallback, None, Some(voice).filter(|id| voice_installed(id)).map(Voice::downloaded), None)
 }
 
 /// [`say_and_wait`] with a voice of its own — Codi's, when its settings name one that is downloaded
@@ -465,7 +612,7 @@ pub fn say_as(
     voice: Option<String>,
 ) -> tokio::sync::oneshot::Receiver<Said> {
     let (done, receiver) = tokio::sync::oneshot::channel();
-    enqueue(app, text, origin, true, language, fallback, Some(done), voice.filter(|id| voice_installed(id)));
+    enqueue(app, text, origin, true, language, fallback, Some(done), voice.filter(|id| voice_installed(id)).map(Voice::downloaded), None);
     receiver
 }
 
@@ -493,7 +640,7 @@ pub fn say_and_wait(
     fallback: &str,
 ) -> tokio::sync::oneshot::Receiver<Said> {
     let (done, receiver) = tokio::sync::oneshot::channel();
-    enqueue(app, text, origin, false, language, fallback, Some(done), None);
+    enqueue(app, text, origin, false, language, fallback, Some(done), None, None);
     receiver
 }
 
@@ -505,7 +652,8 @@ fn enqueue(
     fixed: Option<&'static str>,
     fallback: &str,
     done: Option<tokio::sync::oneshot::Sender<Said>>,
-    voice: Option<String>,
+    voice: Option<Voice>,
+    incoming: Option<std::sync::mpsc::Receiver<String>>,
 ) -> u64 {
     let queue = queue(app);
     if interrupt {
@@ -514,7 +662,7 @@ fn enqueue(
     let id = queue.next_id.fetch_add(1, Ordering::SeqCst);
     let text = speakable(text);
     let lang = fixed.or_else(|| language_of(&text)).unwrap_or_else(|| language(fallback));
-    let job = Job { id, text, origin: origin.to_string(), lang, voice, generation: queue.generation.load(Ordering::SeqCst), done };
+    let job = Job { id, text, origin: origin.to_string(), lang, voice, incoming, generation: queue.generation.load(Ordering::SeqCst), done };
     let mut jobs = queue.jobs.lock().unwrap_or_else(|p| p.into_inner());
     jobs.push_back(job);
     while jobs.len() > MAX_WAITING {
@@ -560,7 +708,7 @@ fn speak(app: &AppHandle, queue: &Queue, job: &Job) -> Said {
     let generation = job.generation;
     let current = || queue.generation.load(Ordering::SeqCst) == generation;
     let ended = |phase: &'static str, duration_ms: u64, error: Option<String>| Said { phase, lang: job.lang, duration_ms, error };
-    if !current() || job.text.trim().is_empty() {
+    if !current() || (job.incoming.is_none() && job.text.trim().is_empty()) {
         return ended("stopped", 0, None);
     }
     let state = |phase: &'static str| SpeechState {
@@ -588,15 +736,13 @@ fn speak(app: &AppHandle, queue: &Queue, job: &Job) -> Said {
             Err(_) => return fail("The settings could not be read".into()),
         }
     };
-    // A voice of its own (Codi's): read as a downloaded voice chosen for this language.
+    // A voice of its own (Codi's, an agent's): in place of the reading aloud's for this language.
     if let Some(voice) = &job.voice {
-        settings.engine = "local".into();
-        if job.lang == "es" {
-            settings.local_voices.es = voice.clone();
-        } else {
-            settings.local_voices.en = voice.clone();
-        }
+        voice.apply(&mut settings, job.lang);
     }
+    // Higher by playing faster what was said that much slower: the length stays, the pitch moves.
+    let pitch = job.voice.as_ref().map_or(1.0, Voice::pitch);
+    settings.rate = (settings.rate / pitch).clamp(0.5, 2.0);
     SPEAKING.store(true, Ordering::SeqCst);
     *SAYING.lock().unwrap_or_else(|p| p.into_inner()) = Some(job.text.clone());
     struct Quiet;
@@ -617,12 +763,19 @@ fn speak(app: &AppHandle, queue: &Queue, job: &Job) -> Said {
     let mut written = Ok(());
     let playing = std::thread::scope(|scope| {
         let player = scope.spawn(|| player::play_stream(&settings.device, settings.volume, rx, &current));
-        let spoken = spoken_form(&settings, &job.text, job.lang);
+        let whole = settings.engine == "cloud";
         let mut synth = |piece: &str, on_chunk: &mut dyn FnMut(&[f32], u32) -> bool| synthesize_into(&settings, piece, job.lang, on_chunk);
-        written = render(&spoken, settings.engine == "cloud", settings.rate, &current, &mut synth, &mut |samples, rate| {
+        // The pieces of a text that is all here, or of one still being written as they arrive.
+        let mut said: Box<dyn Iterator<Item = segments::Segment> + '_> = match &job.incoming {
+            None => Box::new(pieces_of(&spoken_form(&settings, &job.text, job.lang), whole).into_iter()),
+            Some(incoming) => Box::new(Incoming { sentences: incoming, current: &current, settings: &settings, lang: job.lang, whole, waiting: VecDeque::new(), chars: 0 }),
+        };
+        written = render_pieces(&mut said, settings.rate, &current, &mut synth, &mut |samples, rate| {
             if !current() || samples.is_empty() {
                 return current();
             }
+            let shifted = shift_pitch(samples, rate, pitch);
+            let samples = shifted.as_slice();
             // Against the loudest piece so far, so a quiet sentence after a loud one stays quiet.
             let raw = player::levels(samples, rate, STEP_MS);
             loudest = raw.iter().copied().fold(loudest, f32::max);
@@ -631,8 +784,9 @@ fn speak(app: &AppHandle, queue: &Queue, job: &Job) -> Said {
             let _ = app.emit(STATE_EVENT, SpeechState { envelope, duration_ms, append: pieces > 0, ..state("speaking") });
             pieces += 1;
             played_ms += duration_ms;
-            tx.send((samples.to_vec(), rate)).is_ok()
+            tx.send((shifted, rate)).is_ok()
         });
+        drop(said);
         drop(tx);
         player.join().unwrap_or_else(|_| Err("The speaker thread stopped unexpectedly".into()))
     });
@@ -645,6 +799,54 @@ fn speak(app: &AppHandle, queue: &Queue, job: &Job) -> Said {
     let phase = if current() { "done" } else { "stopped" };
     let _ = app.emit(STATE_EVENT, state(phase));
     ended(phase, played_ms, None)
+}
+
+/// The pieces of an utterance still being written: each sentence as it comes, respelled and cut
+/// like any other, until the writer is done or the voice is told to stop.
+struct Incoming<'a> {
+    sentences: &'a std::sync::mpsc::Receiver<String>,
+    current: &'a dyn Fn() -> bool,
+    settings: &'a Settings,
+    lang: &'static str,
+    whole: bool,
+    waiting: VecDeque<segments::Segment>,
+    chars: usize,
+}
+
+impl Iterator for Incoming<'_> {
+    type Item = segments::Segment;
+
+    fn next(&mut self) -> Option<segments::Segment> {
+        loop {
+            if let Some(piece) = self.waiting.pop_front() {
+                return Some(piece);
+            }
+            // The same ceiling as a text handed over whole: past it the voice stops.
+            if !(self.current)() || self.chars >= MAX_CHARS {
+                return None;
+            }
+            match self.sentences.recv_timeout(std::time::Duration::from_millis(80)) {
+                Ok(sentence) => {
+                    let sentence = flatten_lines(&sentence);
+                    if sentence.is_empty() {
+                        continue;
+                    }
+                    self.chars += sentence.chars().count();
+                    // What is being said grows with it: a listener tells its own echo by this.
+                    if let Ok(mut held) = SAYING.lock() {
+                        let so_far = held.get_or_insert_with(String::new);
+                        if !so_far.is_empty() {
+                            so_far.push(' ');
+                        }
+                        so_far.push_str(&sentence);
+                    }
+                    self.waiting.extend(pieces_of(&spoken_form(self.settings, &sentence, self.lang), self.whole));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
+        }
+    }
 }
 
 /// Plays a short sound (a notification's tone, «Probar» on the speaker) on the chosen output, on a
@@ -692,6 +894,73 @@ mod tests {
         assert_eq!(language_of("Git: push completed"), None);
         assert_eq!(language_of("Pipelines: main"), None);
         assert_eq!(language_of(""), None);
+    }
+
+    #[test]
+    fn a_voice_of_its_own_takes_the_place_of_the_user_s_and_keeps_within_bounds() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let mut settings = load_settings(&conn);
+        settings.rate = 1.2;
+        Voice { id: "system:Paulina".into(), pitch: 9.0, rate: 0.1 }.apply(&mut settings, "es");
+        assert_eq!(settings.engine, "system");
+        assert_eq!(settings.system_voices.es, "Paulina");
+        assert_eq!(settings.system_voices.en, "", "the other language keeps its own");
+        assert!((settings.rate - Voice::RATE.0).abs() < 1e-5, "the reading speed does not reach a voice of its own");
+        // A voice is moved a little and no more: past a few percent it is not understood.
+        assert!(Voice::PITCH.0 >= 0.94 && Voice::PITCH.1 <= 1.06);
+        assert_eq!(Voice { pitch: 9.0, ..Voice::default() }.pitch(), Voice::PITCH.1);
+        assert_eq!(Voice { pitch: f32::NAN, ..Voice::default() }.pitch(), 1.0);
+
+        let mut settings = load_settings(&conn);
+        Voice { id: "cloud:elevenlabs:abc".into(), ..Voice::default() }.apply(&mut settings, "en");
+        assert_eq!((settings.engine.as_str(), settings.cloud_service.as_str(), settings.cloud_voice.as_str()), ("cloud", "elevenlabs", "abc"));
+
+        // One that is not here — a downloaded voice removed, a service nobody knows — leaves the user's.
+        let mut settings = load_settings(&conn);
+        let before = settings.engine.clone();
+        Voice { id: "es_XX-nobody-high".into(), ..Voice::default() }.apply(&mut settings, "es");
+        Voice { id: "cloud:nobody:x".into(), ..Voice::default() }.apply(&mut settings, "es");
+        assert_eq!(settings.engine, before);
+    }
+
+    #[test]
+    fn a_higher_pitch_is_as_much_shorter_so_saying_it_slower_keeps_its_length() {
+        let second: Vec<f32> = (0..22_050).map(|i| (i as f32 * 0.05).sin()).collect();
+        assert_eq!(shift_pitch(&second, 22_050, 1.0).len(), second.len());
+        let higher = shift_pitch(&second, 22_050, 1.04);
+        assert!((higher.len() as f32 - second.len() as f32 / 1.04).abs() < 4.0, "{}", higher.len());
+        let lower = shift_pitch(&second, 22_050, 0.96);
+        assert!((lower.len() as f32 - second.len() as f32 / 0.96).abs() < 4.0, "{}", lower.len());
+    }
+
+    #[test]
+    fn an_utterance_still_being_written_is_said_a_sentence_at_a_time() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let settings = load_settings(&conn);
+        let (sentences, incoming) = std::sync::mpsc::channel();
+        let going = std::sync::atomic::AtomicBool::new(true);
+        let current = || going.load(Ordering::SeqCst);
+        let mut pieces = Incoming { sentences: &incoming, current: &current, settings: &settings, lang: "es", whole: false, waiting: VecDeque::new(), chars: 0 };
+        sentences.send("El desarrollo está terminado.".to_string()).unwrap();
+        sentences.send("   ".to_string()).unwrap();
+        // The first piece is there before the writer is done: the voice does not wait for the rest.
+        assert!(pieces.next().unwrap().text.contains("desarrollo"));
+        sentences.send("Se verifican los escenarios. Falta uno.".to_string()).unwrap();
+        // The writer is done: what it sent is said, and then the utterance ends rather than wait.
+        drop(sentences);
+        let rest: Vec<String> = pieces.by_ref().map(|piece| piece.text).collect();
+        assert!(!rest.is_empty());
+        let said = rest.join(" ");
+        assert!(said.contains("verifican") && said.contains("Falta"), "{said}");
+        assert!(pieces.next().is_none());
+
+        // Told to stop, it does not wait for the writer.
+        let (_held, incoming) = std::sync::mpsc::channel::<String>();
+        going.store(false, Ordering::SeqCst);
+        let mut pieces = Incoming { sentences: &incoming, current: &current, settings: &settings, lang: "es", whole: false, waiting: VecDeque::new(), chars: 0 };
+        assert!(pieces.next().is_none());
     }
 
     #[test]

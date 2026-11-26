@@ -26,6 +26,7 @@ import { TemplateActions, TemplateEditor } from "./TemplateEditor";
 import { AgentAvatar } from "../kit/Avatar";
 import { useModelOptions } from "../kit/models";
 import { SelectBox, Btn, Chip, Label, Modal, Seg, SPRING, Stepper, Switch, ToggleChip, field } from "../kit/ui";
+import { VoiceField } from "./VoiceField";
 import { useCrewStore, useL } from "../state";
 
 type Step = "template" | "identity" | "brain" | "scope";
@@ -194,6 +195,7 @@ function IdentityStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<
           ))}
         </div>
       </div>
+      <VoiceField name={draft.name} voice={draft.voice ?? null} onChange={(voice) => patch({ voice })} />
       <div className="flex flex-col gap-1.5">
         <div className="flex items-center gap-2">
           <span className="flex-1"><Label>{l("Icono", "Icon")}</Label></span>
@@ -255,7 +257,7 @@ function BrainStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<Age
                 key={p.id}
                 type="button"
                 transition={SPRING}
-                onClick={() => patch({ provider: p.id, model: "", effort: "", account_id: null, model_ladder: [] })}
+                onClick={() => patch({ provider: p.id, model: "", effort: "", account_id: null, model_ladder: [], call_model: "" })}
                 title={l(`Usar ${p.label} como motor`, `Use ${p.label} as the engine`)}
                 className={`relative flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left text-[12.5px] font-medium transition-colors ${on ? "border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)]" : "border-[var(--cf-border)] hover:bg-[var(--cf-hover)]"}`}
               >
@@ -286,6 +288,17 @@ function BrainStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<Age
           <ToggleChip on={custom || (!!draft.model && !known)} title={l("Escribe el id exacto de otro modelo", "Type the exact id of another model")} onClick={() => setCustom(true)}>{l("Otro…", "Other…")}</ToggleChip>
         </div>
         {(custom || (!!draft.model && !known)) && <input value={draft.model} onChange={(e) => patch({ model: e.target.value.trim() })} placeholder={l("El id exacto que recibe el CLI", "The exact id the CLI takes")} className={`${field} font-mono`} />}
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <Label>{l("Modelo en las llamadas", "Model on calls")}</Label>
+        <SelectBox value={draft.call_model ?? ""} onChange={(v) => patch({ call_model: v })} className="w-full" ariaLabel={l("Modelo en las llamadas", "Model on calls")}>
+          <option value="">{l("Según la llamada (el rápido del proveedor, o el suyo)", "As the call says (the provider's fast one, or its own)")}</option>
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>{m.label}</option>
+          ))}
+          {!!draft.call_model && !models.some((m) => m.id === draft.call_model) && <option value={draft.call_model}>{draft.call_model}</option>}
+        </SelectBox>
+        <span className="text-[11.5px] text-[var(--cf-text-muted)]">{l("Con qué modelo responde cuando hablas con su equipo por voz. Para revisar el código y trabajar usa siempre el de arriba.", "Which model it answers with when you talk to its team by voice. To look at the code and to work it always uses the one above.")}</span>
       </div>
       {effortOk && (
         <div className="flex flex-col gap-1.5">

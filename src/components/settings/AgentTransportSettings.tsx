@@ -4,6 +4,7 @@ import { agentTransportKey, getSettings, providerCaps, setSetting, type Provider
 import { providerDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { Segmented } from "../common/Segmented";
+import { SettingsFold } from "./SettingsFold";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 
@@ -54,19 +55,12 @@ export function AgentTransportSettings() {
       });
   };
 
+  const label = (choice: Choice) => t(choice === "cli" ? "settings.agentTransportCli" : "settings.agentTransportAcp");
+  const summary = caps.map((cap) => `${providerDisplayLabel(cap.id, t) || cap.label} ${label(choices[cap.id] ?? "acp")}`).join(" · ");
+
   return (
-    <section aria-labelledby="agent-transport-title" className="space-y-2 rounded-xl bg-[var(--cf-surface)] p-3 shadow-[inset_0_0_0_1px_var(--cf-border)]">
-      <div className="flex items-start gap-2">
-        <span className="mt-[1px] flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] text-[var(--cf-accent)]">
-          <Cable size={13} aria-hidden />
-        </span>
-        <div className="min-w-0">
-          <h3 id="agent-transport-title" className="text-[12.5px] font-medium text-[var(--cf-text)]">
-            {t("settings.agentTransportTitle")}
-          </h3>
-          <p className="mt-0.5 max-w-[68ch] text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t("settings.agentTransportHint")}</p>
-        </div>
-      </div>
+    <SettingsFold icon={Cable} title={t("settings.agentTransportTitle")} summary={summary}>
+      <p className="max-w-[68ch] text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t("settings.agentTransportHint")}</p>
       <ul className="divide-y divide-[var(--cf-border)] overflow-hidden rounded-lg bg-[var(--cf-surface-raised)] shadow-[inset_0_0_0_1px_var(--cf-border)]">
         {caps.map((cap) => {
           const name = providerDisplayLabel(cap.id, t) || cap.label;
@@ -96,6 +90,6 @@ export function AgentTransportSettings() {
           );
         })}
       </ul>
-    </section>
+    </SettingsFold>
   );
 }

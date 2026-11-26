@@ -1,3 +1,4 @@
+import type { PrepProposal, PrepSource } from "../notes/prepMerge";
 import { invoke } from "./invoke";
 import type {
   DocVersion,
@@ -6,6 +7,7 @@ import type {
   NoteMetaRow,
   NoteRow,
   NoteSaved,
+  NoteRelation,
   NoteSearchHit,
   NoteSync,
   NoteTemplateRow,
@@ -300,7 +302,40 @@ export const notesMoveBookToWorkspace = (id: string, workspaceId: string) =>
 
 /** Every note and the `[[links]]` between them, for the graph view. Reads every body once. */
 export const notesGraph = (workspaceId: string) =>
-  invoke<{ nodes: { id: string; title: string; book_id: string }[]; edges: [string, string][] }>("notes_graph", { workspaceId });
+  invoke<{
+    nodes: { id: string; title: string; book_id: string }[];
+    edges: [string, string][];
+    /** `[later, earlier, kind]` for each pair of related notes. */
+    relations?: [string, string, string][];
+  }>("notes_graph", { workspaceId });
+
+// ---------- related notes ----------
+
+/** The notes this one is related to, on the shelf of `workspaceId`. */
+export const notesListRelations = (noteId: string, workspaceId: string | null) =>
+  invoke<NoteRelation[]>("notes_list_relations", { noteId, workspaceId });
+
+/**
+ * Compares a note with the rest and links the ones about the same thing; with `ai`, a model then
+ * says which it continues, what was settled since and what is still open. Without `force` the
+ * comparison is skipped while nothing was written since the last one.
+ */
+export const notesRelate = (args: { noteId: string; ai: boolean; force?: boolean; language?: string; runId?: string; workspaceId?: string | null }) =>
+  invoke<{ relations: NoteRelation[]; engine: string; nothing: boolean }>("notes_relate", args);
+
+/**
+ * «Preparar reunión»: the earlier notes and meetings that speak of `topic`, and what a model says to
+ * know, ask and decide from them. Writes nothing — `lib/notes/prepMerge` puts it in the note.
+ * `nothing`: no earlier note speaks of it, and no model was asked.
+ */
+export const notesPrepareMeeting = (args: { noteId: string; topic: string; language?: string; runId?: string; workspaceId?: string | null }) =>
+  invoke<{ proposal: PrepProposal; sources: PrepSource[]; engine: string; nothing: boolean }>("notes_prepare_meeting", args);
+
+/** Links two notes by hand. */
+export const notesAddRelation = (noteId: string, otherId: string) => invoke<void>("notes_add_relation", { noteId, otherId });
+
+/** Separates two related notes; the pair is not offered again. */
+export const notesRemoveRelation = (noteId: string, otherId: string) => invoke<void>("notes_remove_relation", { noteId, otherId });
 
 /** Every Markdown file under a folder (an Obsidian vault) or inside a `.zip` (a Notion export). */
 export const notesReadVault = (path: string) => invoke<{ dir: string; name: string; content: string }[]>("notes_read_vault", { path });

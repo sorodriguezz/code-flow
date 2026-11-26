@@ -32,8 +32,10 @@ const INVITATION = /^collab_(?:share|invite|join|join_preview|take_join_link|liv
 
 /** What a model must never call: the doors it is itself held at — answering its own approval,
  *  the window's replies to the app's questions, the interface it already drives through `ui_act`,
- *  the yes to a team it proposed from a turn that may not act (`team_proposal_accept`). */
-const SELF = /^(?:agentcli_|flows_bridge_|codi_act_result|codi_register|codi_ui_|mcp_trust|log_frontend_error|codi_confirm$|codi_act$|team_proposal_)/;
+ *  the yes to a team it proposed from a turn that may not act (`team_proposal_accept`); a call with
+ *  a team, which opens the microphone and ends in work — the user's to start and to hang up
+ *  (`team_call_*`). */
+const SELF = /^(?:agentcli_|flows_bridge_|codi_act_result|codi_register|codi_ui_|mcp_trust|log_frontend_error|codi_confirm$|codi_act$|team_proposal_|team_call_)/;
 
 /** The browser's own plumbing (`browser_window.rs`, `preview_server.rs`): the bar reporting its
  *  height, its tabs, the editor reporting what it shows, and `preview_file_url`, which serves **any** folder

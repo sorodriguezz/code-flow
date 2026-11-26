@@ -1238,10 +1238,16 @@ pub fn delete_workspace_skill(conn: &Connection, id: &str) -> rusqlite::Result<(
 // ---------- workspace SDD/Harness agents ----------
 
 const AGENT_COLUMNS: &str = "id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at, account_id, effort,
-    icon, color, edits, repos, run_in, max_parallel, model_ladder, template_id, template_version, overrides, perms";
+    icon, color, edits, repos, run_in, max_parallel, model_ladder, template_id, template_version, overrides, perms, voice, call_model";
 
 fn json_list(raw: String) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(&raw).unwrap_or_default()
+}
+
+/// An agent's own voice as it is kept: nothing for «Automática» — a voice that names nobody is
+/// no choice, and the agent is given one like the rest.
+fn agent_voice(raw: &str) -> Option<crate::speech::Voice> {
+    serde_json::from_str::<crate::speech::Voice>(raw).ok().filter(|voice| !voice.id.trim().is_empty())
 }
 
 fn map_workspace_agent(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceAgent> {
@@ -1269,6 +1275,8 @@ fn map_workspace_agent(row: &rusqlite::Row) -> rusqlite::Result<WorkspaceAgent> 
         template_version: row.get(20)?,
         overrides: json_list(row.get(21)?),
         perms: json_list(row.get(22)?),
+        voice: agent_voice(&row.get::<_, String>(23)?),
+        call_model: row.get(24)?,
     })
 }
 
@@ -1344,23 +1352,27 @@ pub fn save_workspace_agent(conn: &Connection, draft: &crate::db::models::AgentD
         template_version: draft.template_version.max(0),
         overrides: clean(&draft.overrides),
         perms: clean(&draft.perms),
+        voice: draft.voice.clone().filter(|voice| !voice.id.trim().is_empty()),
+        call_model: draft.call_model.trim().to_string(),
     };
     let to_json = |list: &Vec<String>| serde_json::to_string(list).unwrap_or_else(|_| "[]".into());
     conn.execute(
         "INSERT INTO workspace_agents (id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at,
-            account_id, effort, icon, color, edits, repos, run_in, max_parallel, model_ladder, template_id, template_version, overrides, perms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+            account_id, effort, icon, color, edits, repos, run_in, max_parallel, model_ladder, template_id, template_version, overrides, perms, voice, call_model)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
          ON CONFLICT(id) DO UPDATE SET name = excluded.name, role = excluded.role, provider = excluded.provider,
             model = excluded.model, prompt = excluded.prompt, enabled = excluded.enabled, account_id = excluded.account_id,
             effort = excluded.effort, icon = excluded.icon, color = excluded.color, edits = excluded.edits, repos = excluded.repos,
             run_in = excluded.run_in, max_parallel = excluded.max_parallel, model_ladder = excluded.model_ladder,
             template_id = excluded.template_id, template_version = excluded.template_version, overrides = excluded.overrides,
-            perms = excluded.perms",
+            perms = excluded.perms, voice = excluded.voice, call_model = excluded.call_model",
         params![
             agent.id, agent.workspace_id, agent.name, agent.role, agent.provider, agent.model, agent.prompt, agent.enabled,
             agent.sort_order, agent.created_at, agent.account_id, agent.effort, agent.icon, agent.color, agent.edits,
             to_json(&agent.repos), agent.run_in, agent.max_parallel, to_json(&agent.model_ladder), agent.template_id,
             agent.template_version, to_json(&agent.overrides), to_json(&agent.perms),
+            agent.voice.as_ref().and_then(|voice| serde_json::to_string(voice).ok()).unwrap_or_default(),
+            agent.call_model,
         ],
     )?;
     Ok(agent)
@@ -1432,6 +1444,8 @@ pub fn upsert_workspace_agent(
         template_version: 0,
         overrides: Vec::new(),
         perms: Vec::new(),
+        voice: None,
+        call_model: String::new(),
     };
     conn.execute(
         "INSERT INTO workspace_agents (id, workspace_id, name, role, provider, model, prompt, enabled, sort_order, created_at, account_id)

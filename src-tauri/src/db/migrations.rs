@@ -2076,6 +2076,8 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_effort_to_agents(conn)?;
     add_identity_to_agents(conn)?;
     add_roster_to_meetings(conn)?;
+    // «Relacionadas»: which notes follow or resemble which (`note_relations`).
+    crate::note_relations::migrate(conn)?;
     allow_repo_only_review_runs(conn)?;
     keep_repo_chats_past_their_repository(conn)?;
     // «Equipo»: teams, their runs, items and channel (`team`).
@@ -2167,7 +2169,7 @@ pub(crate) fn add_identity_to_agents(conn: &Connection) -> rusqlite::Result<()> 
     if !table_exists(conn, "workspace_agents")? {
         return Ok(());
     }
-    let columns: [(&str, &str); 11] = [
+    let columns: [(&str, &str); 13] = [
         ("icon", "TEXT NOT NULL DEFAULT ''"),
         ("color", "TEXT NOT NULL DEFAULT ''"),
         ("edits", "INTEGER NOT NULL DEFAULT 1"),
@@ -2179,6 +2181,10 @@ pub(crate) fn add_identity_to_agents(conn: &Connection) -> rusqlite::Result<()> 
         ("template_version", "INTEGER NOT NULL DEFAULT 0"),
         ("overrides", "TEXT NOT NULL DEFAULT '[]'"),
         ("perms", "TEXT NOT NULL DEFAULT '[]'"),
+        // The voice it speaks with in a call, as JSON; empty is «Automática».
+        ("voice", "TEXT NOT NULL DEFAULT ''"),
+        // The model it talks with in a call; empty follows the call's own choice.
+        ("call_model", "TEXT NOT NULL DEFAULT ''"),
     ];
     for (name, definition) in columns {
         if !has_column(conn, "workspace_agents", name)? {

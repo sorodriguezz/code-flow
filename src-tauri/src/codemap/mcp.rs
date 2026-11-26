@@ -941,7 +941,7 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "read_note",
-            "description": "Read one of the user's notes in CodeFlow in full — a passage search_knowledge cited as note:<id>. Only notes of this workspace and global ones; never a secret.",
+            "description": "Read one of the user's notes in CodeFlow in full — a passage search_knowledge cited as note:<id>, or a note another one names. A note or a meeting's minutes end with the notes they are related to, by id: the earlier one they continue, the later ones that continue them, what was settled between them and what is still open — read those too when the question is whether something was resolved or how a discussion went on. Only notes of this workspace and global ones; never a secret.",
             "inputSchema": {"type": "object", "properties": {
                 "id": {"type": "string", "description": "The note's id, as cited (note:<id> or <id>)"}
             }, "required": ["id"]},
@@ -1186,7 +1186,7 @@ fn workspace_tools() -> Vec<Value> {
         }),
         json!({
             "name": "read_note",
-            "description": "Read one of the user's notes in CodeFlow in full — a passage search_knowledge cited as note:<id>. Only notes of this workspace and global ones; never a secret.",
+            "description": "Read one of the user's notes in CodeFlow in full — a passage search_knowledge cited as note:<id>, or a note another one names. A note or a meeting's minutes end with the notes they are related to, by id: the earlier one they continue, the later ones that continue them, what was settled between them and what is still open — read those too when the question is whether something was resolved or how a discussion went on. Only notes of this workspace and global ones; never a secret.",
             "inputSchema": {"type": "object", "properties": {
                 "id": {"type": "string", "description": "The note's id, as cited (note:<id> or <id>)"}
             }, "required": ["id"]},
@@ -1951,6 +1951,14 @@ async fn answer(access: &Access, message: Value) -> Option<Value> {
             // The script only where this run's provider has it on (Settings › Providers).
             if !access.scripts() {
                 own.retain(|tool| tool["name"].as_str() != Some(crate::app_gateway::RUN_TOOL));
+            } else if access.acts && access.full {
+                // «Completo»: its scripts run destructive commands too (`app_script`), and the tool
+                // says so — or the model goes on sending each one through `app_call`.
+                for tool in own.iter_mut().filter(|tool| tool["name"].as_str() == Some(crate::app_gateway::RUN_TOOL)) {
+                    if let Some(said) = tool["description"].as_str() {
+                        tool["description"] = json!(crate::app_script::for_full_access(said));
+                    }
+                }
             }
             let db_saved = db_saved_here(&access.root);
             if !access.grounding && db_saved {
@@ -3023,7 +3031,11 @@ async fn other_apps(access: &Access, name: &str, args: &Value) -> Result<String,
                     Some(id) => id,
                     None => crate::db::note_queries::create_book(conn, &workspace, None, "Agentes", "").map_err(|e| e.to_string())?.id,
                 };
-                crate::db::note_queries::create_note(conn, &workspace, &book, &title, &content, &text("tags")).map_err(|e| e.to_string())
+                let meta = crate::db::note_queries::create_note(conn, &workspace, &book, &title, &content, &text("tags")).map_err(|e| e.to_string())?;
+                // Linked to the notes it is about at once (`crate::note_relations`): a report an
+                // agent files is found from the meeting that asked for it.
+                let _ = crate::note_relations::scan(conn, &meta.id);
+                Ok(meta)
             })
             .ok_or("Notes could not be written")??;
             use tauri::Emitter;

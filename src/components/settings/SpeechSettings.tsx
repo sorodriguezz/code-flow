@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { Play, Square } from "lucide-react";
-import { Select, type SelectOption } from "../common/Select";
+import { Loader2, Play, Square } from "lucide-react";
+import { Select, type SelectItems, type SelectOption } from "../common/Select";
 import { Segmented } from "../common/Segmented";
 import { Checkbox } from "../common/Checkbox";
 import { Button, iconButtonClass } from "../common/Button";
@@ -9,6 +9,7 @@ import { chipClass, fieldClass } from "../common/recipes";
 import { ThinkingOrb } from "../common/ThinkingOrb";
 import { formatBytes, ModelDownloadRow, type DownloadableModel } from "./localModelRow";
 import { PaneBlock } from "./settingsNav";
+import { isNatural, NaturalVoicesControl, useNaturalReady, useNaturalVoices } from "./naturalVoices";
 import { isMac } from "../../lib/platform";
 import { MeasureButton, ramGb, SpeakDetails } from "./voiceFit";
 import { useVoiceFitStore } from "../../state/voiceFitStore";
@@ -97,6 +98,9 @@ export function SpeechSettings() {
   const status = store.status;
   const language = useLanguageStore((s) => s.language);
   const engineHint = { system: t("speech.engineSystemHint"), local: t("speech.engineLocalHint"), cloud: t("speech.engineCloudHint") }[store.engine];
+  // A natural voice speaks at the pace it was recorded at: the speed below is the other voices'.
+  const naturalReads =
+    store.engine === "local" && (status?.voices ?? []).some((voice) => isNatural(voice) && voice.installed && (voice.id === store.localVoices.es || voice.id === store.localVoices.en));
 
   return (
     <div>
@@ -134,7 +138,7 @@ export function SpeechSettings() {
           </>
         )}
         {store.engine === "cloud" && <CloudRows />}
-        <Row label={t("speech.rate")}>
+        <Row label={t("speech.rate")} hint={naturalReads ? t("speech.rateNaturalHint") : undefined}>
           <input
             type="range"
             min={0.6}
@@ -240,6 +244,20 @@ export function SpeechSettings() {
   );
 }
 
+/** Every option of a list that may hold groups. */
+const flatOptions = (items: SelectItems): SelectOption[] => items.flatMap((item) => ("options" in item ? item.options : [item]));
+
+/** Said beside a natural voice while the model of its language comes down. */
+export function NaturalPreparing({ lang }: { lang: Language }) {
+  const t = useT();
+  return (
+    <span role="status" className="flex min-w-0 items-center gap-1.5 text-[11.5px] text-[var(--cf-text-muted)]">
+      <Loader2 size={12} className="shrink-0 animate-spin text-[var(--cf-accent)]" />
+      {t(lang === "es" ? "speech.naturalPreparingEs" : "speech.naturalPreparingEn")}
+    </span>
+  );
+}
+
 /**
  * The voice one language is read with — a text in English gets the English one whatever the screen
  * shows (`speech::language_of`) — and a sample in that language. Empty is «Automática»: the system's
@@ -251,7 +269,7 @@ function LanguageVoiceRow({ lang, engine }: { lang: Language; engine: "system" |
   const chosen = useSpeechStore((s) => (engine === "system" ? s.systemVoices : s.localVoices)[lang]);
   const label = t(lang === "es" ? "speech.voiceEs" : "speech.voiceEn");
 
-  let options: SelectOption[];
+  let options: SelectItems;
   let none = false;
   if (engine === "system") {
     const voices = (status?.systemVoices ?? []).filter((voice) => !voice.lang || voiceLanguage(voice.lang) === lang);
@@ -262,16 +280,26 @@ function LanguageVoiceRow({ lang, engine }: { lang: Language; engine: "system" |
       ...voices.map((voice) => ({ value: voice.id, label: voice.name })),
     ];
   } else {
-    // A cloned voice reads either language: its models are multilingual.
-    const installed = (status?.voices ?? []).filter((voice) => voice.installed && (voice.engine === "clone" || voiceLanguage(voice.lang) === lang));
+    const installed = (status?.voices ?? []).filter((voice) => voice.installed);
+    // «Automática» picks among the downloaded voices of the language — never a cloned voice or a
+    // natural one, which read either language and are only ever chosen (`speech::local_voice`).
+    const ofLanguage = installed.filter((voice) => voice.engine !== "clone" && !isNatural(voice) && voiceLanguage(voice.lang) === lang);
+    const cloned = installed.filter((voice) => voice.engine === "clone");
+    const natural = installed.filter(isNatural);
     const named = (voice: DownloadableVoice) => (voice.engine === "clone" ? t("voiceClone.option", { name: voice.label }) : `${voice.label} · ${t(GENDER_KEY[voice.gender])}`);
-    none = installed.length === 0;
+    none = ofLanguage.length + cloned.length + natural.length === 0;
     options = none
       ? [{ value: "", label: t("speech.noneReadsSystem") }]
-      : [{ value: "", label: t("speech.automaticNamed", { name: named(installed[0]) }) }, ...installed.map((voice) => ({ value: voice.id, label: named(voice) }))];
+      : [
+          { value: "", label: ofLanguage[0] ? t("speech.automaticNamed", { name: named(ofLanguage[0]) }) : t("speech.automaticSystem") },
+          ...[...ofLanguage, ...cloned].map((voice) => ({ value: voice.id, label: named(voice) })),
+          ...(natural.length > 0 ? [{ label: t("speech.naturalGroup"), options: natural.map((voice) => ({ value: voice.id, label: voice.label })) }] : []),
+        ];
   }
   // A choice that is gone (a voice removed, uninstalled from the system) reads as «Automática», which is what speaks.
-  const value = options.some((option) => option.value === chosen) ? chosen : "";
+  const value = flatOptions(options).some((option) => option.value === chosen) ? chosen : "";
+  // The other language's model comes down the first time a natural voice is chosen for it.
+  const ready = useNaturalReady(lang, value, engine === "local" && (status?.voices ?? []).some((voice) => voice.id === value && isNatural(voice)));
 
   return (
     <Row label={label}>
@@ -295,10 +323,14 @@ function LanguageVoiceRow({ lang, engine }: { lang: Language; engine: "system" |
           <Play size={12} />
         </button>
       </Tooltip>
-      {engine === "local" && (
-        <span className="text-[11.5px] text-[var(--cf-text-muted)]">
-          {none ? t("speech.downloadFirst") : t("speech.moreVoices")} <Link onClick={() => go("voice", "models")}>{t("voice.modelsTab")}</Link>
-        </span>
+      {ready === "preparing" ? (
+        <NaturalPreparing lang={lang} />
+      ) : (
+        engine === "local" && (
+          <span className="text-[11.5px] text-[var(--cf-text-muted)]">
+            {none ? t("speech.downloadFirst") : t("speech.moreVoices")} <Link onClick={() => go("voice", "models")}>{t("voice.modelsTab")}</Link>
+          </span>
+        )
       )}
     </Row>
   );
@@ -433,6 +465,7 @@ export function SpeechVoicesBlock() {
   const progress = useSpeechStore((s) => s.progress);
   const installing = useSpeechStore((s) => s.installing);
   const ask = useConfirmStore((s) => s.ask);
+  const natural = useNaturalVoices();
 
   useEffect(() => {
     ensureSpeechEvents();
@@ -448,12 +481,16 @@ export function SpeechVoicesBlock() {
   // it is downloaded, else the first downloaded one of that language.
   const speaksWith = new Set<string>();
   if (engine === "local") {
+    const installed = status.voices.filter((voice) => voice.installed);
     for (const lang of ["es", "en"] as const) {
-      const installed = status.voices.filter((voice) => voice.installed && voiceLanguage(voice.lang) === lang);
-      const id = installed.find((voice) => voice.id === localVoices[lang])?.id ?? installed[0]?.id;
+      // A cloned voice and a natural one read either language, and only when chosen.
+      const anyLanguage = (voice: DownloadableVoice) => voice.engine === "clone" || isNatural(voice);
+      const chosen = installed.find((voice) => voice.id === localVoices[lang] && (anyLanguage(voice) || voiceLanguage(voice.lang) === lang));
+      const id = chosen?.id ?? installed.find((voice) => !anyLanguage(voice) && voiceLanguage(voice.lang) === lang)?.id;
       if (id) speaksWith.add(id);
     }
   }
+  const naturalSpeaks = status.voices.some((voice) => isNatural(voice) && speaksWith.has(voice.id));
   // The app's language first; the catalogue's own order within each. Kokoro's voices are not
   // downloads of their own: its one row stands for all of them.
   const order = languagesFrom(language);
@@ -480,6 +517,38 @@ export function SpeechVoicesBlock() {
           </div>
           <span className={chipClass("ok")}>{t("speech.included")}</span>
         </div>
+        {/* The natural voices, drawn as the downloads below are: one install for all of them, with
+            its own progress — a line at a time, not bytes — so not a `ModelDownloadRow`. */}
+        {natural.engine && (
+          <div className="flex flex-wrap items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2.5 last:border-b-0">
+            <span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${natural.engine.installed ? "bg-[var(--cf-success)]" : "bg-[var(--cf-text-muted)]/40"}`} />
+            <div className="min-w-[240px] flex-1">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-[13px] leading-snug text-[var(--cf-text)]">{t("speech.pocketLabel", { n: natural.engine.voices })}</span>
+                {naturalSpeaks && <span className={chipClass("accent")}>{t("speech.title")}</span>}
+              </div>
+              <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-[var(--cf-text-muted)]">
+                <span>{t("speech.pocketNote")}</span>
+                <span aria-hidden>·</span>
+                <span className="font-mono">Pocket TTS</span>
+                <span aria-hidden>·</span>
+                <span>
+                  {natural.engine.installed
+                    ? t("localai.sizeOnDisk", { size: formatBytes(natural.engine.bytes) })
+                    : t("localai.sizeDownload", { size: formatBytes(natural.engine.estimateBytes) })}
+                </span>
+                <span aria-hidden>·</span>
+                {/* Measured with its Spanish model and sixteen voices loaded: some 840 MB. */}
+                <span>{t("localai.needsRam", { gb: "1" })}</span>
+                <span aria-hidden>·</span>
+                <span>{natural.engine.licence}</span>
+              </div>
+            </div>
+            <div className="flex min-w-0 shrink-0 items-center gap-2">
+              <NaturalVoicesControl natural={natural} />
+            </div>
+          </div>
+        )}
         {status.localSupported && (
           <ModelDownloadRow
             model={{

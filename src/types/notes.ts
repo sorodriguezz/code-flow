@@ -147,6 +147,34 @@ export interface NoteSearchHit {
   at_ms?: number;
 }
 
+/**
+ * A note related to the one being read (`note_relations` in the backend): about the same thing, or
+ * the one before or after it in a discussion that went on.
+ */
+export interface NoteRelation {
+  /** The other note. */
+  id: string;
+  title: string;
+  bookId: string;
+  /** Its date: its meeting's when it holds one, else when it was written. */
+  when: string;
+  /** Whether that note holds a meeting. */
+  meeting: boolean;
+  /** `earlier` — it came before the note being read — or `later`. */
+  direction: "earlier" | "later";
+  /** `continues`: the later of the two follows the earlier. */
+  kind: "related" | "continues";
+  reason: string;
+  /** The words that make them alike. */
+  shared: string[];
+  /** What the earlier note left open and the later one settled. */
+  resolved: string[];
+  /** What the earlier note left open and is still open. */
+  pending: string[];
+  /** Made by their words, by a model, or by hand. */
+  origin: "auto" | "ai" | "manual";
+}
+
 // ---------------------------------------------------------------------------
 // View
 // ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 import { ArtifactsList } from "../chat/ArtifactCards";
 import { useChatArtifactsStore } from "../../state/chatArtifactsStore";
-import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { useCrewPanel } from "../crew/panel/useCrewPanel";
 import {
   AlertCircle,
   Ban,
@@ -81,7 +82,12 @@ import { searchAssistantChats, type AssistantChatHit } from "../../lib/tauri/com
 import { useRemovedProjects, useRemovedProjectsStore } from "../../state/removedProjectsStore";
 import { activitySearchMatch } from "../../lib/activitySearch";
 
-type Filter = "all" | "chat" | "artifacts" | "pr" | "analysis";
+type Filter = "all" | "chat" | "artifacts" | "pr" | "analysis" | "crew";
+
+/** «Equipos»: the workspace's teams and agents, to chat with and to call from here. Its own chunk —
+ *  it brings the avatars and the crew's kit, which a panel showing the history never needs. The
+ *  count beside its tab comes from `useCrewPanel`, which is only the stores. */
+const CrewPanel = lazy(() => import("../crew/panel/CrewPanel").then((m) => ({ default: m.CrewPanel })));
 type Scope = "repo" | "workspace";
 
 const EMPTY_PROJECTS: Project[] = [];
@@ -280,7 +286,7 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
   const artifactCount = useChatArtifactsStore((s) => (workspaceId ? (s.byWorkspace[workspaceId]?.length ?? 0) : 0));
   /** How many rows each kind holds, of what the search leaves — the numbers on the filter tabs. */
   const kindCounts = useMemo(() => {
-    const out: Record<Filter, number> = { all: 0, chat: 0, pr: 0, analysis: 0, artifacts: artifactCount };
+    const out: Record<Filter, number> = { all: 0, chat: 0, pr: 0, analysis: 0, artifacts: artifactCount, crew: 0 };
     for (const entry of entries) {
       if (entryIsRunning(entry) || matches.get(entryKey(entry)) === null) continue;
       out[kindOf(entry)] += 1;
@@ -291,7 +297,17 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
   useEffect(() => {
     if (workspaceId) void useChatArtifactsStore.getState().loadWorkspace(workspaceId);
   }, [workspaceId]);
-  const empty = needs.length === 0 && running.length === 0 && entries.length === 0 && artifactCount === 0;
+  // The teams and agents to talk to from here. They are not history: a workspace that has them
+  // shows the tabs — and so the way to them — even before anything has been asked of the assistant.
+  const crew = useCrewPanel(workspaceId);
+  const hasCrew = crew.teams.length > 0;
+  const lang = useLanguageStore((s) => s.language);
+  const crewLabel = lang === "es" ? "Equipos" : "Teams";
+  const crewTitle = lang === "es" ? "Equipos: conversa con ellos o llámalos desde aquí" : "Teams: chat with them or call them from here";
+  const noHistory = needs.length === 0 && running.length === 0 && entries.length === 0 && artifactCount === 0;
+  const empty = noHistory && !hasCrew;
+  // With nothing else to show, the teams are what there is: the list opens on them.
+  const shownFilter: Filter = noHistory && hasCrew && filter === "all" ? "crew" : filter;
 
   return (
     // Three bands, and only the history scrolls. The scope and the actions, the live rows and
@@ -401,6 +417,10 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
               [
                 ["all", t("assistant.filterAll")],
                 ["chat", t("assistant.filterChats")],
+                // Who else there is to talk to: the workspace's teams and agents. Beside «Chats»
+                // and not at the end — the strip scrolls in a narrow panel, and the end is what
+                // goes out of sight. Drawn with none too: its empty state is the way to make one.
+                ["crew", crewLabel],
                 ["pr", t("assistant.filterPrs")],
                 ["analysis", t("assistant.filterAnalyses")],
                 // The workspace's artifacts (`chat_refs::artifacts`), a list of their own rather
@@ -411,22 +431,28 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
               <button
                 key={value}
                 role="tab"
-                aria-selected={filter === value}
+                aria-selected={shownFilter === value}
+                title={value === "crew" ? crewTitle : undefined}
+                aria-label={value === "crew" ? crewLabel : undefined}
                 onClick={() => setFilter(value)}
                 className={`-mb-px inline-flex shrink-0 items-center gap-1 border-b-2 pb-1.5 pt-1 text-[12px] transition-colors duration-100 ${
-                  filter === value
+                  shownFilter === value
                     ? "border-[var(--cf-accent)] font-semibold text-[var(--cf-text)]"
                     : "border-transparent text-[var(--cf-text-muted)] hover:text-[var(--cf-text)]"
                 }`}
               >
                 {label}
-                {value !== "all" && <span className="text-[11px] font-normal tabular-nums text-[var(--cf-text-faint)]">{kindCounts[value]}</span>}
+                {value !== "all" && <span className="text-[11px] font-normal tabular-nums text-[var(--cf-text-faint)]">{value === "crew" ? crew.teams.length : kindCounts[value]}</span>}
               </button>
             ))}
           </div>
           {/* The one part that moves. */}
           <div className="@container min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-            {filter === "artifacts" ? (
+            {shownFilter === "crew" ? (
+              <Suspense fallback={null}>
+                <CrewPanel workspaceId={workspaceId} query={query} />
+              </Suspense>
+            ) : shownFilter === "artifacts" ? (
               <ArtifactsList workspaceId={workspaceId} query={query} />
             ) : (
             <>
@@ -439,7 +465,8 @@ export function AssistantInbox({ workspaceId }: { workspaceId: string }) {
             )}
             <RecentList entries={recent} showRepo={showRepo} projectName={projectName} snippets={query.trim() ? matches : undefined} workspaceId={workspaceId} />
             {recent.length === 0 && !searching && !searchError && (
-              <p className="px-1 py-3 text-center text-[12px] text-[var(--cf-text-faint)]">{t("ai.noMatches")}</p>
+              // Nothing asked of the assistant yet is not a search that found nothing.
+              <p className="px-1 py-3 text-center text-[12px] text-[var(--cf-text-faint)]">{noHistory && !query.trim() ? t("assistant.inboxEmpty") : t("ai.noMatches")}</p>
             )}
             {hasMore && (
               <p className="flex items-center justify-center gap-1.5 py-2 text-[12px] text-[var(--cf-text-muted)]">

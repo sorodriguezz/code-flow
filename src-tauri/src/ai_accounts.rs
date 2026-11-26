@@ -591,16 +591,39 @@ pub fn binary_for(conn: &Connection, provider: &str) -> String {
         .unwrap_or_else(|| crate::ai::engine_for(provider).default_binary().to_string())
 }
 
-/// The status command for each CLI, and how long it may take.
-fn status_args(provider: &str) -> Option<Vec<&'static str>> {
+/// What each CLI is asked for its login, in the order to ask it — the next one only when the
+/// answer before it did not settle the question.
+fn status_asks(provider: &str) -> Vec<Vec<&'static str>> {
     match provider {
-        "claude" => Some(vec!["auth", "status", "--json"]),
-        "codex" => Some(vec!["login", "status"]),
-        // The first line of `grok models` names the login and spends nothing.
-        "grok" => Some(vec!["models"]),
-        "opencode" => Some(vec!["providers", "list"]),
-        _ => None,
+        "claude" => vec![vec!["auth", "status", "--json"]],
+        "codex" => vec![vec!["login", "status"]],
+        // The first line of `grok models` names the login and spends nothing. Asked twice: Grok
+        // reports "not authenticated" for the one call that finds its token expired, refreshing
+        // it behind the answer — so a second ask is the honest reading.
+        "grok" => vec![vec!["models"], vec!["models"]],
+        // opencode 2 lists its logins with `auth list` and no longer has `providers list`, which
+        // is what the builds before it answer to — asked with only the old one, a signed-in
+        // opencode 2 read as "Sin sesión" (seen 2026-11-25, opencode 2.4.1).
+        "opencode" => vec![vec!["auth", "list", "--format", "json"], vec!["providers", "list"]],
+        _ => Vec::new(),
     }
+}
+
+/// opencode 2's `auth list --format json`: the integrations it holds a login for, by name. `None`
+/// when the text is not that list — an older build's help or its `●` lines.
+fn opencode_integrations(stdout: &str) -> Option<Vec<String>> {
+    let listed: Vec<serde_json::Value> = serde_json::from_str(stdout.trim()).ok()?;
+    Some(
+        listed
+            .iter()
+            .filter(|entry| entry.get("connections").and_then(|c| c.as_array()).is_some_and(|c| !c.is_empty()))
+            .map(|entry| match string_at(entry, "name") {
+                name if name.trim().is_empty() => string_at(entry, "id"),
+                name => name,
+            })
+            .filter(|name| !name.trim().is_empty())
+            .collect(),
+    )
 }
 
 pub async fn probe(binary: &str, env: &AccountEnv) -> AccountStatus {
@@ -613,20 +636,18 @@ pub async fn probe(binary: &str, env: &AccountEnv) -> AccountStatus {
     if env.provider == "gemini" {
         return probe_gemini(binary, env, status).await;
     }
-    let Some(args) = status_args(&env.provider) else {
+    let asks = status_asks(&env.provider);
+    if asks.is_empty() {
         status.error = "unsupported".into();
         return status;
-    };
+    }
     if crate::ai::find_on_path(binary).is_none() {
         status.error = "not_installed".into();
         return status;
     }
-    // Grok reports "not authenticated" for the one call that finds its token expired, refreshing
-    // it behind the answer — so a second ask is the honest reading.
-    let attempts = if env.provider == "grok" { 2 } else { 1 };
-    for attempt in 0..attempts {
+    for args in &asks {
         let (mut cmd, program) = crate::ai::aux_command_resolved(binary);
-        cmd.args(&args);
+        cmd.args(args);
         env.apply(&mut cmd);
         cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -648,7 +669,9 @@ pub async fn probe(binary: &str, env: &AccountEnv) -> AccountStatus {
         let stdout = crate::ai::strip_ansi(&String::from_utf8_lossy(&output.stdout));
         let stderr = crate::ai::strip_ansi(&String::from_utf8_lossy(&output.stderr));
         parse_status(&env.provider, output.status.success(), &stdout, &stderr, &mut status);
-        if status.signed_in == Some(true) || attempt + 1 == attempts {
+        // An opencode that answered with its list has said all there is, signed in or not.
+        let settled = env.provider == "opencode" && opencode_integrations(&stdout).is_some();
+        if status.signed_in == Some(true) || settled {
             break;
         }
     }
@@ -786,8 +809,15 @@ fn parse_status(provider: &str, success: bool, stdout: &str, stderr: &str, out: 
             }
         }
         "opencode" => {
-            // `providers list` names each stored login on its own `●` line — `● OpenCode Zen api`,
-            // `● Google oauth` — and ends with a count. The trailing word is the login type.
+            // opencode 2 answers with its integrations as JSON; see `opencode_integrations`.
+            if let Some(held) = opencode_integrations(stdout) {
+                out.signed_in = Some(success && !held.is_empty());
+                out.plan = held.join(", ");
+                return;
+            }
+            // Before it, `providers list` names each stored login on its own `●` line —
+            // `● OpenCode Zen api`, `● Google oauth` — and ends with a count. The trailing word is
+            // the login type.
             let logins: Vec<String> = stdout
                 .lines()
                 .map(str::trim)
@@ -1063,6 +1093,15 @@ mod tests {
     }
 
     /// agy on this machine, asked the way Settings asks: `agy models`, which spends nothing.
+    /// `cargo test --lib ai_accounts::tests::opencode_status_from_the_installed_cli -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "runs the installed opencode"]
+    async fn opencode_status_from_the_installed_cli() {
+        let status = probe("opencode", &AccountEnv::system("opencode")).await;
+        eprintln!("signed_in={:?} plan={:?} error={:?}", status.signed_in, status.plan, status.error);
+        assert_eq!(status.signed_in, Some(true));
+    }
+
     #[tokio::test]
     #[ignore = "runs the installed agy"]
     async fn gemini_status_from_the_installed_agy() {
@@ -1251,6 +1290,26 @@ mod tests {
         let mut out = AccountStatus::default();
         parse_status("opencode", true, "┌  Credentials\n│\n└  0 credentials\n", "", &mut out);
         assert_eq!(out.signed_in, Some(false));
+    }
+
+    #[test]
+    fn opencode_2_logins_are_read_from_its_own_list() {
+        // `opencode auth list --format json`, opencode 2.4.1.
+        let held = r#"[{"id":"opencode","name":"OpenCode","connections":[{"type":"credential","id":"cred_1","label":"Default","method":"oauth"}]},
+            {"id":"github","name":"GitHub","connections":[]}]"#;
+        let mut out = AccountStatus::default();
+        parse_status("opencode", true, held, "", &mut out);
+        assert_eq!((out.signed_in, out.plan.as_str()), (Some(true), "OpenCode"), "an integration with nothing stored is not a login");
+        let mut out = AccountStatus::default();
+        parse_status("opencode", true, "[]", "", &mut out);
+        assert_eq!(out.signed_in, Some(false));
+        // What opencode 2 prints for the command it no longer has: its help, and a failure.
+        let mut out = AccountStatus::default();
+        parse_status("opencode", false, "DESCRIPTION\n  OpenCode command line interface\n", "", &mut out);
+        assert_eq!(out.signed_in, Some(false));
+        // The new command is asked first, and the old one is still there for the builds before.
+        assert_eq!(status_asks("opencode"), vec![vec!["auth", "list", "--format", "json"], vec!["providers", "list"]]);
+        assert!(opencode_integrations("●  OpenCode Zen api\n").is_none(), "an older build's lines send it on to the old command");
     }
 
     #[test]

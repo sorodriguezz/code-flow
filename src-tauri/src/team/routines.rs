@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 /// The node types that put an agent or a team to work, and what each is.
-const AGENT_NODES: [(&str, &str); 4] = [("ai.team", "team"), ("ai.agent", "agent"), ("ai.agents", "agents"), ("ai.lead", "lead")];
+const AGENT_NODES: [(&str, &str); 4] = [("ai.team", "team"), ("ai.agent", "agent"), ("ai.agents", "agents"), ("ai.orchestrator", "lead")];
 
 /// One agent or team a routine puts to work.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -65,6 +65,15 @@ fn literal(value: &str) -> Option<String> {
     (!value.is_empty() && !value.contains("{{")).then(|| value.to_string())
 }
 
+/// The ids a list parameter names outright, whether written as ids or as `{ agent }` rows.
+fn listed(params: &Value, key: &str) -> Vec<String> {
+    params
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|list| list.iter().filter_map(|v| v.as_str().or_else(|| v.get("agent").and_then(Value::as_str))).filter_map(|id| literal(id.trim())).collect())
+        .unwrap_or_default()
+}
+
 fn shorten(value: &str) -> String {
     let line = value.lines().find(|line| !line.trim().is_empty()).unwrap_or_default().trim();
     let mut out: String = line.chars().take(180).collect();
@@ -88,12 +97,14 @@ pub fn workers(spec: &str) -> Vec<Worker> {
             let params = node.get("params").unwrap_or(&empty);
             let refs: Vec<String> = match kind {
                 "team" => literal(&text(params, "team")).into_iter().collect(),
-                "agent" | "lead" => literal(&text(params, "agent")).into_iter().collect(),
-                _ => params
-                    .get("agents")
-                    .and_then(Value::as_array)
-                    .map(|list| list.iter().filter_map(|v| v.as_str().or_else(|| v.get("agent").and_then(Value::as_str))).filter_map(|id| literal(id.trim())).collect())
-                    .unwrap_or_default(),
+                "agent" => literal(&text(params, "agent")).into_iter().collect(),
+                // The lead first, then the helpers it hands work to.
+                "lead" => literal(&text(params, "agent")).into_iter().chain(listed(params, "helpers")).collect(),
+                // Several on the same task, or one of them going through every item.
+                _ => match listed(params, "agents") {
+                    several if !several.is_empty() => several,
+                    _ => literal(&text(params, "agent")).into_iter().collect(),
+                },
             };
             let ask = ["prompt", "instruction", "goal"].iter().map(|key| text(params, key)).find(|value| !value.is_empty()).unwrap_or_default();
             Some(Worker {
@@ -186,6 +197,22 @@ mod tests {
         assert_eq!((found[0].kind.as_str(), found[0].refs.clone(), found[0].ask.as_str()), ("team", vec!["team-1".to_string()], "Revisa la arquitectura del Core"));
         assert!(found[1].refs.is_empty(), "an id decided at run time is not a reference");
         assert!(workers("no es json").is_empty());
+    }
+
+    #[test]
+    fn a_lead_with_helpers_and_an_agent_per_item_are_routines_too() {
+        let spec = serde_json::json!({
+            "schema": 1,
+            "nodes": [
+                { "id": "l", "type": "ai.orchestrator", "name": "Informe", "pos": [0, 0], "params": { "runAs": "rosterAgent", "agent": "jefe", "helpers": ["ana", "luis"], "prompt": "Prepara el informe" } },
+                { "id": "p", "type": "ai.agents", "name": "Por ítem", "pos": [0, 0], "params": { "mode": "perItem", "agent": "ana", "agents": [], "prompt": "Revisa cada uno" } },
+                { "id": "s", "type": "ai.agents", "name": "A la vez", "pos": [0, 0], "params": { "mode": "sameTask", "agents": ["ana", "luis"], "prompt": "Opinen" } }
+            ]
+        })
+        .to_string();
+        let found = workers(&spec);
+        let seen: Vec<(&str, Vec<&str>)> = found.iter().map(|w| (w.kind.as_str(), w.refs.iter().map(String::as_str).collect())).collect();
+        assert_eq!(seen, vec![("lead", vec!["jefe", "ana", "luis"]), ("agents", vec!["ana"]), ("agents", vec!["ana", "luis"])]);
     }
 
     #[test]

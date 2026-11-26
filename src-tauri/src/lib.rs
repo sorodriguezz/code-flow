@@ -91,6 +91,7 @@ mod jupyter;
 mod knowledge;
 mod learning;
 mod json_schemas;
+mod note_relations;
 mod npm;
 mod localai;
 mod local_history;
@@ -2079,6 +2080,21 @@ sharded_invoke_handler! {
         team::chat::team_chat_send,
         team::chat::team_chat_cancel,
         team::chat::team_chat_delete,
+        team::call::commands::team_call_voices,
+        team::call::commands::team_call_pool,
+        team::call::commands::team_call_start,
+        team::call::commands::team_call_state,
+        team::call::commands::team_call_listening,
+        team::call::commands::team_call_say,
+        team::call::commands::team_call_mic,
+        team::call::commands::team_call_mic_changed,
+        team::call::commands::team_call_headphones,
+        team::call::commands::team_call_talk,
+        team::call::commands::team_call_interrupt,
+        team::call::commands::team_call_hang_up,
+        team::call::commands::team_call_start_now,
+        team::call::commands::team_call_cancel_start,
+        team::call::commands::team_call_close,
         commands::team_cmd::team_save,
         commands::team_cmd::team_delete,
         commands::team_cmd::team_runs,
@@ -2305,6 +2321,11 @@ sharded_invoke_handler! {
         commands::notes_cmd::notes_search,
         commands::notes_cmd::notes_backlinks,
         commands::notes_cmd::notes_graph,
+        commands::note_relations_cmd::notes_list_relations,
+        commands::note_relations_cmd::notes_relate,
+        commands::note_relations_cmd::notes_prepare_meeting,
+        commands::note_relations_cmd::notes_add_relation,
+        commands::note_relations_cmd::notes_remove_relation,
         commands::notes_cmd::notes_read_vault,
         commands::notes_cmd::notes_export_docx,
         commands::notes_cmd::notes_list_versions,
@@ -2553,6 +2574,7 @@ sharded_invoke_handler! {
         commands::speech_cmd::speech_say,
         commands::speech_cmd::speech_stop,
         commands::speech_cmd::speech_say_voice,
+        commands::speech_cmd::speech_try_voice,
         commands::speech_cmd::speech_builtin_pronunciations,
         commands::speech_cmd::speech_spoken_form,
         commands::speech_cmd::audio_outputs,
@@ -2561,6 +2583,10 @@ sharded_invoke_handler! {
         commands::speech_cmd::speech_install_voice,
         commands::speech_cmd::speech_cancel_install,
         commands::speech_cmd::speech_remove_voice,
+        commands::speech_cmd::speech_pocket_status,
+        commands::speech_cmd::speech_pocket_install,
+        commands::speech_cmd::speech_pocket_remove,
+        commands::speech_cmd::speech_pocket_prepare,
         commands::speech_cmd::speech_summarize,
         commands::voice_cmd::voice_fit,
         commands::voice_clone_cmd::voice_clone_status,

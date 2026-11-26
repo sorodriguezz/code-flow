@@ -182,6 +182,14 @@ pub struct WorkspaceAgent {
     /// Extra permissions shown on the card: `cmds`, `commit`, `push`.
     #[serde(default)]
     pub perms: Vec<String>,
+    /// The voice it speaks with in a call with its team; none is «Automática» — one is given to it
+    /// from what this computer has (`team::call::cast`).
+    #[serde(default)]
+    pub voice: Option<crate::speech::Voice>,
+    /// The model it talks with in a call with its team; empty follows the call's own choice — its
+    /// provider's fast model, or the agent's own (`team::call::stage::talk_config`).
+    #[serde(default)]
+    pub call_model: String,
 }
 
 fn default_true() -> bool {
@@ -221,6 +229,8 @@ pub struct AgentDraft {
     pub template_version: i64,
     pub overrides: Vec<String>,
     pub perms: Vec<String>,
+    pub voice: Option<crate::speech::Voice>,
+    pub call_model: String,
 }
 
 /// A folder the user files agent work into. Not a repository: a task still names the `Project` its

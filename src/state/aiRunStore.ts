@@ -194,6 +194,11 @@ function without<T>(map: Record<string, T>, gone: Set<string>): Record<string, T
   return next;
 }
 
+/** What an agent says in a call with its team is a run of a second, one per sentence spoken, and
+ *  the call's own room shows who is thinking: listing each here would bury the runs that are
+ *  somebody's work. */
+const isCallLine = (runId: string): boolean => runId.startsWith("team-call-");
+
 export const useAiRunStore = create<AiRunState>((set, get) => ({
   linesByRun: {},
   engineByRun: {},
@@ -231,6 +236,7 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
     // from a `Drop` guard *inside* `scoped_with_trace`, before the command returns and therefore
     // before any caller can emit "this run is done" — cancellation and crashes included.
     void onAiOutputBatch((event: AiOutputBatchEvent) => {
+      if (isCallLine(event.run_id)) return;
       // Structured agent events become readable lines here rather than in the component, so the
       // stored log is what the user actually saw — and the noise never takes up a slot. Done for
       // the whole batch first so the `set` below is a single, plain append.
@@ -275,6 +281,7 @@ export const useAiRunStore = create<AiRunState>((set, get) => ({
     });
     // Announced once per run, before its first line: which engine and model are doing the work.
     void onAiEngine((event: AiEngineEvent) => {
+      if (isCallLine(event.run_id)) return;
       set((s) => {
         const engineByRun = {
           ...s.engineByRun,

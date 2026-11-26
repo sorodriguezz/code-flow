@@ -576,14 +576,19 @@ pub struct NoteGraph {
     pub nodes: Vec<GraphNote>,
     /// `[from, to]` note ids, one per note pair a `[[link]]` joins.
     pub edges: Vec<(String, String)>,
+    /// `[later, earlier, kind]`, one per pair of related notes (`crate::note_relations`): `kind` is
+    /// `continues` when the later one follows the earlier, else `related`.
+    pub relations: Vec<(String, String, String)>,
 }
 
-/// Every note and the `[[links]]` between them — the graph view. Reads every body, once.
+/// Every note, the `[[links]]` between them and the pairs that are related — the graph view. Reads
+/// every body, once.
 #[tauri::command(async)]
 pub fn notes_graph(db: State<Db>, workspace_id: String) -> Result<NoteGraph, String> {
     let conn = db.0.lock().map_err(|e| e.to_string())?;
     let (nodes, edges) = note_queries::link_graph(&conn, &workspace_id).map_err(|e| e.to_string())?;
-    Ok(NoteGraph { nodes: nodes.into_iter().map(|(id, title, book_id)| GraphNote { id, title, book_id }).collect(), edges })
+    let relations = crate::note_relations::edges(&conn, &workspace_id).map_err(|e| e.to_string())?;
+    Ok(NoteGraph { nodes: nodes.into_iter().map(|(id, title, book_id)| GraphNote { id, title, book_id }).collect(), edges, relations })
 }
 
 // ---------- import ----------

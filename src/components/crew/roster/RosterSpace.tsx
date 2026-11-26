@@ -21,8 +21,8 @@ import { AgentAvatar } from "../kit/Avatar";
 import { useDragSource, useDropTarget } from "../kit/drag";
 import { Btn, Chip, Empty, IconBtn, Modal, SPRING, field, Seg } from "../kit/ui";
 import { InboxBoard, useInboxWaiting } from "./InboxBoard";
-import { lNow, money, useAgentStates, useCrewStore, useL } from "../state";
-import { useWorkspaceStore } from "../../../state/workspaceStore";
+import { money, useAgentStates, useCrewStore, useL } from "../state";
+import { chatWithAgent } from "../../../lib/agents/talk";
 import { ConfigurationExportButton, ConfigurationImportButton } from "../ConfigurationSharing";
 import { AGENT_CONFIGURATION } from "../../../lib/agents/shareConfiguration";
 
@@ -214,7 +214,7 @@ function AgentCard({ agent, index, onSync }: { agent: WorkspaceAgent; index: num
       <div className={AGENT_CARD_ACTIONS_CLASS}>
         <div className="flex items-center gap-1">
           <Btn small kind="primary" icon={WandSparkles} className="flex-1 justify-center" title={l("Dale una tarea a este agente", "Hand this agent a task")} onClick={() => crew.open({ kind: "launch", assignee: { kind: "agent", id: agent.id } })}>{l("Tarea", "Task")}</Btn>
-          <IconBtn title={l("Conversa con este agente en el repositorio activo, como en el chat del repositorio: preguntas, imágenes, su modelo y su forma de trabajar", "Chat with this agent in the active repository, like the repository chat: questions, images, its model and its way of working")} onClick={() => void chatWith(agent)} icon={MessageSquare} />
+          <IconBtn title={l("Conversa con este agente como en el chat del repositorio: preguntas, imágenes, su modelo y su forma de trabajar. Abre su ventana flotante en la última conversación, o empieza una en el repositorio activo", "Chat with this agent like in the repository chat: questions, images, its model and its way of working. It opens its floating window on the last conversation, or starts one in the active repository")} onClick={() => void chatWithAgent(agent)} icon={MessageSquare} />
         </div>
         <div className="flex items-center gap-0.5 border-t border-[var(--cf-border)] pt-1">
           <IconBtn title={l("Editar", "Edit")} onClick={() => crew.open({ kind: "wizard", agentId: agent.id })} icon={Pencil} />
@@ -311,19 +311,3 @@ export function RosterSpace() {
   );
 }
 
-/** A conversation with one agent: a task with no goal yet, in the repository on screen, opened on
- *  its composer. Everything the repository chat brings (context, memory, images) comes with it. */
-async function chatWith(agent: WorkspaceAgent): Promise<void> {
-  const projectId = useWorkspaceStore.getState().activeProjectId;
-  if (!projectId) {
-    pushErrorToast(lNow("Abre un repositorio para conversar con el agente.", "Open a repository to chat with the agent."));
-    return;
-  }
-  try {
-    const task = await useAgentsStore.getState().create({ projectId, agent, goal: "" });
-    await useAgentsStore.getState().rename(task.id, lNow(`Conversación con ${agent.name}`, `Chat with ${agent.name}`));
-    useCrewStore.getState().open({ kind: "task", id: task.id });
-  } catch (e) {
-    pushErrorToast(String(e));
-  }
-}

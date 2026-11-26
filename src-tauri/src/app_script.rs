@@ -17,7 +17,9 @@
 //!
 //! **What it may not do.** A destructive command is refused inside a script: it needs the user's
 //! yes, and a script that stops halfway waiting for one — or goes on after a no — is a worse thing to
-//! approve than one call. The model calls it with `app_call`. A script also has bounds: [`Limits`].
+//! approve than one call. The model calls it with `app_call`. The one exception is a turn with the
+//! chat's «Completo» permissions (or a team's, `team::Policy::permissions`): it is asked nothing
+//! anywhere, so its scripts run them too. A script also has bounds: [`Limits`].
 //!
 //! **What the user sees.** The run's log gets records ([`MARK`]) the chat draws as one step that
 //! opens: the code, every call with its outcome and time, and what the script returned
@@ -45,6 +47,17 @@ pub const DESCRIPTION: &str = "Run a short JavaScript script over CodeFlow's com
 /// the script is its one door to the app, so nothing here sends it to another, and a destructive
 /// command is the user's to do.
 pub const DESCRIPTION_SCRIPT_ONLY: &str = "Run a short JavaScript script over CodeFlow's commands (the ones app_commands lists) and get back only what it returns — for one call too: a one-line script. The code is the body of an async function: `const svc = app.call(\"list_services\", { workspaceId: app.workspaceId });` returns the answer (await is optional) and throws on failure; `return` what the user needs — small. app.workspaceId, app.projectId and app.root say where this run is. console.log is returned too. No files, network or timers. Destructive commands are refused: tell the user what to do in CodeFlow instead. Limits: 40 calls and 5 minutes a script, 200 calls a turn.";
+
+/// What [`DESCRIPTION`] says of destructive commands, and what a turn with full permissions reads
+/// instead ([`for_full_access`]).
+const REFUSES_DESTRUCTIVE: &str = "Destructive commands are refused here: call them with app_call, so the user can approve each.";
+const RUNS_DESTRUCTIVE: &str = "This turn has full permissions: destructive commands run here too, unasked — be sure of each before you call it.";
+
+/// [`DESCRIPTION`] for a turn with the chat's «Completo» permissions, whose scripts run destructive
+/// commands as well.
+pub fn for_full_access(description: &str) -> String {
+    description.replace(REFUSES_DESTRUCTIVE, RUNS_DESTRUCTIVE)
+}
 
 /// The prefix of the records in a run's log — read by `src/lib/appScript.ts`.
 pub const MARK: &str = "⎔ ";
@@ -591,7 +604,10 @@ pub async fn run(app: &tauri::AppHandle, scope: &crate::app_gateway::Scope<'_>, 
     let host: Host = Arc::new(move |command: &str, args: Value| {
         let scope = crate::app_gateway::Scope { root: &root, session: &session, acts, workspace_id: workspace_id.clone(), project: project.clone(), scripts: true, with_call };
         let admitted = crate::app_gateway::admit(&scope, command, Some(&args))?;
-        if admitted.destructive() {
+        // A turn with «Completo» was told to be asked nothing, and `app_call` would run this unasked
+        // (`agentcli::has_full_access`): refusing it here would only cost the round trips a script
+        // is for. Every other turn's destructive command needs a yes, which a script cannot wait for.
+        if admitted.destructive() && !crate::agentcli::has_full_access(&session) {
             return Err(if with_call {
                 format!("{command} is destructive and does not run inside a script: call it with app_call, so the user can approve it")
             } else {
@@ -679,6 +695,13 @@ pub async fn run(app: &tauri::AppHandle, scope: &crate::app_gateway::Scope<'_>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_turn_with_full_permissions_is_told_its_scripts_run_everything() {
+        assert!(DESCRIPTION.contains(REFUSES_DESTRUCTIVE), "the sentence the full-access text replaces is gone");
+        let said = for_full_access(DESCRIPTION);
+        assert!(said.contains(RUNS_DESTRUCTIVE) && !said.contains("refused"), "{said}");
+    }
 
     fn services() -> Value {
         json!([

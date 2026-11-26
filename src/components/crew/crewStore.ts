@@ -46,6 +46,9 @@ interface CrewState {
   rosterTab: "agentes" | "bandejas";
   /** A card or agent to draw attention to once its space opens. */
   focus: string | null;
+  /** The element the spaces are drawn in, while the view is mounted: what the floating chats keep
+   *  to when this view is the one on screen, so they never sit on its header or its dock. */
+  stage: HTMLElement | null;
   setSpace: (space: Space) => void;
   open: (overlay: Overlay) => void;
   close: () => void;
@@ -61,6 +64,7 @@ export const useCrewStore = create<CrewState>((set) => ({
   workshopTab: "worktrees",
   rosterTab: "agentes",
   focus: null,
+  stage: null,
   setSpace: (space) => {
     try {
       localStorage.setItem(SPACE_KEY, space);

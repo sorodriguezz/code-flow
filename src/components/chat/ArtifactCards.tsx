@@ -222,7 +222,16 @@ export function ArtifactsList({ workspaceId, query }: { workspaceId: string | nu
         const repo = a.project_id ? projects?.find((p) => p.id === a.project_id)?.name : null;
         const when = new Date(a.created_at);
         return (
-          <div key={a.id} className="group flex items-start gap-2 rounded-md px-1.5 py-1.5 hover:bg-[var(--cf-hover)]">
+          // The whole row opens it, not only its title: the title is a few words in a row as wide
+          // as the panel, and a click beside them did nothing (the user, 2026-11-25). The buttons
+          // inside — the chat it came from, the bin — keep their own job.
+          <div
+            key={a.id}
+            onClick={(event) => {
+              if (!(event.target as HTMLElement).closest("button")) setOpen(a);
+            }}
+            className="group flex cursor-pointer items-start gap-2 rounded-md px-1.5 py-1.5 hover:bg-[var(--cf-hover)]"
+          >
             <button type="button" onClick={() => setOpen(a)} className="mt-0.5 shrink-0 text-[var(--cf-accent)]" aria-label={t("artifact.open")}>
               <Icon size={14} />
             </button>

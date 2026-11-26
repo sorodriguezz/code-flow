@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { LoaderCircle, Maximize2, ZoomIn, ZoomOut } from "lucide-react";
 import { layoutGroups } from "../../lib/notes/graphLayout";
+import { mergeGraphEdges, pairKey } from "../../lib/notes/relations";
 import { bounds, createSimulation, isSettled, nodeAt, reheat, step, type SimLink, type SimNode, type Simulation } from "../../lib/notes/graphSim";
 import { notesGraph } from "../../lib/tauri/notesCommands";
 import { useNotesStore } from "../../state/notesStore";
@@ -102,7 +103,9 @@ function Loaded({
     }));
     return { notes, groups };
   }, [graph, books, t]);
-  return <GraphCanvas nodes={notes} groups={groups} edges={graph.edges} visibleIds={visibleIds} onOpen={onOpen} />;
+  // A pair of related notes is a line too — dashed, so it is not taken for a link someone wrote.
+  const { edges, related } = useMemo(() => mergeGraphEdges(graph.edges, graph.relations), [graph]);
+  return <GraphCanvas nodes={notes} groups={groups} edges={edges} related={related} visibleIds={visibleIds} onOpen={onOpen} />;
 }
 
 /** A book as the graph paints it. `color` is the book's own, a colour of [`GROUP_COLORS`] when it
@@ -204,12 +207,15 @@ function GraphCanvas({
   nodes: notes,
   groups,
   edges,
+  related,
   visibleIds,
   onOpen,
 }: {
   nodes: { id: string; title: string; group: string }[];
   groups: GraphGroup[];
   edges: [string, string][];
+  /** The pairs of `edges` that are related notes rather than `[[links]]`, by `pairKey`. */
+  related: Set<string>;
   visibleIds: Set<string>;
   onOpen: (id: string) => void;
 }) {
@@ -236,6 +242,8 @@ function GraphCanvas({
 
   visibleRef.current = visibleIds;
   groupsRef.current = groups;
+  const relatedRef = useRef(related);
+  relatedRef.current = related;
 
   /** Who links to whom, by id — what a hover lights up. Both directions: a backlink is as much a
    *  neighbour as a link out. */
@@ -287,10 +295,13 @@ function GraphCanvas({
         ? fade(palette.accent, 0.9)
         : fade(palette.line, shown ? (hovered ? 0.25 : 0.65) : 0.12);
       context.lineWidth = (touched ? 1.6 : 1) / camera.scale;
+      const dashed = relatedRef.current.has(pairKey(a.id, b.id));
+      if (dashed) context.setLineDash([5 / camera.scale, 4 / camera.scale]);
       context.beginPath();
       context.moveTo(a.x, a.y);
       context.lineTo(b.x, b.y);
       context.stroke();
+      if (dashed) context.setLineDash([]);
     }
 
     const labels = camera.scale >= LABEL_ZOOM;

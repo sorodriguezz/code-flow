@@ -2,6 +2,7 @@ import { DictationSettings } from "./DictationSettings";
 import { MeetingsSettings } from "./MeetingsSettings";
 import { SpeechSettings } from "./SpeechSettings";
 import { PronunciationSettings } from "./PronunciationSettings";
+import { CallSettings } from "./CallSettings";
 import { VoiceDevicesSettings, VoiceModelsSettings } from "./VoiceSettings";
 import { RailSection } from "./settingsNav";
 import { useT } from "../../state/languageStore";
@@ -22,6 +23,7 @@ export function VoiceSoundSettings() {
           {tab === "models" && <VoiceModelsSettings />}
           {tab === "dictation" && <DictationSettings />}
           {tab === "meetings" && <MeetingsSettings />}
+          {tab === "calls" && <CallSettings />}
           {tab === "reading" && <SpeechSettings />}
           {tab === "pronunciation" && <PronunciationSettings />}
         </>

@@ -292,6 +292,8 @@ pub static FLOWS: Slot = Slot::new();
 /// «Codi» listening with a whisper model (`crate::codi::listen`) — loaded while its microphone is
 /// open, freed when it closes.
 pub static CODI: Slot = Slot::new();
+/// A call with a team (`crate::team::call`): what the user says in it.
+pub static CALL: Slot = Slot::new();
 
 /// How a run is set up, beyond the samples.
 #[derive(Debug, Clone, Default)]

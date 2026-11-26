@@ -90,7 +90,7 @@ pub enum Runner<'a> {
 impl Runner<'_> {
     /// Characters of transcript one call may carry. A CLI's models read hours; a local model's
     /// window is the limit — about 3.2 characters a token for Spanish, with room for the answer.
-    fn budget(&self) -> usize {
+    pub fn budget(&self) -> usize {
         match self {
             Runner::Cli { .. } => 600_000,
             Runner::Local { ctx, .. } => ((*ctx as f32 * 0.55) * 3.2) as usize,
@@ -98,17 +98,23 @@ impl Runner<'_> {
     }
 
     async fn call(&self, ask: &str, stdin: &str) -> Result<String, String> {
+        self.call_as(SYSTEM, ask, stdin).await
+    }
+
+    /// One call with a system prompt of the caller's — the same engines, checks and queue as a
+    /// recipe, for the other things asked about a note («Relacionadas»: `crate::note_relations`).
+    pub async fn call_as(&self, system: &str, ask: &str, stdin: &str) -> Result<String, String> {
         match self {
-            Runner::Cli { engine, binary, model } => crate::ai::meeting_answer(*engine, binary, model, SYSTEM, ask, stdin).await,
+            Runner::Cli { engine, binary, model } => crate::ai::meeting_answer(*engine, binary, model, system, ask, stdin).await,
             Runner::Local { endpoint, model, ctx, label } => {
                 let user = format!("{ask}\n\n{stdin}");
                 // The part was cut to the window by characters ([`Runner::budget`]); the server's own
                 // count, where it has one, says whether that held — a transcript in a script the
                 // estimate reads low would otherwise reach a server that cuts it in silence, and the
                 // minutes would leave out what was said without a word.
-                let sent = match local_llm::count_tokens(endpoint, &format!("{SYSTEM}\n{user}")).await {
+                let sent = match local_llm::count_tokens(endpoint, &format!("{system}\n{user}")).await {
                     Some(exact) => Sent::Exact(exact),
-                    None => Sent::Estimate(budget::estimate_tokens(SYSTEM) + budget::estimate_tokens(&user)),
+                    None => Sent::Estimate(budget::estimate_tokens(system) + budget::estimate_tokens(&user)),
                 };
                 if let Sent::Exact(tokens) = sent {
                     if tokens + u64::from(ANSWER_TOKENS) > u64::from(*ctx) {
@@ -119,7 +125,7 @@ impl Runner<'_> {
                 }
                 let request = ChatRequest {
                     model,
-                    system: SYSTEM,
+                    system,
                     user: &user,
                     num_ctx: (endpoint.kind == BackendKind::Ollama).then_some(*ctx),
                     max_tokens: ANSWER_TOKENS,

@@ -35,12 +35,13 @@ import {
 import { onRepoFsChanged } from "../lib/tauri/events";
 import { describePath, isChangedOnDisk } from "../lib/editorFiles";
 import { serializeTags, parseTags } from "../lib/notes/tags";
-import { builtInTemplates, toTemplate } from "../lib/notes/templates";
+import { builtInTemplates, LATER_BUILT_INS, toTemplate } from "../lib/notes/templates";
 import { descendantIds } from "../lib/notes/tree";
+import { findMonthBook, monthBookName, monthGroups } from "../lib/notes/filing";
 import type { ImportedMarkdown } from "../lib/notes/importMarkdown";
 import { notifyUnsavedChanged, registerUnsavedProvider } from "../lib/unsavedWork";
 import { chooseAction, confirmAction } from "./confirmStore";
-import { translate } from "./languageStore";
+import { translate, useLanguageStore } from "./languageStore";
 import { pushErrorToast, pushSuccessToast, useToastStore } from "./toastStore";
 import { useAiRunStore } from "./aiRunStore";
 import { useWorkspaceStore } from "./workspaceStore";
@@ -184,6 +185,8 @@ const galleryViewKey = (workspaceId: string) => `notes_gallery_view:${workspaceI
  *  `templates` is empty" — a workspace someone has deleted every template from must stay empty,
  *  not have the starters reappear on the next launch. */
 const templatesSeededKey = (workspaceId: string) => `notes_templates_seeded:${workspaceId}`;
+/** Whether a built-in that shipped later (`LATER_BUILT_INS`) has reached this workspace. */
+const templateAddedKey = (workspaceId: string, id: string) => `notes_template_added:${workspaceId}:${id}`;
 
 async function loadPref(key: string): Promise<string | null> {
   const { getSetting } = await import("../lib/tauri/commands");
@@ -455,6 +458,12 @@ interface NotesState {
   ) => Promise<void>;
 
   createBook: (parentId: string | null, name: string) => Promise<string | null>;
+  /** The book of `date`'s month inside `parentId` («Noviembre 2026»), made when missing — where a
+   *  dated note is filed (`lib/notes/filing`). */
+  monthBook: (parentId: string, date?: Date) => Promise<string | null>;
+  /** Moves the notes sitting directly in `bookId` into a book per month inside it, by when each was
+   *  written. Answers with how many moved. */
+  organizeBookByMonth: (bookId: string) => Promise<number>;
   renameBook: (id: string, name: string) => Promise<void>;
   setBookColor: (id: string, color: string) => Promise<void>;
   /** Puts a book — subtree and notes included — on every workspace's shelf, or takes it back off. */
@@ -857,8 +866,25 @@ export const useNotesStore = create<NotesState>((set, get) => ({
             }
           }
           await savePref(templatesSeededKey(workspaceId), "1");
+          // The seed above wrote every built-in there is today, the later ones among them.
+          for (const id of LATER_BUILT_INS) await savePref(templateAddedKey(workspaceId, id), "1");
           if (seeded.length > 0 && get().workspaceId === workspaceId) {
             set((state) => ({ templates: [...state.templates, ...seeded.map(toTemplate)] }));
+          }
+        } else {
+          // A workspace seeded before a built-in existed gets it now, once — see `LATER_BUILT_INS`.
+          for (const id of LATER_BUILT_INS) {
+            if ((await loadPref(templateAddedKey(workspaceId, id))) === "1") continue;
+            const template = builtInTemplates().find((candidate) => candidate.id === `builtin:${id}`);
+            try {
+              if (template) {
+                const row = await notesCreateTemplate(workspaceId, template.name, template.description, template.icon, template.content, serializeTags(template.tags));
+                if (get().workspaceId === workspaceId) set((state) => ({ templates: [...state.templates, toTemplate(row)] }));
+              }
+              await savePref(templateAddedKey(workspaceId, id), "1");
+            } catch {
+              // Tried again the next time the workspace opens.
+            }
           }
         }
       } catch (error) {
@@ -1652,6 +1678,26 @@ export const useNotesStore = create<NotesState>((set, get) => ({
     }
   },
 
+  monthBook: async (parentId, date = new Date()) => {
+    const existing = findMonthBook(get().books, parentId, date);
+    if (existing) return existing.id;
+    return get().createBook(parentId, monthBookName(date, filingLanguage()));
+  },
+
+  organizeBookByMonth: async (bookId) => {
+    await get().flush();
+    let moved = 0;
+    for (const group of monthGroups(get().notes, bookId, filingLanguage())) {
+      const book = await get().monthBook(bookId, group.date);
+      if (!book) break;
+      for (const noteId of group.noteIds) {
+        await get().moveNote(noteId, book);
+        moved += 1;
+      }
+    }
+    return moved;
+  },
+
   renameBook: async (id, name) => {
     const trimmed = name.trim();
     if (!trimmed) return;
@@ -2015,9 +2061,11 @@ export const useNotesStore = create<NotesState>((set, get) => ({
       return;
     }
     const bookName = translate("notes.dailyBook");
-    const book =
+    const journal =
       get().books.find((candidate) => !candidate.parent_id && candidate.name.trim().toLowerCase() === bookName.toLowerCase())?.id ??
       (await get().createBook(null, bookName));
+    // Filed by month inside it, so a year of days is twelve books and not one list.
+    const book = journal && ((await get().monthBook(journal, now)) ?? journal);
     if (!book) return;
     try {
       const weekday = now.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
@@ -2089,6 +2137,9 @@ export const useNotesStore = create<NotesState>((set, get) => ({
  * `null` comes back only when even that failed, which is a backend error the caller has been told
  * about; there is nothing sensible to write into.
  */
+/** The language a month's book is named in: the one on screen. */
+const filingLanguage = () => (useLanguageStore.getState().language === "en" ? "en" : "es");
+
 async function resolveBook(get: () => NotesState, defaultName: string): Promise<string | null> {
   const state = get();
   if (state.bookFilter && state.books.some((book) => book.id === state.bookFilter)) {

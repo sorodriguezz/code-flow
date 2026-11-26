@@ -31,6 +31,8 @@ type Variable = (typeof VARIABLES)[number];
  *  compile error instead of a blank row in the picker. */
 const BUILT_INS = [
   { id: "meeting", icon: "users", tags: ["reunion"] },
+  // What «Preparar reunión» in the create menu starts from (`meetings/meetingNotes`).
+  { id: "prep", icon: "clipboard-list", tags: ["reunion", "preparacion"] },
   { id: "daily", icon: "calendar-days", tags: ["diario"] },
   { id: "decision", icon: "git-branch", tags: ["decision", "arquitectura"] },
   { id: "runbook", icon: "siren", tags: ["runbook", "operaciones"] },
@@ -39,7 +41,15 @@ const BUILT_INS = [
 ] as const satisfies readonly { id: string; icon: string; tags: readonly string[] }[];
 
 /**
- * The six shipped templates, translated — the shape `notesStore`'s one-time seed writes into the
+ * The built-ins that shipped after the first six. A workspace opened before one existed was seeded
+ * without it and — the seed being once, ever — would never get it: each of these is written into
+ * such a workspace once, under its own flag (`notesStore.setWorkspace`), so it too stays deleted
+ * when someone deletes it.
+ */
+export const LATER_BUILT_INS: readonly string[] = ["prep"];
+
+/**
+ * The shipped templates, translated — the shape `notesStore`'s one-time seed writes into the
  * database. Not memoised: it runs once per workspace, ever, so there is nothing to gain by caching
  * it and a cache keyed on nothing would risk seeding a stale language if that ever changed.
  */

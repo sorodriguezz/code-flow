@@ -54,7 +54,7 @@ pub struct SystemDefaults {
     pub en: Option<String>,
 }
 
-fn has_key(name: &str) -> bool {
+pub(crate) fn has_key(name: &str) -> bool {
     crate::secrets::get_secret(name).ok().flatten().is_some_and(|k| !k.trim().is_empty())
 }
 
@@ -68,7 +68,7 @@ pub async fn speech_status() -> Result<SpeechStatus, String> {
         local_supported: piper::supported(),
         library_installed,
         library_bytes: if library_installed { 0 } else { meetings::SHERPA.map_or(0, |spec| spec.size) },
-        voices: piper::rows().into_iter().chain(kokoro::rows()).chain(cloned_rows()).collect(),
+        voices: piper::rows().into_iter().chain(kokoro::rows()).chain(cloned_rows()).chain(speech::pocket::rows()).collect(),
         kokoro: kokoro::pack_row(),
         keys: SpeechKeys { openai: has_key(cloud::OPENAI_KEY), elevenlabs: has_key(cloud::ELEVENLABS_KEY) },
     })
@@ -76,7 +76,7 @@ pub async fn speech_status() -> Result<SpeechStatus, String> {
 
 /// The cloned voices as rows of the voices list: read any language (their models are
 /// multilingual), so `lang` is `multi`; `installed` when their engine is in.
-fn cloned_rows() -> Vec<piper::VoiceRow> {
+pub(crate) fn cloned_rows() -> Vec<piper::VoiceRow> {
     speech::clone::voices()
         .into_iter()
         .map(|voice| piper::VoiceRow {
@@ -116,6 +116,16 @@ pub fn speech_say_voice(app: AppHandle, text: String, voice: String, lang: Optio
         None => app.state::<Db>().0.lock().map(|conn| speech::app_language(&conn)).unwrap_or("en"),
     };
     let _ = speech::say_as(&app, &text, "test", None, fallback, Some(voice));
+}
+
+/// «Probar» on the voice chosen for an agent: `text` said with it, at its pitch and its rate, now.
+#[tauri::command]
+pub fn speech_try_voice(app: AppHandle, text: String, voice: speech::Voice, lang: Option<String>) -> u64 {
+    let fallback = match lang {
+        Some(lang) => speech::language(&lang),
+        None => app.state::<Db>().0.lock().map(|conn| speech::app_language(&conn)).unwrap_or("en"),
+    };
+    speech::try_voice(&app, &text, fallback, voice)
 }
 
 /// The pronunciations CodeFlow brings, for Settings › Voz y sonido › Pronunciación to list (the
@@ -336,4 +346,95 @@ pub async fn speech_summarize(app: AppHandle, text: String, workspace_id: Option
         (load_ai_config_in(&conn, AiTask::SpokenSummary, workspace_id.as_deref())?, shared_template(&conn, "spoken_summary_template", "")?)
     };
     crate::ai::spoken_summary(&*config.engine, &config.binary, &config.model, &template, &text).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// The natural voices' engine (`speech::pocket`)
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PocketStatus {
+    installed: bool,
+    /// What it holds on disk now.
+    bytes: u64,
+    /// What installing it brings down, to say before it does.
+    estimate_bytes: u64,
+    /// How many voices its catalogue has.
+    voices: usize,
+    licence: &'static str,
+}
+
+/// Whether the natural voices — the calls', and the reading aloud's and Codi's when chosen — are
+/// installed, and what they take on disk.
+#[tauri::command(async)]
+pub fn speech_pocket_status() -> PocketStatus {
+    let installed = speech::pocket::installed();
+    PocketStatus {
+        installed,
+        bytes: if installed { speech::pocket::bytes_on_disk() } else { 0 },
+        estimate_bytes: speech::pocket::ESTIMATE_BYTES,
+        voices: speech::pocket::VOICES.len(),
+        licence: speech::pocket::LICENCE,
+    }
+}
+
+static POCKET_INSTALLING: Mutex<bool> = Mutex::new(false);
+
+/// Installs the natural voices' engine — one model on this computer and a voice of its own for
+/// every agent — with its progress line by line on `voice:pocket`. About a gigabyte and a few minutes.
+/// Once it is in, calls hand out its voices.
+#[tauri::command]
+pub async fn speech_pocket_install(app: AppHandle) -> Result<(), String> {
+    use speech::pocket::{self, PrepareEvent};
+    {
+        let mut busy = POCKET_INSTALLING.lock().map_err(|e| e.to_string())?;
+        if *busy {
+            return Err("The voices are already installing".into());
+        }
+        *busy = true;
+    }
+    let lang = {
+        let db = app.state::<Db>();
+        let conn = db.0.lock().map_err(|e| e.to_string());
+        conn.map(|conn| speech::app_language(&conn)).unwrap_or("es")
+    };
+    let emitter = app.clone();
+    let say = move |line: &str| {
+        let _ = emitter.emit(pocket::EVENT, PrepareEvent { state: "running", line: Some(line.to_string()) });
+    };
+    let result = pocket::prepare(lang, &say).await;
+    *POCKET_INSTALLING.lock().unwrap_or_else(|p| p.into_inner()) = false;
+    if result.is_ok() {
+        // Installing them is choosing them: whatever calls were told to use before, it was not these.
+        let db = app.state::<Db>();
+        let held = db.0.lock();
+        if let Ok(conn) = held {
+            let _ = crate::db::queries::set_setting(&conn, "team_call_voices", "pocket");
+        }
+    }
+    let _ = app.emit(pocket::EVENT, PrepareEvent { state: if result.is_ok() { "done" } else { "failed" }, line: result.as_ref().err().cloned() });
+    result
+}
+
+/// Deletes the natural voices' engine and everything it downloaded. Calls, the reading aloud and
+/// Codi go back to the other voices.
+#[tauri::command(async)]
+pub fn speech_pocket_remove() -> Result<(), String> {
+    if crate::team::call::commands::in_call() {
+        return Err("Hay una llamada en curso: cuélgala antes de quitar sus voces.".into());
+    }
+    if *POCKET_INSTALLING.lock().map_err(|e| e.to_string())? {
+        return Err("The voices are installing".into());
+    }
+    speech::pocket::remove();
+    Ok(())
+}
+
+/// Makes a natural voice ready to read `lang` (`es` · `en`): the install brought the model of the
+/// app's language, and the other one comes down here, once, the first time a voice is chosen for
+/// it. Answers at once when it is already here.
+#[tauri::command]
+pub async fn speech_pocket_prepare(lang: String, voice: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || speech::pocket::prepare_language(&lang, &voice)).await.map_err(|e| e.to_string())?
 }

@@ -8,6 +8,7 @@ import { PROVIDER_CAPS_CHANGED } from "./AgentTransportSettings";
 import { providerDisplayLabel } from "../../lib/aiProviders";
 import { ProviderGlyph } from "../ai/ProviderGlyph";
 import { Segmented } from "../common/Segmented";
+import { SettingsFold } from "./SettingsFold";
 import { pushErrorToast } from "../../state/toastStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
@@ -85,19 +86,17 @@ export function AppScriptsSettings() {
     });
   };
 
+  const offered = caps.filter((cap) => cap.appScripts !== "none");
+  const summary = mapOff
+    ? t("settings.appScriptsSummaryMapOff")
+    : t("settings.appScriptsSummary", {
+        on: String(offered.filter((cap) => (choices[cap.id] ?? "off") === "on").length),
+        total: String(offered.length),
+      });
+
   return (
-    <section aria-labelledby="app-scripts-title" className="space-y-2 rounded-xl bg-[var(--cf-surface)] p-3 shadow-[inset_0_0_0_1px_var(--cf-border)]">
-      <div className="flex items-start gap-2">
-        <span className="mt-[1px] flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[color-mix(in_oklab,var(--cf-accent)_13%,transparent)] text-[var(--cf-accent)]">
-          <Braces size={13} aria-hidden />
-        </span>
-        <div className="min-w-0">
-          <h3 id="app-scripts-title" className="text-[12.5px] font-medium text-[var(--cf-text)]">
-            {t("settings.appScriptsTitle")}
-          </h3>
-          <p className="mt-0.5 max-w-[68ch] text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t("settings.appScriptsHint")}</p>
-        </div>
-      </div>
+    <SettingsFold icon={Braces} title={t("settings.appScriptsTitle")} summary={summary} tone={mapOff ? "warning" : "muted"}>
+      <p className="max-w-[68ch] text-[11.5px] leading-snug text-[var(--cf-text-muted)]">{t("settings.appScriptsHint")}</p>
       {savings && savings.runs > 0 && (
         <p className="max-w-[68ch] text-[11.5px] leading-snug text-[var(--cf-text-muted)]" title={t("settings.appScriptsSavingsHint")}>
           {t("settings.appScriptsSavings", {
@@ -122,7 +121,7 @@ export function AppScriptsSettings() {
           <ProviderScriptsRow key={cap.id} cap={cap} choice={choices[cap.id] ?? "off"} onChoose={(next) => choose(cap.id, next)} t={t} />
         ))}
       </ul>
-    </section>
+    </SettingsFold>
   );
 }
 

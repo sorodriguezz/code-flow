@@ -247,6 +247,13 @@ export function MeetingsSettings() {
             <Checkbox checked={settings.detect} onChange={(on) => void save("detect", on ? "1" : "0")} />
             {t("meetings.settings.detect")}
           </label>
+          <label className="flex w-fit cursor-pointer items-start gap-2 text-[12.5px]">
+            <Checkbox checked={settings.relate} onChange={(on) => void save("relate", on ? "1" : "0")} />
+            <span>
+              {t("meetings.settings.relate")}
+              <span className="block text-[11.5px] text-[var(--cf-text-muted)]">{t("meetings.settings.relateHint")}</span>
+            </span>
+          </label>
         </div>
       </PaneBlock>
     </div>

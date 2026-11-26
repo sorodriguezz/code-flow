@@ -1,6 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { AlertTriangle, ChevronDown, ChevronRight, Play, RotateCcw, ShieldCheck, X } from "lucide-react";
-import { Select, type SelectOption } from "../common/Select";
+import { Select, type SelectItems, type SelectOption } from "../common/Select";
+import { isNatural, useNaturalReady } from "./naturalVoices";
+import { NaturalPreparing } from "./SpeechSettings";
 import { Segmented } from "../common/Segmented";
 import { Button, Kbd, iconButtonClass } from "../common/Button";
 import { Tooltip } from "../common/Tooltip";
@@ -633,11 +635,19 @@ function VoiceRow({ lang }: { lang: Language }) {
   const chosen = useCodiStore((s) => (lang === "es" ? s.settings.voiceEs : s.settings.voiceEn));
   const setValue = useCodiStore((s) => s.setSettingValue);
   const label = t(lang === "es" ? "speech.voiceEs" : "speech.voiceEn");
-  const installed = (voices ?? []).filter((voice) => voice.installed && voiceLanguage(voice.lang) === lang);
+  // The downloaded voices of this language, and the natural ones, which say either.
+  const installed = (voices ?? []).filter((voice) => voice.installed && voice.engine !== "clone" && !isNatural(voice) && voiceLanguage(voice.lang) === lang);
+  const natural = (voices ?? []).filter((voice) => voice.installed && isNatural(voice));
   const named = (voice: DownloadableVoice) => `${voice.label} · ${t(GENDER_KEY[voice.gender])}`;
-  const options: SelectOption[] = [{ value: "", label: t("codi.settings.voiceReading") }, ...installed.map((voice) => ({ value: voice.id, label: named(voice) }))];
+  const options: SelectItems = [
+    { value: "", label: t("codi.settings.voiceReading") },
+    ...installed.map((voice) => ({ value: voice.id, label: named(voice) })),
+    ...(natural.length > 0 ? [{ label: t("speech.naturalGroup"), options: natural.map((voice) => ({ value: voice.id, label: voice.label })) }] : []),
+  ];
   // A voice removed since reads as the reading aloud's, which is what speaks.
-  const value = options.some((option) => option.value === chosen) ? chosen : "";
+  const value = [...installed, ...natural].some((voice) => voice.id === chosen) ? chosen : "";
+  // The other language's model comes down the first time a natural voice is chosen for it.
+  const ready = useNaturalReady(lang, value, natural.some((voice) => voice.id === value));
 
   return (
     <Row label={label}>
@@ -660,7 +670,8 @@ function VoiceRow({ lang }: { lang: Language }) {
           <Play size={12} />
         </button>
       </Tooltip>
-      {installed.length === 0 && (
+      {ready === "preparing" && <NaturalPreparing lang={lang} />}
+      {ready !== "preparing" && installed.length + natural.length === 0 && (
         <span className="text-[11.5px] text-[var(--cf-text-muted)]">
           {t("speech.downloadFirst")} <Link onClick={() => go("voice", "models")}>{t("voice.modelsTab")}</Link>
         </span>

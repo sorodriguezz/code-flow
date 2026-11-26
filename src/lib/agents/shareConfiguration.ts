@@ -34,6 +34,7 @@ const POLICY_CHOICES: Record<string, string[]> = {
   dod: ["off", "warn", "block"],
   sandbox: ["off", "checks"],
   guarantees: ["off", "warn", "block"],
+  permissions: ["restricted", "full"],
 };
 const REVIEW_EXIGENCE = ["correct", "polished"];
 const DECIMAL_POLICY_FIELDS = new Set(["budget_usd", "budget_minutes", "unmetered_minutes"]);
@@ -306,7 +307,8 @@ export function configurationForExport(source: WorkspaceAgent | Team, roster: Wo
   if (isTeam) {
     const members = source.members.map((member) => ({ ...member, repos: present(member.repos) }));
     const plan = source.plan.map((step) => (scoped(step.repo) ? step : { ...step, repo: EMPTY_TEXT }));
-    const basePolicy = { ...defaultPolicy(), ...source.policy };
+    // «Completo» is chosen where a team runs, never handed over in a file (the import resets it too).
+    const basePolicy = { ...defaultPolicy(), ...source.policy, permissions: "restricted" as const };
     const policy = { ...basePolicy, checks: basePolicy.checks.filter((check) => scoped(check.repo)) };
     team = { name: source.name, description: source.description, lead: source.lead, members, plan, policy };
     for (const member of members) for (const repo of member.repos) repositories.add(repo);

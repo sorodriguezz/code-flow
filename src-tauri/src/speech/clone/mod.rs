@@ -193,7 +193,7 @@ pub async fn prepare(engine: Engine, terms_accepted: bool, say: &(dyn Fn(&str) +
     Ok(())
 }
 
-fn version_at_least(text: &str, major: u32, minor: u32) -> bool {
+pub(super) fn version_at_least(text: &str, major: u32, minor: u32) -> bool {
     let mut parts = text.trim().split('.').filter_map(|p| p.parse::<u32>().ok());
     matches!((parts.next(), parts.next()), (Some(a), Some(b)) if (a, b) >= (major, minor))
 }

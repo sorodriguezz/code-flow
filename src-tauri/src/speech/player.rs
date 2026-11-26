@@ -295,22 +295,61 @@ fn open_stream(device: &cpal::Device) -> Result<(cpal::Stream, Arc<Mutex<Cursor>
     Ok((stream, cursor, finished, out_rate))
 }
 
-/// Linear interpolation from `from` to `to` Hz — plenty for a voice and a chime.
+/// How many zero crossings of the sinc each side of a sample is read from.
+const SINC_HALF: f64 = 16.0;
+
+/// `samples` from `from` to `to` Hz, band-limited: each new sample is the old ones around it under
+/// a windowed sinc, cut at the lower of the two rates' half.
+///
+/// It was a straight line between neighbours, "plenty for a voice" — and it was not. A voice
+/// written at 22 kHz and played at 48 came out with a copy of itself folded above 11 kHz, the
+/// metallic edge a downloaded voice had on every sentence; and the call's own voices, moved a few
+/// percent in pitch through here, got it twice (the user, 2026-11-25: «siguen escuchándose muy
+/// mal»). The sums are a few dozen products a sample, on audio that is seconds long.
 pub fn resample(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
-    if from == to || from == 0 || samples.is_empty() {
+    if from == to || from == 0 || to == 0 || samples.is_empty() {
         return samples.to_vec();
     }
     let ratio = f64::from(from) / f64::from(to);
     let length = ((samples.len() as f64) / ratio).floor() as usize;
+    // Going down, the sinc is stretched so nothing above the new half-rate gets through.
+    let stretch = ratio.max(1.0);
+    let reach = SINC_HALF * stretch;
+    let last = samples.len() as isize - 1;
     (0..length)
         .map(|i| {
             let position = i as f64 * ratio;
-            let index = position.floor() as usize;
-            let next = samples.get(index + 1).copied().unwrap_or(samples[index.min(samples.len() - 1)]);
-            let here = samples[index.min(samples.len() - 1)];
-            here + (next - here) * (position - index as f64) as f32
+            let first = (position - reach).ceil() as isize;
+            let end = (position + reach).floor() as isize;
+            let (mut sum, mut weight) = (0.0f64, 0.0f64);
+            for index in first..=end {
+                let x = (index as f64 - position) / stretch;
+                let w = sinc(x) * window(x / SINC_HALF);
+                // Past either end the edge sample stands in for what is not there.
+                sum += f64::from(samples[index.clamp(0, last) as usize]) * w;
+                weight += w;
+            }
+            // Dividing by the weights keeps a steady level steady whatever the fraction.
+            (if weight.abs() > 1e-9 { sum / weight } else { sum }) as f32
         })
         .collect()
+}
+
+fn sinc(x: f64) -> f64 {
+    if x.abs() < 1e-9 {
+        return 1.0;
+    }
+    let pi_x = std::f64::consts::PI * x;
+    pi_x.sin() / pi_x
+}
+
+/// Blackman's window over `-1..=1`: what keeps the cut sinc from ringing.
+fn window(x: f64) -> f64 {
+    if x.abs() >= 1.0 {
+        return 0.0;
+    }
+    let pi_x = std::f64::consts::PI * x;
+    0.42 + 0.5 * pi_x.cos() + 0.08 * (2.0 * pi_x).cos()
 }
 
 /// The loudness (RMS) of every `step_ms` of `samples`, unscaled.
@@ -329,6 +368,38 @@ mod tests {
         assert_eq!(resample(&second, 22_050, 48_000).len(), 48_000);
         assert_eq!(resample(&second, 22_050, 22_050).len(), 22_050);
         assert!(resample(&[], 22_050, 48_000).is_empty());
+    }
+
+    /// How far `heard` is from a pure tone of `hz` at `rate`, in decibels below it — away from the
+    /// ends, where there is nothing either side to read.
+    fn noise_db(heard: &[f32], hz: f64, rate: u32) -> f64 {
+        let (mut signal, mut noise) = (0.0f64, 0.0f64);
+        for (i, sample) in heard.iter().enumerate().skip(2_000).take(heard.len().saturating_sub(4_000)) {
+            let ideal = (2.0 * std::f64::consts::PI * hz * i as f64 / f64::from(rate)).sin();
+            signal += ideal * ideal;
+            noise += (f64::from(*sample) - ideal).powi(2);
+        }
+        10.0 * (noise / signal).log10()
+    }
+
+    #[test]
+    fn a_resampled_voice_is_the_same_voice_and_nothing_else() {
+        let tone = |hz: f64, rate: u32| -> Vec<f32> { (0..rate).map(|i| (2.0 * std::f64::consts::PI * hz * f64::from(i) / f64::from(rate)).sin() as f32).collect() };
+        // A downloaded voice on a 48 kHz speaker, at the top of what a voice carries: a straight
+        // line between samples left it some 20 dB under itself in noise.
+        for hz in [300.0, 3_000.0, 7_000.0] {
+            let noise = noise_db(&resample(&tone(hz, 22_050), 22_050, 48_000), hz, 48_000);
+            assert!(noise < -60.0, "{hz} Hz up to 48 kHz: {noise:.1} dB");
+        }
+        // A pitch moved three percent, as a call's voices are.
+        let noise = noise_db(&resample(&tone(3_000.0, 22_050), 22_050, 21_408), 3_000.0, 21_408);
+        assert!(noise < -60.0, "three percent: {noise:.1} dB");
+        // Going down, what the new rate cannot carry is taken out rather than folded back in.
+        let folded = resample(&tone(15_000.0, 48_000), 48_000, 22_050);
+        let loud = folded.iter().skip(2_000).take(18_000).map(|v| v.abs()).fold(0.0f32, f32::max);
+        assert!(loud < 0.01, "15 kHz into 22.05 kHz: {loud}");
+        // And a steady level stays where it was, ends included.
+        assert!(resample(&[0.5; 400], 22_050, 48_000).iter().all(|v| (v - 0.5).abs() < 1e-4));
     }
 
     /// The real default output, fed silence so nothing is heard: `CODEFLOW_TEST_PLAY=1`. It plays

@@ -160,6 +160,11 @@ pub async fn start_run(
             team::post(&tx, &run.id, "", ("system", "CodeFlow"), ("user", "Tú"), "finding",
                 &format!("Esta corrida empieza con garantías abiertas:\n{}", open.join("\n")), &[]).map_err(e2s)?;
         }
+        // Said where the run is read, so nobody finds out from what it did.
+        if run.policy.full_access() {
+            team::post(&tx, &run.id, "", ("system", "CodeFlow"), ("user", "Tú"), "finding",
+                "Esta corrida usa permisos completos: sus agentes no te preguntan antes de ejecutar comandos destructivos ni acciones de la app que borran o sobrescriben. Para las próximas corridas se cambia en el equipo, en «Permisos y aislamiento».", &[]).map_err(e2s)?;
+        }
         if run.lead.is_empty() {
             seed_fixed_plan(&tx, &run, &tm.plan, &made)?;
         } else {

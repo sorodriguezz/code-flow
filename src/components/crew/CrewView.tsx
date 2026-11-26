@@ -11,7 +11,8 @@
  * It is the same in the main window and in an island: every run moves in the backend
  * (`src-tauri/src/runner`) and every window only watches and sends orders.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { isMainWindow } from "../../lib/windowIdentity";
 import { Inbox } from "./live/Inbox";
 import { AnimatePresence, motion } from "framer-motion";
 import { Activity, Bot, CalendarClock, Hand, Kanban, Network, SquareTerminal, WandSparkles } from "lucide-react";
@@ -55,6 +56,7 @@ const CAST: readonly Space[] = ["equipos", "agentes"];
 export function CrewView() {
   const l = useL();
   const [host, setHost] = useState<HTMLDivElement | null>(null);
+  const setStage = useCallback((element: HTMLDivElement | null) => useCrewStore.getState().set({ stage: element }), []);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
   const activeView = useUiStore((s) => s.activeView);
   const space = useCrewStore((s) => s.space);
@@ -222,7 +224,7 @@ export function CrewView() {
         </span>
       </div>
 
-      <div className="relative min-h-0 flex-1 overflow-hidden" data-tour="agents-tree">
+      <div ref={setStage} className="relative min-h-0 flex-1 overflow-hidden" data-tour="agents-tree">
         <AnimatePresence mode="wait" initial={false}>
           <motion.div key={space} initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={SOFT} className="absolute inset-0 flex min-h-0 flex-col">
             {space === "tablero" && <BoardSpace />}
@@ -238,8 +240,10 @@ export function CrewView() {
             <TerminalBench />
           </div>
         )}
-        {/* Over whichever space is open, and apart from the overlay: a chat stays while the rest is used. */}
-        <TeamChatWindows />
+        {/* The chats and the call float over the whole app from the main window (`App.tsx`), which
+            keeps them to this area while this view is showing. An island is this view alone: it
+            carries its own. */}
+        {!isMainWindow() && <TeamChatWindows />}
       </div>
 
       <Dock />

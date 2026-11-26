@@ -6,6 +6,7 @@ import { ServicesActivity } from "./ServicesActivity";
 import { FlowsActivity } from "./FlowsActivity";
 import { MeetingActivity } from "./MeetingActivity";
 import { SpeechActivity } from "./SpeechActivity";
+import { TeamCallActivity } from "./TeamCallActivity";
 import { CodiActivity } from "./CodiActivity";
 import { CompletionActivity } from "./CompletionActivity";
 import { EnginesActivity } from "./EnginesActivity";
@@ -82,6 +83,7 @@ export function StatusBar() {
           <FlowsActivity />
           <MeetingActivity />
           <CodiActivity />
+          <TeamCallActivity />
           <SpeechActivity />
           <CompletionActivity />
           <EnginesActivity />
@@ -174,6 +176,7 @@ export function StatusBar() {
         <FlowsActivity />
         <MeetingActivity />
         <CodiActivity />
+        <TeamCallActivity />
         <SpeechActivity />
         <CompletionActivity />
         <EnginesActivity />

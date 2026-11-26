@@ -10,6 +10,11 @@ import {
   FileUp,
   BookPlus,
   CalendarDays,
+  CalendarRange,
+  ClipboardList,
+  Mic,
+  Monitor,
+  Users,
   Plus,
   LayoutTemplate,
   Palette,
@@ -47,6 +52,8 @@ import {
 } from "../../state/notesDragStore";
 import { confirmAction } from "../../state/confirmStore";
 import { promptAction } from "../../state/promptStore";
+import { useToastStore } from "../../state/toastStore";
+import { PREP_TAG, prepareMeetingNote, prepTopic, proposeFromEarlier, startMeetingNow } from "./meetings/meetingNotes";
 import { useT } from "../../state/languageStore";
 import { fieldClass } from "../common/recipes";
 
@@ -508,6 +515,21 @@ export function NoteExplorer() {
           icon: FileUp,
           onClick: () => void importMarkdownFiles(bookId),
         },
+        // The loose notes of this book into a book per month, by when each was written — what a
+        // book of meetings or dailies turns into by hand after a few weeks.
+        {
+          label: t("notes.organizeByMonth"),
+          icon: CalendarRange,
+          onClick: () =>
+            void useNotesStore
+              .getState()
+              .organizeBookByMonth(bookId)
+              .then((moved) =>
+                useToastStore
+                  .getState()
+                  .pushToast(moved === 0 ? t("notes.organizeNothing") : moved === 1 ? t("notes.organizedOne") : t("notes.organizedByMonth", { count: moved }), moved === 0 ? "info" : "success"),
+              ),
+        },
         {
           label: t("notes.exportHtml"),
           icon: FileCode2,
@@ -617,6 +639,13 @@ export function NoteExplorer() {
         icon: Copy,
         onClick: () => void duplicateNote(noteId),
       },
+      // A preparation («Preparar reunión») can be filled again from what was written since.
+      ...(() => {
+        const note = useNotesStore.getState().notes.find((candidate) => candidate.id === noteId);
+        return note?.tags.includes(PREP_TAG)
+          ? [{ label: t("notes.prep.again"), icon: ClipboardList, onClick: () => void proposeFromEarlier(noteId, prepTopic(note.title)) }]
+          : [];
+      })(),
       ...noteRepoItems(noteId),
       {
         // No confirmation: it lands in the trash, which is where it is undone.
@@ -728,8 +757,28 @@ export function NoteExplorer() {
                     { label: t("notes.newNote"), icon: FilePlus2, onClick: () => void createNote(null) },
                     // Today's note — opened when it exists, made in «Diario» when it does not.
                     { label: t("notes.dailyNote"), icon: CalendarDays, onClick: () => void useNotesStore.getState().openDailyNote() },
+                    // A note that is already recording: made where the meetings are kept, in this
+                    // month's book, and started as a call or as a room (`meetings/meetingNotes`).
+                    {
+                      label: t("notes.meetingNow"),
+                      icon: Mic,
+                      separated: true,
+                      onClick: () => {},
+                      children: [
+                        { label: t("notes.meetingNowCall"), icon: Monitor, onClick: () => void startMeetingNow("virtual") },
+                        { label: t("notes.meetingNowRoom"), icon: Users, onClick: () => void startMeetingNow("room") },
+                      ],
+                    },
+                    // And the note written before one: the goal, the questions, the decisions needed.
+                    {
+                      label: t("notes.prepMeeting"),
+                      icon: ClipboardList,
+                      onClick: () => {
+                        void promptAction(t("notes.prepPrompt"), { confirmLabel: t("notes.create") }).then((topic) => topic && void prepareMeetingNote(topic));
+                      },
+                    },
                     // «Daily / Semanal»: the work summary written and kept as a note (user, 2026-10-23).
-                    { label: t("worklog.menu"), icon: WORKLOG_ICON, onClick: openWorklogForm },
+                    { label: t("worklog.menu"), icon: WORKLOG_ICON, separated: true, onClick: openWorklogForm },
                     {
                       label: t("notes.newBook"),
                       icon: BookPlus,

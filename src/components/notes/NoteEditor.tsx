@@ -32,6 +32,7 @@ import { NotePreview } from "./NotePreview";
 import { ResizeHandle } from "../common/ResizeHandle";
 import { NoteToolbar } from "./NoteToolbar";
 import { NoteBacklinks } from "./NoteBacklinks";
+import { NoteRelations, NoteRelationsBar, useNoteRelations } from "./NoteRelations";
 import { VersionHistoryModal } from "../common/VersionHistoryModal";
 import { Segmented } from "../common/Segmented";
 import {
@@ -128,6 +129,8 @@ export function NoteEditor() {
   const titleAtFocus = useRef<string | null>(null);
 
   const note = draft ? notes.find((n) => n.id === draft.id) ?? null : null;
+  // The notes this one is related to: read when it opens, compared again once an edit has settled.
+  useNoteRelations(draft?.id ?? null, savedAt);
   const content = draft?.content ?? "";
 
   // The expensive derivations run against the *deferred* text. See the component's doc comment —
@@ -489,6 +492,9 @@ export function NoteEditor() {
         </div>
       </div>
 
+      {/* What this note follows and what follows it; nothing on a note that stands alone. */}
+      <NoteRelationsBar noteId={draft.id} />
+
       {/* A «Daily / Semanal» note's copy and regenerate strip; nothing on any other note. */}
       <WorklogNoteBar noteId={draft.id} title={draft.title} content={draft.content} />
 
@@ -602,8 +608,15 @@ export function NoteEditor() {
                 }}
               />
               </div>
+              {/* Under the outline, what is around the note: the notes it is related to, then
+                  the ones that name it. Each is capped and scrolls on its own. */}
               {note && (
-                <div className="max-h-[45%] min-h-[92px] shrink-0">
+                <div className="flex max-h-[40%] min-h-[84px] shrink-0 flex-col overflow-hidden">
+                  <NoteRelations noteId={note.id} />
+                </div>
+              )}
+              {note && (
+                <div className="flex max-h-[28%] min-h-[76px] shrink-0 flex-col overflow-hidden">
                   <NoteBacklinks noteId={note.id} title={note.title} />
                 </div>
               )}

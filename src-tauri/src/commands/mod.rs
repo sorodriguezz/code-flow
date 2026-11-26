@@ -41,6 +41,7 @@ pub mod github_cmd;
 pub mod publish_cmd;
 pub mod refrepos_cmd;
 pub mod gitlab_cmd;
+pub mod note_relations_cmd;
 pub mod notes_cmd;
 pub mod notebook_cmd;
 pub mod keyvault_cmd;

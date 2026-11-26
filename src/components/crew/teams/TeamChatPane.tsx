@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type HTMLAttributes, type ReactNode } from "react";
-import { ListPlus, Loader2, MessageSquare, MessageSquarePlus, X } from "lucide-react";
+import { ListPlus, Loader2, MessageSquare, MessageSquarePlus, Phone, X } from "lucide-react";
 import { openTeamChatWindow, useTeamChatStore, teamChatBusy } from "../../../state/teamChatStore";
-import { showingTeamChat, useTeamChatWindowStore } from "../../../state/teamChatWindowStore";
-import { useWorkspaceStore } from "../../../state/workspaceStore";
+import { showingTeamChat } from "../../../state/teamChatWindowStore";
 import { pushErrorToast } from "../../../state/toastStore";
 import { AgentComposer } from "../../agents/AgentTaskDetail";
 import { ChatMessageBubble } from "../../chat/ChatMessageBubble";
@@ -13,18 +12,12 @@ import { AgentAvatar, TeamAvatar } from "../kit/Avatar";
 import { nextChat, TeamChatHistory } from "./TeamChatHistory";
 import { Btn } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
+import { callTeam, chatWithTeam, showAgentsView } from "../../../lib/agents/talk";
 import { scrollBehavior } from "../../../lib/motion";
 import type { ChatAttachment } from "../../../lib/tauri/chatCommands";
 
-/** The chat is the team's, in its workspace: the open repository only says where members prefer to
- *  work, and having none open is fine. It opens as the team's floating window (`TeamChatWindow`),
- *  so the view behind it — the org chart, a run — stays in sight and in use. */
-export async function chatWithTeam(teamId: string, fresh = false, projectId: string | null = useWorkspaceStore.getState().activeProjectId): Promise<void> {
-  try {
-    const id = await useTeamChatStore.getState().open(teamId, projectId, fresh);
-    useTeamChatWindowStore.getState().open(id, teamId);
-  } catch (error) { pushErrorToast(String(error)); }
-}
+// Where these live now, for whoever still asks for them here.
+export { callTeam, chatWithTeam };
 
 /**
  * A team conversation: its header, its messages and its composer.
@@ -83,6 +76,8 @@ export function TeamChatContent({ chatId, onClose, controls, grip, shown = true 
     setPreparing(true);
     try {
       const draft = await teamChatDraft(chatId);
+      // The launcher is the Agents view's: this window may be floating over any other.
+      showAgentsView();
       useCrewStore.getState().open({
         kind: "launch",
         goal: draft.goal,
@@ -146,6 +141,7 @@ export function TeamChatContent({ chatId, onClose, controls, grip, shown = true 
               <span className={controls ? "hidden @[640px]:inline" : ""}>{l("Convertir en tarea", "Convert to task")}</span>
             </Btn>
           )}
+          {chat && <button type="button" onClick={() => callTeam(chat.teamId)} title={l("Llamar al equipo: habla con sus agentes por voz", "Call the team: talk to its agents by voice")} aria-label={l("Llamar al equipo", "Call the team")} className={iconButtonClass({ size: "sm" })}><Phone className="h-4 w-4" /></button>}
           {/* The menu offers it too: in a narrow window that is where it lives, so the team's name keeps its room. */}
           {chat && <span className={controls && manage ? "hidden shrink-0 @[440px]:inline-flex" : "inline-flex shrink-0"}><button type="button" disabled={busy} onClick={() => void chatWithTeam(chat.teamId, true)} title={l("Nueva conversación con el equipo", "New conversation with the team")} aria-label={l("Nueva conversación con el equipo", "New conversation with the team")} className={iconButtonClass({ size: "sm" })}><MessageSquarePlus className="h-4 w-4" /></button></span>}
         </div>

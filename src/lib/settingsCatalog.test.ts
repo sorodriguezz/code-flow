@@ -74,7 +74,7 @@ describe("the settings catalog", () => {
   it("returns the panes of a section by id", () => {
     expect(tabsFor("tasks").map((tab) => tab.id)).toContain("git");
     expect(tabsFor("general").map((tab) => tab.id)).toContain("language");
-    expect(tabsFor("voice").map((tab) => tab.id)).toEqual(["devices", "models", "dictation", "meetings", "reading", "pronunciation"]);
+    expect(tabsFor("voice").map((tab) => tab.id)).toEqual(["devices", "models", "dictation", "meetings", "calls", "reading", "pronunciation"]);
   });
 
   it("files every section under one of the nav's four groups, in the groups' order", () => {

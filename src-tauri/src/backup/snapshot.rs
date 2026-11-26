@@ -97,6 +97,10 @@ pub const TABLES: &[&str] = &[
     "meeting_speakers",
     "meeting_lines",
     "meeting_recipes",
+    // «Relacionadas» (`note_relations`): which notes follow or resemble which. After `notes`, which
+    // both ends point at. The links made by hand and what a model said of a pair are the user's;
+    // the ones made by words alone come back with the next scan either way.
+    "note_relations",
     "voice_profiles",
     // The Diagrams workspace, with its own switch for the same reasons the Notes one has. Folders
     // before diagrams: a diagram points at the folder it is filed in. Templates last — they point
@@ -288,6 +292,9 @@ pub const TABLES: &[&str] = &[
 /// writing it down compulsory.
 #[allow(dead_code)]
 pub const NEVER_BACKED_UP: &[&str] = &[
+    // When each note was last compared with the rest (`note_relations`): a stamp, redone by the
+    // next look at the note.
+    "note_relation_scans",
     // Scans of the images of *this* machine's engines: another machine has other images, and a
     // scan there is a command away.
     "container_scans",
@@ -468,7 +475,7 @@ pub const GROUPS: &[Group] = &[
         // a user trimming a backup wants that choice to be available separately from "everything I
         // ever wrote".
         key: "notes",
-        tables: &["note_books", "notes", "note_templates", "meetings", "meeting_speakers", "meeting_lines", "meeting_recipes", "voice_profiles"],
+        tables: &["note_books", "notes", "note_templates", "meetings", "meeting_speakers", "meeting_lines", "meeting_recipes", "note_relations", "voice_profiles"],
     },
     Group {
         // Its own switch beside `notes` rather than inside it. The argument is the size one: a

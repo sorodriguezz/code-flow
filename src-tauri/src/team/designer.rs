@@ -841,7 +841,9 @@ pub fn design(conn: &Connection, workspace_id: &str, spec: &Spec, known: &Known)
     }
 
     // ---- the policy
-    let mut policy = existing.map(|t| t.policy.clone()).unwrap_or_default();
+    // What its members may do unasked is the user's to say, in the team's editor: a design starts
+    // restricted, and a redesign — new seats, new prompts — goes back to it.
+    let mut policy = existing.map(|t| t.policy.clone()).unwrap_or_default().untrusted();
     if existing.is_some() {
         // The seats are new ones: what named the old ones by id is gone with them.
         policy.review = super::ReviewPolicy::default();
@@ -855,6 +857,7 @@ pub fn design(conn: &Connection, workspace_id: &str, spec: &Spec, known: &Known)
         match key.as_str() {
             "checks" => problems.push("policy.checks: the checks are their own field — \"checks\": [...] beside \"policy\".".into()),
             "review" => problems.push("policy.review: review is its own field — \"review\": {...} beside \"policy\".".into()),
+            "permissions" => problems.push("policy.permissions: what the members may do without asking is set by the user, in the team's editor (Permisos y aislamiento) — leave it out.".into()),
             "conflicts" => {
                 let text = value.as_str().unwrap_or_default().trim();
                 match (text, seat_of(text)) {
@@ -877,7 +880,7 @@ pub fn design(conn: &Connection, workspace_id: &str, spec: &Spec, known: &Known)
                 overlay.insert(key.clone(), value.clone());
             }
             unknown => {
-                let mut names: Vec<&String> = fields.keys().filter(|k| *k != "checks" && *k != "review").collect();
+                let mut names: Vec<&String> = fields.keys().filter(|k| *k != "checks" && *k != "review" && *k != "permissions").collect();
                 names.sort();
                 problems.push(format!("policy.{unknown}: not a policy field. Fields: {}.", names.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")));
             }
@@ -2049,6 +2052,17 @@ mod tests {
 
     fn spec(value: Value) -> Spec {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn a_model_cannot_design_a_team_with_full_permissions() {
+        let (conn, ws, _dir) = workspace();
+        let mut asked = sound();
+        asked["policy"]["permissions"] = json!("full");
+        let problems = design(&conn, &ws, &spec(asked), &known_here()).unwrap_err();
+        assert!(problems.iter().any(|p| p.starts_with("policy.permissions:")), "{problems:?}");
+        let made = design(&conn, &ws, &spec(sound()), &known_here()).unwrap();
+        assert!(!made.team.policy.full_access());
     }
 
     #[test]

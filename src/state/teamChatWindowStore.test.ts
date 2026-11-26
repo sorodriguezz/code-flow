@@ -95,4 +95,43 @@ describe("team chat windows", () => {
     drop("unknown");
     expect(useTeamChatWindowStore.getState().windows).toBe(before);
   });
+
+  it("gives each agent a window of its own on the same shelf as the teams'", () => {
+    const { open, openAgent } = useTeamChatWindowStore.getState();
+    const kinds = () => windows().map((w) => `${w.kind}:${w.teamId}:${w.chatId}:${w.minimized ? "folded" : "open"}`);
+    open("chat-a", "team-a");
+    openAgent("task-1", "agent-x", "ws");
+    expect(kinds()).toEqual(["team:team-a:chat-a:folded", "agent:agent-x:task-1:open"]);
+    expect(windows()[1].workspaceId).toBe("ws");
+    // Another conversation with the same agent turns its window; another agent gets its own.
+    const key = windows()[1].key;
+    openAgent("task-2", "agent-x", "ws");
+    openAgent("task-3", "agent-y", "ws");
+    expect(kinds()).toEqual(["team:team-a:chat-a:folded", "agent:agent-x:task-2:folded", "agent:agent-y:task-3:open"]);
+    expect(windows()[1].key).toBe(key);
+    // A team and an agent never share a window, whatever their ids.
+    open("task-3", "agent-y");
+    expect(windows().map((w) => w.kind)).toEqual(["team", "agent", "agent", "team"]);
+  });
+
+  it("keeps a window per conversation for an agent that is gone", () => {
+    const { openAgent } = useTeamChatWindowStore.getState();
+    openAgent("task-1", "", "ws");
+    openAgent("task-2", "", "ws");
+    expect(windows().map((w) => w.chatId)).toEqual(["task-1", "task-2"]);
+    openAgent("task-1", "", "ws");
+    expect(windows().map((w) => `${w.chatId}:${w.minimized}`)).toEqual(["task-1:false", "task-2:true"]);
+  });
+
+  it("lights and drops an agent's window by its conversation, as a team's", () => {
+    const { openAgent, minimize, markUnread, drop } = useTeamChatWindowStore.getState();
+    openAgent("task-1", "agent-x", "ws");
+    minimize(windows()[0].key);
+    markUnread("task-1", "error");
+    expect(windows()[0].unread).toBe("error");
+    drop("task-1", "task-0");
+    expect(windows().map((w) => `${w.kind}:${w.chatId}:${w.unread}`)).toEqual(["agent:task-0:"]);
+    drop("task-0");
+    expect(windows()).toEqual([]);
+  });
 });

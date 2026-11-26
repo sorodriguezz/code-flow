@@ -34,6 +34,8 @@ pub struct Turn {
     pub effort: Option<String>,
     /// Where the member works: the item's worktree.
     pub cwd: String,
+    /// The run's members ask the user nothing (`team::Policy::permissions`): the chat's «Completo».
+    pub full_access: bool,
     /// Fires when the run is stopped. The app's engine hears a Stop through `ai_runs`; an engine
     /// without it listens here.
     pub cancel: CancellationToken,
@@ -119,7 +121,7 @@ impl Host for AppHost {
             turn.effort,
             Some(false),
             None,
-            None,
+            turn.full_access.then(|| crate::commands::chat_cmd::FULL_PERMISSIONS.to_string()),
         )
         .await?;
         Ok(TurnReply { model: reply.model.clone(), text: reply.text })

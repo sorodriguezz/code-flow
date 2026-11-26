@@ -544,6 +544,7 @@ const TASK_LABELS: Record<string, TranslationKey> = {
   meetings: "usage.task.meetings",
   worklog: "worklog.usageTask",
   "spoken-summary": "usage.task.spokenSummary",
+  "team-call": "usage.task.teamCall",
   codi: "usage.task.codi",
   "codi-research": "usage.task.codiResearch",
   "codi-answer": "usage.task.codiAnswer",

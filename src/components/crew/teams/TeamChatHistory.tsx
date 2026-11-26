@@ -27,7 +27,9 @@ export function nextChat(items: TeamChatSummary[], gone: string): string | undef
  * be reachable for every conversation, not only the one on screen. It stays open after a
  * deletion, so clearing several out is one visit.
  */
-export function TeamChatHistory({ chatId, items, busy, compact, onPick, onNew, onDelete }: {
+export function TeamChatHistory({ chatId, items, busy, compact, onPick, onNew, onDelete, agent = false }: {
+  /** The conversations are one agent's rather than a team's: only the words change. */
+  agent?: boolean;
   chatId: string;
   items: TeamChatSummary[];
   /** The team is answering the conversation on screen: that one cannot be deleted now. */
@@ -115,12 +117,17 @@ export function TeamChatHistory({ chatId, items, busy, compact, onPick, onNew, o
     const name = whole.length > 60 ? `${whole.slice(0, 60).trimEnd()}…` : whole;
     asking.current = true;
     const yes = await confirmAction(
-      item.messages > 0
-        ? l(
-            `¿Eliminar la conversación «${name}»? Se borran sus mensajes y lo que cada miembro respondió en ella. Los cambios que el equipo hizo en los repositorios se conservan.`,
-            `Delete the conversation “${name}”? Its messages and what each member answered in it are removed. The changes the team made in the repositories stay.`,
-          )
-        : l("¿Eliminar esta conversación sin mensajes?", "Delete this conversation with no messages?"),
+      item.messages === 0
+        ? l("¿Eliminar esta conversación sin mensajes?", "Delete this conversation with no messages?")
+        : agent
+          ? l(
+              `¿Eliminar la conversación «${name}»? Se borran sus mensajes. Los cambios que el agente hizo en el repositorio se conservan.`,
+              `Delete the conversation “${name}”? Its messages are removed. The changes the agent made in the repository stay.`,
+            )
+          : l(
+              `¿Eliminar la conversación «${name}»? Se borran sus mensajes y lo que cada miembro respondió en ella. Los cambios que el equipo hizo en los repositorios se conservan.`,
+              `Delete the conversation “${name}”? Its messages and what each member answered in it are removed. The changes the team made in the repositories stay.`,
+            ),
       true,
       l("Eliminar", "Delete"),
     ).finally(() => { asking.current = false; });
@@ -129,7 +136,8 @@ export function TeamChatHistory({ chatId, items, busy, compact, onPick, onNew, o
     try { await onDelete(item); } finally { setRemoving(""); }
   };
 
-  const label = l("Conversaciones del equipo", "Team conversations");
+  const label = agent ? l("Conversaciones con el agente", "Conversations with the agent") : l("Conversaciones del equipo", "Team conversations");
+  const answering = agent ? l("El agente está respondiendo", "The agent is answering") : l("El equipo está respondiendo", "The team is answering");
   return (
     <>
       <button
@@ -147,7 +155,9 @@ export function TeamChatHistory({ chatId, items, busy, compact, onPick, onNew, o
         }`}
       >
         <History className="h-3.5 w-3.5 shrink-0 text-[var(--cf-text-muted)]" />
-        <span className={`max-w-[120px] truncate @[700px]:max-w-[180px] ${compact ? "hidden @[520px]:inline" : ""}`}>{current ? chatTitle(current, l) : l("Historial", "History")}</span>
+        {/* An agent's conversations are told apart by when they were, not by a name: the header keeps
+            that room for who the agent is. */}
+        {!agent && <span className={`max-w-[120px] truncate @[700px]:max-w-[180px] ${compact ? "hidden @[520px]:inline" : ""}`}>{current ? chatTitle(current, l) : l("Historial", "History")}</span>}
         <span className={`rounded-full bg-[var(--cf-surface-raised)] px-1.5 text-[10.5px] font-medium tabular-nums text-[var(--cf-text-muted)] ${compact ? "hidden @[440px]:inline" : ""}`}>{items.length}</span>
         <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-[var(--cf-text-faint)] transition-transform ${open ? "rotate-180" : ""} ${compact ? "hidden @[520px]:block" : ""}`} />
       </button>
@@ -202,7 +212,7 @@ export function TeamChatHistory({ chatId, items, busy, compact, onPick, onNew, o
                     disabled={locked || going}
                     onClick={() => void remove(item)}
                     aria-label={l(`Eliminar la conversación «${name}»`, `Delete the conversation “${name}”`)}
-                    title={locked ? l("El equipo está respondiendo: detén la respuesta para eliminarla", "The team is answering: stop it to delete this conversation") : l("Eliminar conversación", "Delete conversation")}
+                    title={locked ? l(`${answering}: detén la respuesta para eliminarla`, `${answering}: stop it to delete this conversation`) : l("Eliminar conversación", "Delete conversation")}
                     className="mr-1 grid h-6 w-6 shrink-0 place-items-center rounded-md text-[var(--cf-text-muted)] opacity-0 outline-none transition-[opacity,color,background-color] duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_14%,transparent)] hover:text-[var(--cf-danger)] focus-visible:opacity-100 focus-visible:shadow-[0_0_0_2px_color-mix(in_oklab,var(--cf-danger)_45%,transparent)] disabled:cursor-not-allowed disabled:hover:bg-transparent disabled:hover:text-[var(--cf-text-muted)] group-focus-within:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
                   >
                     {going ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
@@ -216,7 +226,7 @@ export function TeamChatHistory({ chatId, items, busy, compact, onPick, onNew, o
               type="button"
               data-row
               disabled={busy}
-              title={busy ? l("El equipo está respondiendo", "The team is answering") : undefined}
+              title={busy ? answering : undefined}
               onClick={() => { onNew(); close(); }}
               className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12.5px] text-[var(--cf-text)] outline-none hover:bg-[color-mix(in_oklab,var(--cf-text)_6%,transparent)] focus-visible:shadow-[inset_0_0_0_2px_color-mix(in_oklab,var(--cf-accent)_55%,transparent)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
             >

@@ -1450,6 +1450,9 @@ pub mod task {
     /// A long answer cut to what is worth hearing, before the thinking mark reads it aloud — see
     /// [`super::spoken_summary`].
     pub const SPOKEN_SUMMARY: &str = "spoken-summary";
+    /// What an agent says in a call with its team, and the call's minutes — see
+    /// [`super::call_line`] and [`super::call_minutes`].
+    pub const TEAM_CALL: &str = "team-call";
     /// «Codi»'s turns that its own router and the local model could not run.
     pub const CODI: &str = "codi";
     /// A question Codi was asked about a repository's code, answered from inside it, read-only —
@@ -6217,6 +6220,46 @@ pub async fn spoken_summary(engine: &dyn AiEngine, binary: &str, model: &str, te
     inv.read_only = true;
     let run = run(engine, binary, inv).await?;
     Ok(strip_wrapper_fence(&run.text))
+}
+
+/// What one agent says in a call with its team (`crate::team::call`): `system` is who it is and how
+/// a call is spoken in, `ask` what it was just told, `talk` the conversation so far. Text only —
+/// nothing is read and nothing is written, which is what lets it answer in the time a person
+/// waits for a reply. `stream`, on an engine that writes its answer piece by piece, hands those
+/// pieces over as they come, so the voice starts before the answer is whole.
+#[allow(clippy::too_many_arguments)]
+pub async fn call_line(
+    engine: &dyn AiEngine,
+    binary: &str,
+    model: &str,
+    system: &str,
+    ask: &str,
+    talk: &str,
+    effort: Option<&str>,
+    stream: Option<DeltaSink>,
+) -> Result<String, String> {
+    let talk = if engine.in_process() { talk.to_string() } else { crate::secret_scan::redact(talk).0 };
+    let mut inv = AiInvocation::new(ask, &talk);
+    inv.system_prompt = Some(system);
+    inv.model = model;
+    inv.read_only = true;
+    inv.text_only = true;
+    inv.effort = effort.filter(|_| engine.model_supports_effort(model));
+    inv.stream_deltas = stream;
+    inv.task = task::TEAM_CALL;
+    Ok(strip_wrapper_fence(&run(engine, binary, inv).await?.text))
+}
+
+/// A call's minutes as the JSON `system` asks for, from its transcript. Text only.
+pub async fn call_minutes(engine: &dyn AiEngine, binary: &str, model: &str, system: &str, talk: &str) -> Result<String, String> {
+    let talk = if engine.in_process() { talk.to_string() } else { crate::secret_scan::redact(talk).0 };
+    let mut inv = AiInvocation::new("Escribe el acta de esta llamada en el JSON pedido. Solo el JSON.", &talk);
+    inv.system_prompt = Some(system);
+    inv.model = model;
+    inv.read_only = true;
+    inv.text_only = true;
+    inv.task = task::TEAM_CALL;
+    Ok(strip_wrapper_fence(&run(engine, binary, inv).await?.text))
 }
 
 /// One of «Codi»'s turns on the provider its row names (`crate::codi::brain`): the order and the

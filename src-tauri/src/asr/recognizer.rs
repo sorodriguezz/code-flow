@@ -178,6 +178,8 @@ pub fn loaded() -> Vec<(&'static str, String)> {
 pub static DICTATION: Slot = Slot::new();
 /// «Codi», listening all the time it is on.
 pub static CODI: Slot = Slot::new();
+/// A call with a team (`crate::team::call`): what the user says in it.
+pub static CALL: Slot = Slot::new();
 pub static MEETINGS: Slot = Slot::new();
 /// A flow's «Transcribir audio», freed when the node is done.
 pub static FLOWS: Slot = Slot::new();
@@ -406,7 +408,7 @@ pub fn unload(slot: &Slot) {
 
 /// Frees every recognizer — before a model's files are deleted.
 pub fn unload_all() {
-    for slot in [&DICTATION, &CODI, &MEETINGS, &FLOWS] {
+    for slot in [&DICTATION, &CODI, &CALL, &MEETINGS, &FLOWS] {
         unload(slot);
     }
 }

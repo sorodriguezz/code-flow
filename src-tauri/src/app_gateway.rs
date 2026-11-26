@@ -479,6 +479,14 @@ fn risk_of_call(command: &Command, args: &serde_json::Map<String, Value>) -> Str
             return "destructive".into();
         }
     }
+    // A team whose members ask nothing (`team::Policy::permissions`): saving one like that, or
+    // starting a run with it, is the user's to approve — a model does not hand agents «Completo».
+    let full = |policy: Option<&Value>| policy.and_then(|p| p.get("permissions")).and_then(Value::as_str) == Some(crate::team::FULL_PERMISSIONS);
+    match command.name.as_str() {
+        "team_save" if full(args.get("team").and_then(|team| team.get("policy"))) => return "destructive".into(),
+        "team_start" if full(args.get("policy")) => return "destructive".into(),
+        _ => {}
+    }
     command.risk.clone()
 }
 
@@ -721,6 +729,16 @@ mod tests {
             assert!(outside(&scope, "git", &args(json!({"path": linked})), &roots).is_some());
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn handing_a_team_full_permissions_is_the_users_to_approve() {
+        let command = |name: &str| CATALOG.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("{name}"));
+        let args = |value: Value| value.as_object().cloned().unwrap();
+        assert_eq!(risk_of_call(command("team_save"), &args(json!({"team": {"policy": {"permissions": "restricted"}}}))), "write");
+        assert_eq!(risk_of_call(command("team_save"), &args(json!({"team": {"policy": {"permissions": "full"}}}))), "destructive");
+        assert_eq!(risk_of_call(command("team_start"), &args(json!({"teamId": "t", "goal": "g"}))), "write", "the team's own policy is the user's choice already");
+        assert_eq!(risk_of_call(command("team_start"), &args(json!({"teamId": "t", "policy": {"permissions": "full"}}))), "destructive");
     }
 
     #[test]

@@ -51,10 +51,11 @@ export async function openTeamChatWindow(chatId: string): Promise<void> {
 
 /**
  * A turn ended. Seen happening, that is all there is to say; otherwise its window's chip is
- * marked, the bell keeps a row and a toast says it where the user is now.
+ * marked, the bell keeps a row and a toast says it where the user is now. Both lead to the
+ * conversation's window, which floats over whatever view that is.
  */
 function announce(state: TeamChatState): void {
-  const { chat, task } = state;
+  const { chat } = state;
   if (teamChatOnScreen(chat.id)) return;
   const failed = chat.status === "error" || Boolean(chat.error);
   useTeamChatWindowStore.getState().markUnread(chat.id, failed ? "error" : "done");
@@ -66,14 +67,14 @@ function announce(state: TeamChatState): void {
     titleKey,
     params: { team: chat.teamName },
     workspaceId: chat.workspaceId,
-    target: { view: "agents", projectId: chat.projectId || undefined, select: { kind: "agentTask", id: task.id } },
+    target: { select: { kind: "teamChat", id: chat.id } },
     status: failed ? "error" : "success",
     detail,
   });
   useToastStore.getState().pushToast(translate(titleKey, { team: chat.teamName }), failed ? "error" : "success", {
     action: {
       label: translate("notifications.openTeamChat"),
-      run: () => void followTarget(chat.workspaceId, { view: "agents", projectId: chat.projectId || undefined, select: { kind: "agentTask", id: task.id } }),
+      run: () => void followTarget(chat.workspaceId, { select: { kind: "teamChat", id: chat.id } }),
     },
     lifetimeMs: 12_000,
   });
@@ -120,7 +121,7 @@ export const useTeamChatStore = create<TeamChatStore>((set, get) => ({
       useAiRunStore.getState().adopt(chat.activeRunId, {
         kindKey: "agents.liveKindAgent", workspaceId: chat.workspaceId,
         detail: `${chat.teamName} · ${chat.members.find((m) => m.id === chat.activeMemberId)?.name ?? ""}`,
-        target: { view: "agents", projectId: chat.projectId, select: { kind: "agentTask", id: task.id } },
+        target: { select: { kind: "teamChat", id: chat.id } },
       });
     }
     if (previous?.chat.activeRunId && previous.chat.activeRunId !== chat.activeRunId) useAiRunStore.getState().settle(previous.chat.activeRunId);

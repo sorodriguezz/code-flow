@@ -1126,6 +1126,8 @@ export function draftOf(agent: WorkspaceAgent): AgentDraft {
     template_version: agent.template_version ?? 0,
     overrides: agent.overrides ?? [],
     perms: agent.perms ?? [],
+    voice: agent.voice ?? null,
+    call_model: agent.call_model ?? "",
   };
 }
 

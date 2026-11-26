@@ -114,6 +114,7 @@ fn cleanup_steps(app: &AppHandle) {
     crate::ai_prompt_files::remove_own();
     // The voice-cloning engine's Python and Codi's microphone: neither outlives the app.
     crate::speech::clone::stop_server();
+    crate::speech::pocket::stop_server();
     crate::codi::listen::stop();
     // Flow runs, and every process their nodes started: each sits in a process group of its
     // own (that is what Stop needs), so a `npm run build` a flow started would outlive the app.

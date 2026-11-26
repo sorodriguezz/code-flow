@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { Mic, X } from "lucide-react";
 import { buttonClass } from "../../common/Button";
 import { useMeetingsStore } from "../../../state/meetingsStore";
-import { useNotesStore } from "../../../state/notesStore";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
 import { useUiStore } from "../../../state/uiStore";
 import { useWindowStore } from "../../../state/windowStore";
@@ -10,14 +9,15 @@ import { broadcast } from "../../../lib/windowBus";
 import { focusSatellite } from "../../../lib/tauri/windows";
 import { isMainWindow, WINDOW } from "../../../lib/windowIdentity";
 import { useLanguageStore, useT, translate } from "../../../state/languageStore";
+import { startMeetingNote } from "./meetingNotes";
 
 /** How long the card waits for an answer before it goes away by itself. */
 const SHOWN_MS = 60_000;
 
 /**
  * «¿Tomar notas de esta reunión?» — the card the call detector raises when Teams, Zoom or a browser
- * starts using the microphone (`meetings::detect`). It only ever asks: «Tomar notas» makes a note in
- * the workspace's «Reuniones» book, opens it and starts recording; anything else lets it go. The main
+ * starts using the microphone (`meetings::detect`). It only ever asks: «Tomar notas» makes a note
+ * where the workspace's meetings are kept, opens it and starts recording; anything else lets it go. The main
  * window only, bottom right, out of the way of whatever is being worked on.
  */
 export function MeetingSuggestion() {
@@ -52,7 +52,7 @@ export function MeetingSuggestion() {
   );
 }
 
-/** A note in the «Reuniones» book (made when missing), opened, and recording the call. */
+/** A note where the meetings are kept (`meetingNotes`), opened, and recording the call. */
 async function takeNotes(app: string) {
   useMeetingsStore.getState().dismissSuggestion();
   // With Notes on an island, the note is made and recorded there — where the user takes notes.
@@ -71,17 +71,6 @@ export async function takeNotesHere(app: string, opts: { show?: boolean } = {}) 
   const workspaceId = useWorkspaceStore.getState().activeWorkspaceId;
   if (!workspaceId) return;
   if (isMainWindow() && opts.show !== false) useUiStore.getState().setActiveView("notes");
-  const notes = useNotesStore.getState();
-  if (notes.workspaceId !== workspaceId) await notes.setWorkspace(workspaceId);
-  const bookName = translate("meetings.bookName");
-  const existing = useNotesStore.getState().books.find((b) => !b.parent_id && b.name === bookName);
-  const book = existing?.id ?? (await useNotesStore.getState().createBook(null, bookName));
-  if (!book) return;
-  const noteId = await useNotesStore.getState().createNote(book);
-  if (!noteId) return;
   const when = new Date().toLocaleString(useLanguageStore.getState().language, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
-  useNotesStore.getState().editDraft({ title: translate("meetings.suggest.noteTitle", { app, when }) });
-  void useNotesStore.getState().flush();
-  const language = useLanguageStore.getState().language === "en" ? "en" : "es";
-  await useMeetingsStore.getState().start({ noteId, workspaceId, kind: "virtual", language });
+  await startMeetingNote(translate("meetings.suggest.noteTitle", { app, when }), "virtual");
 }

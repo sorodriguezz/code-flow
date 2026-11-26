@@ -789,7 +789,7 @@ pub(super) async fn speech(ctx: &NodeCtx) -> Result<Ports, NodeError> {
     Ok(super::super::with_failures(ctx, vec![out], failed, 0))
 }
 
-/// A natural voice downloaded in Settings › Voz y sonido (Piper or Kokoro, run on this computer): the
+/// A natural voice downloaded in Settings › Voz y sonido (Piper, Kokoro or a natural one, run on this computer): the
 /// one named by its id, else the first downloaded one in the text's language — the reading aloud's
 /// own rule. Saves 16-bit WAV.
 async fn local_voice(ctx: &NodeCtx, said: &str, voice: &str, path: &Path) -> Result<(), NodeError> {

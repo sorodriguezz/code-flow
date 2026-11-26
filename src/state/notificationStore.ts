@@ -138,7 +138,10 @@ export interface NotificationTarget {
        *  repositories exactly as a PR number is. See `runKey` in `ciStore`. */
       | "pipelineRun"
       /** A team run in the Agents view's live space. */
-      | "teamRun";
+      | "teamRun"
+      /** A conversation with a team, by its chat id. It is a floating window over whichever view
+       *  is on screen, so it names no view: going to it takes nothing away. */
+      | "teamChat";
     id: string;
   };
 }
@@ -488,13 +491,20 @@ export async function followTarget(
   } else if (kind === "agentTask") {
     const { useAgentsStore } = await import("./agentsStore");
     await useAgentsStore.getState().select(id);
-    // A team's chat is a floating window of the Agents view, not a task to select: unfold it.
+    // A team's chat is a floating window, not a task to select: unfold it. So is a conversation
+    // with one agent — a task with no goal.
     const task = useAgentsStore.getState().tasks.find((candidate) => candidate.id === id);
     const chatId = task ? teamChatIdOf(task) : null;
     if (chatId) {
       const { openTeamChatWindow } = await import("./teamChatStore");
       await openTeamChatWindow(chatId);
+    } else if (task) {
+      const { isAgentChat, openAgentChat } = await import("../lib/agents/talk");
+      if (isAgentChat(task)) openAgentChat(task);
     }
+  } else if (kind === "teamChat") {
+    const { openTeamChatWindow } = await import("./teamChatStore");
+    await openTeamChatWindow(id);
   } else if (kind === "teamRun") {
     const [{ useTeamStore }, { useCrewStore }] = await Promise.all([import("./teamStore"), import("../components/crew/crewStore")]);
     useCrewStore.getState().setSpace("en-vivo");

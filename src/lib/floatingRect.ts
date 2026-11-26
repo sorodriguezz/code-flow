@@ -41,6 +41,14 @@ export function defaultRect(area: Area): Rect {
   return { x: Math.max(0, area.w - w - GAP), y: Math.max(0, area.h - h - SHELF), w, h };
 }
 
+/** A window of `w`×`h` in the middle of the area, as large as fits and clear of the shelf — where
+ *  one that is the centre of attention opens, like a call. */
+export function centerRect(area: Area, w: number, h: number): Rect {
+  const width = clamp(w, Math.min(MIN_W, area.w), area.w - GAP * 2);
+  const height = clamp(h, Math.min(MIN_H, area.h), area.h - GAP - SHELF);
+  return { x: Math.max(0, Math.round((area.w - width) / 2)), y: Math.max(0, Math.round((area.h - SHELF - height) / 2)), w: width, h: height };
+}
+
 /** The whole area but its margins — and but the shelf, when something sits on it. */
 export function maximizedRect(area: Area, shelf = false): Rect {
   return { x: GAP, y: GAP, w: Math.max(0, area.w - GAP * 2), h: Math.max(0, area.h - GAP - (shelf ? SHELF : GAP)) };

@@ -579,6 +579,21 @@ export interface WorkspaceAgent {
   overrides?: string[];
   /** Extra permissions shown on its card: `cmds`, `commit`, `push`. */
   perms?: string[];
+  /** The voice it speaks with in a call with its team; none is «Automática». */
+  voice?: AgentVoice | null;
+  /** The model it talks with in a call; `""` follows the call's own choice. */
+  call_model?: string;
+}
+
+/** `speech::Voice`: whose voice, how high and how fast. */
+export interface AgentVoice {
+  /** `system:<name>`, `cloud:<service>:<voice>`, or a downloaded or cloned voice's id; `""` is the
+   *  reading aloud's own. */
+  id: string;
+  /** 1 as it is; above is higher. */
+  pitch: number;
+  /** Times the user's own rate. */
+  rate: number;
 }
 
 /** Everything the roster editor saves at once — `id: null` creates the agent. */
@@ -604,6 +619,10 @@ export interface AgentDraft {
   template_version: number;
   overrides: string[];
   perms: string[];
+  /** `null` is «Automática»: one is given to it when a call starts. */
+  voice?: AgentVoice | null;
+  /** The model it talks with in a call; `""` follows the call's own choice. */
+  call_model?: string;
 }
 
 /** A folder for agent work. Not a repository: `AgentTask.project_id` is still the git working copy

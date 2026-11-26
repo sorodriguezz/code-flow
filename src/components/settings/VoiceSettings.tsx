@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Select, type SelectOption } from "../common/Select";
+import { Select } from "../common/Select";
 import { Skeleton } from "../common/Skeleton";
 import { Button } from "../common/Button";
 import { chipClass } from "../common/recipes";
@@ -19,6 +19,7 @@ import type { TranslationKey } from "../../lib/i18n/translations";
 import { useT } from "../../state/languageStore";
 import { useConfirmStore } from "../../state/confirmStore";
 import { reportMicError, useDictationStore } from "../../state/dictationStore";
+import { micOptions } from "../../lib/dictation/micOptions";
 import { ensureMeetingEvents, useMeetingsStore } from "../../state/meetingsStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { PaneBlock } from "./settingsNav";
@@ -230,15 +231,7 @@ function MicrophoneRow() {
     return () => window.removeEventListener("focus", reload);
   }, [reload]);
 
-  const fallback = inputs?.find((input) => input.isDefault);
-  const options: SelectOption[] = [
-    { value: "", label: fallback ? t("dictation.micDefaultNamed", { name: fallback.name }) : t("dictation.micDefault") },
-    ...(inputs ?? []).map((input) => ({ value: input.id, label: input.name })),
-  ];
-  // Chosen once and unplugged now: still the choice, and recordings use the default meanwhile.
-  if (device && inputs && !inputs.some((input) => input.id === device)) {
-    options.push({ value: device, label: t("dictation.micAbsent") });
-  }
+  const options = micOptions(inputs, device, t);
 
   return (
     <div className="flex flex-col gap-1.5">

@@ -30,6 +30,7 @@ import { translate, useLanguageStore } from "./languageStore";
 import type { Language } from "../lib/i18n/translations";
 import { pushErrorToast } from "./toastStore";
 import { useCodiStore } from "./codiStore";
+import { callOngoing, useTeamCallStore } from "./teamCallStore";
 import { codiAnnounce } from "../lib/tauri/codiCommands";
 import { isMainWindow } from "../lib/windowIdentity";
 
@@ -332,9 +333,11 @@ async function write(
   await setSetting(key, value).catch((error) => pushErrorToast(String(error)));
 }
 
-/** A meeting being recorded, or a dictation under way — the two moments a voice would be heard by the microphone. */
+/** A meeting being recorded, or a dictation under way — the two moments a voice would be heard by
+ *  the microphone — and a call with a team, where the speaker is the agents' and nothing talks over them. */
 function quietNow(): boolean {
   const { quietMeeting, quietDictation } = useSpeechStore.getState();
+  if (callOngoing(useTeamCallStore.getState().call)) return true;
   if (quietMeeting && useMeetingsStore.getState().status?.recording) return true;
   if (quietDictation && useDictationStore.getState().phase !== "idle") return true;
   return false;

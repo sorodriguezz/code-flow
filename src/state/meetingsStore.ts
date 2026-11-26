@@ -72,6 +72,7 @@ export const KEYS = {
   threads: "meetings_threads",
   audioDays: "meetings_audio_days",
   detect: "meetings_detect",
+  relate: "meetings_relate_ai",
   bench: "meetings_bench",
   vocabulary: "meetings_vocabulary",
   consent: "meetings_consent_seen",
@@ -90,6 +91,8 @@ export interface MeetingSettings {
   threads: number;
   audioDays: number;
   detect: boolean;
+  /** After the AI writes about a meeting, have it say which earlier notes it continues. */
+  relate: boolean;
   vocabulary: string;
   bench: MeetingBench | null;
   consentSeen: boolean;
@@ -109,6 +112,7 @@ const DEFAULT_SETTINGS: MeetingSettings = {
   threads: 0,
   audioDays: 30,
   detect: true,
+  relate: true,
   vocabulary: "",
   bench: null,
   consentSeen: false,
@@ -225,6 +229,7 @@ function parseSettings(raw: Record<string, string>): MeetingSettings {
     threads: Number.parseInt(raw[KEYS.threads] ?? "0", 10) || 0,
     audioDays: Number.isFinite(days) ? days : 30,
     detect: raw[KEYS.detect] !== "0",
+    relate: raw[KEYS.relate] !== "0",
     vocabulary: raw[KEYS.vocabulary] ?? "",
     bench,
     consentSeen: raw[KEYS.consent] === "1",
