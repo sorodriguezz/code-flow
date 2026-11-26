@@ -24,6 +24,8 @@ struct Script {
     hushed: usize,
     /// A turn that never ends by itself: only a stop ends it.
     stuck: Option<String>,
+    /// Members whose answer waits to be let go: thinking for as long as the test wants.
+    held: HashMap<String, Arc<tokio::sync::Notify>>,
 }
 
 #[derive(Clone, Default)]
@@ -39,6 +41,15 @@ impl Scripted {
     fn said(&self) -> Vec<(String, String)> {
         self.with(|s| s.said.clone())
     }
+    /// `member` thinks until [`Scripted::let_go`].
+    fn hold(&self, member: &str) {
+        self.with(|s| s.held.insert(member.into(), Arc::new(tokio::sync::Notify::new())));
+    }
+    fn let_go(&self, member: &str) {
+        if let Some(gate) = self.with(|s| s.held.remove(member)) {
+            gate.notify_one();
+        }
+    }
     fn phase(&self) -> &'static str {
         self.with(|s| s.states.last().map(|state| state.phase).unwrap_or("none"))
     }
@@ -47,11 +58,17 @@ impl Scripted {
 impl Stage for Scripted {
     fn think(&self, _call: &str, thought: Thought, written: mpsc::UnboundedSender<String>, stop: CancellationToken) -> impl Future<Output = Result<String, String>> + Send {
         let member = thought.member.member.id.clone();
-        let (answer, stuck) = self.with(|s| {
+        let (answer, stuck, gate) = self.with(|s| {
             s.asked.push((member.clone(), thought.ask.clone()));
-            (s.answers.get_mut(&member).and_then(VecDeque::pop_front), s.stuck.as_deref() == Some(member.as_str()))
+            (s.answers.get_mut(&member).and_then(VecDeque::pop_front), s.stuck.as_deref() == Some(member.as_str()), s.held.get(&member).cloned())
         });
         async move {
+            if let Some(gate) = gate {
+                tokio::select! {
+                    _ = gate.notified() => {}
+                    _ = stop.cancelled() => return Err(crate::ai_runs::CANCELLED_MARKER.to_string()),
+                }
+            }
             if stuck {
                 let _ = written.send("Empiezo a explicar algo largo. ".to_string());
                 stop.cancelled().await;
@@ -94,8 +111,16 @@ impl Stage for Scripted {
         "- Corrida «Autenticación»: 2 de 3 tareas terminadas.".into()
     }
     fn look(&self, _chat: &Chat, member: MemberSnap, what: String, _talk: String, _lang: &'static str, _stop: CancellationToken) -> impl Future<Output = Result<(String, String), String>> + Send {
-        self.with(|s| s.looked.push((member.member.id.clone(), what.clone())));
-        async move { Ok((format!("Informe completo sobre {what} en `cita.repository.ts`."), format!("Revisé {what}: falta un índice."))) }
+        let gate = self.with(|s| {
+            s.looked.push((member.member.id.clone(), what.clone()));
+            s.held.get(&format!("look:{}", member.member.id)).cloned()
+        });
+        async move {
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
+            Ok((format!("Informe completo sobre {what} en `cita.repository.ts`."), format!("Revisé {what}: falta un índice.")))
+        }
     }
     fn minutes(&self, _chat: &Chat, _lead: MemberSnap, _system: String, _talk: String) -> impl Future<Output = Result<String, String>> + Send {
         let minutes = self.with(|s| s.minutes.clone());
@@ -152,6 +177,9 @@ fn call() -> Shared {
         talk: "fast",
         last: None,
         hands: Default::default(),
+        said: 0,
+        thoughts: Default::default(),
+        thought: 0,
         wrap: None,
         countdown_ends_ms: None,
         countdown: 0,
@@ -285,6 +313,110 @@ async fn a_look_at_the_code_goes_on_behind_the_call_and_comes_back_asking_for_th
     // The whole report is the conversation's; the call heard the gist.
     assert!(room.stage.with(|s| s.kept.iter().any(|(who, text)| who == "dba" && text.starts_with("Informe completo"))));
     room.until("the DBA is listening again", |r| r.seat_state("dba") == "listening").await;
+}
+
+#[tokio::test]
+async fn whoever_was_still_thinking_when_the_user_moved_on_raises_its_hand_and_speaks_when_given_the_word() {
+    let room = Room::open();
+    room.stage.hold("lead");
+    room.stage.hold("qa");
+    room.stage.answers("lead", &["Seguimos el lienzo y lo cerramos con un registro de decisión."]);
+    room.stage.answers("qa", &["Faltan dos escenarios."]);
+    room.stage.answers("dba", &["Falta particionar la tabla por fecha."]);
+    room.say("Arquitecto, ¿qué hacemos con el estado del proceso?");
+    room.until("the lead is thinking", |r| r.seat_state("lead") == "thinking").await;
+    room.say("QA, ¿qué falta probar?");
+    room.until("QA is thinking", |r| r.seat_state("qa") == "thinking").await;
+
+    // The user turns to the DBA: the other two go on thinking, and the DBA — who answers the last
+    // thing said — speaks as soon as it has its answer.
+    room.say("DBA, ¿qué falta para que la base soporte el histórico?");
+    room.until("the DBA answered", |r| r.stage.said().len() == 1).await;
+    assert_eq!(room.stage.said()[0].0, "dba");
+    assert_eq!(room.seat_state("lead"), "thinking");
+    assert_eq!(room.stage.with(|s| s.hushed), 3, "nobody was cut off but by the user speaking");
+
+    // QA finishes first, then the lead: neither speaks — each raises its hand, in that order.
+    room.stage.let_go("qa");
+    room.until("QA has its hand up", |r| r.seat_state("qa") == "hand").await;
+    room.stage.let_go("lead");
+    room.until("the lead has its hand up", |r| r.seat_state("lead") == "hand").await;
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(room.stage.said().len(), 1, "nobody speaks without the word: {:?}", room.stage.said());
+    let order = |r: &Room| lock(&r.call).view().seats.iter().map(|seat| (seat.member_id.clone(), seat.hand)).filter(|(_, hand)| *hand > 0).collect::<Vec<_>>();
+    assert_eq!(order(&room), vec![("lead".to_string(), 2), ("qa".to_string(), 1)]);
+    assert_eq!(room.lines().len(), 4, "what waits is not in the transcript yet: {:?}", room.lines());
+
+    // The hand is pressed: the lead says it, and QA moves up.
+    room.events.send(Event::Grant("lead".into())).unwrap();
+    room.until("the lead spoke", |r| r.stage.said().len() == 2).await;
+    assert_eq!(room.stage.said()[1], ("lead".to_string(), "Seguimos el lienzo y lo cerramos con un registro de decisión.".to_string()));
+    room.until("the lead is listening again", |r| r.seat_state("lead") == "listening").await;
+    assert_eq!(order(&room), vec![("qa".to_string(), 1)]);
+    assert!(room.stage.with(|s| s.kept.iter().any(|(who, text)| who == "lead" && text.starts_with("Seguimos el lienzo"))), "what it said is kept once it is said");
+
+    // Or it is named: «adelante» gives it the word and asks nothing new.
+    room.say("QA, adelante");
+    room.until("QA spoke", |r| r.stage.said().len() == 3).await;
+    assert_eq!(room.stage.said()[2], ("qa".to_string(), "Faltan dos escenarios.".to_string()));
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(room.stage.with(|s| s.asked.len()), 3, "giving the word is not a question: {:?}", room.stage.with(|s| s.asked.clone()));
+    assert!(order(&room).is_empty());
+}
+
+#[tokio::test]
+async fn a_hand_can_be_lowered_and_the_next_in_line_is_whoever_waited_longest() {
+    let room = Room::open();
+    room.stage.hold("lead");
+    room.stage.hold("qa");
+    room.stage.answers("lead", &["Lo mío puede esperar."]);
+    room.stage.answers("qa", &["Hay un escenario sin cubrir."]);
+    room.stage.answers("dba", &["Listo por mi parte."]);
+    room.say("Arquitecto, ¿algo más?");
+    room.until("the lead is thinking", |r| r.seat_state("lead") == "thinking").await;
+    room.say("QA, ¿y tú?");
+    room.until("QA is thinking", |r| r.seat_state("qa") == "thinking").await;
+    room.say("DBA, ¿cómo vas?");
+    room.until("the DBA answered", |r| r.stage.said().len() == 1).await;
+    room.stage.let_go("lead");
+    room.until("the lead has its hand up", |r| r.seat_state("lead") == "hand").await;
+    room.stage.let_go("qa");
+    room.until("QA has its hand up", |r| r.seat_state("qa") == "hand").await;
+
+    room.events.send(Event::Lower("lead".into())).unwrap();
+    room.until("the lead's hand is down", |r| r.seat_state("lead") == "listening").await;
+    // «El siguiente» names nobody: it is whoever is first in line now.
+    room.say("El siguiente");
+    room.until("QA spoke", |r| r.stage.said().len() == 2).await;
+    assert_eq!(room.stage.said()[1].0, "qa");
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(room.stage.said().iter().all(|(member, _)| member != "lead"), "a lowered hand says nothing");
+}
+
+#[tokio::test]
+async fn what_comes_back_from_the_code_after_the_conversation_moved_on_waits_for_the_word_and_hanging_up_drops_it() {
+    let room = Room::open();
+    room.stage.with(|s| s.minutes = "{\"summary\": \"Se conversó.\"}".into());
+    room.stage.hold("qa");
+    room.stage.hold("look:dba");
+    room.stage.answers("dba", &["Lo reviso y te digo.\n[[revisar: los índices de la tabla cita]]"]);
+    room.stage.answers("qa", &["Nada nuevo."]);
+    room.say("DBA, ¿faltan índices?");
+    room.until("the DBA went to look", |r| r.seat_state("dba") == "looking").await;
+    // By the time it is back the user is on something else.
+    room.say("QA, ¿y las pruebas?");
+    room.until("QA is thinking", |r| r.seat_state("qa") == "thinking").await;
+    room.stage.let_go("look:dba");
+    room.until("the DBA is back, with its hand up", |r| r.seat_state("dba") == "hand").await;
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert_eq!(room.stage.said().len(), 1, "{:?}", room.stage.said());
+
+    // Hung up: nobody is left thinking or waiting.
+    room.events.send(Event::HangUp).unwrap();
+    room.until("ended", |r| r.stage.phase() == "ended").await;
+    assert!(lock(&room.call).hands.is_empty());
+    assert!(lock(&room.call).thoughts.is_empty());
+    assert!(lock(&room.call).view().seats.iter().all(|seat| seat.state == "listening" && seat.hand == 0));
 }
 
 const MINUTES: &str = "{\"title\": \"Outbox para citas\", \"summary\": \"Se acordó el outbox.\", \"decisions\": [\"Usar outbox\"], \

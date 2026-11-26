@@ -12,7 +12,6 @@
  * (`src-tauri/src/runner`) and every window only watches and sends orders.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { isMainWindow } from "../../lib/windowIdentity";
 import { Inbox } from "./live/Inbox";
 import { AnimatePresence, motion } from "framer-motion";
 import { Activity, Bot, CalendarClock, Hand, Kanban, Network, SquareTerminal, WandSparkles } from "lucide-react";
@@ -38,7 +37,6 @@ import { DeciderDialog, GovernorDialog } from "./Settings";
 import { BoardSpace } from "./board/BoardSpace";
 import { CardDrawer } from "./board/CardDrawer";
 import { TeamsSpace } from "./teams/TeamsSpace";
-import { TeamChatWindows } from "./teams/TeamChatWindow";
 import { TeamTemplatesDialog } from "./teams/TeamTemplates";
 import { RosterSpace } from "./roster/RosterSpace";
 import { AgentWizard } from "./roster/AgentWizard";
@@ -240,10 +238,6 @@ export function CrewView() {
             <TerminalBench />
           </div>
         )}
-        {/* The chats and the call float over the whole app from the main window (`App.tsx`), which
-            keeps them to this area while this view is showing. An island is this view alone: it
-            carries its own. */}
-        {!isMainWindow() && <TeamChatWindows />}
       </div>
 
       <Dock />

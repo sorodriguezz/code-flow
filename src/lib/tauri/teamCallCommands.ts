@@ -30,6 +30,9 @@ export interface CallSeat {
   state: SeatState;
   /** What it is looking at in the code, while it is. */
   note: string;
+  /** Its place among those waiting for the word, from 1 — whoever finished first is first; 0
+   *  when it is not waiting. */
+  hand: number;
   voice: AgentVoice;
   voiceLabel: string;
   /** Whose engine it answers with (`claude`, `codex`…). */
@@ -112,6 +115,10 @@ export const teamCallHeadphones = (on: boolean) => invoke<void>("team_call_headp
 /** Which model the agents talk with when none was chosen for one. The call as it is after, if one is on. */
 export const teamCallTalk = (mode: "fast" | "own") => invoke<CallState | null>("team_call_talk", { mode });
 export const teamCallInterrupt = () => invoke<void>("team_call_interrupt");
+/** Gives the word to a participant with its hand up: it says what it was waiting to say. */
+export const teamCallGrant = (memberId: string) => invoke<void>("team_call_grant", { memberId });
+/** Lowers a participant's hand: what it was waiting to say is not wanted. */
+export const teamCallLower = (memberId: string) => invoke<void>("team_call_lower", { memberId });
 export const teamCallHangUp = () => invoke<void>("team_call_hang_up");
 export const teamCallStartNow = () => invoke<void>("team_call_start_now");
 export const teamCallCancelStart = () => invoke<void>("team_call_cancel_start");

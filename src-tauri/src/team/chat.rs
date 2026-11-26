@@ -592,6 +592,14 @@ pub fn recover(conn: &Connection) -> rusqlite::Result<()> {
                 chat.active_member_id.clear();
                 save(conn, &mut chat)
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+            } else if !chat.active_run_id.is_empty() || !chat.active_member_id.is_empty() {
+                // Nothing runs when the app starts. A turn outside a message to the team — a look
+                // at the code during a call — used to leave its run named here for good, and every
+                // window went on listing it as under way.
+                chat.active_run_id.clear();
+                chat.active_member_id.clear();
+                save(conn, &mut chat)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
             }
         }
     }
@@ -714,6 +722,24 @@ pub(in crate::team) async fn turn(
         }
     };
     let elapsed = started.elapsed().as_millis() as i64;
+    // The run is over, so the conversation stops naming it: what a window lists as under way is
+    // read from here. A message to the team clears the member too once the whole exchange is done;
+    // a turn outside one — a look at the code during a call — has nobody else to do it.
+    let rested = with_conn(app, |conn| {
+        let mut chat = get(conn, chat_id)?;
+        if chat.active_run_id != run_id {
+            return Ok(false);
+        }
+        chat.active_run_id.clear();
+        if !matches!(chat.status.as_str(), "running" | "cancelling") {
+            chat.active_member_id.clear();
+        }
+        save(conn, &mut chat)?;
+        Ok(true)
+    });
+    if rested.unwrap_or(false) {
+        changed(app, chat_id);
+    }
     with_conn(app, |conn| {
         let (status, error) = match &reply {
             Ok(_) => ("idle", ""),

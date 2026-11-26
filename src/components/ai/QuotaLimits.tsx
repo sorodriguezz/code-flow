@@ -296,7 +296,7 @@ export function limitLabel(limit: QuotaLimit, narrowed: Set<string>, t: Translat
  * Numbers that came from the CLI's last run rather than from the provider (`from_run`): said, with
  * how old they are — and, for the system account, why the provider could not be read (`from_run|…`).
  */
-function FromRunNote({ quota }: { quota: ProviderQuota }) {
+export function FromRunNote({ quota }: { quota: ProviderQuota }) {
   const t = useT();
   const why = quota.error.split("|").slice(1).join("|");
   const minutes = quota.fetched_at ? Math.max(0, Math.floor((Date.now() - Date.parse(quota.fetched_at)) / 60_000)) : 0;
@@ -335,7 +335,7 @@ function shortReason(why: string): string {
  * The backend marks it by leaving `fetched_at` empty — no limits, no error and no read time is a
  * provider whose request is still out, which only happens for the ones that answer by running their
  * CLI. Everything else carries the instant it was read, even when what it read was "nothing". */
-function isPending(quota: ProviderQuota): boolean {
+export function isPending(quota: ProviderQuota): boolean {
   return quota.limits.length === 0 && !quota.error && !quota.fetched_at;
 }
 
@@ -349,7 +349,7 @@ function isPending(quota: ProviderQuota): boolean {
  * failing to parse what it got, which is the only one of the five that is nobody's problem but
  * ours. Anything unrecognised — an HTTP status, a transport error — falls in with that last one, and
  * says what it was in a few words: "could not read" alone left the user asking why (2026-10-20). */
-function emptyMessage(error: string, t: Translate): string {
+export function emptyMessage(error: string, t: Translate): string {
   if (!error) return t("quota.noLimits");
   if (error === "signed_out") return t("quota.signedOut");
   if (error === "stale") return t("quota.stale");

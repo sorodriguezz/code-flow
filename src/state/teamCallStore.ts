@@ -1,20 +1,29 @@
 /**
  * A call with a team, as this window sees it. The call itself lives in the backend
- * (`team::call`): the microphone, who has the word and how it ends go on whatever this window
- * shows. Here are its state, what was said, and the window it is drawn in — floating over the
- * view on screen, folded to the shelf when it is in the way.
+ * (`team::call`): the microphone, who has the word and how it ends go on whatever any window
+ * shows. Here are its state and what was said.
+ *
+ * It is drawn in a window of the system's of its own (`lib/floats`, key `call`), which reads the
+ * same state from the backend. **The main window holds whether that window is shown or folded** to
+ * the chip on its shelf, opens it and closes it; the call's own window asks it to (`FloatAction`).
  */
 import { create } from "zustand";
-import type { Rect } from "../lib/floatingRect";
+import { listen } from "@tauri-apps/api/event";
+import { encodeFloatRef, FLOAT, parseFloatRef } from "../lib/floats";
+import { floatClose, floatHide, floatList, floatOpen, type SatelliteInfo } from "../lib/tauri/windows";
+import { broadcast, onWindowMessage } from "../lib/windowBus";
+import { isMainWindow, MAIN_LABEL } from "../lib/windowIdentity";
 import {
   onCallLevel,
   onCallLine,
   onCallState,
   teamCallCancelStart,
   teamCallClose,
+  teamCallGrant,
   teamCallHangUp,
   teamCallHeadphones,
   teamCallInterrupt,
+  teamCallLower,
   teamCallMic,
   teamCallMicChanged,
   teamCallSay,
@@ -29,13 +38,15 @@ import { codiPrepare } from "../lib/tauri/codiCommands";
 import { useDictationStore } from "./dictationStore";
 import { translate } from "./languageStore";
 import { followTarget, notify } from "./notificationStore";
+import { askMain } from "./teamChatWindowStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
 
 const FRAME_KEY = "cf.crew.teamCallWindow";
+const MAIN = isMainWindow();
+/** The call's floating window: there is one. */
+const CALL_KEY = "call";
 
 interface Frame {
-  rect: Rect | null;
-  maximized: boolean;
   /** The transcript under the participants. */
   captions: boolean;
 }
@@ -43,12 +54,17 @@ interface Frame {
 function readFrame(): Frame {
   try {
     const raw = JSON.parse(localStorage.getItem(FRAME_KEY) ?? "null") as Partial<Frame> | null;
-    const r = raw?.rect;
-    const whole = r && [r.x, r.y, r.w, r.h].every((n) => typeof n === "number" && Number.isFinite(n));
-    return { rect: whole ? { x: r.x, y: r.y, w: r.w, h: r.h } : null, maximized: raw?.maximized === true, captions: raw?.captions !== false };
+    return { captions: raw?.captions !== false };
   } catch {
-    return { rect: null, maximized: false, captions: true };
+    return { captions: true };
   }
+}
+
+/** Puts the call's window on screen. */
+function showWindow(call: CallState): void {
+  const ref = encodeFloatRef({ key: CALL_KEY, kind: "call", chatId: call.id, workspaceId: call.workspaceId, owner: call.teamId });
+  void floatOpen(CALL_KEY, ref, call.teamName, call.workspaceId || null).catch(() => {});
+  broadcast({ kind: "float-state", key: CALL_KEY, minimized: false, chatId: null });
 }
 
 function writeFrame(frame: Frame): void {
@@ -83,6 +99,10 @@ interface TeamCallStore extends Frame {
   talk: (mode: "fast" | "own") => Promise<void>;
   interrupt: () => void;
   hangUp: () => void;
+  /** Gives the word to a participant with its hand up. */
+  grant: (memberId: string) => void;
+  /** Lowers a participant's hand: what it had to say is not wanted. */
+  lower: (memberId: string) => void;
   startNow: () => void;
   cancelStart: () => void;
   /** Lets go of a call that is over, and of its window. */
@@ -91,28 +111,28 @@ interface TeamCallStore extends Frame {
   prepare: () => Promise<void>;
   minimize: () => void;
   restore: () => void;
-  place: (rect: Rect) => void;
-  toggleMaximized: () => void;
   toggleCaptions: () => void;
 }
 
 const failed = (error: unknown) => pushErrorToast(String(error));
 
 export const useTeamCallStore = create<TeamCallStore>((set, get) => {
-  const keep = () => writeFrame({ rect: get().rect, maximized: get().maximized, captions: get().captions });
+  const keep = () => writeFrame({ captions: get().captions });
   return {
     call: null,
     lines: [],
     minimized: false,
     starting: false,
     preparing: false,
-    ...(typeof window === "undefined" ? { rect: null, maximized: false, captions: true } : readFrame()),
+    ...(typeof window === "undefined" ? { captions: true } : readFrame()),
 
     start: async (teamId, projectId) => {
+      // The main window starts it: it is the one that opens the call's window and keeps its chip.
+      if (!MAIN) return askMain({ do: "call-start", teamId, projectId });
       const current = get().call;
       if (callOngoing(current)) {
         // One call at a time: the button of a call that is going on brings it back.
-        set({ minimized: false });
+        get().restore();
         if (current?.teamId !== teamId) pushErrorToast(translate("teamCall.busy", { team: current?.teamName ?? "" }));
         return;
       }
@@ -123,6 +143,7 @@ export const useTeamCallStore = create<TeamCallStore>((set, get) => {
         if (current) await teamCallClose().catch(() => undefined);
         const call = await teamCallStart(teamId, projectId);
         set({ call: { ...call, lines: [] }, lines: call.lines, minimized: false });
+        showWindow(call);
       } catch (error) {
         failed(error);
       } finally {
@@ -168,11 +189,15 @@ export const useTeamCallStore = create<TeamCallStore>((set, get) => {
     },
     interrupt: () => void teamCallInterrupt().catch(failed),
     hangUp: () => void teamCallHangUp().catch(failed),
+    grant: (memberId) => void teamCallGrant(memberId).catch(failed),
+    lower: (memberId) => void teamCallLower(memberId).catch(failed),
     startNow: () => void teamCallStartNow().catch(failed),
     cancelStart: () => void teamCallCancelStart().catch(failed),
 
     close: async () => {
+      if (!MAIN) return askMain({ do: "call-close" });
       set({ call: null, lines: [], minimized: false });
+      void floatClose(CALL_KEY).catch(() => {});
       await teamCallClose().catch(failed);
     },
 
@@ -189,15 +214,17 @@ export const useTeamCallStore = create<TeamCallStore>((set, get) => {
       }
     },
 
-    minimize: () => set({ minimized: true }),
-    restore: () => set({ minimized: false }),
-    place: (rect) => {
-      set({ rect });
-      keep();
+    minimize: () => {
+      if (!MAIN) return askMain({ do: "call-minimize" });
+      set({ minimized: true });
+      void floatHide(CALL_KEY).catch(() => {});
+      broadcast({ kind: "float-state", key: CALL_KEY, minimized: true, chatId: null });
     },
-    toggleMaximized: () => {
-      set((s) => ({ maximized: !s.maximized }));
-      keep();
+    restore: () => {
+      if (!MAIN) return askMain({ do: "call-restore" });
+      set({ minimized: false });
+      const call = get().call;
+      if (call) showWindow(call);
     },
     toggleCaptions: () => {
       set((s) => ({ captions: !s.captions }));
@@ -214,22 +241,11 @@ export function callMicLevel(now: number = performance.now()): number {
   return now - level.at > 300 ? 0 : level.value;
 }
 
-/** The elements that are drawing the call, so its end is announced only to somebody not looking. */
-const shown = new Set<HTMLElement>();
-export function showingTeamCall(element: HTMLElement): () => void {
-  shown.add(element);
-  return () => void shown.delete(element);
-}
-function onScreen(): boolean {
-  if (typeof document === "undefined" || document.hidden) return false;
-  for (const element of shown) if (element.isConnected && element.getClientRects().length > 0) return true;
-  return false;
-}
-
-/** The team started on what the call agreed. Seen happening, the room says it; otherwise the bell
- *  keeps it and a toast says it where the user is. */
+/** The team started on what the call agreed. Seen happening — the call's window is open — the room
+ *  says it; folded away, the bell keeps it and a toast says it where the user is. Said by the main
+ *  window alone, which is where the bell and the user's other work are. */
 function announceStart(call: CallState): void {
-  if (!call.runId || onScreen()) return;
+  if (!MAIN || !call.runId || !useTeamCallStore.getState().minimized) return;
   const target = { view: "agents" as const, select: { kind: "teamRun" as const, id: call.runId } };
   notify({ source: "agents", titleKey: "notifications.teamCallStarted", params: { team: call.teamName }, workspaceId: call.workspaceId, target, status: "success", detail: call.wrap?.title || undefined });
   useToastStore.getState().pushToast(translate("notifications.teamCallStarted", { team: call.teamName }), "success", {
@@ -265,4 +281,39 @@ if (typeof window !== "undefined") {
     level = { value: Math.min(1, Math.max(0, value)), at: performance.now() };
   });
   void useTeamCallStore.getState().resume();
+  if (MAIN) {
+    onWindowMessage((message) => {
+      if (message.kind !== "float" || message.to !== MAIN_LABEL) return;
+      const store = useTeamCallStore.getState();
+      const { action } = message;
+      if (action.do === "call-start") void store.start(action.teamId, action.projectId);
+      else if (action.do === "call-minimize") store.minimize();
+      else if (action.do === "call-restore") store.restore();
+      else if (action.do === "call-close") void store.close();
+    });
+    // The call's window, as the system has it. One that is there and hidden — after a reload of
+    // this window — is a call folded to its chip; one that went without being closed from here
+    // (⌘W) leaves the call going, so it folds to the chip it can be brought back from.
+    let had = false;
+    const read = (keys: { key: string; visible: boolean }[]) => {
+      const mine = keys.find((entry) => entry.key === CALL_KEY);
+      if (mine) {
+        had = true;
+        if (!mine.visible) useTeamCallStore.setState({ minimized: true });
+      } else if (had) {
+        had = false;
+        if (useTeamCallStore.getState().call) useTeamCallStore.setState({ minimized: true });
+      }
+    };
+    void floatList()
+      .then((floats) => read((floats ?? []).map((float) => ({ key: parseFloatRef(float.refId)?.key ?? "", visible: float.visible }))))
+      .catch(() => {});
+    void listen<SatelliteInfo[]>("windows:satellites", (event) => {
+      read(event.payload.filter((s) => s.kind === "float").map((s) => ({ key: parseFloatRef(s.ref_id)?.key ?? "", visible: true })));
+    }).catch(() => {});
+  } else if (FLOAT?.kind === "call") {
+    onWindowMessage((message) => {
+      if (message.kind === "float-state" && message.key === CALL_KEY) useTeamCallStore.setState({ minimized: message.minimized });
+    });
+  }
 }

@@ -5,11 +5,15 @@
 //! not from Codi's own listener: that one answers to a name and hands what it hears to Codi's
 //! brain. Here everything said is for the call, and the call decides who it was for.
 //!
-//! **An agent's voice is not the user.** On speakers the microphone hears the agents too. While
-//! one speaks — and for a moment after, the end of its words is still in the room — what is heard
-//! is marked as said over a voice (the call lets through only a name or a «esperen», unless the
-//! user said they wear headphones), a transcript that is mostly the words being said is dropped
-//! outright, and the detector's bar is raised.
+//! **An agent's voice is not the user.** On speakers the microphone hears the agents too. What is
+//! heard while one speaks — and for a moment after, the end of its words is still in the room — is
+//! marked as said over a voice (the call lets through only a name or a «esperen», unless the user
+//! said they wear headphones), a transcript that is the agents' own words in their own order is
+//! dropped outright, and the detector's bar is raised.
+//!
+//! Both are judged against **when it was heard**, not when its text is ready: a long thing takes a
+//! second or two to transcribe, by which time the voice it was heard over has stopped — and an
+//! agent's whole answer, which opens with its own name, came through as the user's.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -29,6 +33,41 @@ const THRESHOLD_SPEAKING: f32 = 0.7;
 const SHORTEST: usize = 16_000 * 3 / 10;
 /// How long after a voice stops what is heard may still be that voice.
 const TAIL: Duration = Duration::from_millis(900);
+/// How long what an agent said is remembered, to tell it from the user when it is heard back.
+const REMEMBER: Duration = Duration::from_secs(90);
+
+/// What the agents' voices have been saying, and when: each stretch of one voice with the last
+/// moment it was heard to be on.
+#[derive(Default)]
+struct Voices {
+    said: std::collections::VecDeque<(Instant, String)>,
+}
+
+impl Voices {
+    /// A voice is on now, saying `text` — everything of its turn so far.
+    fn on(&mut self, now: Instant, text: String) {
+        match self.said.back_mut() {
+            // The same turn, grown by a sentence — or a block later.
+            Some((at, last)) if text.starts_with(last.as_str()) || last.starts_with(text.as_str()) => {
+                *at = now;
+                if text.len() > last.len() {
+                    *last = text;
+                }
+            }
+            _ => self.said.push_back((now, text)),
+        }
+        while self.said.front().is_some_and(|(at, _)| now.duration_since(*at) > REMEMBER) {
+            self.said.pop_front();
+        }
+    }
+
+    /// What was being said while something heard from `began` on was being heard — nothing when no
+    /// voice was on then, nor in the moment before.
+    fn over(&self, began: Instant) -> Option<String> {
+        let texts: Vec<&str> = self.said.iter().filter(|(at, _)| *at + TAIL >= began).map(|(_, text)| text.as_str()).collect();
+        (!texts.is_empty()).then(|| texts.join(" "))
+    }
+}
 
 struct Running {
     capture: crate::dictation::capture::Capture,
@@ -96,7 +135,7 @@ pub fn start(app: &AppHandle, events: UnboundedSender<Event>, gate: Arc<AtomicBo
         if crate::dictation::permission::request() == crate::dictation::permission::Permission::Denied {
             return Err(Deaf::Denied);
         }
-        let (tx, rx) = mpsc::channel::<Vec<f32>>();
+        let (tx, rx) = mpsc::channel::<Heard>();
         let level_app = app.clone();
         let last_level = Mutex::new(Instant::now());
         let capture = crate::dictation::capture::listen(
@@ -110,8 +149,12 @@ pub fn start(app: &AppHandle, events: UnboundedSender<Event>, gate: Arc<AtomicBo
                     let _ = level_app.emit(LEVEL_EVENT, level);
                 }
             },
-            move |block| {
-                let _ = tx.send(block);
+            move |samples| {
+                // Stamped as it is captured, with what a voice was saying then: the thread that
+                // reads these falls behind while it transcribes, and by the time it gets to a
+                // block the voice it was heard over may have stopped.
+                let voice = crate::speech::speaking().then(|| crate::speech::saying().unwrap_or_default());
+                let _ = tx.send(Heard { at: Instant::now(), voice, samples });
             },
         )
         .map_err(|error| if error == crate::dictation::capture::DENIED { Deaf::Denied } else { Deaf::Failed(error) })?;
@@ -142,7 +185,14 @@ pub fn open() -> bool {
     running().lock().is_ok_and(|held| held.is_some())
 }
 
-fn run(listener: Listener, rx: mpsc::Receiver<Vec<f32>>, stop: &AtomicBool, events: &UnboundedSender<Event>, lang: &'static str, names: &[String]) {
+/// A block of what the microphone heard: when, and what an agent's voice was saying at that moment.
+struct Heard {
+    at: Instant,
+    voice: Option<String>,
+    samples: Vec<f32>,
+}
+
+fn run(listener: Listener, rx: mpsc::Receiver<Heard>, stop: &AtomicBool, events: &UnboundedSender<Event>, lang: &'static str, names: &[String]) {
     let mut detector = match vad::Detector::new(&vad::model_path(), THRESHOLD) {
         Ok(detector) => detector,
         Err(error) => {
@@ -152,17 +202,16 @@ fn run(listener: Listener, rx: mpsc::Receiver<Vec<f32>>, stop: &AtomicBool, even
     };
     let mut raised = false;
     let mut was_speaking = false;
-    // The last moment an agent's voice was heard to be on, and what it was saying.
-    let mut voice: Option<(Instant, String)> = None;
+    let mut voices = Voices::default();
     while !stop.load(Ordering::SeqCst) {
-        let block = match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(block) => block,
+        let Heard { at, voice, samples: block } = match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(heard) => heard,
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        let speaking_now = crate::speech::speaking();
-        if speaking_now {
-            voice = Some((Instant::now(), crate::speech::saying().unwrap_or_default()));
+        let speaking_now = voice.is_some();
+        if let Some(saying) = voice {
+            voices.on(at, saying);
         }
         // An agent's voice raises the bar; a new detector, since the threshold is part of its config.
         if speaking_now != raised {
@@ -181,6 +230,10 @@ fn run(listener: Listener, rx: mpsc::Receiver<Vec<f32>>, stop: &AtomicBool, even
             if samples.len() < SHORTEST || crate::commands::dictation_cmd::dictating() {
                 continue;
             }
+            // When it was heard — it ends with the block just read — and not when its text is ready:
+            // by then the voice it was heard over may have been quiet for seconds.
+            let began = at.checked_sub(Duration::from_millis(samples.len() as u64 * 1000 / 16_000)).unwrap_or(at);
+            let over = voices.over(began);
             let text = match transcribe(listener, &samples, lang, names) {
                 Ok(text) => text,
                 Err(error) => {
@@ -191,8 +244,7 @@ fn run(listener: Listener, rx: mpsc::Receiver<Vec<f32>>, stop: &AtomicBool, even
             if text.trim().is_empty() {
                 continue;
             }
-            let over = voice.as_ref().filter(|(at, _)| at.elapsed() <= TAIL);
-            if over.is_some_and(|(_, saying)| echoes(&text, saying)) {
+            if over.as_deref().is_some_and(|saying| echoes(&text, saying)) {
                 continue;
             }
             let _ = events.send(Event::Said { text, typed: false, over_voice: over.is_some() });
@@ -200,17 +252,35 @@ fn run(listener: Listener, rx: mpsc::Receiver<Vec<f32>>, stop: &AtomicBool, even
     }
 }
 
-/// Most of `heard` is the words being said: an agent's voice, heard back.
+/// `heard` is what was being said (`saying`), heard back: the agents' own words in their own
+/// order. Words in common are not enough — somebody asking about «la base de datos» while an agent
+/// talks about it shares most of its words with it — so what counts is runs: half of what was
+/// heard in runs of three words the voice said, or most of it in pairs, which is what a transcript
+/// with a word misheard here and there still leaves.
 pub(super) fn echoes(heard: &str, saying: &str) -> bool {
     let normal = crate::codi::router::normalize;
-    let said: std::collections::HashSet<String> = normal(saying).split(' ').map(str::to_string).collect();
-    let heard = normal(heard);
-    let words: Vec<&str> = heard.split(' ').filter(|w| w.len() > 2).collect();
-    if words.is_empty() {
+    let (heard, saying) = (normal(heard), normal(saying));
+    let heard: Vec<&str> = heard.split(' ').filter(|w| !w.is_empty()).collect();
+    let said: Vec<&str> = saying.split(' ').filter(|w| !w.is_empty()).collect();
+    if heard.is_empty() || said.is_empty() {
         return false;
     }
-    let shared = words.iter().filter(|w| said.contains(**w)).count();
-    shared * 2 > words.len()
+    // A word or two: an echo when the voice said exactly that.
+    if heard.len() < 3 {
+        return said.windows(heard.len()).any(|run| run == heard.as_slice());
+    }
+    // How many of the words heard sit in a run of `n` the voice said.
+    let covered = |n: usize| {
+        let runs: std::collections::HashSet<&[&str]> = said.windows(n).collect();
+        let mut inside = vec![false; heard.len()];
+        for at in 0..=heard.len() - n {
+            if runs.contains(&heard[at..at + n]) {
+                inside[at..at + n].fill(true);
+            }
+        }
+        inside.into_iter().filter(|inside| *inside).count()
+    };
+    covered(3) * 2 >= heard.len() || covered(2) * 10 >= heard.len() * 7
 }
 
 /// The text of one thing said, by whichever engine listens. The team's names go in whisper's prompt:
@@ -242,5 +312,37 @@ mod tests {
         assert!(!echoes("QA, ¿encontraste algún problema?", saying));
         assert!(!echoes("Esperen", saying));
         assert!(!echoes("", saying));
+    }
+
+    #[test]
+    fn a_whole_answer_heard_back_is_an_echo_though_it_opens_with_a_name_and_a_word_was_misheard() {
+        let saying = "Te responde Arquitecto. La pregunta es sobre la base de datos de maestros, y ahí el choque es claro: el lienzo quiere el estado del ETL en Table Storage, vía la API del Core, y el código lo tiene como schema etl en Prisma. Mi postura es seguir el lienzo y cerrarlo con un ADR. Antes de afirmarlo del todo, lo confirmo en el código.";
+        let heard = "responde arquitecto. La pregunta es sobre la base de datos de maestros y ahí el choque es claro. El lienzo quiere el estado del ETL en Table Storage vía la API del core. Y el código lo tiene como esquema Excel en Prisma. Mi postura es seguir el lienzo y cerrarlo con una DR. Antes de afirmarlo del todo. Lo confirmo en el código.";
+        assert!(echoes(heard, saying));
+        // A piece of it, cut where the detector cut it.
+        assert!(echoes("QA haga la verificación completa, que integraciones corrija", "Falta decidir cómo seguimos: que QA haga la verificación completa, que Integraciones corrija la consulta y las credenciales."));
+        // The user, talking about the same thing over it, is not the voice.
+        assert!(!echoes("DBA, ¿qué falta para que la base de datos soporte particiones por fecha?", saying));
+        assert!(!echoes("Arquitecto, espera un segundo", saying));
+        // A word alone is the voice's only when the voice said it.
+        assert!(echoes("para", "Esto es para el módulo de pagos."));
+        assert!(!echoes("para", "El desarrollo está terminado."));
+    }
+
+    #[test]
+    fn what_was_being_said_is_judged_by_when_it_was_heard() {
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut voices = Voices::default();
+        // One turn, growing sentence by sentence, then another agent's.
+        voices.on(at(0), "Te responde Arquitecto.".into());
+        voices.on(at(2_000), "Te responde Arquitecto. La pregunta es sobre la base.".into());
+        voices.on(at(20_000), "Revisé los índices.".into());
+        // Heard from the middle of the first turn on: both were said over it.
+        assert_eq!(voices.over(at(1_000)).as_deref(), Some("Te responde Arquitecto. La pregunta es sobre la base. Revisé los índices."));
+        // Heard just after the last voice stopped: its tail is still in the room.
+        assert_eq!(voices.over(at(20_500)).as_deref(), Some("Revisé los índices."));
+        // Heard well after: nobody was speaking.
+        assert_eq!(voices.over(at(22_000)), None);
     }
 }

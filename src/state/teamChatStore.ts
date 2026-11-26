@@ -9,8 +9,10 @@ import { useChatStore } from "./chatStore";
 import { pushErrorToast, useToastStore } from "./toastStore";
 import { translate } from "./languageStore";
 import { followTarget, notify } from "./notificationStore";
-import { teamChatOnScreen, useTeamChatWindowStore } from "./teamChatWindowStore";
+import { askMain, teamChatOnScreen, useTeamChatWindowStore } from "./teamChatWindowStore";
 import { splitAttachmentNote } from "../lib/attachmentNote";
+import { onWindowMessage } from "../lib/windowBus";
+import { isMainWindow, MAIN_LABEL } from "../lib/windowIdentity";
 
 export const teamChatBusy = (state: TeamChatState | undefined) => state?.chat.status === "running" || state?.chat.status === "cancelling";
 
@@ -46,18 +48,28 @@ function forget(chatId: string): void {
 export async function openTeamChatWindow(chatId: string): Promise<void> {
   if (!useTeamChatStore.getState().states[chatId]) await useTeamChatStore.getState().refresh(chatId);
   const state = useTeamChatStore.getState().states[chatId];
-  if (state) useTeamChatWindowStore.getState().open(chatId, state.chat.teamId);
+  if (state) useTeamChatWindowStore.getState().open(chatId, state.chat.teamId, { workspaceId: state.chat.workspaceId, title: state.chat.teamName });
 }
 
 /**
  * A turn ended. Seen happening, that is all there is to say; otherwise its window's chip is
  * marked, the bell keeps a row and a toast says it where the user is now. Both lead to the
- * conversation's window, which floats over whatever view that is.
+ * conversation's window.
+ *
+ * The chip, the bell and the user's other work are the main window's: a turn sent from a floating
+ * window is announced there, told whether its own window was showing it.
  */
 function announce(state: TeamChatState): void {
   const { chat } = state;
-  if (teamChatOnScreen(chat.id)) return;
   const failed = chat.status === "error" || Boolean(chat.error);
+  if (!isMainWindow()) return askMain({ do: "ended", chatId: chat.id, how: failed ? "error" : "done", seen: teamChatOnScreen(chat.id) });
+  if (teamChatOnScreen(chat.id)) return;
+  tell(state, failed);
+}
+
+/** Says a turn nobody saw end has ended: the chip, the bell and a toast. */
+function tell(state: TeamChatState, failed: boolean): void {
+  const { chat } = state;
   useTeamChatWindowStore.getState().markUnread(chat.id, failed ? "error" : "done");
   const titleKey = failed ? "notifications.teamChatFailed" : "notifications.teamChatDone";
   const asked = [...state.messages].reverse().find((message) => message.role === "user");
@@ -184,12 +196,27 @@ export const useTeamChatStore = create<TeamChatStore>((set, get) => ({
 }));
 
 if (typeof window !== "undefined") {
+  // A turn that ended in a floating window with nobody looking at it: said here, where the bell is.
+  if (isMainWindow()) {
+    onWindowMessage((message) => {
+      if (message.kind !== "float" || message.to !== MAIN_LABEL || message.action.do !== "ended" || message.action.seen) return;
+      const { chatId, how } = message.action;
+      const state = useTeamChatStore.getState().states[chatId];
+      // A team's conversation is told whole; an agent's lights its chip — its task says the rest.
+      if (state) tell(state, how === "error");
+      else useTeamChatWindowStore.getState().markUnread(chatId, how);
+    });
+  }
   void listen<{ chatId: string }>("team-chat:changed", (event) => void useTeamChatStore.getState().refresh(event.payload.chatId));
   // Deleted from another window: this one lets go of it too.
   void listen<{ chatId: string }>("team-chat:deleted", (event) => {
     const { chatId } = event.payload;
     if (deleting.has(chatId)) return;
-    useTeamChatWindowStore.getState().drop(chatId);
     forget(chatId);
+    // Whoever deleted it says what its window does — turn to another of the team's conversations,
+    // or close — and says it to the main window, which holds the windows. Only if that never
+    // comes (the window that deleted it went away mid-way) is a window left on a conversation that
+    // is gone, and then it closes.
+    if (isMainWindow()) window.setTimeout(() => useTeamChatWindowStore.getState().drop(chatId), 2000);
   });
 }

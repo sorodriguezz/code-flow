@@ -160,6 +160,9 @@ pub async fn team_call_start(app: AppHandle, db: State<'_, Db>, team_id: String,
         talk,
         last: None,
         hands: Default::default(),
+        said: 0,
+        thoughts: Default::default(),
+        thought: 0,
         wrap: None,
         countdown_ends_ms: None,
         countdown: 0,
@@ -340,6 +343,18 @@ pub fn team_call_talk(db: State<'_, Db>, mode: String) -> Result<Option<CallStat
 #[tauri::command]
 pub fn team_call_interrupt() -> Result<(), String> {
     send(Event::Interrupt)
+}
+
+/// The user gives the word to `member_id`, who had its hand up: it says what it was waiting to say.
+#[tauri::command]
+pub fn team_call_grant(member_id: String) -> Result<(), String> {
+    send(Event::Grant(member_id))
+}
+
+/// `member_id`'s hand is lowered: what it was waiting to say is not wanted.
+#[tauri::command]
+pub fn team_call_lower(member_id: String) -> Result<(), String> {
+    send(Event::Lower(member_id))
 }
 
 #[tauri::command]

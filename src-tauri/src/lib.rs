@@ -981,6 +981,10 @@ pub fn run() {
             if matches!(event, tauri::WindowEvent::Moved(_)) && window.label() == windows::codi_label() {
                 windows::remember_codi_spot(window);
             }
+            // A floating conversation or the call opens where the last of its kind was left.
+            if matches!(event, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) && windows::is_float(window.label()) {
+                windows::remember_float_frame(window);
+            }
             #[cfg(windows)]
             if matches!(event, tauri::WindowEvent::Resized(_)) {
                 follow_minimize(window);
@@ -1219,6 +1223,11 @@ sharded_invoke_handler! {
         agentcli::agentcli_endpoint,
         agentcli::agentcli_focus,
         windows::open_satellite,
+        windows::float_open,
+        windows::float_hide,
+        windows::float_close,
+        windows::float_list,
+        windows::float_resize,
         chat_lineage::chat_lineage_list,
         chat_lineage::chat_lineage_link,
         chat_lineage::chat_lineage_forget,
@@ -2091,6 +2100,8 @@ sharded_invoke_handler! {
         team::call::commands::team_call_headphones,
         team::call::commands::team_call_talk,
         team::call::commands::team_call_interrupt,
+        team::call::commands::team_call_grant,
+        team::call::commands::team_call_lower,
         team::call::commands::team_call_hang_up,
         team::call::commands::team_call_start_now,
         team::call::commands::team_call_cancel_start,

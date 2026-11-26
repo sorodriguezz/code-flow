@@ -7,10 +7,14 @@
  */
 import type { AgentTask, WorkspaceAgent } from "../../types/domain";
 import { useAgentsStore } from "../../state/agentsStore";
+import { useAiRunStore } from "../../state/aiRunStore";
 import { useLanguageStore } from "../../state/languageStore";
+import { followTarget, type NotificationTarget } from "../../state/notificationStore";
 import { useTeamCallStore } from "../../state/teamCallStore";
-import { useTeamChatStore } from "../../state/teamChatStore";
-import { useTeamChatWindowStore } from "../../state/teamChatWindowStore";
+import { teamChatBusy, useTeamChatStore } from "../../state/teamChatStore";
+import { askMain, useTeamChatWindowStore, type TeamChatWindow } from "../../state/teamChatWindowStore";
+import { teamChatCancel } from "../tauri/teamCommands";
+import { isMainWindow } from "../windowIdentity";
 import { pushErrorToast } from "../../state/toastStore";
 import { useUiStore } from "../../state/uiStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
@@ -23,7 +27,8 @@ const say = (es: string, en: string) => (useLanguageStore.getState().language ==
 export async function chatWithTeam(teamId: string, fresh = false, projectId: string | null = useWorkspaceStore.getState().activeProjectId): Promise<void> {
   try {
     const id = await useTeamChatStore.getState().open(teamId, projectId, fresh);
-    useTeamChatWindowStore.getState().open(id, teamId);
+    const chat = useTeamChatStore.getState().states[id]?.chat;
+    useTeamChatWindowStore.getState().open(id, teamId, { workspaceId: chat?.workspaceId, title: chat?.teamName });
   } catch (error) {
     pushErrorToast(String(error));
   }
@@ -62,9 +67,32 @@ export function conversationName(task: Pick<AgentTask, "title" | "agent_name" | 
 }
 
 /** Unfolds the agent's floating window on `task`, its conversation. */
-export function openAgentChat(task: Pick<AgentTask, "id" | "agent_id" | "workspace_id">): void {
-  useTeamChatWindowStore.getState().openAgent(task.id, task.agent_id, task.workspace_id);
+export function openAgentChat(task: Pick<AgentTask, "id" | "agent_id" | "workspace_id"> & Partial<Pick<AgentTask, "agent_name">>): void {
+  const name = useAgentsStore.getState().roster?.find((agent) => agent.id === task.agent_id)?.name ?? task.agent_name ?? "";
+  useTeamChatWindowStore.getState().openAgent(task.id, task.agent_id, task.workspace_id, name);
   void useAgentsStore.getState().ensureLoaded(task.id);
+}
+
+/**
+ * Closes a conversation's window for good — and with it whatever the team or the agent was still
+ * answering there (the user, 2026-11-26: closed, it must not go on listed as under way). Folding
+ * the window is what keeps a turn going out of sight; closing it is being done with it. What was
+ * already changed in the repository stays.
+ */
+export function closeChatWindow(win: Pick<TeamChatWindow, "key" | "kind" | "chatId">): void {
+  if (win.kind === "team") {
+    const state = useTeamChatStore.getState().states[win.chatId];
+    if (teamChatBusy(state)) void useTeamChatStore.getState().cancel(win.chatId);
+    // Not read in this window: the backend knows whether there is anything to stop.
+    else if (!state) void teamChatCancel(win.chatId).catch(() => {});
+  } else {
+    // The turn may have been sent from another window: its run is known here by what it is about.
+    const runs = useAiRunStore.getState();
+    const about = Object.entries(runs.aboutByRun).find(([runId, run]) => runs.active[runId] && run?.target?.select?.kind === "agentTask" && run.target.select.id === win.chatId);
+    const runId = useAgentsStore.getState().live?.[win.chatId]?.runId ?? about?.[0];
+    if (runId) void runs.cancel(runId);
+  }
+  useTeamChatWindowStore.getState().close(win.key);
 }
 
 /**
@@ -102,4 +130,20 @@ export async function chatWithAgent(agent: WorkspaceAgent, fresh = false): Promi
 /** Brings the Agents view to the front — for what only it can show: the launcher, a run, the roster. */
 export function showAgentsView(): void {
   useUiStore.getState().setActiveView("agents");
+}
+
+/**
+ * Opens `overlay` in the Agents view — the launcher with a draft, a task's whole sheet. From a
+ * floating window that view is the main window's, which comes forward on it.
+ */
+export function openInAgents<T>(overlay: T, open: (overlay: T) => void): void {
+  if (!isMainWindow()) return askMain({ do: "crew-open", overlay });
+  showAgentsView();
+  open(overlay);
+}
+
+/** Goes to `target` — a run, a task — in the main window, whichever window asks. */
+export function followInMain(workspaceId: string | null, target: NotificationTarget): void {
+  if (!isMainWindow()) return askMain({ do: "follow", workspaceId, target });
+  void followTarget(workspaceId, target);
 }

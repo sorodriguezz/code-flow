@@ -3,6 +3,7 @@ import { aiQuotaStatus, getSetting, setSetting, type QuotaTrigger } from "../lib
 import { onTurnSettled } from "./agentEvents";
 import type { ProviderQuota, QuotaLimit } from "../types/domain";
 import { accountKey } from "../lib/aiAccounts";
+import { availabilityOf } from "../lib/quotaOverview";
 
 /** Where the status-bar pick is stored. Blank — the default — means "whichever is fullest". */
 const PICK_SETTING = "quota_pill_limit";
@@ -69,6 +70,8 @@ interface QuotaState {
   railHidden: string[];
   /** Shows or hides one account's ring, and persists the choice. */
   setRailShown: (key: string, shown: boolean) => Promise<void>;
+  /** Replaces the whole list of accounts the rail leaves out. */
+  setRailHidden: (keys: string[]) => Promise<void>;
   /** `trigger` says who asked. `"refresh"` skips the backend's per-provider cache — without that
    * the button re-reads a cache at most a minute old and hands back the same numbers, which looks
    * like a broken button and is in fact a working cache. `"poll"` additionally forbids starting a
@@ -104,6 +107,12 @@ export const useQuotaStore = create<QuotaState>((set, get) => ({
   setRailShown: async (key: string, shown: boolean) => {
     const rest = get().railHidden.filter((k) => k !== key);
     const next = shown ? rest : [...rest, key];
+    set({ railHidden: next });
+    await setSetting(RAIL_HIDDEN_SETTING, next.length ? JSON.stringify(next) : "");
+  },
+
+  setRailHidden: async (keys: string[]) => {
+    const next = [...new Set(keys)];
     set({ railHidden: next });
     await setSetting(RAIL_HIDDEN_SETTING, next.length ? JSON.stringify(next) : "");
   },
@@ -430,11 +439,12 @@ export function ageOf(lastReadAt: number, now: number = Date.now()): "now" | num
 
 /** How worried the bar should look, given how much of the window is gone. Thresholds rather than a
  * gradient so the same percentage is always the same colour across the pill, the panel and the
- * settings screen. */
+ * settings screen — and the same thresholds «Consumo y límites» names its states by
+ * (`lib/quotaOverview`): a warning from «próximo al límite» on, red from «crítico» on. */
 export function severityOf(usedPercent: number): "normal" | "low" | "critical" {
-  if (usedPercent >= 90) return "critical";
-  if (usedPercent >= 75) return "low";
-  return "normal";
+  const status = availabilityOf(usedPercent);
+  if (status === "critical" || status === "exhausted") return "critical";
+  return status === "near" ? "low" : "normal";
 }
 
 function fullestOf(limits: QuotaLimit[]): QuotaLimit | null {

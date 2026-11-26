@@ -55,7 +55,8 @@ export function catalogueFor(identity: WindowIdentity): CodiAction[] {
   }
   const spec = identity.satellite;
   // «Navegador» holds a page of the internet, nothing of the app's for Codi to act on.
-  if (!spec || spec.kind === "quick" || spec.kind === "codi" || spec.kind === "attention" || spec.kind === "browser") return [];
+  // A floating conversation or the call holds no screen of the app either.
+  if (!spec || spec.kind === "quick" || spec.kind === "codi" || spec.kind === "attention" || spec.kind === "browser" || spec.kind === "float") return [];
   // A chat island holds a conversation, not text Codi could read or write into.
   const common = [
     ...uiActions(),

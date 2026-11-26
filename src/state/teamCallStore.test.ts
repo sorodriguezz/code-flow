@@ -10,11 +10,11 @@ vi.mock("../lib/tauri/teamCallCommands", async (original) => ({
   teamCallStart: api.start, teamCallClose: api.close, teamCallState: api.state, teamCallMic: api.mic,
 }));
 
-const { acceptCallLine, acceptCallState, callOngoing, showingTeamCall, useTeamCallStore } = await import("./teamCallStore");
+const { acceptCallLine, acceptCallState, callOngoing, useTeamCallStore } = await import("./teamCallStore");
 const { useToastStore } = await import("./toastStore");
 
 const seat = (memberId: string, state: CallSeat["state"] = "listening"): CallSeat => ({
-  memberId, agentId: `agent-${memberId}`, name: memberId.toUpperCase(), role: "", icon: "", color: "", lead: memberId === "lead", state, note: "", voice: { id: "", pitch: 1, rate: 1 }, voiceLabel: "", provider: "claude", model: "haiku", ownModel: "opus", account: "",
+  memberId, agentId: `agent-${memberId}`, name: memberId.toUpperCase(), role: "", icon: "", color: "", lead: memberId === "lead", state, note: "", hand: 0, voice: { id: "", pitch: 1, rate: 1 }, voiceLabel: "", provider: "claude", model: "haiku", ownModel: "opus", account: "",
 });
 const call = (patch: Partial<CallState> = {}): CallState => ({
   id: "call", chatId: "chat", teamId: "team", teamName: "Equipo Agenda", workspaceId: "ws", lang: "es", phase: "live", startedAtMs: 0, seats: [seat("lead"), seat("dba")],
@@ -68,8 +68,8 @@ describe("team call", () => {
     expect(useTeamCallStore.getState().lines).toEqual([]);
   });
 
-  it("takes the state of its own call only, and says the team started when nobody is looking", () => {
-    useTeamCallStore.setState({ call: call() });
+  it("takes the state of its own call only, and says the team started when its window is folded away", () => {
+    useTeamCallStore.setState({ call: call(), minimized: true });
     acceptCallState(call({ id: "somebody-else", phase: "ended" }));
     expect(useTeamCallStore.getState().call?.phase).toBe("live");
 
@@ -85,17 +85,22 @@ describe("team call", () => {
     expect(api.notify).toHaveBeenCalledTimes(1);
   });
 
-  it("says nothing about a start that is being watched", () => {
-    Object.assign(globalThis, { document: { hidden: false } });
-    const leave = showingTeamCall({ isConnected: true, getClientRects: () => [{}] } as unknown as HTMLElement);
-    try {
-      useTeamCallStore.setState({ call: call() });
-      acceptCallState(call({ phase: "started", runId: "run-1" }));
-    } finally {
-      leave();
-      delete (globalThis as { document?: unknown }).document;
-    }
+  it("says nothing about a start that is being watched: the call's window is open", () => {
+    useTeamCallStore.setState({ call: call(), minimized: false });
+    acceptCallState(call({ phase: "started", runId: "run-1" }));
     expect(api.notify).not.toHaveBeenCalled();
+    expect(useToastStore.getState().toasts).toEqual([]);
+  });
+
+  it("folds its window to the chip and brings it back, and closing lets go of the call", async () => {
+    useTeamCallStore.setState({ call: call() });
+    useTeamCallStore.getState().minimize();
+    expect(useTeamCallStore.getState().minimized).toBe(true);
+    useTeamCallStore.getState().restore();
+    expect(useTeamCallStore.getState().minimized).toBe(false);
+    await useTeamCallStore.getState().close();
+    expect(api.close).toHaveBeenCalled();
+    expect(useTeamCallStore.getState().call).toBeNull();
   });
 
   it("counts a call as going on until it has handed over or ended", () => {

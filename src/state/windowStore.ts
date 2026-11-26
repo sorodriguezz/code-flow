@@ -85,7 +85,9 @@ export function countedSatellites(satellites: readonly SatelliteInfo[]): number 
   // Codi's window neither: one window of its own, summoned by its button, never a detached app.
   // Nor chat islands: several conversations side by side is what they are for, and the user asked
   // that they not spend the islands the limit allows (`windows.rs` gives them a backstop of their own).
-  return satellites.filter((s) => s.kind !== "quick" && s.kind !== "codi" && s.kind !== "chat").length;
+  // Nor the floating conversations and the call: they are not detached screens of the app, and a
+  // call that could not open because four islands were must not be a thing.
+  return satellites.filter((s) => s.kind !== "quick" && s.kind !== "codi" && s.kind !== "chat" && s.kind !== "float").length;
 }
 
 let nextReturnId = 0;

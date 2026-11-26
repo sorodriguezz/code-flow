@@ -16,6 +16,12 @@
 //! **One at a time.** One call (there is one microphone), one voice (whoever has the word), and the
 //! user over both: speaking, or the hand, stops whoever is talking.
 //!
+//! **The user gives the word.** Whoever answers the last thing the user said speaks as soon as it
+//! has its answer. Anybody else who comes to have something to say — an agent that was still
+//! thinking when the user turned to a colleague, one that comes back from the code after the
+//! conversation moved on — raises its hand and waits ([`Hand`]), in the order they finished, until
+//! the user gives it the word: a press on its hand, or its name.
+//!
 //! **Bounded.** A thing said is answered by whoever it names; an agent may hand the word on, at
 //! most [`MAX_HANDS`] times per thing said; a question to everybody is one turn each for at most
 //! [`ROUND`] members and the lead to close. Nobody speaks without being spoken to.
@@ -31,7 +37,7 @@ pub mod route;
 pub mod stage;
 pub mod wrap;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -89,6 +95,9 @@ pub struct SeatView {
     pub state: &'static str,
     /// What it is looking at, while it is.
     pub note: String,
+    /// Its place among those waiting for the word, from 1 — whoever finished first is first; 0
+    /// when it is not waiting.
+    pub hand: usize,
     pub voice: Voice,
     pub voice_label: String,
     /// Whose engine it answers with.
@@ -133,6 +142,17 @@ pub struct CallState {
     pub lines: Vec<Line>,
 }
 
+/// Something an agent has to say and is waiting to be given the word for.
+pub(crate) struct Hand {
+    pub member: String,
+    pub text: String,
+    /// What its words asked of the call — looked at once they are said.
+    pub asks: line::Asks,
+    /// Whether what it says is still to be kept in the team's conversation: an answer is, what
+    /// came back from the code was kept whole when it arrived.
+    pub keep: bool,
+}
+
 pub(crate) struct Seat {
     pub member: MemberSnap,
     pub voice: Voice,
@@ -165,8 +185,16 @@ pub(crate) struct Call {
     pub talk: &'static str,
     /// The agent that spoke last: who an answer with no name goes to.
     pub last: Option<String>,
-    /// What came back from a look at the code and is waiting for the word: `(member, said)`.
-    pub hands: VecDeque<(String, String)>,
+    /// Who is waiting for the word, whoever finished first at the front.
+    pub hands: VecDeque<Hand>,
+    /// How many things the user has said: what tells an answer to the last of them from one the
+    /// conversation has moved on from.
+    pub said: u64,
+    /// Who is thinking, and what stops each: `member → (which thought, its stop)`. One thought per
+    /// member — asked again, the older one is dropped.
+    pub thoughts: HashMap<String, (u64, CancellationToken)>,
+    /// The last thought's number.
+    pub thought: u64,
     pub wrap: Option<WrapUp>,
     pub countdown_ends_ms: Option<u64>,
     /// Bumped whenever a countdown stops counting, so one that was called off does not fire.
@@ -201,6 +229,7 @@ impl Call {
                     lead: seat.lead,
                     state: seat.state,
                     note: seat.note.clone(),
+                    hand: self.hands.iter().position(|hand| hand.member == seat.member.member.id).map_or(0, |at| at + 1),
                     voice: seat.voice.clone(),
                     voice_label: seat.voice_label.clone(),
                     provider: seat.member.provider.clone(),
@@ -262,8 +291,12 @@ pub(crate) enum Event {
     Hearing(bool),
     /// The hand: whoever is speaking stops.
     Interrupt,
-    /// A look at the code came back.
-    Looked { member: String, full: String, said: String, error: Option<String> },
+    /// A look at the code came back. `seq`: how many things the user had said when it left.
+    Looked { member: String, full: String, said: String, error: Option<String>, seq: u64 },
+    /// The user gives the word to `member`, who had its hand up.
+    Grant(String),
+    /// `member`'s hand is lowered: what it had to say is not wanted.
+    Lower(String),
     /// Exchange number so-and-so ended by itself: nobody has the word any more.
     Idle(u64),
     /// The call is hung up: its minutes, and the work if there is any.
@@ -325,8 +358,10 @@ pub trait Stage: Clone + Send + Sync + 'static {
 /// One turn at speaking.
 enum Turn {
     Ask { member: String, ask: Asked, hops: usize },
-    /// Words already written — the opening, what a look at the code found, the close.
-    Say { member: String, text: String },
+    /// Words already written — the opening, what a look at the code found, what somebody waited
+    /// with its hand up to say. `asks`: what those words asked of the call; `keep`: whether they
+    /// are still to be kept in the conversation.
+    Say { member: String, text: String, asks: line::Asks, keep: bool },
 }
 
 enum Asked {
@@ -370,6 +405,8 @@ fn note<S: Stage>(stage: &S, call: &Shared, text: String) {
 fn set_seat<S: Stage>(stage: &S, call: &Shared, member: &str, state: &'static str, note: &str) {
     {
         let mut held = lock(call);
+        // Whoever is waiting for the word goes back to waiting, not to listening.
+        let state = if state == "listening" && held.hands.iter().any(|hand| hand.member == member) { "hand" } else { state };
         if let Some(seat) = held.seats.iter_mut().find(|seat| seat.member.member.id == member) {
             seat.state = state;
             seat.note = note.to_string();
@@ -378,21 +415,70 @@ fn set_seat<S: Stage>(stage: &S, call: &Shared, member: &str, state: &'static st
     publish(stage, call);
 }
 
+/// `member` has `text` to say and waits for the word, behind whoever was already waiting. One
+/// that was waiting keeps its place and says both.
+fn raise<S: Stage>(stage: &S, call: &Shared, member: &str, text: String, asks: line::Asks, keep: bool) {
+    {
+        let mut held = lock(call);
+        match held.hands.iter_mut().find(|hand| hand.member == member) {
+            Some(hand) => {
+                hand.text = format!("{} {text}", hand.text);
+                hand.asks = line::Asks { look: asks.look.or(hand.asks.look.take()), hand: asks.hand.or(hand.asks.hand.take()) };
+                hand.keep |= keep;
+            }
+            None => held.hands.push_back(Hand { member: member.to_string(), text, asks, keep }),
+        }
+    }
+    set_seat(stage, call, member, "hand", "");
+}
+
+/// Takes `member`'s hand down and hands over what it was waiting to say, as its turn.
+fn granted(call: &Shared, member: &str) -> Option<Turn> {
+    let mut held = lock(call);
+    let at = held.hands.iter().position(|hand| hand.member == member)?;
+    let hand = held.hands.remove(at)?;
+    Some(Turn::Say { member: hand.member, text: hand.text, asks: hand.asks, keep: hand.keep })
+}
+
+/// The exchange that has the word: its number, what stops it outright, and what tells it the user
+/// has moved on to something else.
+struct Floor {
+    number: u64,
+    stop: CancellationToken,
+    moved: CancellationToken,
+}
+
+impl Floor {
+    /// Stops it: whoever was speaking or thinking in it is cut off.
+    fn cut(self) {
+        self.stop.cancel();
+    }
+
+    /// The user turned to something else: whoever was speaking stops, whoever was still thinking
+    /// finishes behind the call and raises its hand.
+    fn aside(self) {
+        self.moved.cancel();
+    }
+}
+
 /// Runs a call until its window lets go of it: every [`Event`], in order.
 pub(crate) async fn conduct<S: Stage>(stage: S, call: Shared, events: mpsc::UnboundedSender<Event>, mut inbox: mpsc::UnboundedReceiver<Event>, opening: String) {
-    // The exchange that has the word, by its number, and what stops it.
-    let mut talking: Option<(u64, CancellationToken)> = None;
+    // The exchange that has the word.
+    let mut talking: Option<Floor> = None;
     let mut exchanges = 0u64;
     let looks = CancellationToken::new();
     let mut begin = |turns: Vec<Turn>| {
+        if turns.is_empty() {
+            return None;
+        }
         exchanges += 1;
-        Some((exchanges, begin(&stage, &call, &events, &looks, exchanges, turns)))
+        Some(begin(&stage, &call, &events, &looks, exchanges, turns))
     };
     publish(&stage, &call);
     // The lead opens: the call is heard to have started before anybody asks anything.
     if let Some(lead) = lock(&call).lead().map(|seat| seat.member.member.id.clone()) {
         if !opening.trim().is_empty() {
-            talking = begin(vec![Turn::Say { member: lead, text: opening }]);
+            talking = begin(vec![Turn::Say { member: lead, text: opening, asks: line::Asks::default(), keep: false }]);
         }
     }
     while let Some(event) = inbox.recv().await {
@@ -407,20 +493,32 @@ pub(crate) async fn conduct<S: Stage>(stage: S, call: Shared, events: mpsc::Unbo
                     continue;
                 }
                 let routed = route::route(&text, &seats);
-                if let Some((_, stop)) = talking.take() {
-                    stop.cancel();
-                    stage.hush();
-                }
                 let at_ms = lock(&call).started.elapsed().as_millis() as u64;
                 write(&stage, &call, Line { id: id(), at_ms, who: "user".into(), name: String::new(), text: text.clone(), partial: false, kind: "say" });
                 let chat = lock(&call).chat.clone();
                 stage.keep(&chat, None, &text);
                 match routed.order {
-                    Some(Order::Wait) => {}
-                    Some(Order::End) => close(&stage, &call, &events, false).await,
-                    Some(Order::Go) => close(&stage, &call, &events, true).await,
+                    Some(order) => {
+                        // An order is for everybody: whoever has the word is cut off.
+                        if let Some(floor) = talking.take() {
+                            floor.cut();
+                        }
+                        stage.hush();
+                        match order {
+                            Order::Wait => {}
+                            Order::End => close(&stage, &call, &events, &looks, false).await,
+                            Order::Go => close(&stage, &call, &events, &looks, true).await,
+                        }
+                    }
                     None => {
-                        talking = begin(turns_for(&call, &routed.to, &text));
+                        // The user has the word now, and gives it: whoever was speaking stops, and
+                        // whoever was still thinking keeps what it has for when it is asked.
+                        if let Some(floor) = talking.take() {
+                            floor.aside();
+                        }
+                        stage.hush();
+                        lock(&call).said += 1;
+                        talking = begin(turns_for(&call, &routed.to, &text, route::yields(&text, &seats)));
                     }
                 }
             }
@@ -429,13 +527,33 @@ pub(crate) async fn conduct<S: Stage>(stage: S, call: Shared, events: mpsc::Unbo
                 publish(&stage, &call);
             }
             Event::Interrupt => {
-                if let Some((_, stop)) = talking.take() {
-                    stop.cancel();
+                if let Some(floor) = talking.take() {
+                    floor.cut();
                 }
                 stage.hush();
                 // Whoever was waiting for the word keeps waiting: the user has it now.
             }
-            Event::Looked { member, full, said, error } if phase == "live" => {
+            Event::Grant(member) if phase == "live" => {
+                if let Some(turn) = granted(&call, &member) {
+                    if let Some(floor) = talking.take() {
+                        floor.aside();
+                    }
+                    stage.hush();
+                    talking = begin(vec![turn]);
+                }
+            }
+            Event::Lower(member) if phase == "live" => {
+                let lowered = {
+                    let mut held = lock(&call);
+                    let before = held.hands.len();
+                    held.hands.retain(|hand| hand.member != member);
+                    held.hands.len() != before
+                };
+                if lowered {
+                    set_seat(&stage, &call, &member, "listening", "");
+                }
+            }
+            Event::Looked { member, full, said, error, seq } if phase == "live" => {
                 let (chat, seat) = {
                     let held = lock(&call);
                     (held.chat.clone(), held.seat(&member).map(|seat| seat.member.clone()))
@@ -450,30 +568,29 @@ pub(crate) async fn conduct<S: Stage>(stage: S, call: Shared, events: mpsc::Unbo
                     None => {
                         // The whole of what it found is the conversation's; the call hears the gist.
                         stage.keep(&chat, seat.as_ref(), &full);
-                        lock(&call).hands.push_back((member.clone(), said));
-                        set_seat(&stage, &call, &member, "hand", "");
-                        if talking.is_none() {
-                            talking = begin(waiting(&call));
+                        // Back while the room is still on what it went to look at, and quiet: it
+                        // says it. Otherwise the conversation went elsewhere: it asks for the word.
+                        if talking.is_none() && lock(&call).said == seq {
+                            talking = begin(vec![Turn::Say { member, text: said, asks: line::Asks::default(), keep: false }]);
+                        } else {
+                            raise(&stage, &call, &member, said, line::Asks::default(), false);
                         }
                     }
                 }
             }
             Event::Idle(number) => {
                 // Only the exchange that has the word gives it up: one that was cut off for a new
-                // one may still be reporting its end.
-                if talking.as_ref().is_some_and(|(mine, _)| *mine == number) {
+                // one may still be reporting its end. Whoever has a hand up waits for the user.
+                if talking.as_ref().is_some_and(|floor| floor.number == number) {
                     talking = None;
-                    if phase == "live" && !lock(&call).hands.is_empty() {
-                        talking = begin(waiting(&call));
-                    }
                 }
             }
             Event::HangUp => match phase {
                 "live" => {
-                    if let Some((_, stop)) = talking.take() {
-                        stop.cancel();
+                    if let Some(floor) = talking.take() {
+                        floor.cut();
                     }
-                    close(&stage, &call, &events, false).await;
+                    close(&stage, &call, &events, &looks, false).await;
                 }
                 "countdown" => call_off(&stage, &call),
                 _ => {}
@@ -495,22 +612,53 @@ pub(crate) async fn conduct<S: Stage>(stage: S, call: Shared, events: mpsc::Unbo
             _ => {}
         }
     }
-    if let Some((_, stop)) = talking.take() {
-        stop.cancel();
+    if let Some(floor) = talking.take() {
+        floor.cut();
     }
     looks.cancel();
+    quiet(&call);
     stage.hush();
     stage.deafen();
     lock(&call).phase = "ended";
     publish(&stage, &call);
 }
 
-/// Who answers what was `said`.
-fn turns_for(call: &Shared, to: &To, said: &str) -> Vec<Turn> {
-    let held = lock(call);
+/// Nobody goes on thinking and nobody is waiting for the word: the call is over.
+fn quiet(call: &Shared) {
+    let mut held = lock(call);
+    for (_, (_, stop)) in held.thoughts.drain() {
+        stop.cancel();
+    }
+    held.hands.clear();
+}
+
+/// Who answers what was `said`. `yields`: it asks nothing — it gives somebody the word.
+fn turns_for(call: &Shared, to: &To, said: &str, yields: bool) -> Vec<Turn> {
+    let mut held = lock(call);
     let lead = held.lead().map(|seat| seat.member.member.id.clone());
+    let ask = |member: &str| Turn::Ask { member: member.to_string(), ask: Asked::Direct(said.to_string()), hops: 0 };
+    fn take(hands: &mut VecDeque<Hand>, member: &str) -> Option<Turn> {
+        let at = hands.iter().position(|hand| hand.member == member)?;
+        hands.remove(at).map(|hand| Turn::Say { member: hand.member, text: hand.text, asks: hand.asks, keep: hand.keep })
+    }
     match to {
-        To::Members(ids) => ids.iter().map(|member| Turn::Ask { member: member.clone(), ask: Asked::Direct(said.to_string()), hops: 0 }).collect(),
+        To::Members(ids) => {
+            let mut turns = Vec::new();
+            for member in ids {
+                // Named with its hand up: it has the word, and says what it was waiting to say.
+                // Asked something as well, it answers that after.
+                match take(&mut held.hands, member) {
+                    Some(turn) => {
+                        turns.push(turn);
+                        if !yields {
+                            turns.push(ask(member));
+                        }
+                    }
+                    None => turns.push(ask(member)),
+                }
+            }
+            turns
+        }
         To::Team => {
             let mut turns: Vec<Turn> = held
                 .seats
@@ -525,88 +673,105 @@ fn turns_for(call: &Shared, to: &To, said: &str) -> Vec<Turn> {
             turns
         }
         To::Open => {
+            // «Adelante», «el siguiente»: whoever has waited longest.
+            if yields {
+                let first = held.hands.front().map(|hand| hand.member.clone());
+                if let Some(turn) = first.and_then(|member| take(&mut held.hands, &member)) {
+                    return vec![turn];
+                }
+            }
             let member = held.last.clone().filter(|id| held.seat(id).is_some()).or(lead);
-            member.map(|member| vec![Turn::Ask { member, ask: Asked::Direct(said.to_string()), hops: 0 }]).unwrap_or_default()
+            member.map(|member| vec![ask(&member)]).unwrap_or_default()
         }
     }
 }
 
-/// What came back from the code and waits to be said, as turns.
-fn waiting(call: &Shared) -> Vec<Turn> {
-    lock(call).hands.drain(..).map(|(member, text)| Turn::Say { member, text }).collect()
-}
-
-/// Starts exchange `number` — the turns that answer one thing — and returns what stops it.
-fn begin<S: Stage>(stage: &S, call: &Shared, events: &mpsc::UnboundedSender<Event>, looks: &CancellationToken, number: u64, turns: Vec<Turn>) -> CancellationToken {
-    let stop = CancellationToken::new();
-    let (stage, call, events, looks, mine) = (stage.clone(), call.clone(), events.clone(), looks.clone(), stop.clone());
+/// Starts exchange `number` — the turns that answer one thing — and returns what ends it.
+fn begin<S: Stage>(stage: &S, call: &Shared, events: &mpsc::UnboundedSender<Event>, looks: &CancellationToken, number: u64, turns: Vec<Turn>) -> Floor {
+    let floor = Floor { number, stop: CancellationToken::new(), moved: CancellationToken::new() };
+    let (stage, call, events, looks, stop, moved) = (stage.clone(), call.clone(), events.clone(), looks.clone(), floor.stop.clone(), floor.moved.clone());
     tokio::spawn(async move {
-        exchange(&stage, &call, &events, &looks, turns, &mine).await;
-        if !mine.is_cancelled() {
+        exchange(&stage, &call, &events, &looks, turns, &stop, &moved).await;
+        if !stop.is_cancelled() && !moved.is_cancelled() {
             let _ = events.send(Event::Idle(number));
         }
     });
-    stop
+    floor
 }
 
-async fn exchange<S: Stage>(stage: &S, call: &Shared, events: &mpsc::UnboundedSender<Event>, looks: &CancellationToken, turns: Vec<Turn>, stop: &CancellationToken) {
+async fn exchange<S: Stage>(stage: &S, call: &Shared, events: &mpsc::UnboundedSender<Event>, looks: &CancellationToken, turns: Vec<Turn>, stop: &CancellationToken, moved: &CancellationToken) {
     let mut turns: VecDeque<Turn> = turns.into();
     let mut handed = 0usize;
     while let Some(turn) = turns.pop_front() {
-        if stop.is_cancelled() {
+        // The user moved on: whoever had not started does not.
+        if stop.is_cancelled() || moved.is_cancelled() {
             break;
         }
-        match turn {
-            Turn::Say { member, text } => {
-                let Some((voice, name)) = lock(call).seat(&member).map(|seat| (seat.voice.clone(), crate::team::member_name(&seat.member))) else { continue };
+        let (member, asks, hops) = match turn {
+            Turn::Say { member, text, asks, keep } => {
+                let Some((voice, name, snap)) = lock(call).seat(&member).map(|seat| (seat.voice.clone(), crate::team::member_name(&seat.member), seat.member.clone())) else { continue };
                 set_seat(stage, call, &member, "speaking", "");
-                let (at_ms, lang) = {
+                let (at_ms, lang, chat) = {
                     let held = lock(call);
-                    (held.started.elapsed().as_millis() as u64, held.lang)
+                    (held.started.elapsed().as_millis() as u64, held.lang, held.chat.clone())
                 };
                 write(stage, call, Line { id: id(), at_ms, who: member.clone(), name, text: text.clone(), partial: false, kind: "say" });
+                if keep {
+                    stage.keep(&chat, Some(&snap), &text);
+                }
                 let speaking = stage.voice(&member, &voice, lang);
                 let _ = speaking.sentences.send(text);
                 drop(speaking.sentences);
                 tokio::select! {
                     _ = speaking.done => {}
                     _ = stop.cancelled() => {}
+                    _ = moved.cancelled() => {}
                 }
                 lock(call).last = Some(member.clone());
-                set_seat(stage, call, &member, "listening", "");
+                // A look it asked for shows on its seat from here; otherwise it goes back to listening.
+                if asks.look.is_none() {
+                    set_seat(stage, call, &member, "listening", "");
+                }
+                (member, asks, 0)
             }
             Turn::Ask { member, ask, hops } => {
-                let asks = speak(stage, call, &member, &ask, stop).await;
-                let Some(asks) = asks else { continue };
-                if let Some(what) = asks.look {
-                    look(stage, call, events, looks, &member, what);
-                }
-                if let Some(to) = asks.hand {
-                    let names = lock(call).names();
-                    let target = names
-                        .iter()
-                        .find(|(id, ..)| *id == to.trim())
-                        .map(|(id, ..)| id.clone())
-                        .or_else(|| match route::route(&to, &seats_of(&names)).to {
-                            To::Members(ids) => ids.into_iter().next(),
-                            _ => None,
-                        })
-                        .filter(|id| *id != member);
-                    if let Some(target) = target {
-                        if hops < MAX_HANDS && handed < MAX_HANDS {
-                            handed += 1;
-                            let by = names.iter().find(|(id, ..)| *id == member).map(|(_, name, ..)| name.clone()).unwrap_or_default();
-                            turns.push_front(Turn::Ask { member: target, ask: Asked::Handed { by }, hops: hops + 1 });
-                        }
-                    }
+                let Some(asks) = speak(stage, call, &member, &ask, stop, moved).await else { continue };
+                (member, asks, hops)
+            }
+        };
+        if let Some(what) = asks.look {
+            look(stage, call, events, looks, &member, what);
+        }
+        // The word is handed on only while this is still what the room is on.
+        if stop.is_cancelled() || moved.is_cancelled() {
+            break;
+        }
+        if let Some(to) = asks.hand {
+            let names = lock(call).names();
+            let target = names
+                .iter()
+                .find(|(id, ..)| *id == to.trim())
+                .map(|(id, ..)| id.clone())
+                .or_else(|| match route::route(&to, &seats_of(&names)).to {
+                    To::Members(ids) => ids.into_iter().next(),
+                    _ => None,
+                })
+                .filter(|id| *id != member);
+            if let Some(target) = target {
+                if hops < MAX_HANDS && handed < MAX_HANDS {
+                    handed += 1;
+                    let by = names.iter().find(|(id, ..)| *id == member).map(|(_, name, ..)| name.clone()).unwrap_or_default();
+                    turns.push_front(Turn::Ask { member: target, ask: Asked::Handed { by }, hops: hops + 1 });
                 }
             }
         }
     }
 }
 
-/// One agent thinks and says it. What it asked of the call, or nothing when it could not answer.
-async fn speak<S: Stage>(stage: &S, call: &Shared, member: &str, ask: &Asked, stop: &CancellationToken) -> Option<line::Asks> {
+/// One agent thinks and says it. What it asked of the call, or nothing when it could not answer —
+/// or when the user moved on (`moved`) before it had begun to speak: then it goes on thinking
+/// behind the call and raises its hand with what it has to say.
+async fn speak<S: Stage>(stage: &S, call: &Shared, member: &str, ask: &Asked, stop: &CancellationToken, moved: &CancellationToken) -> Option<line::Asks> {
     // The facts are a look at the database: read before the call's lock is taken.
     let (chat, lang) = {
         let held = lock(call);
@@ -624,11 +789,21 @@ async fn speak<S: Stage>(stage: &S, call: &Shared, member: &str, ask: &Asked, st
         let thought = Thought { member: seat.member.clone(), workspace: held.chat.workspace_id.clone(), system: line::system(&seat.member, &held.chat.team_name, seat.lead, &held.roster(), &facts, lang), ask: said, talk: line::talk(&held.lines, lang) };
         (thought, seat.voice.clone(), crate::team::member_name(&seat.member), held.id.clone(), id())
     };
+    // One thought per member: asked again while it was still on an older question, that one goes.
+    let (mine, number) = {
+        let mut held = lock(call);
+        held.thought += 1;
+        let (mine, number) = (stop.child_token(), held.thought);
+        if let Some((_, older)) = held.thoughts.insert(member.to_string(), (number, mine.clone())) {
+            older.cancel();
+        }
+        (mine, number)
+    };
     let member_snap = thought.member.clone();
     set_seat(stage, call, member, "thinking", "");
     let at_ms = lock(call).started.elapsed().as_millis() as u64;
     let (written, mut pieces) = mpsc::unbounded_channel::<String>();
-    let thinking = stage.think(&call_id, thought, written, stop.clone());
+    let thinking = stage.think(&call_id, thought, written, mine.clone());
     tokio::pin!(thinking);
     let mut cutter = line::Cutter::default();
     let mut speaking: Option<Speaking> = None;
@@ -644,25 +819,71 @@ async fn speak<S: Stage>(stage: &S, call: &Shared, member: &str, ask: &Asked, st
         }
     };
     let show = |text: String, partial: bool| write(stage, call, Line { id: line_id.clone(), at_ms, who: member.to_string(), name: name.clone(), text, partial, kind: "say" });
+    // The user moved on before it had said a word: it thinks on, unheard and unseen.
+    let mut aside = false;
     let answer = loop {
         tokio::select! {
             biased;
+            _ = moved.cancelled(), if !aside && !mine.is_cancelled() => {
+                // Already speaking, it is cut off; still thinking, it keeps its answer for later.
+                if speaking.is_some() {
+                    mine.cancel();
+                } else {
+                    aside = true;
+                }
+            }
             // Disabled once the writer is done, so the answer is what is waited for.
             Some(piece) = pieces.recv() => {
-                say(cutter.push(&piece), &mut speaking);
-                let so_far = cutter.so_far();
-                if !so_far.is_empty() {
-                    show(so_far, true);
+                let sentences = cutter.push(&piece);
+                if !aside {
+                    say(sentences, &mut speaking);
+                    // Written on screen from its first sentence on: what shows is what is being said.
+                    if speaking.is_some() {
+                        show(cutter.so_far(), true);
+                    }
                 }
             }
             answer = &mut thinking => break answer,
         }
     };
+    // The same moment for both: an answer that came back as the user moved on waits for the word.
+    if !aside && speaking.is_none() && moved.is_cancelled() && !mine.is_cancelled() {
+        aside = true;
+    }
     // Whatever was still on its way when the answer came back.
     while let Ok(piece) = pieces.try_recv() {
-        say(cutter.push(&piece), &mut speaking);
+        let sentences = cutter.push(&piece);
+        if !aside {
+            say(sentences, &mut speaking);
+        }
     }
-    let stopped = stop.is_cancelled();
+    let stopped = mine.is_cancelled();
+    // Whether this is still the member's thought: asked again meanwhile, the newer one has its seat.
+    let ended = |call: &Shared| {
+        let mut held = lock(call);
+        let current = held.thoughts.get(member).is_some_and(|(current, _)| *current == number);
+        if current {
+            held.thoughts.remove(member);
+        }
+        current
+    };
+    if aside {
+        let waiting = match answer {
+            Ok(written) if !stopped => Some(line::read(&written)).filter(|(said, _)| !said.is_empty()),
+            Err(error) if !stopped => {
+                note(stage, call, if lang == "es" { format!("{name} no pudo responder: {error}") } else { format!("{name} could not answer: {error}") });
+                None
+            }
+            _ => None,
+        };
+        if ended(call) {
+            match waiting {
+                Some((said, asks)) => raise(stage, call, member, said, asks, true),
+                None => set_seat(stage, call, member, "listening", ""),
+            }
+        }
+        return None;
+    }
     let result = match answer {
         Ok(written) if !stopped => {
             let (said, asks) = line::read(&written);
@@ -678,7 +899,7 @@ async fn speak<S: Stage>(stage: &S, call: &Shared, member: &str, ask: &Asked, st
         Ok(_) | Err(_) if stopped => {
             // Cut off: what was said stays, as far as it got.
             let so_far = cutter.so_far();
-            if !so_far.is_empty() {
+            if speaking.is_some() && !so_far.is_empty() {
                 show(format!("{so_far}…"), false);
                 stage.keep(&chat, Some(&member_snap), &so_far);
             }
@@ -688,7 +909,7 @@ async fn speak<S: Stage>(stage: &S, call: &Shared, member: &str, ask: &Asked, st
         Err(error) => {
             // What it got to say before failing stays as said, not as still being said.
             let so_far = cutter.so_far();
-            if !so_far.is_empty() {
+            if speaking.is_some() && !so_far.is_empty() {
                 show(format!("{so_far}…"), false);
             }
             note(stage, call, if lang == "es" { format!("{name} no pudo responder: {error}") } else { format!("{name} could not answer: {error}") });
@@ -699,14 +920,15 @@ async fn speak<S: Stage>(stage: &S, call: &Shared, member: &str, ask: &Asked, st
         drop(voice.sentences);
         tokio::select! {
             _ = voice.done => {}
-            _ = stop.cancelled() => {}
+            _ = mine.cancelled() => {}
+            _ = moved.cancelled() => {}
         }
     }
     if result.is_some() {
         lock(call).last = Some(member.to_string());
     }
     // A look it asked for shows on its seat from here; otherwise it goes back to listening.
-    if result.as_ref().is_none_or(|asks| asks.look.is_none()) {
+    if ended(call) && result.as_ref().is_none_or(|asks| asks.look.is_none()) {
         set_seat(stage, call, member, "listening", "");
     }
     result
@@ -714,10 +936,10 @@ async fn speak<S: Stage>(stage: &S, call: &Shared, member: &str, ask: &Asked, st
 
 /// `member` goes to read the code for `what`, while the call goes on.
 fn look<S: Stage>(stage: &S, call: &Shared, events: &mpsc::UnboundedSender<Event>, looks: &CancellationToken, member: &str, what: String) {
-    let (chat, snap, talk, lang) = {
+    let (chat, snap, talk, lang, seq) = {
         let held = lock(call);
         let Some(seat) = held.seat(member) else { return };
-        (held.chat.clone(), seat.member.clone(), line::talk(&held.lines, held.lang), held.lang)
+        (held.chat.clone(), seat.member.clone(), line::talk(&held.lines, held.lang), held.lang, held.said)
     };
     set_seat(stage, call, member, "looking", &what);
     let (stage, events, member, stop) = (stage.clone(), events.clone(), member.to_string(), looks.clone());
@@ -727,17 +949,22 @@ fn look<S: Stage>(stage: &S, call: &Shared, events: &mpsc::UnboundedSender<Event
             return;
         }
         let _ = events.send(match found {
-            Ok((full, said)) => Event::Looked { member, full, said, error: None },
-            Err(error) => Event::Looked { member, full: String::new(), said: String::new(), error: Some(error) },
+            Ok((full, said)) => Event::Looked { member, full, said, error: None, seq },
+            Err(error) => Event::Looked { member, full: String::new(), said: String::new(), error: Some(error), seq },
         });
     });
 }
 
 /// The call is over: the minutes are written, and if work was agreed the team is about to start —
-/// at once when it was told to (`now`), after the countdown otherwise.
-async fn close<S: Stage>(stage: &S, call: &Shared, events: &mpsc::UnboundedSender<Event>, now: bool) {
+/// at once when it was told to (`now`), after the countdown otherwise. Whatever the agents were
+/// still doing for the call — a look at the code, an answer nobody heard — stops here.
+async fn close<S: Stage>(stage: &S, call: &Shared, events: &mpsc::UnboundedSender<Event>, looks: &CancellationToken, now: bool) {
     stage.hush();
     stage.deafen();
+    // Nothing of the call goes on behind it: whoever was reading the code or still thinking stops.
+    // What the team does from here is the run, if work was agreed.
+    looks.cancel();
+    quiet(call);
     let (chat, lead, system, talk, lang, spoke) = {
         let mut held = lock(call);
         held.phase = "closing";

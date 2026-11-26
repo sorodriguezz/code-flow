@@ -4,7 +4,11 @@ const BARS = 13;
 /** Where each bar sits in the wave: tallest in the middle, like a voice drawn. */
 const SHAPE = Array.from({ length: BARS }, (_, i) => 0.35 + 0.65 * Math.sin(((i + 0.5) / BARS) * Math.PI));
 const IDLE = 2;
-const TALLEST = 22;
+/** How tall the tallest bar gets, how wide a bar is and how far apart, and the row's height. */
+const SIZES = {
+  md: { tallest: 22, bar: 3, gap: 3, row: 24 },
+  lg: { tallest: 46, bar: 5, gap: 5, row: 52 },
+} as const;
 
 /**
  * A participant's voice, drawn: bars that move by how loud it is right now.
@@ -13,8 +17,9 @@ const TALLEST = 22;
  * and the bars are moved directly. At rest they are a dotted line, so every tile has the same row
  * and the one that is speaking is the one that moves.
  */
-export function VoiceBars({ level, active, color = "var(--cf-accent)" }: { level: () => number; active: boolean; color?: string }) {
+export function VoiceBars({ level, active, color = "var(--cf-accent)", size = "md" }: { level: () => number; active: boolean; color?: string; size?: keyof typeof SIZES }) {
   const row = useRef<HTMLSpanElement>(null);
+  const { tallest: TALLEST, bar, gap, row: height } = SIZES[size];
   useEffect(() => {
     const bars = row.current ? [...row.current.children] as HTMLElement[] : [];
     const rest = () => bars.forEach((bar) => { bar.style.height = `${IDLE}px`; });
@@ -44,11 +49,11 @@ export function VoiceBars({ level, active, color = "var(--cf-accent)" }: { level
       cancelAnimationFrame(frame);
       rest();
     };
-  }, [active, level]);
+  }, [active, level, TALLEST]);
   return (
-    <span ref={row} aria-hidden className="flex h-6 items-center justify-center gap-[3px]">
+    <span ref={row} aria-hidden className="flex items-center justify-center" style={{ height, gap }}>
       {SHAPE.map((_, i) => (
-        <span key={i} className="w-[3px] rounded-full transition-[background-color,opacity] duration-200" style={{ height: IDLE, background: active ? color : "var(--cf-text-faint)", opacity: active ? 1 : 0.45 }} />
+        <span key={i} className="rounded-full transition-[background-color,opacity] duration-200" style={{ width: bar, height: IDLE, background: active ? color : "var(--cf-text-faint)", opacity: active ? 1 : 0.45 }} />
       ))}
     </span>
   );

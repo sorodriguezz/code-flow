@@ -158,7 +158,7 @@ const ArchitectureView = lazy(() =>
   import("./components/architecture/ArchitectureView").then((m) => ({ default: m.ArchitectureView })),
 );
 const ChatView = lazy(() => import("./components/chat/ChatView").then((m) => ({ default: m.ChatView })));
-const TeamChatWindows = lazy(() => import("./components/crew/teams/TeamChatWindow").then((m) => ({ default: m.TeamChatWindows })));
+const FloatShelf = lazy(() => import("./components/crew/teams/TeamChatWindow").then((m) => ({ default: m.FloatShelf })));
 const ToolboxView = lazy(() => import("./components/toolbox/ToolboxView").then((m) => ({ default: m.ToolboxView })));
 const ContainersView = lazy(() => import("./components/containers/ContainersView").then((m) => ({ default: m.ContainersView })));
 
@@ -591,9 +591,9 @@ function MainContent() {
  * them when only `App` changed cannot leave one stale.
  */
 /**
- * The floating chats and the call (`crew/teams/TeamChatWindow`), fetched and mounted the first time
- * there is one to draw and kept from then on — a folded window holds a draft and a turn in progress,
- * so it is never unmounted for being out of sight. Boot does not pay for it.
+ * The shelf the floating chats and the call fold down to (`crew/teams/TeamChatWindow`) — each is a
+ * window of the system's of its own (`crew/float/FloatWindow`). Fetched and mounted the first time
+ * there is one and kept from then on. Boot does not pay for it.
  */
 const FloatingChats = memo(function FloatingChats() {
   const wanted = useTeamChatWindowStore((s) => s.windows.length > 0);
@@ -606,7 +606,7 @@ const FloatingChats = memo(function FloatingChats() {
   return (
     <ErrorBoundary resetKey="floating-chats">
       <Suspense fallback={null}>
-        <TeamChatWindows />
+        <FloatShelf />
       </Suspense>
     </ErrorBoundary>
   );

@@ -57,8 +57,12 @@ export const MAIN_LABEL = "main";
  * `browser` is «Navegador» (`windows::open_browser_window`, `window.html?kind=browser&ref=web`): its
  * own webview draws the bar, and the page is a second, native webview under it
  * (`browser_window.rs`). See `components/browser/BrowserWindow`.
+ *
+ * `float` is a conversation with a team or with one agent, or the call with a team, in a window of
+ * its own (`windows::float_open`): frameless, carried by its own bar, and folded — hidden, not
+ * minimised — to a chip on the main window's shelf. See `lib/floats` for its `refId`.
  */
-export type SatelliteKind = "app" | "repo" | "quick" | "file" | "codi" | "attention" | "chat" | "browser";
+export type SatelliteKind = "app" | "repo" | "quick" | "file" | "codi" | "attention" | "chat" | "browser" | "float";
 
 /**
  * The kinds a window can be *detached into*, which is not all of them.
@@ -70,7 +74,7 @@ export type SatelliteKind = "app" | "repo" | "quick" | "file" | "codi" | "attent
  * generic builder would produce a window that looks like the ask box and behaves like a satellite.
  * Codi's window is the same case: `codi_open_window` builds it, frameless and always on top.
  */
-export type DetachableKind = Exclude<SatelliteKind, "quick" | "codi" | "attention" | "browser">;
+export type DetachableKind = Exclude<SatelliteKind, "quick" | "codi" | "attention" | "browser" | "float">;
 
 export interface WindowIdentity {
   /** The platform's own window label — `"main"`, or `sat-app-notes`. */
@@ -119,7 +123,7 @@ export function parseIdentity(label: string, search: string): WindowIdentity {
     // except that it happens on a window that is working perfectly: the webview loads, the label is
     // right, and `SatelliteApp` is handed `satellite: null` and paints a skeleton forever.
     satellite:
-      (kind === "app" || kind === "repo" || kind === "quick" || kind === "file" || kind === "codi" || kind === "attention" || kind === "chat" || kind === "browser") && refId
+      (kind === "app" || kind === "repo" || kind === "quick" || kind === "file" || kind === "codi" || kind === "attention" || kind === "chat" || kind === "browser" || kind === "float") && refId
         ? { kind, refId }
         : null,
   };

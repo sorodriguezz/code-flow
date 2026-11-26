@@ -78,6 +78,29 @@ pub fn cuts_in(text: &str, seats: &[Seat<'_>]) -> bool {
     routed.order == Some(Order::Wait) || !matches!(routed.to, To::Open)
 }
 
+/// Words that give somebody the word and ask nothing: «adelante», «habla», «el siguiente».
+const YIELD: &[&str] = &[
+    "habla", "hable", "hablen", "adelante", "dale", "dime", "dinos", "cuenta", "cuentame", "cuentanos", "escucho", "escuchamos", "palabra", "sigue", "siga",
+    "continua", "continue", "siguiente", "turno", "go", "ahead", "speak", "talk", "tell", "listening", "next", "turn", "floor", "word",
+];
+/// Words that say nothing by themselves, around a name or a [`YIELD`].
+const SMALL: &[&str] = &[
+    "a", "al", "el", "la", "los", "las", "le", "te", "tu", "tienes", "tiene", "que", "por", "favor", "ya", "ahora", "si", "ok", "okay", "vale", "bueno", "oye", "y",
+    "es", "su", "me", "nos", "de", "del", "the", "you", "your", "have", "has", "is", "it", "s", "please", "now", "yes", "we", "re", "i", "m", "us", "to",
+];
+
+/// Whether `text` only gives the word — a name by itself, «adelante», «te escucho, DBA» — and asks
+/// nothing: said to somebody with a hand up, it is what lets it speak, not a new question.
+pub fn yields(text: &str, seats: &[Seat<'_>]) -> bool {
+    let said = normalize(text);
+    let words: Vec<&str> = said.split(' ').filter(|w| !w.is_empty()).collect();
+    let names: std::collections::HashSet<String> = seats.iter().flat_map(|seat| keys(seat, seats)).flat_map(|key| key.split(' ').map(str::to_string).collect::<Vec<_>>()).collect();
+    let named = words.iter().any(|word| names.contains(*word));
+    let rest: Vec<&str> = words.iter().copied().filter(|word| !names.contains(*word) && !SMALL.contains(word)).collect();
+    // Something has to say it: a name, or a word that gives the word.
+    (named || !rest.is_empty()) && rest.iter().all(|word| YIELD.contains(word))
+}
+
 fn has_phrase(said: &str, phrase: &str) -> bool {
     said == phrase || said.starts_with(&format!("{phrase} ")) || said.ends_with(&format!(" {phrase}")) || said.contains(&format!(" {phrase} "))
 }
@@ -245,6 +268,24 @@ mod tests {
         assert_eq!(order("Listo, eso es todo"), Some(Order::End));
         assert_eq!(order("Terminamos por hoy"), Some(Order::End));
         assert_eq!(order("¿Cuándo terminamos la migración de la base de datos de agenda del core?"), None);
+    }
+
+    #[test]
+    fn giving_the_word_asks_nothing() {
+        let yields = |text: &str| yields(text, &seats());
+        assert!(yields("Arquitecto"));
+        assert!(yields("Adelante, arquitecto"));
+        assert!(yields("Te escucho, DBA"));
+        assert!(yields("Que hable el QA"));
+        assert!(yields("El siguiente"));
+        assert!(yields("Dale"));
+        assert!(yields("DBA, tienes la palabra"));
+        // A question is a question, whoever it names.
+        assert!(!yields("DBA, ¿qué falta para que la base soporte particiones?"));
+        assert!(!yields("Arquitecto, ¿y los eventos?"));
+        // Neither a name nor a word that gives the word.
+        assert!(!yields("Sí"));
+        assert!(!yields(""));
     }
 
     #[test]

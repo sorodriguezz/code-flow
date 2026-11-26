@@ -1,22 +1,25 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Gauge, RefreshCw } from "lucide-react";
+import { Gauge } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
 import { formatUsed, pillLimit, severityOf, useQuotaStore } from "../../state/quotaStore";
-import { RailRingsToggle } from "../ai/RailRingsToggle";
-import { QuotaLimits, limitTitle, quotaAccountLabel } from "../ai/QuotaLimits";
+import { QuotaPanel } from "../ai/QuotaPanel";
+import { limitTitle, quotaAccountLabel } from "../ai/QuotaLimits";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 
-const PANEL_WIDTH = 300;
+const PANEL_WIDTH = 384;
 
 /**
  * How far through each provider's plan you are, next to the bell.
  *
  * **Quota only.** Tokens and cost used to share this panel and no longer do — they live on the
  * Settings → AI screen, which is where a spend history belongs anyway. Two kinds of number in one
- * 300px panel meant working out which was which on every glance, and only one of them can run out.
+ * small panel meant working out which was which on every glance, and only one of them can run out.
  * What is left here is a single question with a single direction: how much of the window is gone.
+ *
+ * The panel itself is `ai/QuotaPanel` — «Consumo y límites»: a summary that counts the accounts by
+ * how available each is, and the accounts one by one. This is its trigger and where it is placed.
  *
  * Nothing here is derived from what this app measured. The percentages come from the providers (see
  * `ai_quota.rs`); the moment a "% used" is computed from recorded tokens it becomes a guess wearing
@@ -46,7 +49,6 @@ export function UsageMeter() {
   const quotaProviders = useQuotaStore((s) => s.providers);
   const quotaRouted = useQuotaStore((s) => s.routed);
   const quotaPick = useQuotaStore((s) => s.pick);
-  const quotaLoading = useQuotaStore((s) => s.loading);
   const accounts = useAiAccountsStore((s) => s.accounts);
   const ensureAccounts = useAiAccountsStore((s) => s.ensure);
   const nameOf = useAccountName();
@@ -117,7 +119,7 @@ export function UsageMeter() {
         type="button"
         onClick={() => setOpen((wasOpen) => !wasOpen)}
         aria-expanded={open}
-        title={shownLabel ? `${t("quota.title")} · ${shownLabel}` : t("quota.title")}
+        title={shownLabel ? `${t("quota.panelTitle")} · ${shownLabel}` : t("quota.panelTitle")}
         className={`flex h-[22px] shrink-0 items-center gap-[5px] rounded-md px-1.5 text-[12px] tabular-nums hover:bg-[var(--cf-hover)] ${
           open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
         }`}
@@ -147,40 +149,10 @@ export function UsageMeter() {
         createPortal(
           <div
             ref={panelRef}
-            style={{ bottom: pos.bottom, right: pos.right, width: PANEL_WIDTH, maxHeight: pos.maxHeight }}
-            className="cf-fade-in fixed z-[60] flex flex-col overflow-hidden rounded-lg border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+            style={{ bottom: pos.bottom, right: pos.right, width: `min(${PANEL_WIDTH}px, calc(100vw - 16px))`, maxHeight: Math.min(pos.maxHeight, 720) }}
+            className="cf-fade-in fixed z-[60] flex flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
           >
-            <div className="flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3 py-2">
-              <Gauge size={13} className="shrink-0 text-[var(--cf-accent)]" />
-              <span className="min-w-0 flex-1 truncate text-[12px] font-semibold">{t("quota.title")}</span>
-              {/* `"refresh"` — bypasses the backend cache. Without it a press inside the cache
-                  window returns the same numbers instantly, which reads as a dead button. */}
-              <button
-                type="button"
-                onClick={() => void refreshQuota("refresh")}
-                disabled={quotaLoading}
-                title={t("quota.refresh")}
-                aria-label={t("quota.refresh")}
-                className="flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)] disabled:opacity-60 disabled:hover:bg-transparent"
-              >
-                <RefreshCw size={13} className={quotaLoading ? "animate-spin" : undefined} />
-              </button>
-            </div>
-
-            <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
-              <QuotaLimits compact />
-            </div>
-
-            {/* Where the other half went. Tokens and cost used to sit under this and no longer do:
-                two kinds of number in one small panel meant reading which was which every time, and
-                only one of them can run out. Spend is a screen's worth of material anyway. */}
-            <div className="shrink-0 border-t border-[var(--cf-border)] px-3 py-2">
-              <RailRingsToggle compact />
-            </div>
-
-            <p className="shrink-0 border-t border-[var(--cf-border)] px-3 py-2 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
-              {t("quota.spendMovedHint")}
-            </p>
+            <QuotaPanel />
           </div>,
           document.body,
         )}

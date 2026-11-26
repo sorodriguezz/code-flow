@@ -97,6 +97,8 @@ const QuickAskWindow = lazy(() =>
 // Its own chunk, and small: the voice assistant's window draws a face, two switches and a log.
 const CodiWindow = lazy(() => import("./components/codi/CodiWindow").then((m) => ({ default: m.CodiWindow })));
 const AttentionWindow = lazy(() => import("./components/layout/AttentionWindow").then((m) => ({ default: m.AttentionWindow })));
+const ResizeHandles = lazy(() => import("./components/crew/float/ResizeHandles").then((m) => ({ default: m.ResizeHandles })));
+const FloatWindow = lazy(() => import("./components/crew/float/FloatWindow").then((m) => ({ default: m.FloatWindow })));
 const BrowserWindow = lazy(() => import("./components/browser/BrowserWindow").then((m) => ({ default: m.BrowserWindow })));
 const PanelChat = lazy(() => import("./components/ai/PanelChat").then((m) => ({ default: m.PanelChat })));
 const WorkspaceChat = lazy(() => import("./components/ai/WorkspaceChat").then((m) => ({ default: m.WorkspaceChat })));
@@ -200,7 +202,7 @@ function useSatelliteBoot(): boolean {
       // «Codi»'s actions for what this window holds — see `lib/codi/actions`. Not the ask box, which
       // holds a question rather than a screen of the app, nor Codi's own window, which holds Codi.
       const kind = WINDOW.satellite?.kind;
-      if (kind && kind !== "quick" && kind !== "codi") startCodiBus();
+      if (kind && kind !== "quick" && kind !== "codi" && kind !== "float") startCodiBus();
     })().catch((cause: unknown) => {
       // Effects are outside React's error boundaries. Re-throw during render so a failed boot
       // offers the existing reload screen instead of leaving the loading skeleton forever.
@@ -729,6 +731,27 @@ export default function SatelliteApp() {
         </ErrorBoundary>
         <ToastContainer />
         <ConfirmModal />
+        <TitleTooltips />
+      </div>
+    );
+  }
+
+  // A conversation with a team or an agent, or the call, floating: frameless like Codi's, carried
+  // by the header of what it holds (`FloatWindow`). Mounted once the boot is done — it reads its
+  // workspace's agents — over the same hosts a window that holds a screen has: what a chat opens
+  // (a diff, a confirmation, dictation) opens here.
+  if (spec && kind === "float") {
+    return (
+      <div className="cf-round-shell cf-glass-solo flex h-screen flex-col overflow-hidden">
+        <ErrorBoundary resetKey={spec.refId}>
+          <Suspense fallback={<ViewSkeleton />}>{ready ? <FloatWindow /> : <ViewSkeleton />}</Suspense>
+        </ErrorBoundary>
+        <Suspense fallback={null}><ResizeHandles /></Suspense>
+        <ToastContainer />
+        <MultiDiffHost />
+        <ConfirmModal />
+        <DictationOverlay shortcut />
+        <PromptModal />
         <TitleTooltips />
       </div>
     );

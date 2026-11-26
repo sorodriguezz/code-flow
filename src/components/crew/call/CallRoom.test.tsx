@@ -4,11 +4,10 @@ import type { CallSeat, PoolVoice } from "../../../lib/tauri/teamCallCommands";
 vi.mock("@tauri-apps/api/core", () => ({ invoke: async () => null }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {}, emit: async () => {}, emitTo: async () => {} }));
 
-const { clock, engineTitle, seatStatus, shortModel } = await import("./CallRoom");
+const { clock, engineTitle, enteredSeats, seatStatus, shortModel, transcriptText } = await import("./CallRoom");
 const { nearestPitch, voiceGroups } = await import("../roster/VoiceField");
-const { centerRect, SHELF } = await import("../../../lib/floatingRect");
 const en = (_es: string, text: string) => text;
-const seat = (state: CallSeat["state"]): CallSeat => ({ memberId: "dba", agentId: "a", name: "DBA", role: "", icon: "", color: "", lead: false, state, note: "", voice: { id: "", pitch: 1, rate: 1 }, voiceLabel: "", provider: "claude", model: "claude-haiku-5-5", ownModel: "claude-opus-5-5", account: "Trabajo" });
+const seat = (state: CallSeat["state"]): CallSeat => ({ memberId: "dba", agentId: "a", name: "DBA", role: "", icon: "", color: "", lead: false, state, note: "", hand: 0, voice: { id: "", pitch: 1, rate: 1 }, voiceLabel: "", provider: "claude", model: "claude-haiku-5-5", ownModel: "claude-opus-5-5", account: "Trabajo" });
 
 describe("call room", () => {
   it("counts the call in minutes and seconds", () => {
@@ -37,11 +36,33 @@ describe("call room", () => {
     expect(shortModel("")).toBe("");
   });
 
-  it("opens in the middle of the view, whole and clear of the shelf", () => {
-    expect(centerRect({ w: 1400, h: 900 }, 880, 760)).toEqual({ x: 260, y: 42, w: 880, h: 760 });
-    const small = centerRect({ w: 700, h: 500 }, 880, 760);
-    expect(small.w).toBeLessThanOrEqual(700);
-    expect(small.y + small.h).toBeLessThanOrEqual(500 - SHELF + 1);
+  it("copies the transcript as who said what and when, without the call's own notes", () => {
+    const line = (who: string, name: string, text: string, atMs: number, kind: "say" | "note" = "say") => ({ id: `${atMs}`, atMs, who, name, text, partial: false, kind });
+    expect(transcriptText([line("user", "", "DBA, ¿cómo ves la base?", 5_000), line("call", "", "DBA consulta el código", 6_000, "note"), line("dba", "DBA", "Faltan dos índices.", 65_000)], en)).toBe(
+      "[00:05] You: DBA, ¿cómo ves la base?\n[01:05] DBA: Faltan dos índices.",
+    );
+  });
+});
+
+describe("who the room shows", () => {
+  const line = (who: string, text: string, kind: "say" | "note" = "say") => ({ id: `${who}-${text}`, atMs: 0, who, name: who, text, partial: false, kind });
+  const at = (memberId: string, state: CallSeat["state"] = "listening", hand = 0): CallSeat => ({ ...seat(state), memberId, name: memberId, hand });
+
+  it("is nobody of a team that has not been spoken to", () => {
+    expect(enteredSeats([], [at("dba"), at("qa")], [line("user", "Hola"), line("lead", "Hola, aquí Arquitecto")])).toEqual([]);
+  });
+
+  it("is whoever said something or is doing something, in the order they came in", () => {
+    const seats = [at("dba"), at("qa", "thinking"), at("ux"), at("devops", "hand", 1)];
+    // QA is thinking and DevOps waits for the word; the DBA spoke before either.
+    expect(enteredSeats([], seats, [line("user", "DBA, ¿y la base?"), line("dba", "Faltan dos índices.")])).toEqual(["dba", "qa", "devops"]);
+    // A note of the call's own about someone is not that someone speaking.
+    expect(enteredSeats([], [at("ux")], [line("ux", "UX consulta el código", "note")])).toEqual([]);
+  });
+
+  it("keeps whoever came in, where they were, and forgets whoever left the team", () => {
+    const before = ["qa", "gone", "dba"];
+    expect(enteredSeats(before, [at("dba"), at("qa"), at("ux", "looking")], [])).toEqual(["qa", "dba", "ux"]);
   });
 });
 

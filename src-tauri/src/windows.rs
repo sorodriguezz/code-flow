@@ -97,6 +97,15 @@ pub enum SatelliteKind {
     /// Not counted against the ceilings and never parked with the desk — a page is not a screen of
     /// the app to restore — but closed with it.
     Browser,
+    /// A conversation with a team or with one agent, or the call with a team, in a window of its
+    /// own (the user, 2026-11-26: «ventanas flotantes independientes»). Built by [`float_open`],
+    /// frameless: its own bar carries it and folds it — **hidden, not minimised**, to a chip on the
+    /// main window's shelf, where it shows what the team is doing and comes back from. `ref_id` is
+    /// `"<key>|<conversation>|<workspace>|<owner>"`; the label is derived from the key alone, so
+    /// one team, one agent and the call each have one window whichever conversation it shows.
+    /// Not counted against the ceilings and not put away with the desk: a call goes on while the
+    /// main window is in the tray.
+    Float,
 }
 
 /// The chat islands' own backstop: they do not count against [`MAX_SATELLITES`] (see
@@ -107,7 +116,7 @@ impl SatelliteKind {
     /// Whether it counts as part of the desk — the screens the person arranged — rather than a
     /// summoned utility. The ask box, Codi and this one outlive the desk and are never counted.
     fn is_utility(self) -> bool {
-        matches!(self, SatelliteKind::Quick | SatelliteKind::Codi | SatelliteKind::Attention | SatelliteKind::Browser)
+        matches!(self, SatelliteKind::Quick | SatelliteKind::Codi | SatelliteKind::Attention | SatelliteKind::Browser | SatelliteKind::Float)
     }
 
     /// Whether it spends one of the islands the ceilings allow: everything on the desk but chats.
@@ -125,6 +134,7 @@ impl SatelliteKind {
             SatelliteKind::Attention => "attention",
             SatelliteKind::Chat => "chat",
             SatelliteKind::Browser => "browser",
+            SatelliteKind::Float => "float",
         }
     }
 }
@@ -260,7 +270,7 @@ fn label_for(kind: SatelliteKind, ref_id: &str) -> String {
     // `src/a-b.ts` and `src/a_b.ts` fold to the same label, and the second window would "already
     // exist" — the first one would come forward instead. So a file's label is a digest of its id
     // rather than a spelling of it. Stable across runs (no random seed), which the restore needs.
-    if kind == SatelliteKind::File || kind == SatelliteKind::Chat {
+    if kind == SatelliteKind::File || kind == SatelliteKind::Chat || kind == SatelliteKind::Float {
         return format!("{LABEL_PREFIX}{}-{:016x}", kind.slug(), fnv1a64(ref_id));
     }
     let safe: String = ref_id
@@ -1062,6 +1072,411 @@ pub async fn open_codi(app: AppHandle) -> Result<String, String> {
     Ok(label)
 }
 
+// ===================== the floating conversations and the call =====================
+
+/// How many floating windows may be open: a backstop, like [`MAX_CHAT_SATELLITES`].
+const MAX_FLOATS: usize = 16;
+
+/// What a floating window's key says it holds: `call`, `team` or `agent` (`"team:<id>"`).
+fn float_family(key: &str) -> &'static str {
+    match key.split(':').next().unwrap_or_default() {
+        "call" => "call",
+        "agent" => "agent",
+        _ => "team",
+    }
+}
+
+/// The key of the floating window a `ref_id` is of — its first field.
+fn float_key(ref_id: &str) -> &str {
+    ref_id.split('|').next().unwrap_or_default()
+}
+
+/// Where a family of floating windows was last left, `x,y,w,h` in points.
+fn float_frame_key(family: &str) -> String {
+    format!("float_window_frame_{family}")
+}
+
+fn parse_frame(raw: &str) -> Option<(f64, f64, f64, f64)> {
+    let numbers: Vec<f64> = raw.split(',').filter_map(|n| n.trim().parse::<f64>().ok()).filter(|n| n.is_finite()).collect();
+    match numbers.as_slice() {
+        [x, y, w, h] if *w >= 200.0 && *h >= 200.0 => Some((*x, *y, *w, *h)),
+        _ => None,
+    }
+}
+
+/// `frame` when its bar — what it is carried by — is still on a screen.
+fn on_a_screen<R: Runtime>(app: &AppHandle<R>, frame: (f64, f64, f64, f64)) -> bool {
+    let (x, y, w, _) = frame;
+    app.available_monitors().unwrap_or_default().iter().any(|monitor| {
+        let scale = monitor.scale_factor();
+        let area = monitor.work_area();
+        let (left, top) = (area.position.x as f64 / scale, area.position.y as f64 / scale);
+        let (width, height) = (area.size.width as f64 / scale, area.size.height as f64 / scale);
+        x + 120.0 <= left + width && x + w - 120.0 >= left && y >= top - 4.0 && y + 48.0 <= top + height
+    })
+}
+
+/// Opens the floating window `key` (`call`, `team:<id>`, `agent:<id>`) on `ref_id`, or brings the
+/// one it has back — unhidden, forward, and told which conversation to show, since a team's window
+/// turns to another of its conversations without becoming another window.
+#[tauri::command]
+pub async fn float_open(app: AppHandle, key: String, ref_id: String, title: String, workspace_id: Option<String>) -> Result<String, String> {
+    let label = label_for(SatelliteKind::Float, &key);
+    let registry = app.state::<SatelliteRegistry>();
+    if let Some(existing) = app.get_webview_window(&label) {
+        if let Ok(mut held) = registry.open.lock() {
+            held.insert(label.clone(), SatelliteInfo { label: label.clone(), kind: SatelliteKind::Float, ref_id: ref_id.clone(), title: title.clone() });
+        }
+        let _ = existing.set_title(&title);
+        let _ = existing.unminimize();
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        announce(&app);
+        return Ok(label);
+    }
+    let family = float_family(&key);
+    let behind = {
+        let mut held = registry.open.lock().map_err(|e| e.to_string())?;
+        if held.contains_key(&label) {
+            return Ok(label);
+        }
+        let floats: Vec<&SatelliteInfo> = held.values().filter(|info| info.kind == SatelliteKind::Float).collect();
+        if floats.len() >= MAX_FLOATS {
+            return Err(format!("too many floating windows are open (limit {MAX_FLOATS})"));
+        }
+        // How many of its family are already open: the new one opens a step off them, not on top.
+        let behind = floats.iter().filter(|info| float_family(float_key(&info.ref_id)) == family).count();
+        held.insert(label.clone(), SatelliteInfo { label: label.clone(), kind: SatelliteKind::Float, ref_id: ref_id.clone(), title: title.clone() });
+        behind
+    };
+    crate::applog::info(&format!("window: float_open {label} ({family})"));
+    let mut url = format!("window.html?kind={}&ref={}", SatelliteKind::Float.slug(), urlencode(&ref_id));
+    if let Some(workspace) = workspace_id.as_deref().filter(|w| !w.is_empty()) {
+        url.push_str(&format!("&ws={}", urlencode(workspace)));
+    }
+    // A call is a room: wide enough for a row of participants beside whoever leads. A conversation
+    // is a column.
+    let ((width, height), (min_width, min_height)) = if family == "call" { ((1020.0, 780.0), (560.0, 480.0)) } else { ((580.0, 740.0), (380.0, 340.0)) };
+    let stored = app
+        .try_state::<crate::db::Db>()
+        .and_then(|db| db.0.lock().ok().and_then(|conn| crate::db::queries::get_setting(&conn, &float_frame_key(family)).ok().flatten()))
+        .as_deref()
+        .and_then(parse_frame)
+        .filter(|frame| on_a_screen(&app, *frame));
+    let look = crate::glass::stored(&app);
+    let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        .enable_clipboard_access()
+        .transparent(true)
+        .title(&title)
+        .min_inner_size(min_width, min_height)
+        .decorations(false)
+        .resizable(true);
+    let step = behind as f64 * 28.0;
+    builder = match stored {
+        Some((x, y, w, h)) => builder.inner_size(w.max(min_width), h.max(min_height)).position(x + step, y + step),
+        None if behind == 0 => builder.inner_size(width, height).center(),
+        None => builder.inner_size(width, height).position(cascade_offset(&app) + step, cascade_offset(&app) + step),
+    };
+    if let Some(script) = crate::glass::init_script(&look) {
+        builder = builder.initialization_script(script);
+    }
+    match builder.build() {
+        Ok(window) => {
+            crate::glass::round_corners(&window, CODI_CORNER_RADIUS);
+            crate::glass::on_create(&window, &look);
+        }
+        Err(e) => {
+            if let Ok(mut held) = registry.open.lock() {
+                held.remove(&label);
+            }
+            return Err(e.to_string());
+        }
+    }
+    announce(&app);
+    Ok(label)
+}
+
+/// Folds the floating window `key` away: hidden with everything in it — a draft, the scroll, a
+/// turn in progress — while its chip on the main window's shelf stands for it.
+#[tauri::command]
+pub fn float_hide(app: AppHandle, key: String) {
+    if let Some(window) = app.get_webview_window(&label_for(SatelliteKind::Float, &key)) {
+        let _ = window.hide();
+    }
+}
+
+/// Closes the floating window `key` for good.
+#[tauri::command]
+pub fn float_close(app: AppHandle, key: String) {
+    if let Some(window) = app.get_webview_window(&label_for(SatelliteKind::Float, &key)) {
+        let _ = window.close();
+    }
+}
+
+/// One floating window, as the main window reads them back after a reload of its own.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FloatInfo {
+    pub ref_id: String,
+    /// False while it is folded to its chip.
+    pub visible: bool,
+}
+
+/// The floating windows there are, shown or folded.
+#[tauri::command]
+pub fn float_list(app: AppHandle, registry: tauri::State<SatelliteRegistry>) -> Vec<FloatInfo> {
+    let held: Vec<SatelliteInfo> = registry.open.lock().map(|held| held.values().filter(|info| info.kind == SatelliteKind::Float).cloned().collect()).unwrap_or_default();
+    held.into_iter()
+        .filter_map(|info| {
+            let window = app.get_webview_window(&info.label)?;
+            Some(FloatInfo { ref_id: info.ref_id, visible: window.is_visible().unwrap_or(true) })
+        })
+        .collect()
+}
+
+/// Whether `label` is a floating conversation or the call.
+pub fn is_float(label: &str) -> bool {
+    label.starts_with(&format!("{LABEL_PREFIX}{}-", SatelliteKind::Float.slug()))
+}
+
+/// Which edges of a window a press on its border carries: one for a side, two for a corner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Edges {
+    pub north: bool,
+    pub south: bool,
+    pub east: bool,
+    pub west: bool,
+}
+
+impl Edges {
+    /// From the compass name the page sends: `n`, `se`, `w`…
+    pub fn parse(name: &str) -> Option<Edges> {
+        let edges = Edges { north: name.contains('n'), south: name.contains('s'), east: name.contains('e'), west: name.contains('w') };
+        let known = !name.is_empty() && name.len() <= 2 && name.chars().all(|c| "nsew".contains(c));
+        (known && !(edges.north && edges.south) && !(edges.east && edges.west)).then_some(edges)
+    }
+}
+
+/// The frame a window has once the pointer has gone `(dx, dy)` from where its border was pressed —
+/// in the system's own terms on macOS: the origin is the bottom left corner and `y` grows upwards.
+/// No smaller than `min`, with the opposite side where it was; and no taller than `top`, where the
+/// menu bar begins, so its header stays in reach.
+pub fn resized_frame(start: (f64, f64, f64, f64), (dx, dy): (f64, f64), edges: Edges, min: (f64, f64), top: Option<f64>) -> (f64, f64, f64, f64) {
+    let (mut x, mut y, mut width, mut height) = start;
+    if edges.east {
+        width = (start.2 + dx).max(min.0);
+    } else if edges.west {
+        width = (start.2 - dx).max(min.0);
+        x = start.0 + start.2 - width;
+    }
+    if edges.north {
+        height = (start.3 + dy).max(min.1);
+        if let Some(top) = top.filter(|top| start.1 + start.3 <= *top) {
+            height = height.min((top - y).max(min.1));
+        }
+    } else if edges.south {
+        height = (start.3 - dy).max(min.1);
+        y = start.1 + start.3 - height;
+    }
+    (x, y, width, height)
+}
+
+/// Carries a floating window's border with the pointer until the button is let go.
+///
+/// A window without a frame has nothing of the system's to be resized by: what macOS leaves it is
+/// a hairline at the edge, under a page that sets its own pointer over it — and the windowing
+/// library's own «start resizing» is not there on macOS. So the page draws the borders
+/// (`ResizeHandles`), and a press on one arrives here: the pointer is read where the system has it
+/// and the frame is set whole, place and size in one step, so the opposite side does not shake.
+#[tauri::command]
+pub fn float_resize(window: tauri::WebviewWindow, edge: String) -> Result<(), String> {
+    if !is_float(window.label()) {
+        return Err("only a floating window is resized this way".into());
+    }
+    let edges = Edges::parse(&edge).ok_or_else(|| format!("unknown edge: {edge}"))?;
+    #[cfg(target_os = "macos")]
+    macos_resize::follow(window, edges);
+    #[cfg(not(target_os = "macos"))]
+    let _ = (window, edges);
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+mod macos_resize {
+    use super::{resized_frame, Edges};
+    use objc2::encode::{Encode, Encoding};
+    use objc2::runtime::AnyObject;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Arc, Mutex};
+    use std::time::Duration;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Point {
+        x: f64,
+        y: f64,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Size {
+        width: f64,
+        height: f64,
+    }
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Rect {
+        origin: Point,
+        size: Size,
+    }
+    // SAFETY: the three are laid out as, and named for, the system's `CGPoint`, `CGSize` and
+    // `CGRect` — two doubles, two doubles, and one of each.
+    unsafe impl Encode for Point {
+        const ENCODING: Encoding = Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
+    }
+    unsafe impl Encode for Size {
+        const ENCODING: Encoding = Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
+    }
+    unsafe impl Encode for Rect {
+        const ENCODING: Encoding = Encoding::Struct("CGRect", &[Point::ENCODING, Size::ENCODING]);
+    }
+
+    /// One pointer, so one border carried at a time.
+    static CARRYING: AtomicBool = AtomicBool::new(false);
+
+    /// Where the pointer and the window were when the border was pressed.
+    type Start = Arc<Mutex<Option<(Point, Rect)>>>;
+
+    /// One step, on the main thread: whether the button is still down.
+    fn step(window: &tauri::WebviewWindow, edges: Edges, start: &Start) -> bool {
+        let Ok(ns_window) = window.ns_window() else { return false };
+        let ns_window = ns_window.cast::<AnyObject>();
+        // SAFETY: `ns_window` is this window's live `NSWindow`, used on the main thread. Every call
+        // is a plain getter or setter of AppKit's with the argument and return types it declares:
+        // `+[NSEvent pressedMouseButtons]` an `NSUInteger`, `+[NSEvent mouseLocation]` an `NSPoint`,
+        // `frame` and `visibleFrame` an `NSRect`, `contentMinSize` an `NSSize`.
+        unsafe {
+            let events = objc2::class!(NSEvent);
+            let buttons: usize = objc2::msg_send![events, pressedMouseButtons];
+            if buttons & 1 == 0 {
+                return false;
+            }
+            let pointer: Point = objc2::msg_send![events, mouseLocation];
+            let Ok(mut start) = start.lock() else { return false };
+            let (from, frame) = match *start {
+                Some(held) => held,
+                None => {
+                    let frame: Rect = objc2::msg_send![ns_window, frame];
+                    *start = Some((pointer, frame));
+                    return true;
+                }
+            };
+            let min: Size = objc2::msg_send![ns_window, contentMinSize];
+            let screen: *mut AnyObject = objc2::msg_send![ns_window, screen];
+            let top = if screen.is_null() {
+                None
+            } else {
+                let visible: Rect = objc2::msg_send![screen, visibleFrame];
+                Some(visible.origin.y + visible.size.height)
+            };
+            let (x, y, width, height) = resized_frame(
+                (frame.origin.x, frame.origin.y, frame.size.width, frame.size.height),
+                (pointer.x - from.x, pointer.y - from.y),
+                edges,
+                (min.width.max(240.0), min.height.max(200.0)),
+                top,
+            );
+            let next = Rect { origin: Point { x, y }, size: Size { width, height } };
+            let _: () = objc2::msg_send![ns_window, setFrame: next, display: true];
+        }
+        true
+    }
+
+    pub fn follow(window: tauri::WebviewWindow, edges: Edges) {
+        if CARRYING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        std::thread::spawn(move || {
+            let start: Start = Arc::new(Mutex::new(None));
+            loop {
+                let (done, went) = mpsc::channel();
+                let (target, held) = (window.clone(), start.clone());
+                let asked = window.run_on_main_thread(move || {
+                    let _ = done.send(step(&target, edges, &held));
+                });
+                // The main thread answers each step before the next is asked: none pile up.
+                if asked.is_err() || !matches!(went.recv_timeout(Duration::from_secs(2)), Ok(true)) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            CARRYING.store(false, Ordering::SeqCst);
+        });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The two questions asked of the system on every step are asked with the types it
+        /// declares — a mismatch is refused by the runtime here, not in someone's window.
+        #[test]
+        fn the_system_says_where_the_pointer_is_and_which_buttons_are_down() {
+            // SAFETY: two class methods of AppKit's that take no arguments and may be called from
+            // any thread: `+[NSEvent mouseLocation]` an `NSPoint`, `+[NSEvent pressedMouseButtons]`
+            // an `NSUInteger`.
+            let (pointer, buttons): (Point, usize) = unsafe {
+                let events = objc2::class!(NSEvent);
+                (objc2::msg_send![events, mouseLocation], objc2::msg_send![events, pressedMouseButtons])
+            };
+            assert!(pointer.x.is_finite() && pointer.y.is_finite());
+            assert!(buttons < 1 << 16);
+        }
+    }
+}
+
+/// Notes where a floating window was left — its place and its size — so the next of its family
+/// opens there. Every step of a drag arrives here; nothing is written until it has been still for
+/// a second, by one writer at a time (as [`remember_codi_spot`]).
+pub fn remember_float_frame(window: &tauri::Window) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static PENDING: Mutex<Option<(String, String, std::time::Instant)>> = Mutex::new(None);
+    static WRITER: AtomicBool = AtomicBool::new(false);
+    if !window.is_visible().unwrap_or(false) || window.is_minimized().unwrap_or(false) || window.is_maximized().unwrap_or(false) || window.is_fullscreen().unwrap_or(false) {
+        return;
+    }
+    let app = window.app_handle().clone();
+    let family = {
+        let registry = app.state::<SatelliteRegistry>();
+        let Ok(held) = registry.open.lock() else { return };
+        let Some(info) = held.get(window.label()) else { return };
+        float_family(float_key(&info.ref_id))
+    };
+    let (Ok(position), Ok(size), Ok(scale)) = (window.outer_position(), window.inner_size(), window.scale_factor()) else { return };
+    let frame = format!("{:.0},{:.0},{:.0},{:.0}", position.x as f64 / scale, position.y as f64 / scale, size.width as f64 / scale, size.height as f64 / scale);
+    if let Ok(mut pending) = PENDING.lock() {
+        *pending = Some((float_frame_key(family), frame, std::time::Instant::now()));
+    }
+    if WRITER.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let settled = PENDING.lock().ok().and_then(|mut pending| match pending.as_ref() {
+            Some((_, _, at)) if at.elapsed() >= std::time::Duration::from_secs(1) => pending.take(),
+            _ => None,
+        });
+        if let Some((key, frame, _)) = settled {
+            if let Some(db) = app.try_state::<crate::db::Db>() {
+                if let Ok(conn) = db.0.lock() {
+                    let _ = crate::db::queries::set_setting(&conn, &key, &frame);
+                }
+            }
+            WRITER.store(false, Ordering::SeqCst);
+            return;
+        }
+    });
+}
+
 /// The browser window's id — there is one (see `SatelliteKind::Browser`).
 pub const BROWSER_REF_ID: &str = "web";
 
@@ -1416,6 +1831,33 @@ fn announce(app: &AppHandle) {
 mod tests {
     use super::*;
 
+    /// A floating conversation is one window per team, per agent and for the call, whichever
+    /// conversation it shows — and it is not part of the desk: a call goes on with the main window
+    /// in the tray, and no island is spent on it.
+    #[test]
+    fn a_floating_window_is_known_by_whose_it_is_not_by_what_it_shows() {
+        let key = float_key("team:t1|chat-a|ws|t1");
+        assert_eq!(key, "team:t1");
+        assert_eq!(label_for(SatelliteKind::Float, key), label_for(SatelliteKind::Float, float_key("team:t1|chat-b|ws|t1")));
+        assert_ne!(label_for(SatelliteKind::Float, "team:t1"), label_for(SatelliteKind::Float, "agent:t1"));
+        assert!(is_float(&label_for(SatelliteKind::Float, "call")));
+        assert!(!is_float(&label_for(SatelliteKind::Chat, "call")));
+        assert!(SatelliteKind::Float.is_utility());
+        assert!(!SatelliteKind::Float.counts_against_ceiling());
+        assert_eq!([float_family("call"), float_family("agent:a1"), float_family("team:t1")], ["call", "agent", "team"]);
+    }
+
+    /// Where a floating window was left is read back whole or not at all.
+    #[test]
+    fn a_remembered_frame_is_four_numbers_of_a_window_that_could_be_one() {
+        assert_eq!(parse_frame("120,80,1020,780"), Some((120.0, 80.0, 1020.0, 780.0)));
+        assert_eq!(parse_frame(" -300, 40, 580, 740 "), Some((-300.0, 40.0, 580.0, 740.0)));
+        assert_eq!(parse_frame("120,80,1020"), None);
+        assert_eq!(parse_frame("120,80,10,10"), None, "too small to be a window");
+        assert_eq!(parse_frame("a,b,c,d"), None);
+        assert_eq!(parse_frame(""), None);
+    }
+
     /// The property the whole design rests on: the same thing always resolves to the same window.
     #[test]
     fn one_thing_is_always_one_label() {
@@ -1648,4 +2090,47 @@ mod tests {
         let held = registry.open.lock().unwrap();
         assert_eq!(SatelliteRegistry::counted(&held), 2);
     }
+    #[test]
+    fn a_border_is_named_by_its_compass_point() {
+        assert_eq!(Edges::parse("n"), Some(Edges { north: true, south: false, east: false, west: false }));
+        assert_eq!(Edges::parse("se"), Some(Edges { north: false, south: true, east: true, west: false }));
+        assert_eq!(Edges::parse("nw"), Some(Edges { north: true, south: false, east: false, west: true }));
+        for wrong in ["", "ns", "ew", "x", "nse", "north"] {
+            assert_eq!(Edges::parse(wrong), None, "{wrong}");
+        }
+    }
+
+    #[test]
+    fn carrying_a_border_moves_that_side_and_leaves_the_opposite_one_where_it_was() {
+        let start = (100.0, 200.0, 600.0, 400.0);
+        let min = (300.0, 250.0);
+        let edges = |name: &str| Edges::parse(name).unwrap();
+        // The right side follows the pointer; the left one stays.
+        assert_eq!(resized_frame(start, (50.0, 999.0), edges("e"), min, None), (100.0, 200.0, 650.0, 400.0));
+        // The left side follows it, and the right one — x + width — stays at 700.
+        assert_eq!(resized_frame(start, (-40.0, 0.0), edges("w"), min, None), (60.0, 200.0, 640.0, 400.0));
+        // Upwards is more `y`: the top side goes up, the bottom one stays.
+        assert_eq!(resized_frame(start, (0.0, 30.0), edges("n"), min, None), (100.0, 200.0, 600.0, 430.0));
+        // The bottom side goes down with the pointer, and the top one — y + height — stays at 600.
+        assert_eq!(resized_frame(start, (0.0, -30.0), edges("s"), min, None), (100.0, 170.0, 600.0, 430.0));
+        // A corner carries both.
+        assert_eq!(resized_frame(start, (-40.0, -30.0), edges("sw"), min, None), (60.0, 170.0, 640.0, 430.0));
+    }
+
+    #[test]
+    fn a_window_is_not_carried_past_its_smallest_size_nor_under_the_menu_bar() {
+        let start = (100.0, 200.0, 600.0, 400.0);
+        let min = (300.0, 250.0);
+        let edges = |name: &str| Edges::parse(name).unwrap();
+        // Pushed in past its minimum from the left, it stops there with the right side still at 700.
+        assert_eq!(resized_frame(start, (900.0, 0.0), edges("w"), min, None), (400.0, 200.0, 300.0, 400.0));
+        // And from the bottom, with the top side still at 600.
+        assert_eq!(resized_frame(start, (0.0, 900.0), edges("s"), min, None), (100.0, 350.0, 600.0, 250.0));
+        assert_eq!(resized_frame(start, (-900.0, -900.0), edges("ne"), min, None), (100.0, 200.0, 300.0, 250.0));
+        // The top side stops where the menu bar begins.
+        assert_eq!(resized_frame(start, (0.0, 500.0), edges("n"), min, Some(700.0)), (100.0, 200.0, 600.0, 500.0));
+        // A window that was already above it (another screen's arrangement) is left to go on.
+        assert_eq!(resized_frame(start, (0.0, 50.0), edges("n"), min, Some(550.0)), (100.0, 200.0, 600.0, 450.0));
+    }
+
 }

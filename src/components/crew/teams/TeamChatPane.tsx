@@ -12,7 +12,7 @@ import { AgentAvatar, TeamAvatar } from "../kit/Avatar";
 import { nextChat, TeamChatHistory } from "./TeamChatHistory";
 import { Btn } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
-import { callTeam, chatWithTeam, showAgentsView } from "../../../lib/agents/talk";
+import { callTeam, chatWithTeam, openInAgents } from "../../../lib/agents/talk";
 import { scrollBehavior } from "../../../lib/motion";
 import type { ChatAttachment } from "../../../lib/tauri/chatCommands";
 
@@ -76,15 +76,11 @@ export function TeamChatContent({ chatId, onClose, controls, grip, shown = true 
     setPreparing(true);
     try {
       const draft = await teamChatDraft(chatId);
-      // The launcher is the Agents view's: this window may be floating over any other.
-      showAgentsView();
-      useCrewStore.getState().open({
-        kind: "launch",
-        goal: draft.goal,
-        assignee: { kind: "team", id: draft.teamId },
-        projectId: draft.projectId,
-        attachments: draft.attachments,
-      });
+      // The launcher is the Agents view's, in the main window: this one comes forward on it.
+      openInAgents(
+        { kind: "launch" as const, goal: draft.goal, assignee: { kind: "team" as const, id: draft.teamId }, projectId: draft.projectId, attachments: draft.attachments },
+        (overlay) => useCrewStore.getState().open(overlay),
+      );
     } catch (error) {
       pushErrorToast(String(error));
     } finally {

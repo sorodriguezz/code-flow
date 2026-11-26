@@ -35,6 +35,24 @@ export const openSatellite = (
   at?: { x: number; y: number },
 ) => invoke<string>("open_satellite", { kind, refId, title, workspaceId, x: at?.x ?? null, y: at?.y ?? null });
 
+/**
+ * Opens the floating window `key` — a conversation with a team or an agent, or the call — on
+ * `refId`, or brings the one it has back from its chip, turned to that conversation. See
+ * `lib/floats` for what the two strings are, and `float_open` in `windows.rs`.
+ */
+export const floatOpen = (key: string, refId: string, title: string, workspaceId: string | null) =>
+  invoke<string>("float_open", { key, refId, title, workspaceId });
+/** Folds a floating window away: hidden with everything in it, while its chip stands for it. */
+export const floatHide = (key: string) => invoke<void>("float_hide", { key });
+export const floatClose = (key: string) => invoke<void>("float_close", { key });
+/** The floating windows there are — for the main window to read back after a reload of its own. */
+export const floatList = () => invoke<{ refId: string; visible: boolean }[]>("float_list");
+/**
+ * Carries one border of the floating window that asks — `n`, `se`, `w`… — with the pointer until
+ * the button is let go. macOS only: see `float_resize` in `windows.rs` and `ResizeHandles`.
+ */
+export const floatResize = (edge: string) => invoke<void>("float_resize", { edge });
+
 export const focusSatellite = (label: string) => invoke<void>("focus_satellite", { label });
 
 export const listSatellites = () => invoke<SatelliteInfo[]>("list_satellites");

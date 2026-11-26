@@ -15,6 +15,23 @@ Cómo usarlo:
   y el workflow deja un aviso.
 -->
 
+## 2.9.12
+
+### ✨ Nuevo
+- **Tú das la palabra, como en una reunión.** Si le hablas a un agente y, mientras piensa o revisa el código, le preguntas otra cosa a otro, ya nadie se pisa: quien responde lo último que dijiste habla en cuanto tiene su respuesta, y los demás levantan la mano cuando terminan y esperan. Les das la palabra pulsando su mano o diciéndolo —«adelante, QA», «te escucho, Arquitecto», o solo «el siguiente»—. Cuando hay más de uno esperando, cada mano lleva su número según quién terminó primero, y una franja sobre la transcripción los muestra en orden. Si lo que iba a decir ya no hace falta, puedes bajarle la mano.
+- **Los chats y la llamada son ventanas de verdad.** La llamada con el equipo, el chat de cada equipo y el de cada agente se abren ahora en su propia ventana del sistema: la puedes llevar a otro monitor, dejarla al lado de CodeFlow y tener varias abiertas a la vez, cada una con su tamaño y en el lugar donde la dejaste. Se redimensionan desde cualquier borde o esquina, con un margen cómodo de agarrar. Al minimizarlas siguen quedando abajo en CodeFlow, en la misma ficha de siempre, que dice qué está haciendo el equipo y avisa cuando respondió.
+- **«Consumo y límites» con resumen.** El panel del medidor de la barra de estado se abre ahora en una pestaña Resumen que responde de un vistazo cuánta capacidad tienes, qué cuentas están por agotarse y cuáles se recuperan primero: cuántas cuentas hay disponibles y cuántas en uso crítico, un anillo con la disponibilidad, el estado de cada proveedor con un segmento por cuenta, las que requieren atención y los próximos reinicios. La pestaña Cuentas muestra cada cuenta agrupada por proveedor, con buscador, filtros por proveedor y estado, y orden por uso, nombre o reinicio. Desde el mismo panel eliges qué cuentas muestran su anillo en la barra lateral.
+- **Estados en vez de promedios.** Cada cuenta se clasifica por su uso —disponible, consumo moderado, próximo al límite (desde 80 %), crítico (desde 95 %), agotado o sin información— y nunca se promedian porcentajes de proveedores distintos. Un límite propio de un modelo no marca la cuenta como agotada si todavía se puede usar con otros: aparece aparte, señalado como «Solo este modelo».
+- **Sala de llamada rediseñada.** Quien lidera el equipo aparece en grande y, a su lado, solo quienes han entrado en la conversación: la tarjeta de cada agente aparece cuando le hablas, cuando se pone a pensar o cuando pide la palabra, en vez de mostrar al equipo entero de una vez. Una línea dice cuántos más están escuchando y lleva a la lista completa. En lugar de una foto, cada agente muestra el logo de su proveedor, para ver de un vistazo qué modelo está hablando; cuando alguien habla, su tarjeta queda enmarcada en verde, el logo se difumina y en su lugar se ve la onda de su voz. Lo que se dice está en la transcripción, no repetido en las tarjetas, y los nombres largos ya no cambian el tamaño de una tarjeta. Bajo los participantes hay pestañas de Transcripción —con buscador y un botón para copiarla— y de Participantes, con el modelo, la cuenta y la voz de cada uno, y un botón para hablarle a cualquiera. El menú «…» de cada tarjeta permite hablarle, darle la palabra o bajarle la mano.
+
+### 🚀 Mejorado
+- **El medidor avisa con los mismos umbrales.** El porcentaje junto al medidor y las barras de Límites del plan pasan a amarillo desde el 80 % y a rojo desde el 95 %, igual que los estados del panel.
+- **Cerrar es terminar.** Al cerrar la ventana de un chat, lo que el equipo o el agente estaba respondiendo se detiene, en vez de seguir figurando como en curso; para que siga trabajando sin tenerlo a la vista, minimízala. Al colgar una llamada también se detiene lo que los agentes aún estaban pensando o revisando: lo único que continúa es la corrida del equipo, cuando se acordó trabajo.
+
+### 🐛 Corregido
+- **El equipo ya no se responde a sí mismo por los altavoces.** Sin audífonos, la respuesta completa de un agente podía volver por el micrófono y tomarse como algo dicho por ti —sobre todo cuando empezaba nombrándose a sí mismo—. Ahora lo que se oye se compara con lo que los agentes estaban diciendo en ese momento, y lo que es su propia voz se descarta aunque alguna palabra se haya entendido distinto.
+- **Tareas que quedaban «en curso» después de una llamada.** Cuando un agente iba a revisar el código durante una llamada, esa revisión podía seguir apareciendo entre las ejecuciones en curso aunque ya hubiera terminado, incluso tras cerrar la llamada.
+
 ## 2.9.11
 
 ### ✨ Nuevo

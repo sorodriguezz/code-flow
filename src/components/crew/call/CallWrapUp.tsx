@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, CircleDashed, ListChecks, Loader2, MessageSquareText, Play, Rocket } from "lucide-react";
 import type { CallState } from "../../../lib/tauri/teamCallCommands";
 import { agentColorVar } from "../../../lib/agents/agentColors";
-import { followTarget } from "../../../state/notificationStore";
+import { followInMain } from "../../../lib/agents/talk";
 import { openTeamChatWindow } from "../../../state/teamChatStore";
 import { useTeamCallStore } from "../../../state/teamCallStore";
 import { AgentAvatar } from "../kit/Avatar";
@@ -50,7 +50,7 @@ export function CallWrapUp({ call, onClose }: { call: CallState; onClose: () => 
     onClose();
   };
   const seeRun = () => {
-    if (call.runId) void followTarget(call.workspaceId, { view: "agents", select: { kind: "teamRun", id: call.runId } });
+    if (call.runId) followInMain(call.workspaceId, { view: "agents", select: { kind: "teamRun", id: call.runId } });
     onClose();
   };
 

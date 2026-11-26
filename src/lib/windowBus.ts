@@ -212,7 +212,36 @@ export type WindowMessage =
    * Something a chat island wants on screen in the assistant panel — a fork, a subchat, a chat it
    * links to. An island has no panel of its own, so the main window opens it (`lib/chatIslands`).
    */
-  | { kind: "panel-open"; to: string; target: PanelTarget };
+  | { kind: "panel-open"; to: string; target: PanelTarget }
+  /**
+   * Something asked of the floating conversations and the call from a window that is not the main
+   * one — their own window folding or closing itself, a chat started from an island. The main
+   * window holds which of them exist and which are folded to its shelf (`teamChatWindowStore`,
+   * `teamCallStore`), so every such gesture is carried out there. Addressed: only it may act.
+   */
+  | { kind: "float"; to: string; action: FloatAction }
+  /**
+   * The main window telling a floating window what it is now: shown or folded, and — a team's or
+   * an agent's — which conversation it holds. `key` is whose window it is (`lib/floats`); every
+   * other window drops it.
+   */
+  | { kind: "float-state"; key: string; minimized: boolean; chatId: string | null };
+
+/** What a window that is not the main one asks about a floating conversation or the call. */
+export type FloatAction =
+  /** Open — or bring back, turned to this conversation — the window of a team or of an agent. */
+  | { do: "open"; kind: "team" | "agent"; chatId: string; owner: string; workspaceId: string; title: string }
+  | { do: "minimize" | "restore" | "close"; key: string }
+  /** `chatId` was deleted: its window turns to `next`, or closes. */
+  | { do: "drop"; chatId: string; next?: string }
+  /** A turn of `chatId` ended; `seen` says whether its own window was showing it then. */
+  | { do: "ended"; chatId: string; how: "done" | "error"; seen: boolean }
+  | { do: "call-start"; teamId: string; projectId: string | null }
+  | { do: "call-minimize" | "call-restore" | "call-close" }
+  /** Show this in the Agents view — the launcher with a draft, a task's whole sheet — and come forward. */
+  | { do: "crew-open"; overlay: unknown }
+  /** Go to this — the run a call started — and come forward. `target` is a `NotificationTarget`. */
+  | { do: "follow"; workspaceId: string | null; target: unknown };
 
 interface Frame {
   from: string;

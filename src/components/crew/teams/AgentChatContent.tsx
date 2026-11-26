@@ -13,7 +13,7 @@ import { useLanguageStore } from "../../../state/languageStore";
 import { showingTeamChat, useTeamChatWindowStore } from "../../../state/teamChatWindowStore";
 import { useWorkspaceStore } from "../../../state/workspaceStore";
 import type { TeamChatSummary } from "../../../lib/tauri/teamCommands";
-import { agentChats, chatWithAgent, conversationName, openAgentChat, showAgentsView } from "../../../lib/agents/talk";
+import { agentChats, chatWithAgent, conversationName, openAgentChat, openInAgents } from "../../../lib/agents/talk";
 import { TaskConversation } from "../../agents/AgentTaskDetail";
 import { ProviderGlyph } from "../../ai/ProviderGlyph";
 import { iconButtonClass } from "../../common/Button";
@@ -63,8 +63,7 @@ export function AgentChatContent({ taskId, onClose, controls, grip, shown = true
   };
   const toSheet = () => {
     // The whole task — what it changed, its repository, its plan — is the Agents view's.
-    showAgentsView();
-    useCrewStore.getState().open({ kind: "task", id: taskId });
+    openInAgents({ kind: "task" as const, id: taskId }, (overlay) => useCrewStore.getState().open(overlay));
     const win = useTeamChatWindowStore.getState().windows.find((w) => w.kind === "agent" && w.chatId === taskId);
     if (win) useTeamChatWindowStore.getState().minimize(win.key);
   };
