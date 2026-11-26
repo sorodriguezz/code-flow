@@ -22,7 +22,6 @@ import {
   AlignLeft,
   BarChart3,
   Monitor,
-  AppWindow,
   AudioLines,
   AudioWaveform,
   Bell,
@@ -167,10 +166,9 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     group: "app",
     color: "#64748b",
     // The grouping the user chose: the language beside the version (updates, the site, Ko-fi — all in
-    // `UpdateSection`), the window limit on its own, the tours on their own, and the app's own files.
+    // `UpdateSection`), the tours on their own, and the app's own files.
     tabs: [
       { id: "language", labelKey: "settings.tabLanguageUpdates", icon: Languages, searchKey: "settings.searchTermsLanguageUpdates" },
-      { id: "windows", labelKey: "windows.limitLabel", hintKey: "windows.limitHint", icon: AppWindow, searchKey: "settings.searchTermsWindows" },
       { id: "tours", labelKey: "tour.settingsTitle", hintKey: "tour.settingsHint", icon: GraduationCap, searchKey: "settings.searchTermsTours" },
       { id: "data", labelKey: "settings.tabAppData", icon: HardDrive, searchKey: "settings.searchTermsAppData" },
       // The version, the log folder and the way to report a problem — which were only ever in the
@@ -704,6 +702,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "devices", labelKey: "remote.devices", icon: Smartphone },
       { id: "terminal", labelKey: "remote.groupTerminal", icon: TerminalSquare },
       { id: "access", labelKey: "remote.groupAccess", icon: ShieldCheck },
+      { id: "activity", labelKey: "remote.groupActivity", hintKey: "remote.activityHint", icon: History },
     ],
     searchKey: "settings.searchTermsRemote",
   },

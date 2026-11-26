@@ -31,10 +31,13 @@
 //! flips — and is stopped by dropping the shutdown sender in [`Running`]. Turning it off does not
 //! revoke devices: the user may simply be leaving the café. Revoking is its own explicit action.
 
+pub mod activity;
+pub mod apps;
 pub mod auth;
 pub mod bridge;
 pub mod dispatch;
 pub mod server;
+pub mod teams;
 pub mod tls;
 
 use std::collections::HashMap;

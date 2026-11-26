@@ -18,7 +18,7 @@
  */
 
 import { create } from "zustand";
-import { NotAllowed, rpc, TimedOut, Unpaired } from "./transport";
+import { NotAllowed, ReadOnly, rpc, TimedOut, Unpaired } from "./transport";
 import { t } from "./i18n";
 import { toastError, toastSuccess } from "./toast";
 import { resetDepth } from "./nav";
@@ -188,7 +188,36 @@ function storedNoticesSeen(): number {
  * the branch screen shares `repo`. `review` and `chat` are apart from everything because they are
  * the two calls that hold the connection open for as long as an engine takes to answer.
  */
-export type BusyKey = "repo" | "analyze" | "chains" | "review" | "chat" | "pipelines" | "services" | "flows";
+export type BusyKey = "repo" | "analyze" | "chains" | "review" | "chat" | "pipelines" | "services" | "flows" | "teams" | "containers" | "notes";
+
+/**
+ * One team run, as the desktop shows it to a phone (`remotectl/teams.rs`).
+ *
+ * Not the desk's `TeamRun`: that record carries every member's prompt and account and megabytes of
+ * transcript, none of which a phone has a use for or a right to. This is the row a list needs.
+ */
+export interface TeamRunRow {
+  id: string;
+  title: string;
+  teamName: string;
+  /** `running | gated | paused | done | failed | aborted`. */
+  status: string;
+  /** What a gated run waits for, whole — sent back as the precondition of the answer. */
+  gate: string;
+  /** The gate's kind alone: `plan`, `item`, `merge`, `review`, `deps`, `budget`, `stuck`… */
+  gateKind: string;
+  /** Unanswered questions a member asked the user. */
+  questions: number;
+  done: number;
+  total: number;
+  running: number;
+  failed: number;
+  updatedAt: string;
+  pinned: boolean;
+}
+
+/** Whether a run is asking for somebody: parked on a gate, or holding a question. */
+export const teamRunWaits = (run: TeamRunRow): boolean => run.status === "gated" || run.questions > 0;
 
 /** A run waiting for somebody, as the desktop shows it to a phone (`waits::phone_view`). */
 export interface FlowWait {
@@ -249,6 +278,8 @@ interface Bootstrap {
   projectId: string | null;
   chains: AgentChain[];
   allowTerminal: boolean;
+  /** `full` or `read`. Absent from a desktop older than per-device access, which had one level. */
+  access?: "full" | "read";
 }
 
 interface MobileState {
@@ -264,6 +295,14 @@ interface MobileState {
    * answered that by deleting its token. The probe is gone; see `NotAllowed` in `transport.ts`.
    */
   terminalAllowed: boolean;
+  /**
+   * Whether the desktop has narrowed this device to looking.
+   *
+   * Told, like the shell grant, and for the same reason: so the client can say so once, up front,
+   * instead of letting every button find out by being refused. The desktop is still what enforces
+   * it — this flag only decides what is *offered*.
+   */
+  readOnly: boolean;
 
   workspaces: Workspace[];
   workspaceId: string | null;
@@ -295,6 +334,14 @@ interface MobileState {
   stashes: StashInfo[];
 
   chains: AgentChain[];
+
+  /**
+   * The current workspace's team runs — the ones waiting for somebody first. In the store and not
+   * the screen for the reason `chains` is: the tab bar's badge counts them from every screen.
+   */
+  teamRuns: TeamRunRow[];
+  teamsState: "loading" | "ready" | "error";
+  teamsError: string | null;
 
   /**
    * The current workspace's services, as the desktop defines them — and, in `serviceRuntime`, what
@@ -351,6 +398,7 @@ interface MobileState {
   setProject: (id: string) => Promise<void>;
   refreshRepo: () => Promise<void>;
   refreshChains: () => Promise<void>;
+  refreshTeams: () => Promise<void>;
   refreshServices: () => Promise<void>;
   refreshFlows: () => Promise<void>;
   /** Folds one `services:runtime` frame in. */
@@ -385,6 +433,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   unpaired: false,
   connected: false,
   terminalAllowed: false,
+  readOnly: false,
 
   workspaces: [],
   workspaceId: null,
@@ -398,6 +447,10 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   stashes: [],
 
   chains: [],
+
+  teamRuns: [],
+  teamsState: "loading",
+  teamsError: null,
 
   services: [],
   serviceRuntime: {},
@@ -415,7 +468,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   logs: {},
   terminals: storedTerminals(),
 
-  busy: { repo: false, analyze: false, chains: false, review: false, chat: false, pipelines: false, services: false, flows: false },
+  busy: { repo: false, analyze: false, chains: false, review: false, chat: false, pipelines: false, services: false, flows: false, teams: false, containers: false, notes: false },
   error: null,
 
   /** The cold-start call. One round trip for what would otherwise be four — see `remote_bootstrap`
@@ -450,6 +503,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
         // device. `?? false` because a desktop older than this client will not send it, and no
         // answer must mean no shell.
         terminalAllowed: data.allowTerminal ?? false,
+        readOnly: data.access === "read",
       });
       rememberScope(workspaceId, projectId);
       if (projectId) {
@@ -458,6 +512,11 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       }
       void get().refreshServices();
       void get().refreshNotices();
+      // Both of these are *questions waiting for somebody*, and the tab bar's badge counts them.
+      // They used to be read only when their own view was opened, so a phone unlocked to check
+      // whether anything needed it showed no badge for an approval that had been waiting an hour.
+      void get().refreshTeams();
+      void get().refreshFlows();
     } catch (e) {
       if (e instanceof Unpaired) set({ unpaired: true, ready: true });
       else set({ ready: true, error: String(e) });
@@ -515,6 +574,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       projects: data.projects,
       chains: data.chains,
       terminalAllowed: data.allowTerminal ?? false,
+      readOnly: data.access === "read",
       projectId: nextProject,
       error: null,
       // The same clearing `setProject` does, and for the same reason: `repoPath` resolves from the
@@ -532,9 +592,11 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     // this resync exists to close.
     watchProject(nextProject);
     void get().refreshRepo();
-    // Both lists were pushed to a socket nobody was holding while this phone was away.
+    // All four were pushed to a socket nobody was holding while this phone was away.
     void get().refreshServices();
     void get().refreshNotices();
+    void get().refreshTeams();
+    void get().refreshFlows();
 
     const active = await read(() => rpc<string[]>("list_active_runs"));
     if (!active.ok) {
@@ -581,6 +643,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       commits: get().commits,
       unpushed: get().unpushed,
       chains: get().chains,
+      teamRuns: get().teamRuns,
     };
     set({
       workspaceId: id,
@@ -595,6 +658,9 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       unpushed: [],
       stashes: [],
       chains: [],
+      // The old workspace's runs, and with them a badge counting gates that are not this one's.
+      teamRuns: [],
+      teamsState: "loading",
       repoState: "loading",
       error: null,
     });
@@ -609,7 +675,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       }
       // Back to the workspace that was working, with the reason said out loud. An empty project list
       // drawn from a failed read is a workspace that looks deleted.
-      set({ ...previous, repoState: "ready", error: null });
+      set({ ...previous, repoState: "ready", teamsState: "ready", error: null });
       toastError(t("error.actionFailed"), info.error);
       return;
     }
@@ -620,6 +686,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       projects: data.projects,
       chains: data.chains,
       terminalAllowed: data.allowTerminal ?? false,
+      readOnly: data.access === "read",
       projectId,
       repoState: projectId ? "loading" : "ready",
       error: null,
@@ -632,6 +699,7 @@ export const useMobileStore = create<MobileState>((set, get) => ({
     // Service definitions are per workspace, and the ones on screen are the workspace just left.
     set({ services: [], servicesState: "loading", servicesError: null });
     void get().refreshServices();
+    void get().refreshTeams();
   },
 
   setProject: async (id) => {
@@ -693,6 +761,25 @@ export const useMobileStore = create<MobileState>((set, get) => ({
       return;
     }
     set({ chains: chains.value, error: null });
+  },
+
+  refreshTeams: async () => {
+    const workspaceId = get().workspaceId;
+    if (!workspaceId) {
+      set({ teamRuns: [], teamsState: "ready", teamsError: null });
+      return;
+    }
+    const runs = await read(() => rpc<TeamRunRow[]>("team_phone_runs", { workspaceId }));
+    if (get().workspaceId !== workspaceId) return;
+    if (!runs.ok) {
+      if (runs.unpaired) set({ unpaired: true });
+      // The last list is kept, for the reason `refreshChains` keeps its own: zeroing the count of
+      // what is waiting because a request dropped is the one lie this client must not tell. A
+      // desktop older than this client answers `not_allowed`; that is "no teams here", not an error.
+      else if (get().teamRuns.length === 0) set({ teamsState: "error", teamsError: runs.error });
+      return;
+    }
+    set({ teamRuns: runs.value, teamsState: "ready", teamsError: null });
   },
 
   refreshServices: async () => {
@@ -767,7 +854,13 @@ export const useMobileStore = create<MobileState>((set, get) => ({
   },
 
   refreshAll: async () => {
-    await Promise.all([get().refreshRepo(), get().refreshChains(), get().refreshServices(), get().refreshFlows()]);
+    await Promise.all([
+      get().refreshRepo(),
+      get().refreshChains(),
+      get().refreshTeams(),
+      get().refreshServices(),
+      get().refreshFlows(),
+    ]);
   },
 
   /**
@@ -797,6 +890,11 @@ export const useMobileStore = create<MobileState>((set, get) => ({
         // Not "it failed" — nobody knows whether it did. The retry is safe: it carries the same key,
         // and the desktop answers a key it has seen with what the first attempt did.
         toastError(t("error.timedOut"));
+      } else if (e instanceof ReadOnly) {
+        // Before `NotAllowed`, which it extends: the desk narrowed this device to looking, and the
+        // useful thing to say is where that is changed.
+        set({ readOnly: true });
+        toastError(t("error.readOnly"));
       } else if (e instanceof NotAllowed) {
         // `NotAllowed`'s message is the wire token `not_allowed` — a value, not a sentence. It
         // reaches a user only when this client is newer than the desktop and names a command the
@@ -898,6 +996,32 @@ export const useMobileStore = create<MobileState>((set, get) => ({
  * would re-render the commit button every time a review started or ended.
  */
 export const useBusy = (key: BusyKey): boolean => useMobileStore((s) => s.busy[key]);
+
+/**
+ * How many things are waiting for a person, across everything this client can show.
+ *
+ * The number the whole feature exists to surface, and until this it was only ever a part of itself:
+ * the tab bar counted chain gates and nothing else, so a flow parked on an approval, a team waiting
+ * for its plan to be approved and a service that had fallen over all sat behind a tab with no badge.
+ * One definition, used by the badge and by the summary that lists what is behind it, so the two can
+ * never disagree about what "waiting" means.
+ */
+export function attentionCount(s: {
+  chains: AgentChain[];
+  teamRuns: TeamRunRow[];
+  flowWaits: FlowWait[];
+  services: ServiceRow[];
+  serviceRuntime: Record<string, ServiceRuntime>;
+}): number {
+  return (
+    s.chains.filter((chain) => chain.status === "gated").length +
+    s.teamRuns.filter(teamRunWaits).length +
+    // Approvals are questions; a flow waiting for a call or a time is not waiting for *you*.
+    s.flowWaits.filter((wait) => wait.kind === "approval").length +
+    // A service that fell over. Running ones are the ordinary state.
+    s.services.filter((service) => s.serviceRuntime[service.id]?.status === "failed").length
+  );
+}
 
 /**
  * The path of the repository currently in scope, or `null`.

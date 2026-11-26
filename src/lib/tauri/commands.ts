@@ -108,6 +108,7 @@ import type {
   DocPage,
   DocResult,
   DocScope,
+  RemoteActivity,
   RemoteDevice,
   RemoteNotice,
   RemoteTerminal,
@@ -3588,6 +3589,19 @@ export const remotectlForgetDevice = (id: string) =>
 /** Clears every revoked row at once. */
 export const remotectlForgetAllRevoked = () =>
   invoke<RemoteDevice[]>("remotectl_forget_all_revoked");
+
+/**
+ * Narrows one device to looking, or gives it back everything the allowlist offers. Takes effect on
+ * the device's next request, closes the shells it had open when narrowed, and tells the phone.
+ */
+export const remotectlSetDeviceAccess = (id: string, readOnly: boolean) =>
+  invoke<RemoteDevice[]>("remotectl_set_device_access", { id, readOnly });
+
+/** What paired devices did on this machine, newest first — kept across restarts. */
+export const remotectlListActivity = (limit = 100) =>
+  invoke<RemoteActivity[]>("remotectl_list_activity", { limit });
+
+export const remotectlClearActivity = () => invoke<void>("remotectl_clear_activity");
 
 /**
  * Tells every connected phone that this window just changed something they hold a copy of.

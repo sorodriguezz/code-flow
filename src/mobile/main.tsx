@@ -3,7 +3,7 @@ import { App } from "./App";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { locale } from "./i18n";
 import { initNav } from "./nav";
-import { adoptHandoff, rememberBundle } from "./transport";
+import { adoptHandoff, capturePairingCode, rememberBundle } from "./transport";
 import { trackViewport } from "./viewport";
 import "./mobile.css";
 
@@ -11,6 +11,9 @@ import "./mobile.css";
 // fragment, and it has to be in storage — and out of the address bar — before anything reads the
 // token or writes a history entry. See `adoptHandoff`.
 adoptHandoff();
+// And the six digits a scanned QR carries, for the same reason: out of the address before anything
+// writes a history entry. See `capturePairingCode`.
+capturePairingCode();
 
 // Before the first render, so the shell is laid out against the real viewport from its first frame
 // rather than resizing under the user a moment later. See `viewport.ts` for why `100%` and `100dvh`

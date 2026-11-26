@@ -7,7 +7,6 @@ import {
   setSetting,
 } from "../lib/tauri/commands";
 import { useRepoStore } from "./repoStore";
-import { DEFAULT_SATELLITE_LIMIT, useWindowStore } from "./windowStore";
 import { watchSettings } from "../lib/settingsSync";
 import {
   DEFAULT_NOTIFICATION_SOUND,
@@ -43,7 +42,6 @@ const CHAT_AUTO_COMPACT_KEY = "chat_auto_compact";
  *  context meter's card. `0` or unset means no threshold. Frontend-only: the decision is taken in
  *  the chat stores, after the answer is in. */
 const CHAT_COMPACT_THRESHOLD_KEY = "chat_compact_threshold_k";
-const WINDOW_LIMIT_KEY = "satellite_window_limit";
 /** Whether the Revisor tab is shown. On unless explicitly hidden in Settings. */
 const REVIEWER_KEY = "reviewer_enabled";
 /** How tight the interface is drawn — Apariencia › Modo y color › Densidad. */
@@ -81,20 +79,6 @@ export function applyDensity(
   const attr = densityAttribute(density);
   if (attr === null) root.removeAttribute("data-density");
   else root.setAttribute("data-density", attr);
-}
-
-/**
- * How many satellite windows are allowed, from a stored string.
- *
- * Zero is a real answer — "never open a second window" — so the clamp starts there rather than at
- * one. The upper bound matches `MAX_SATELLITES` in `windows.rs`: a setting the backend would refuse
- * to honour is a setting that lies.
- */
-function clampWindows(raw: string | undefined | null): number {
-  if (raw == null) return DEFAULT_SATELLITE_LIMIT;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) return DEFAULT_SATELLITE_LIMIT;
-  return Math.max(0, Math.min(8, Math.round(parsed)));
 }
 
 interface PreferencesState {
@@ -190,16 +174,6 @@ interface PreferencesState {
    */
   chatCompactThresholdK: number;
   /**
-   * How many apps and repositories may be open in windows of their own, besides the main one.
-   *
-   * A setting rather than a constant because the right answer is about the machine, not about the
-   * app: four covers the case this was asked for — API client, database, frontend, backend — on a
-   * laptop, and someone on a desktop with 64 GB has no reason to be held to it. Enforced where the
-   * button is (`windowStore.detach`) so the refusal can name the limit; `windows.rs` keeps a hard
-   * ceiling underneath it that no setting can raise.
-   */
-  satelliteLimit: number;
-  /**
    * Whether the Revisor tab sits beside Editor — the project's quality pipeline (build, tests,
    * SonarQube, Quality Gate).
    *
@@ -243,7 +217,6 @@ interface PreferencesState {
   setChatFileGenerationEnabled: (enabled: boolean) => Promise<void>;
   setChatAutoCompactEnabled: (enabled: boolean) => Promise<void>;
   setChatCompactThresholdK: (thousands: number) => Promise<void>;
-  setSatelliteLimit: (limit: number) => Promise<void>;
   setReviewerEnabled: (enabled: boolean) => Promise<void>;
   setDensity: (density: Density) => Promise<void>;
   /** Saves the list and adopts the normalised version the backend stored. */
@@ -292,7 +265,6 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
   spokenNotificationSources: [],
   pipelinePollSeconds: 5,
   blameAnnotationEnabled: false,
-  satelliteLimit: DEFAULT_SATELLITE_LIMIT,
   reviewerEnabled: true,
   density: "comfortable",
   lockedBranchRules: null,
@@ -317,7 +289,6 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
         SPOKEN_SOURCES_KEY,
         PIPELINE_POLL_KEY,
         BLAME_ANNOTATION_KEY,
-        WINDOW_LIMIT_KEY,
         CHAT_FILE_GENERATION_KEY,
         CHAT_AUTO_COMPACT_KEY,
         CHAT_COMPACT_THRESHOLD_KEY,
@@ -361,7 +332,6 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       spokenNotificationSources: sourceList(stored[SPOKEN_SOURCES_KEY]),
       // Same one-liner, same reason: unset and explicit-false are both "don't blame anything".
       blameAnnotationEnabled: stored[BLAME_ANNOTATION_KEY] === "true",
-      satelliteLimit: clampWindows(stored[WINDOW_LIMIT_KEY]),
       // Unset is on, like `secretScanEnabled` and unlike most of the booleans above: this one is a
       // capability the chat workspace is built around rather than an extra to opt into.
       chatFileGenerationEnabled: (stored[CHAT_FILE_GENERATION_KEY] ?? null) === null
@@ -378,9 +348,6 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
       lockedBranchRules: rules,
     });
     applyDensity(get().density);
-    // The store that enforces it keeps its own copy, so the rail can refuse without reaching across
-    // stores on every press. One writer, mirrored — not two sources.
-    useWindowStore.getState().setLimit(get().satelliteLimit);
   },
 
   setAutoFetchSeconds: async (seconds) => {
@@ -485,13 +452,6 @@ export const usePreferencesStore = create<PreferencesState>((set, get) => ({
     await setSetting(DENSITY_KEY, density);
   },
 
-  setSatelliteLimit: async (limit) => {
-    const value = clampWindows(String(limit));
-    set({ satelliteLimit: value });
-    useWindowStore.getState().setLimit(value);
-    await setSetting(WINDOW_LIMIT_KEY, String(value));
-  },
-
   // Not optimistic, unlike the three above: the backend normalises the list on the way in, and
   // showing the typed version first would flash a duplicate or an untrimmed entry that is about to
   // disappear. The round trip is one SQLite write.
@@ -531,7 +491,6 @@ watchSettings(
     SPOKEN_SOURCES_KEY,
     PIPELINE_POLL_KEY,
     BLAME_ANNOTATION_KEY,
-    WINDOW_LIMIT_KEY,
     CHAT_FILE_GENERATION_KEY,
     CHAT_AUTO_COMPACT_KEY,
     CHAT_COMPACT_THRESHOLD_KEY,

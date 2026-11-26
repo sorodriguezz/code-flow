@@ -15,6 +15,32 @@ Cómo usarlo:
   y el workflow deja un aviso.
 -->
 
+## 2.9.13
+
+### ✨ Nuevo
+- **Tus equipos, desde el teléfono.** El control remoto muestra ahora las corridas de los equipos del espacio, con las que te esperan arriba. Al abrir una ves qué te pregunta —el plan del líder con sus tareas, la tarea que necesita tu sí, la integración, un cambio de impacto con los archivos que toca— y respondes con los mismos dos botones que en el escritorio, cada uno diciendo qué hace. También respondes las preguntas de los agentes (con sus opciones a un toque), les dejas una nota, reintentas o saltas una tarea, y pausas o detienes la corrida.
+- **Dale una tarea a un equipo desde el teléfono.** En la vista Equipos, cada equipo tiene «Dar una tarea»: escribes el encargo, eliges los repositorios y la corrida empieza con los miembros, el presupuesto y las aprobaciones que el equipo ya tiene configurados, sobre la rama que cada repositorio tiene en el escritorio. Pide confirmación antes de iniciar.
+- **Conversa con un equipo desde el teléfono.** «Conversar» abre la misma conversación del escritorio: ves quién responde en cada momento, con el formato de las respuestas, puedes detener una respuesta en curso y empezar una conversación nueva.
+- **Lee los cambios antes de decidir.** Las decisiones de una corrida que dependen de un cambio —una tarea que pide tu sí, un cambio de impacto, una revisión que no aprobó, la integración final— tienen ahora «Ver los cambios»: el diff de la tarea, o lo que cada repositorio traería a su rama, archivo por archivo. También está en cada tarea terminada.
+- **Notas en el teléfono.** Nueva pestaña Notas: tus notas con buscador (títulos al escribir, contenido desde tres letras) y filtro por libro, la nota con su formato, y puedes crear una, editarla y anclarla. Si la nota cambió en el escritorio mientras la editabas, el teléfono te avisa en vez de pisarla. Las notas que reflejan un archivo de un repositorio se leen, y se editan en el escritorio.
+- **Contenedores en el teléfono.** La pestaña Agentes tiene una vista Contenedores: los que hay en el equipo agrupados por proyecto de Compose, con su estado y puertos, las últimas líneas de su registro, e iniciar, reiniciar o detener cada uno (detener pide confirmación).
+- **«Resumen»: lo que te espera, en una sola lista.** La pestaña Agentes del teléfono abre en un resumen con todo lo que necesita una respuesta —equipos, cadenas, aprobaciones de flujos y servicios caídos— y, debajo, lo que está en marcha. Si no hay nada, lo dice. Las vistas de la pestaña (Resumen, Equipos, Cadenas, Corridas, Servicios, Contenedores, Flujos) se eligen en una fila que se desliza.
+- **Uso y límites en el teléfono.** Cuánto llevas consumido de cada plan de IA y cuándo se reinicia, con los mismos colores de aviso del escritorio. Abrir la pantalla no consulta a ningún proveedor: muestra la última lectura del escritorio.
+- **Emparejar con solo escanear.** Mientras hay un emparejamiento abierto, el código QR de Ajustes › Control remoto lleva también el código: apuntas la cámara y el dispositivo queda emparejado, sin escribir los seis dígitos ni un nombre. Escribir el código sigue funcionando.
+- **Dispositivos de solo lectura.** Cada dispositivo emparejado puede quedar en «Solo lectura» desde Ajustes › Control remoto › Dispositivos: ve todo, pero no puede hacer commits, aprobar, responder ni abrir un terminal. Vale desde su siguiente acción, el dispositivo se entera al instante y lo muestra arriba en todas sus pantallas.
+- **Registro de actividad de los dispositivos.** Ajustes › Control remoto › Actividad guarda lo que hizo cada dispositivo —commits, push, aprobaciones, lo que falló y lo que se le negó por ser de solo lectura— y se conserva al cerrar la app.
+- **Cuánta memoria ocupa cada ventana.** El panel de CPU y memoria de la barra de estado lista ahora las ventanas abiertas —la principal, las apps y repositorios separados, los chats y la llamada— con lo que ocupa cada una, de mayor a menor. Disponible en macOS.
+
+### 🚀 Mejorado
+- **Sin límite de ventanas.** Ya no hay un máximo de apps, repositorios y editores abiertos en ventanas propias: puedes abrir las que tu equipo aguante. El ajuste «Ventanas a la vez» desaparece de Ajustes › General.
+- **El contador de la pestaña Agentes cuenta todo lo que te espera.** Antes solo sumaba las cadenas; ahora incluye las decisiones y preguntas de los equipos, las aprobaciones de flujos y los servicios caídos.
+- **Las acciones de equipos hechas desde un dispositivo se avisan en el escritorio**, como ya pasaba con los commits y las cadenas.
+
+### 🐛 Corregido
+- **Aprobaciones de flujos que no aparecían al abrir el teléfono.** El aviso de una aprobación pendiente solo se cargaba al entrar a la vista Flujos, así que al desbloquear el teléfono no había ninguna señal de que algo esperaba. Ahora se lee al conectar y al reconectar.
+- **Decidir o iniciar un flujo dos veces tras una conexión cortada.** Si la respuesta se perdía y volvías a pulsar, la acción podía repetirse. Ahora el reintento recibe el resultado del primer intento, como el resto de las acciones.
+- **Las decisiones e inicios de flujos hechos desde un dispositivo no se avisaban en el escritorio.** Ahora aparecen en el centro de notificaciones.
+
 ## 2.9.12
 
 ### ✨ Nuevo

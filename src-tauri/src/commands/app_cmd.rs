@@ -252,9 +252,16 @@ pub async fn power_save_set(app: tauri::AppHandle, level: u8) {
 ///
 /// Infallible by design: a status bar has nothing to do with an error about a detail nobody asked
 /// to be told about, so anything unreadable comes back as zero.
+///
+/// With `detail` it also says what each open window takes (`windows::memory_by_window`), so the
+/// panel can answer "which of these is the heavy one" now that nothing limits how many are open.
 #[tauri::command(async)]
-pub fn system_load(detail: bool) -> crate::sysload::SystemLoad {
-    crate::sysload::read(detail)
+pub fn system_load(app: tauri::AppHandle, detail: bool) -> crate::sysload::SystemLoad {
+    let mut load = crate::sysload::read(detail);
+    if detail {
+        load.windows = crate::windows::memory_by_window(&app);
+    }
+    load
 }
 
 /// What the app cannot do without, checked on the first launch after installing.

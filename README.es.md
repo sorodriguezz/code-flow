@@ -12,7 +12,7 @@ una sola app nativa y rápida. Después prueba el endpoint que acabas de cambiar
 datos que hay detrás y entra por SSH a la máquina donde corre, sin salir de la ventana. **Tú decides
 qué modelo hace qué.**
 
-![versión](https://img.shields.io/badge/versión-2.9.12-6C5CE7)
+![versión](https://img.shields.io/badge/versión-2.9.13-6C5CE7)
 ![plataforma](https://img.shields.io/badge/plataforma-Windows%20%7C%20macOS-2D3436)
 ![proveedores](https://img.shields.io/badge/IA-7%20motores-00B894)
 ![idiomas](https://img.shields.io/badge/idiomas-EN%20%7C%20ES-0984E3)
@@ -676,12 +676,22 @@ texto en el escritorio.
 
 ## 📱 Tu teléfono, cuando no estás en la máquina
 
-Enciende el servidor de control remoto en Ajustes, escribe en el navegador de tu teléfono los seis
-dígitos que muestra, y la app tiene una segunda pantalla — sin tienda de apps, sin cuenta, sin nada
-publicado en internet.
+Enciende el servidor de control remoto en Ajustes, apunta la cámara del teléfono al código QR que
+muestra — o escribe los seis dígitos — y la app tiene una segunda pantalla: sin tienda de apps, sin
+cuenta, sin nada publicado en internet.
 
-- **Mira lo que está corriendo**: tareas y cadenas de agentes, en vivo, y responde a las que esperan en
-  *Tu turno* desde donde estés.
+- **Lo que te espera, primero**: un resumen con todo lo que necesita una respuesta — el plan de un
+  equipo, una tarea que pide tu sí, la pregunta de un agente, el gate de una cadena, la aprobación de
+  un flujo, un servicio caído — y el contador en la pestaña que lo suma todo.
+- **Tus equipos, de principio a fin**: dale una tarea a un equipo, conversa con él, lee el diff de
+  lo que te pide aprobar, aprueba o rechaza cada decisión, responde las preguntas de sus agentes,
+  reintenta o salta una tarea, pausa o detén la corrida.
+- **Tus notas**: búscalas, léelas con su formato, crea una y edítala — sin pisar lo que cambió en el
+  escritorio.
+- **Tus contenedores**: cuáles están arriba, las últimas líneas de su registro, e iniciar, detener o
+  reiniciar cada uno.
+- **Mira lo que está corriendo**: tareas y cadenas de agentes, en vivo, y cuánto queda de cada plan
+  de IA y cuándo se reinicia.
 - **Revisa un pull request**, lee el repositorio y sigue chateando con el asistente.
 - **Más que mirar**: pipelines (ejecuciones, jobs, reejecutar y cancelar), servicios (iniciar,
   detener, reiniciar), stashes (aplicar y sacar) y tus notificaciones.
@@ -692,9 +702,12 @@ publicado en internet.
   escritorio. Los teléfonos que ya estaban emparejados se trasladan solos.
 - **Una conexión inestable no duplica una acción**: cada cambio que envía el teléfono lleva una clave,
   así que reintentar tras un timeout recibe la primera respuesta en vez de repetirlo.
-- **Cada dispositivo es revocable** uno a uno desde el escritorio, y administrar la función es algo que
-  solo puede hacer la máquina: un teléfono emparejado no puede abrir una ventana de emparejamiento,
-  mover el puerto ni revocar al dispositivo de al lado.
+- **Cada dispositivo con su acceso**: completo o de solo lectura — para la tablet que solo muestra
+  cómo va todo, o el teléfono que prestas — y revocable uno a uno desde el escritorio.
+- **Un registro de lo que hicieron**: cada commit, push, aprobación o intento rechazado de un
+  dispositivo queda anotado en el escritorio, también después de cerrar la app.
+- **Administrar la función solo se hace en la máquina**: un teléfono emparejado no puede abrir una
+  ventana de emparejamiento, mover el puerto, cambiar su propio acceso ni revocar al de al lado.
 
 ## 🛟 Copias de seguridad que se pueden restaurar
 

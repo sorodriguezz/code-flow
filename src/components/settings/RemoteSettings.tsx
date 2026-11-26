@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Lock, ShieldCheck, ShieldX, Smartphone, TerminalSquare, Trash2, X } from "lucide-react";
+import { Eye, Lock, ShieldCheck, ShieldX, Smartphone, TerminalSquare, Trash2, X } from "lucide-react";
 import qrcode from "qrcode-generator";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
@@ -13,20 +13,24 @@ import { RailSection } from "./settingsNav";
 import {
   closeTerminal,
   remotectlCancelPairing,
+  remotectlClearActivity,
   remotectlForgetAllRevoked,
   remotectlForgetDevice,
+  remotectlListActivity,
   remotectlListDevices,
   remotectlListTerminals,
   remotectlRevokeAll,
   remotectlRevokeDevice,
   remotectlSetAllowTerminal,
+  remotectlSetDeviceAccess,
   remotectlSetEnabled,
   remotectlSetPort,
   remotectlSetTls,
   remotectlStartPairing,
   remotectlStatus,
 } from "../../lib/tauri/commands";
-import type { RemoteDevice, RemoteStatus, RemoteTerminal } from "../../types/domain";
+import type { RemoteActivity, RemoteDevice, RemoteStatus, RemoteTerminal } from "../../types/domain";
+import { isRemoteActionKey } from "../../lib/remoteActions";
 
 /**
  * The address, as something you can point a camera at.
@@ -139,6 +143,7 @@ export function RemoteSettings() {
   const [status, setStatus] = useState<RemoteStatus | null>(null);
   const [devices, setDevices] = useState<RemoteDevice[]>([]);
   const [terminals, setTerminals] = useState<RemoteTerminal[]>([]);
+  const [activity, setActivity] = useState<RemoteActivity[]>([]);
   const [code, setCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // Held separately from `status.port` so typing "8" on the way to "8080" does not immediately try
@@ -146,10 +151,11 @@ export function RemoteSettings() {
   const [portDraft, setPortDraft] = useState("");
 
   const reload = useCallback(async () => {
-    const [next, list, shells] = await Promise.all([
+    const [next, list, shells, acts] = await Promise.all([
       remotectlStatus().catch(() => null),
       remotectlListDevices().catch(() => [] as RemoteDevice[]),
       remotectlListTerminals().catch(() => [] as RemoteTerminal[]),
+      remotectlListActivity().catch(() => [] as RemoteActivity[]),
     ]);
     if (next) {
       setStatus(next);
@@ -161,6 +167,7 @@ export function RemoteSettings() {
     }
     setDevices(list);
     setTerminals(shells);
+    setActivity(acts);
   }, []);
 
   useEffect(() => {
@@ -351,7 +358,11 @@ export function RemoteSettings() {
                 </p>
                 {status?.url ? (
                   <div className="flex items-start gap-3">
-                    <AddressQr url={status.url} />
+                    {/* While a pairing is open the QR carries the code too, in the URL's fragment —
+                        which a browser never sends anywhere — so pointing a camera at it is the
+                        whole pairing: no six digits read off one screen and typed into another. The
+                        code is on this screen either way; the QR only saves the typing. */}
+                    <AddressQr url={code ? `${status.url}/#pair=${code}` : status.url} />
                     <div className="min-w-0 flex-1">
                       {/* `inline-block`, so the box is the width of the address rather than of the
                           pane: a 25-character LAN URL stretched across a full-width panel reads as an
@@ -360,7 +371,7 @@ export function RemoteSettings() {
                         {status.url}
                       </code>
                       <p className="mt-1.5 text-[11px] leading-snug text-[var(--cf-text-muted)]">
-                        {t("remote.scanHint")}
+                        {code ? t("remote.scanPairHint") : t("remote.scanHint")}
                       </p>
                       {status.fingerprint && <Fingerprint value={status.fingerprint} />}
 
@@ -455,6 +466,34 @@ export function RemoteSettings() {
                             </span>
                           )}
                         </span>
+                        {/* What this device may do — per device, where the shell switch is for all of
+                            them. A pressed toggle rather than a menu: there are two levels, and the
+                            one worth noticing at a glance is the narrower one. */}
+                        {!device.revoked && (
+                          <Tooltip
+                            label={device.access === "read" ? t("remote.accessRead") : t("remote.accessFull")}
+                            description={t("remote.accessHint")}
+                          >
+                            <button
+                              type="button"
+                              aria-pressed={device.access === "read"}
+                              onClick={() =>
+                                void guard(async () => {
+                                  setDevices(await remotectlSetDeviceAccess(device.id, device.access !== "read"));
+                                })
+                              }
+                              disabled={busy}
+                              className={buttonClass({
+                                variant: "ghost",
+                                size: "sm",
+                                className: device.access === "read" ? "text-[var(--cf-warning)]" : "",
+                              })}
+                            >
+                              <Eye size={13} />
+                              {device.access === "read" ? t("remote.accessRead") : t("remote.accessFull")}
+                            </button>
+                          </Tooltip>
+                        )}
                         {/* A live device gets a cut-off button; a revoked one gets a remove-from-list
                             button. The same slot, because a row only ever has one next step. */}
                         {device.revoked ? (
@@ -651,6 +690,58 @@ export function RemoteSettings() {
               </p>
             </>
           )}
+
+          {/* What devices did, kept across restarts. The notification centre says the same as it
+              happens and forgets it when the app closes; this is what is left to read afterwards —
+              including the writes a read-only device was refused. */}
+          {tab === "activity" &&
+            (activity.length === 0 ? (
+              <p className="text-[12px] leading-snug text-[var(--cf-text-muted)]">{t("remote.activityEmpty")}</p>
+            ) : (
+              <>
+                <ul className="divide-y divide-[var(--cf-border)] border-y border-[var(--cf-border)]">
+                  {activity.map((row) => (
+                    <li key={row.id} className="flex items-center gap-2 py-2">
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[13px] text-[var(--cf-text)]">
+                          {/* A key this build has no string for — a log written by a newer version —
+                              is shown as "another action" rather than as its raw key. */}
+                          {isRemoteActionKey(row.action) ? t(row.action) : t("remote.activityOther")}
+                          {row.detail ? ` · ${row.detail}` : ""}
+                        </span>
+                        <span className="block truncate text-[11px] text-[var(--cf-text-muted)]">
+                          {[row.deviceName, whenLabel(row.createdAt)].filter(Boolean).join(" · ")}
+                        </span>
+                      </span>
+                      {row.status === "refused" ? (
+                        <Status tone="warning">{t("remote.activityRefused")}</Status>
+                      ) : row.status === "error" ? (
+                        // `Status` has no red: a failed act is a line of a log, not an alarm. The
+                        // word carries it, in the app's own danger colour.
+                        <span className="shrink-0 text-[11px] text-[var(--cf-danger)]">{t("remote.activityFailed")}</span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+                <div className="-ml-2 mt-2">
+                  <Actions>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void guard(async () => {
+                          await remotectlClearActivity();
+                          setActivity([]);
+                        })
+                      }
+                      disabled={busy}
+                      className={buttonClass({ variant: "ghost", size: "sm" })}
+                    >
+                      {t("remote.activityClear")}
+                    </button>
+                  </Actions>
+                </div>
+              </>
+            ))}
         </>
       )}
     </RailSection>

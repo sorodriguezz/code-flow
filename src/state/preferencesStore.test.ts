@@ -7,7 +7,6 @@ vi.mock("../lib/tauri/commands", () => ({
   setSetting: async (key: string, value: string) => { settings[key] = value; },
 }));
 vi.mock("./repoStore", () => ({ useRepoStore: { getState: () => ({}) } }));
-vi.mock("./windowStore", () => ({ DEFAULT_SATELLITE_LIMIT: 4, useWindowStore: { getState: () => ({ setLimit: () => {} }) } }));
 vi.mock("../lib/settingsSync", () => ({ watchSettings: () => {} }));
 
 const { usePreferencesStore } = await import("./preferencesStore");

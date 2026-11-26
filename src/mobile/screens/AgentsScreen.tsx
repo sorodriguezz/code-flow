@@ -7,12 +7,16 @@ import { navigated } from "../haptics";
 import { sinceIso } from "../time";
 import { RootBar } from "../ui/RootBar";
 import { Screen } from "../ui/Screen";
-import { Segmented } from "../ui/Segmented";
+import { Chips } from "../ui/Chips";
 import { Card, Divider, Row, Section } from "../ui/List";
 import { Badge, EmptyState } from "../ui/Feedback";
 import { RunsView } from "./RunsScreen";
 import { ServicesView } from "./ServicesScreen";
 import { FlowsView } from "./FlowsScreen";
+import { TeamsView } from "./TeamsScreen";
+import { ContainersView } from "./ContainersScreen";
+import { SummaryView, type AgentsView } from "./SummaryView";
+import { teamRunWaits } from "../store";
 import type { AgentChain, ChainStatus } from "../../types/domain";
 
 /**
@@ -23,16 +27,34 @@ import type { AgentChain, ChainStatus } from "../../types/domain";
  * finishing when you get back to the desk. Everything else in this client is convenience; this is
  * the part that changes an outcome.
  *
- * # Three views, one control
+ * # Seven views, one control
  *
- * Chains and live runs are two views of one thing — a chain *is* what most runs belong to — so they
- * share a tab behind a segmented control rather than taking two of the five slots in the tab bar.
- * Services joined them as the third: the other thing running on the machine for this workspace, and
- * the other list somebody checks from a phone to see whether what they left going is still up.
- * The control now disappears when a chain is open, because it belongs to the list level: it used to
- * stay, with "Cadenas" drawn as selected while the chain *list* was nowhere on screen and tapping it
- * did nothing at all.
+ * Everything that runs on the machine for this workspace and can stop to wait for somebody: team
+ * runs, chains, live engine runs, services, containers and flows — and, first, a summary of all of
+ * them, which is what the tab opens on. They share a tab rather than taking a slot each in the tab bar, behind
+ * a row of chips that scrolls (`Chips`): a segmented control divides the width evenly, and six
+ * labels do not fit in a phone's width divided by six.
+ *
+ * The summary is first because it answers the question the tab is opened to ask — does anything
+ * need me — across all five lists at once. Until it existed that took a tap per list, and the tab's
+ * badge counted only one of them.
+ *
+ * The control disappears when something is open, because it belongs to the list level.
  */
+
+/** Which view the tab was last on, so coming back to it is coming back to the same list. The
+ *  summary is the default and is what a fresh device opens on. */
+const VIEW_KEY = "codeflow.remote.agentsView";
+const VIEWS: AgentsView[] = ["summary", "teams", "chains", "runs", "services", "containers", "flows"];
+
+function storedView(): AgentsView {
+  try {
+    const raw = sessionStorage.getItem(VIEW_KEY);
+    return VIEWS.includes(raw as AgentsView) ? (raw as AgentsView) : "summary";
+  } catch {
+    return "summary";
+  }
+}
 
 export const STATUS_KEY: Record<ChainStatus, MobileKey> = {
   queued: "chainStatus.queued",
@@ -175,8 +197,19 @@ export function AgentsScreen() {
   const failedServices = useMobileStore(
     (s) => s.services.filter((service) => s.serviceRuntime[service.id]?.status === "failed").length,
   );
-  const [view, setView] = useState<"chains" | "runs" | "services" | "flows">("chains");
+  // Remembered for the session, not for ever: within a visit, leaving the tab to read a diff and
+  // coming back should land on the same list; the next morning it should land on the summary.
+  const [view, setViewState] = useState<AgentsView>(storedView);
+  const setView = (next: AgentsView) => {
+    setViewState(next);
+    try {
+      sessionStorage.setItem(VIEW_KEY, next);
+    } catch {
+      /* private browsing; the view is simply not remembered */
+    }
+  };
   const waiting = chains.filter((c) => c.status === "gated").length;
+  const teamsWaiting = useMobileStore((s) => s.teamRuns.filter(teamRunWaits).length);
   // Approvals are questions, like gates; a wait for a call or a time is not, so it adds no badge.
   const approvals = useMobileStore((s) => s.flowWaits.filter((w) => w.kind === "approval").length);
 
@@ -187,28 +220,36 @@ export function AgentsScreen() {
         <RootBar
           title={t("nav.agents")}
           below={
-            <div className="px-3 pb-2">
-              <Segmented
-                value={view}
-                onChange={setView}
-                options={[
-                  { id: "chains", label: t("agents.chains"), badge: waiting },
-                  { id: "runs", label: t("agents.runs"), badge: liveRuns },
-                  { id: "services", label: t("agents.services"), badge: failedServices },
-                  { id: "flows", label: t("agents.flows"), badge: approvals },
-                ]}
-              />
-            </div>
+            <Chips
+              label={t("agents.views")}
+              value={view}
+              onChange={setView}
+              options={[
+                { id: "summary", label: t("agents.summary"), badge: waiting + teamsWaiting + approvals + failedServices },
+                { id: "teams", label: t("agents.teams"), badge: teamsWaiting },
+                { id: "chains", label: t("agents.chains"), badge: waiting },
+                { id: "runs", label: t("agents.runs"), badge: liveRuns },
+                { id: "services", label: t("agents.services"), badge: failedServices },
+                { id: "containers", label: t("agents.containers") },
+                { id: "flows", label: t("agents.flows"), badge: approvals },
+              ]}
+            />
           }
         />
       }
     >
-      {view === "chains" ? (
+      {view === "summary" ? (
+        <SummaryView onOpen={setView} />
+      ) : view === "teams" ? (
+        <TeamsView />
+      ) : view === "chains" ? (
         <ChainsView chains={chains} />
       ) : view === "runs" ? (
         <RunsView />
       ) : view === "services" ? (
         <ServicesView />
+      ) : view === "containers" ? (
+        <ContainersView />
       ) : (
         <FlowsView />
       )}

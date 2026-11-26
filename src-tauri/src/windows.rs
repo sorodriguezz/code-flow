@@ -21,12 +21,13 @@
 //! two-editors-on-one-file, two-live-sockets and two-filesystem-watchers problems, and it is why
 //! the label is *derived* from what the window holds rather than minted fresh each time.
 //!
-//! # The ceiling
+//! # No limit, and a guard against a loop
 //!
-//! The user-facing limit lives in settings and is enforced where the button is, so the message can
-//! say what the limit is. [`MAX_SATELLITES`] is the backstop underneath it: a frontend bug, a
-//! repeated keystroke or a restored layout from a machine with a higher limit cannot open windows
-//! without end.
+//! How many windows a person keeps open is theirs to decide: it is a matter of the machine's
+//! memory, which the status bar's panel shows window by window (`sysload.rs`), and there is no
+//! setting for it any more. What is left is [`MAX_SATELLITES`] and its two siblings — far past
+//! anything a person opens by hand, and there only so a frontend bug or a key held down cannot
+//! build windows without end.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -34,8 +35,8 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
 
-/// Backstop, not the user's limit. See the module note.
-const MAX_SATELLITES: usize = 8;
+/// A guard against a runaway loop, not a limit on the user. See the module note.
+const MAX_SATELLITES: usize = 64;
 
 /// Prefix every satellite label carries.
 ///
@@ -58,8 +59,7 @@ const LABEL_PREFIX: &str = "sat-";
 /// in whatever application. It is a satellite only in the mechanical sense — it is built by this
 /// module, it carries the `sat-` prefix so `capabilities/default.json` covers it, and it appears in
 /// the registry so `forget` reaps it — but it is **not** counted against the ceiling, the user's or
-/// [`MAX_SATELLITES`]: it is hidden, not closed, between uses, so it is "open" all day, and a limit
-/// of four windows that quietly meant three once the hotkey had been pressed was a limit that lied.
+/// [`MAX_SATELLITES`]: it is hidden, not closed, between uses, so it is "open" all day.
 /// Everywhere the main window's desk is put away, this one deliberately stays; see [`close_all`].
 ///
 /// `File` is one editor tab of one repository, torn out of the main window's editor into a window of
@@ -87,9 +87,8 @@ pub enum SatelliteKind {
     Attention,
     /// One assistant conversation torn out of the side panel — a repository chat or a workspace
     /// chat. `ref_id` is `"panel:<project id>:<conversation id>"` or `"ws:<workspace id>:<conversation
-    /// id>"`. Part of the desk (put away and restored with it) but **not counted against the user's
-    /// island limit** — the user asked for several chats open at once without spending islands on
-    /// them — so it has a backstop of its own, [`MAX_CHAT_SATELLITES`].
+    /// id>"`. Part of the desk (put away and restored with it), with a runaway guard of its own,
+    /// [`MAX_CHAT_SATELLITES`].
     Chat,
     /// «Navegador»: the in-app browser for pages that are not the user's own — a site on the internet,
     /// opened from a link, the command palette or an agent (`crate::browser_window`). One window,
@@ -108,9 +107,9 @@ pub enum SatelliteKind {
     Float,
 }
 
-/// The chat islands' own backstop: they do not count against [`MAX_SATELLITES`] (see
+/// The chat islands' own runaway guard: they do not count against [`MAX_SATELLITES`] (see
 /// [`SatelliteKind::Chat`]), so without this a bug could open them without end.
-const MAX_CHAT_SATELLITES: usize = 12;
+const MAX_CHAT_SATELLITES: usize = 64;
 
 impl SatelliteKind {
     /// Whether it counts as part of the desk — the screens the person arranged — rather than a
@@ -1074,8 +1073,8 @@ pub async fn open_codi(app: AppHandle) -> Result<String, String> {
 
 // ===================== the floating conversations and the call =====================
 
-/// How many floating windows may be open: a backstop, like [`MAX_CHAT_SATELLITES`].
-const MAX_FLOATS: usize = 16;
+/// The floating windows' runaway guard, like [`MAX_CHAT_SATELLITES`]: not a limit a person meets.
+const MAX_FLOATS: usize = 64;
 
 /// What a floating window's key says it holds: `call`, `team` or `agent` (`"team:<id>"`).
 fn float_family(key: &str) -> &'static str {
@@ -1825,6 +1824,154 @@ fn announce(app: &AppHandle) {
         .map(|held| held.values().cloned().collect())
         .unwrap_or_default();
     let _ = app.emit("windows:satellites", open);
+}
+
+// ===================== what each window costs =====================
+
+/// One open window and the memory its page takes — a row of the status bar's panel.
+#[derive(Debug, Clone, Serialize)]
+pub struct WindowMemory {
+    pub label: String,
+    /// `main`, or what the window holds (`app`, `repo`, `chat`, `float`…) — see [`SatelliteKind`].
+    pub kind: String,
+    /// What the OS calls the window. Empty for the main one, which the panel names itself.
+    pub title: String,
+    /// Bytes, as the OS bills them (`sysload::footprint`).
+    pub memory: u64,
+}
+
+/// How long the main thread is given to answer for every window's page process.
+const PAGE_PID_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Every open window with what its page takes in memory, largest first.
+///
+/// # What is measured
+///
+/// A window is a webview, and a webview's page — its JavaScript heap, its DOM, its layers — lives
+/// in a process of its own. That process is the part of the app's footprint that belongs to *one*
+/// window, and it is nearly all of what opening a window adds; the rest (the app's own process,
+/// the GPU and network helpers) is shared by every window and stays in the app's total. So the rows
+/// add up to less than that total, on purpose.
+///
+/// A window holding two webviews (the browser: its bar and the page) is one row with both.
+///
+/// # Where it answers
+///
+/// macOS only, today: WebKit says which process holds a view's page ([`page_pid`]). Elsewhere the
+/// list comes back empty and the panel leaves the section out, rather than showing an estimate
+/// nobody could check against the system's own monitor.
+///
+/// Never called from the main thread: asking a view is dispatched there and waited for.
+pub fn memory_by_window(app: &AppHandle) -> Vec<WindowMemory> {
+    let known: HashMap<String, SatelliteInfo> = app
+        .state::<SatelliteRegistry>()
+        .open
+        .lock()
+        .map(|held| held.clone())
+        .unwrap_or_default();
+
+    // Asked all at once and collected after, so a busy main thread costs one wait and not one per
+    // window.
+    let (tx, rx) = std::sync::mpsc::channel::<(String, u32)>();
+    let mut asked = 0usize;
+    let mut titles: HashMap<String, String> = HashMap::new();
+    for webview in app.webviews().into_values() {
+        let window = webview.window();
+        let label = window.label().to_string();
+        titles.entry(label.clone()).or_insert_with(|| window.title().unwrap_or_default());
+        if ask_page_pid(&webview, label, tx.clone()) {
+            asked += 1;
+        }
+    }
+    drop(tx);
+
+    let deadline = std::time::Instant::now() + PAGE_PID_WAIT;
+    let mut pids: HashMap<String, HashSet<u32>> = HashMap::new();
+    for _ in 0..asked {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(left) {
+            Ok((label, pid)) => {
+                pids.entry(label).or_default().insert(pid);
+            }
+            Err(_) => break,
+        }
+    }
+
+    let mut rows: Vec<WindowMemory> = pids
+        .into_iter()
+        .filter_map(|(label, pids)| {
+            let memory: u64 = pids
+                .into_iter()
+                .filter_map(|pid| crate::sysload::footprint(sysinfo::Pid::from_u32(pid)))
+                .sum();
+            if memory == 0 {
+                return None;
+            }
+            let info = known.get(&label);
+            let kind = match info {
+                Some(info) => info.kind.slug().to_string(),
+                None if label == "main" => "main".to_string(),
+                None => "other".to_string(),
+            };
+            let title = if label == "main" {
+                String::new()
+            } else {
+                info.map(|info| info.title.clone())
+                    .filter(|title| !title.trim().is_empty())
+                    .or_else(|| titles.get(&label).cloned())
+                    .unwrap_or_default()
+            };
+            Some(WindowMemory { label, kind, title, memory })
+        })
+        .collect();
+    rows.sort_by(|a, b| b.memory.cmp(&a.memory).then_with(|| a.label.cmp(&b.label)));
+    rows
+}
+
+/// Asks one webview, on the main thread, which process holds its page; the answer arrives on `tx`.
+/// False when it could not even be asked.
+#[cfg(target_os = "macos")]
+fn ask_page_pid<R: Runtime>(webview: &tauri::Webview<R>, label: String, tx: std::sync::mpsc::Sender<(String, u32)>) -> bool {
+    webview
+        .with_webview(move |platform| {
+            // Safe: `inner()` is the live `WKWebView` this closure was handed, on the thread that
+            // owns it, for the length of the call.
+            if let Some(pid) = unsafe { page_pid(platform.inner()) } {
+                let _ = tx.send((label, pid));
+            }
+        })
+        .is_ok()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ask_page_pid<R: Runtime>(_webview: &tauri::Webview<R>, _label: String, _tx: std::sync::mpsc::Sender<(String, u32)>) -> bool {
+    false
+}
+
+/// The process holding a `WKWebView`'s page.
+///
+/// `_webProcessIdentifier` is WebKit SPI — the selector Safari's own tooling and every WebKit
+/// embedder's diagnostics use, present since macOS 10.13 — so it is asked for rather than assumed:
+/// a WebKit that no longer answers it gets `None`, and the panel simply has no rows.
+///
+/// # Safety
+///
+/// `view` must be a live `WKWebView`, and this must run on the main thread.
+#[cfg(target_os = "macos")]
+unsafe fn page_pid(view: *mut std::ffi::c_void) -> Option<u32> {
+    use objc2::runtime::AnyObject;
+    use objc2::{msg_send, sel};
+
+    let view = view.cast::<AnyObject>();
+    if view.is_null() {
+        return None;
+    }
+    let answers: bool = msg_send![view, respondsToSelector: sel!(_webProcessIdentifier)];
+    if !answers {
+        return None;
+    }
+    let pid: i32 = msg_send![view, _webProcessIdentifier];
+    (pid > 0).then_some(pid as u32)
 }
 
 #[cfg(test)]

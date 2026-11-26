@@ -20,7 +20,9 @@ import { EmptyState, ErrorState, SkeletonList } from "../ui/Feedback";
  * a pocket is a poor place to confirm in. Approving is one — it is what the wait was waiting for.
  */
 
-function TwoTap({
+/** A button that acts on the second tap: the first arms it, and it disarms itself after a moment.
+ *  Shared with the containers view, where stopping is the same kind of act. */
+export function TwoTap({
   label,
   confirmLabel,
   icon,

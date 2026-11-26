@@ -2322,6 +2322,23 @@ export interface SystemLoad {
   app_mem_percent: number;
   /** How many processes that tree came to — the line that explains the two figures above it. */
   app_processes: number;
+  /**
+   * What each open window's page takes, largest first. Only on a detailed read, and only where the
+   * platform can tell one page's process from another (macOS today) — empty otherwise, and the
+   * panel then leaves the section out.
+   */
+  windows: WindowMemory[];
+}
+
+/** One open window and the memory its page takes. See `windows::memory_by_window`. */
+export interface WindowMemory {
+  label: string;
+  /** `main`, or what the window holds: `app`, `repo`, `file`, `chat`, `float`, `quick`, `codi`… */
+  kind: string;
+  /** What the OS calls the window; empty for the main one. */
+  title: string;
+  /** Bytes. */
+  memory: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -2411,6 +2428,11 @@ export interface RemoteDevice {
   last_seen_at: string | null;
   revoked: boolean;
   /**
+   * What the device may do: `full` is everything the allowlist offers, `read` is looking only —
+   * every command that changes something is refused before it runs.
+   */
+  access: "full" | "read";
+  /**
    * Whether the device is holding an open event socket right now.
    *
    * The question `last_seen_at` cannot answer: a WebSocket authenticates once, when it is opened,
@@ -2419,6 +2441,21 @@ export interface RemoteDevice {
    * map instead, and it is the field the panel's dot is drawn from.
    */
   connected: boolean;
+}
+
+/** One act a paired device took on this machine, from the log the desktop keeps. */
+export interface RemoteActivity {
+  id: number;
+  deviceId: string;
+  /** Copied in when it happened, so a device forgotten since is still named. */
+  deviceName: string;
+  /** A `remote.action.*` key. */
+  action: string;
+  /** `ok`, `error` (it ran and failed) or `refused` (a read-only device asked to write). */
+  status: "ok" | "error" | "refused";
+  /** The repository's folder name, when the call named one. */
+  detail: string;
+  createdAt: string;
 }
 
 // ---------------------------------------------------------------------------

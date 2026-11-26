@@ -63,8 +63,6 @@ const en = {
   "windows.openInWindow": "Open in its own window",
   "windows.focusWindow": "Already open in another window — bring it forward",
   "tabbar.unsavedDrafts": "A save didn't go through — the draft is kept and will be retried",
-  "windows.limitReached":
-    "{limit} windows are already open. Close one, or raise the limit in Settings → General.",
   "windows.reattach": "Bring it back here",
   "windows.returned": "{name} is back",
   "windows.reattachHint": "Closes this window and returns what is in it to the main one. Nothing is lost.",
@@ -75,11 +73,7 @@ const en = {
   "windows.repoElsewhereTitle": "This repository is in another workspace",
   "windows.repoElsewhereBody":
     "The main window has moved elsewhere, and this window follows it. Go back to the workspace this repository belongs to and it reappears here — nothing was closed.",
-  "windows.limitLabel": "Windows at once",
-  "windows.limitHint":
-    "How many apps, repositories and floating editors can be open in windows of their own, besides the main one. Each is a webview: roughly 60 MB for an app, 140 MB for a repository with the editor open.",
   "windows.inOtherWindow": "In another window",
-  "windows.openNow": "{count} open right now.",
   "windows.minimize": "Minimize",
   "windows.maximize": "Maximize",
   "windows.restore": "Restore",
@@ -2550,10 +2544,24 @@ const en = {
   "remote.pairingNeedsServer": "Turn the server on under “Server” to pair a phone.",
   "remote.groupTerminal": "Terminal",
   "remote.groupAccess": "Access",
+  "remote.groupActivity": "Activity",
+  "remote.activityHint":
+    "What paired devices did on this machine: commits, pushes, approvals, what they were refused. Kept when the app closes.",
+  "remote.activityEmpty": "No device has done anything yet.",
+  "remote.activityClear": "Clear the log",
+  "remote.activityRefused": "Refused: read-only",
+  "remote.activityFailed": "Failed",
+  "remote.activityOther": "Another action",
+  "remote.accessFull": "Full access",
+  "remote.accessRead": "Read-only",
+  "remote.accessHint":
+    "A read-only device can look — repositories, runs, pull requests — and changes nothing: no commits, no approvals, no terminal. It applies from its next action.",
+  "remote.scanPairHint":
+    "Scan this code with the device's camera and it is paired, with nothing to type. You can also open the address and enter the code below.",
   "remote.serverNote":
     "This opens a port on this machine and hands a paired device real authority over it. Turn the server off when you are not using it.",
   "remote.subtitle":
-    "Drive this install from your phone or tablet on the same network — watch agent runs, answer a chain's gate, commit and push without coming back to the desk.",
+    "Drive this install from your phone or tablet on the same network — watch agent and team runs, approve what is waiting on you, answer their questions, commit and push without coming back to the desk.",
   "remote.enable": "Enable the server",
   "remote.enableHint":
     "Off by default. While it is on, this machine accepts connections from paired devices on your local network — and only from paired devices.",
@@ -2597,7 +2605,7 @@ const en = {
   "remote.neverSeen": "Never connected",
   "remote.safety": "What a paired device can and cannot do",
   "remote.safetyAllowed":
-    "It can read your repositories and diffs, run the pre-commit review, stage and commit, push and pull, switch branch, apply a stash, review pull requests, re-run or cancel a pipeline, start or stop your services, chat with an engine, and answer or abort a chain.",
+    "It can read your repositories and diffs, run the pre-commit review, stage and commit, push and pull, switch branch, apply a stash, review pull requests, re-run or cancel a pipeline, start or stop your services, chat with an engine, answer or abort a chain; give a team a task, chat with it and approve, answer, pause or stop its run; read, create and edit notes; and start, stop or restart containers on this machine. A read-only device can only look.",
   "remote.safetyDenied":
     "It can never read or write your credentials, reach your databases or SSH hosts, delete anything, or discard your work. That list is fixed in the app, not a setting.",
   // What a paired device did, announced in the notification centre. The device's own name travels
@@ -2632,6 +2640,15 @@ const en = {
   "remote.action.flowStarted": "Flow started from a device",
   "remote.action.servicesStopped": "Service stopped from a device",
   "remote.action.servicesRestarted": "Service restarted from a device",
+  "remote.action.teamDecided": "A team's decision answered from a device",
+  "remote.action.teamAnswered": "A team's question answered from a device",
+  "remote.action.teamNoted": "Note sent to a team from a device",
+  "remote.action.teamControlled": "A team's run paused, resumed or stopped from a device",
+  "remote.action.teamStarted": "A team's run started from a device",
+  "remote.action.teamChat": "Message sent to a team from a device",
+  "remote.action.noteCreated": "Note created from a device",
+  "remote.action.noteSaved": "Note edited from a device",
+  "remote.action.containerActed": "Container started, stopped or restarted from a device",
   "remote.forget": "Remove from the list",
   "remote.forgetAllRevoked": "Clear revoked",
 
@@ -3597,7 +3614,12 @@ const en = {
   "sysload.free": "{size} free",
   "sysload.thisApp": "CodeFlow right now",
   "sysload.appIncludes":
-    "Across {n} process(es) — the app, its window, and every agent, terminal and engine it has launched.",
+    "Across {n} process(es) — the app, its windows, and every agent, terminal and engine it has launched.",
+  "sysload.windows": "Open windows",
+  "sysload.mainWindow": "Main window",
+  "sysload.untitledWindow": "Untitled window",
+  "sysload.moreWindows": "and {n} more",
+  "sysload.windowsHint": "What each window's page takes. Closing one frees that memory.",
   "quota.used": "{percent} used",
   "quota.spendMovedHint": "Tokens and cost are under AI engines → Usage.",
   "quota.resetsIn": "Resets in {time}",
@@ -3904,12 +3926,11 @@ const en = {
   "settings.searchTermsCertificates": "client certificate, mtls, pem, pfx",
   "settings.searchTermsCollab": "share, team, supabase, sync",
   "settings.searchTermsRemote": "phone, mobile, ssh, remote control, port, https, tls, certificate, fingerprint",
-  "settings.generalHint": "Language, updates, windows, guided tours and the app's own files.",
+  "settings.generalHint": "Language, updates, guided tours and the app's own files.",
   "settings.tabLanguage": "Language",
   "settings.tabAppData": "App and data",
   "settings.tabLanguageUpdates": "Language and updates",
   "settings.searchTermsLanguageUpdates": "language, translation, english, spanish, update, version, what's new, donate, support, ko-fi, coffee, website",
-  "settings.searchTermsWindows": "windows, satellite, detach, limit",
   "settings.searchTermsTours": "tour, walkthrough, tutorial, help",
   "settings.tabModeColor": "Mode and color",
   "settings.searchTermsModeColor": "dark, light, system, mode, accent, color, highlight, transparency, transparent, translucent, glass, blur, vibrancy, acrylic, mica, opacity, animation, animations, motion, transitions, smooth, density, compact, comfortable, spacing, tight, dense",

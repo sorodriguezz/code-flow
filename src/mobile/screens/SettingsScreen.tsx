@@ -7,6 +7,7 @@ import {
   TerminalSquare,
   Wifi,
   WifiOff,
+  ShieldCheck,
 } from "lucide-react";
 import { t } from "../i18n";
 import { forget, hello, storedName, type Hello } from "../transport";
@@ -39,6 +40,7 @@ import { Badge } from "../ui/Feedback";
 export function SettingsScreen() {
   const connected = useMobileStore((s) => s.connected);
   const terminalAllowed = useMobileStore((s) => s.terminalAllowed);
+  const readOnly = useMobileStore((s) => s.readOnly);
   const workspace = useMobileStore((s) => s.workspaces.find((w) => w.id === s.workspaceId)?.name);
   const project = useMobileStore((s) => s.projects.find((p) => p.id === s.projectId)?.name);
   const [info, setInfo] = useState<Hello | null>(null);
@@ -110,6 +112,19 @@ export function SettingsScreen() {
             trailing={
               <Badge tone={terminalAllowed ? "success" : "neutral"}>
                 {terminalAllowed ? t("settings.terminalsOn") : t("settings.terminalsOff")}
+              </Badge>
+            }
+          />
+          <Divider inset />
+          {/* What the desktop lets this device do. Decided at the desk, per device — shown here so
+              "why did that button refuse" has an answer on the phone it happened on. */}
+          <Row
+            leading={<ShieldCheck size={16} className="text-[var(--cf-text-muted)]" aria-hidden />}
+            title={t("settings.access")}
+            chevron={false}
+            trailing={
+              <Badge tone={readOnly ? "warning" : "success"}>
+                {readOnly ? t("settings.accessRead") : t("settings.accessFull")}
               </Badge>
             }
           />

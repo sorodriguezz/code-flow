@@ -49,6 +49,44 @@ const MAX_PAIRING_ATTEMPTS: u32 = 5;
 /// record something whose only reader is a settings screen that says "hace un momento" either way.
 const LAST_SEEN_THROTTLE: Duration = Duration::from_secs(60);
 
+/// What a paired device is allowed to do with the allowlist.
+///
+/// # Why a second level, when the allowlist already bounds everything
+///
+/// The allowlist answers "what can *any* phone do", and it is the same for every device. That is
+/// the right shape for the dangerous end — nothing destructive is reachable by anyone — and too
+/// blunt for the ordinary one: the tablet on the kitchen counter that only ever shows whether the
+/// build passed does not need to be able to push, and a phone lent to somebody for an afternoon
+/// should not be one tap from approving a pull request.
+///
+/// `ReadOnly` is that: every read still answers, and every command in
+/// [`dispatch::MUTATING`](super::dispatch::MUTATING) is refused before it runs. It also bounds a
+/// stolen token to what its device was given, which for a read-only one is looking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    Full,
+    ReadOnly,
+}
+
+impl Access {
+    /// The stored spelling. Anything that is not exactly `read` is `Full`: the column's default,
+    /// and what every device paired before the column existed has.
+    pub fn from_db(value: &str) -> Self {
+        if value == "read" {
+            Access::ReadOnly
+        } else {
+            Access::Full
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Access::Full => "full",
+            Access::ReadOnly => "read",
+        }
+    }
+}
+
 /// A paired device, as the settings screen shows it. Deliberately carries no token and no hash —
 /// there is nothing here that would help anybody who read it.
 #[derive(Debug, Clone, Serialize)]
@@ -58,6 +96,8 @@ pub struct RemoteDevice {
     pub created_at: String,
     pub last_seen_at: Option<String>,
     pub revoked: bool,
+    /// `full` or `read`. See [`Access`].
+    pub access: String,
     /// Whether this device has an event socket open at this instant.
     ///
     /// Not a column, and not derivable from one. `last_seen_at` is written by [`verify`], at most
@@ -265,19 +305,37 @@ pub fn verify(conn: &Connection, pairing: &Pairing, token: &str) -> Verdict {
     }
 }
 
-/// What a device calls itself, for the desktop's notification centre.
+/// What a device calls itself — for the desktop's notification centre — and what it may do.
 ///
-/// Falls back to a generic label rather than to the id: a UUID in a notification says nothing to
-/// anybody, and this is only ever used as display text beside an action.
-pub fn device_name(conn: &Connection, id: &str) -> String {
-    conn.query_row("SELECT name FROM remote_devices WHERE id = ?1", params![id], |row| {
-        row.get::<_, String>(0)
-    })
-    .optional()
-    .ok()
-    .flatten()
-    .filter(|name| !name.is_empty())
-    .unwrap_or_else(|| "Dispositivo".to_string())
+/// The name falls back to a generic label rather than to the id: a UUID in a notification says
+/// nothing to anybody, and it is only ever used as display text beside an action.
+///
+/// The access level **fails closed**: a row that cannot be read answers [`Access::ReadOnly`]. The
+/// caller has already verified the token on this same connection, so this is a database that
+/// answered a moment ago and now does not — and "could not tell" must never be read as "may write".
+pub fn device_identity(conn: &Connection, id: &str) -> (String, Access) {
+    let row = conn
+        .query_row("SELECT name, access FROM remote_devices WHERE id = ?1", params![id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional();
+    match row {
+        Ok(Some((name, access))) => {
+            (if name.is_empty() { "Dispositivo".to_string() } else { name }, Access::from_db(&access))
+        }
+        _ => ("Dispositivo".to_string(), Access::ReadOnly),
+    }
+}
+
+/// Changes what a live device may do. A revoked row is left alone: it can do nothing either way,
+/// and its record should say what it had when it was cut off.
+pub fn set_device_access(conn: &Connection, id: &str, access: Access) -> Result<(), String> {
+    conn.execute(
+        "UPDATE remote_devices SET access = ?2 WHERE id = ?1 AND revoked = 0",
+        params![id, access.as_str()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Every device ever paired, newest first — revoked ones included, so the screen can show that a
@@ -294,7 +352,7 @@ pub fn list_devices(
 ) -> Result<Vec<RemoteDevice>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, created_at, last_seen_at, revoked
+            "SELECT id, name, created_at, last_seen_at, revoked, access
              FROM remote_devices ORDER BY created_at DESC",
         )
         .map_err(|e| e.to_string())?;
@@ -313,6 +371,7 @@ pub fn list_devices(
                 created_at: row.get(2)?,
                 last_seen_at: row.get(3)?,
                 revoked,
+                access: Access::from_db(&row.get::<_, String>(5)?).as_str().to_string(),
             })
         })
         .map_err(|e| e.to_string())?;
@@ -485,6 +544,30 @@ mod tests {
 
         revoke_device(&conn, &paired.device_id).unwrap();
         assert!(!list_devices(&conn, &all_live).unwrap()[0].connected);
+    }
+
+    /// A device starts with everything the allowlist offers, can be narrowed to looking, and a row
+    /// that cannot be read is never taken for one that may write.
+    #[test]
+    fn access_defaults_to_full_narrows_to_read_and_fails_closed() {
+        let conn = db();
+        let pairing = Pairing::default();
+        let code = pairing.open();
+        let paired = pair(&conn, &pairing, &code, "Tablet").unwrap();
+
+        assert_eq!(device_identity(&conn, &paired.device_id), ("Tablet".to_string(), Access::Full));
+        set_device_access(&conn, &paired.device_id, Access::ReadOnly).unwrap();
+        assert_eq!(device_identity(&conn, &paired.device_id).1, Access::ReadOnly);
+        assert_eq!(list_devices(&conn, &|_| false).unwrap()[0].access, "read");
+        set_device_access(&conn, &paired.device_id, Access::Full).unwrap();
+        assert_eq!(device_identity(&conn, &paired.device_id).1, Access::Full);
+
+        // No such row, and no such table: both are "could not tell", and neither may write.
+        assert_eq!(device_identity(&conn, "nobody").1, Access::ReadOnly);
+        let broken = Connection::open_in_memory().unwrap();
+        assert_eq!(device_identity(&broken, &paired.device_id).1, Access::ReadOnly);
+        // An unknown spelling in the column is the default, not a third level.
+        assert_eq!(Access::from_db("admin"), Access::Full);
     }
 
     #[test]

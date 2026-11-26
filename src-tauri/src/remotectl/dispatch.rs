@@ -60,9 +60,10 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest as _, Sha256};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::watch;
 
+use super::auth::Access;
 use crate::commands;
 use crate::db::Db;
 
@@ -176,6 +177,20 @@ pub fn announce_for(cmd: &str) -> Announce {
         "services_start" => Some("remote.action.servicesStarted"),
         "services_stop" => Some("remote.action.servicesStopped"),
         "services_restart" => Some("remote.action.servicesRestarted"),
+        // A team's run answered, told or steered from somewhere else. The run goes on — or stops —
+        // because of it, on branches the person at the desk may be watching.
+        "team_decide" => Some("remote.action.teamDecided"),
+        "team_answer" => Some("remote.action.teamAnswered"),
+        "team_note" => Some("remote.action.teamNoted"),
+        "team_control" => Some("remote.action.teamControlled"),
+        // A run started from somewhere else spends real money and opens branches in the user's
+        // repositories: of everything a phone can do, the act most worth a line at the desk.
+        "team_start" => Some("remote.action.teamStarted"),
+        "team_chat_send" => Some("remote.action.teamChat"),
+        // A note written or changed, and a container started or stopped, under somebody's hands.
+        "notes_create_note" => Some("remote.action.noteCreated"),
+        "notes_save_note" => Some("remote.action.noteSaved"),
+        "containers_phone_act" => Some("remote.action.containerActed"),
         // Staging is left out on purpose: it is what somebody does a dozen times while composing
         // one commit, and the commit is the event. Announcing both means the interesting line
         // arrives already buried.
@@ -227,6 +242,10 @@ pub enum DispatchError {
     /// The command is not in the table. Not a typo to be helpful about: the client is either out
     /// of date or probing.
     NotAllowed,
+    /// The command is in the table and this device may only look ([`Access::ReadOnly`]). Its own
+    /// variant rather than `NotAllowed` because the client has something true to say about it —
+    /// "this device is read-only" — where for a missing command it has nothing.
+    ReadOnly,
     /// The command is in the table but the arguments do not fit it.
     BadArgs(String),
     /// The command ran and failed on its own terms — a git error, a database error. This is the
@@ -469,6 +488,34 @@ pub const ALLOWED: &[&str] = &[
     "flows_decide_wait",
     "flows_phone_flows",
     "flows_run_from_phone",
+    // Teams: the runs, what a decision would bring in, and what a person does to one from
+    // wherever they are — start it included.
+    "team_phone_teams",
+    "team_phone_runs",
+    "team_phone_run",
+    "team_phone_diff",
+    "team_start",
+    "team_decide",
+    "team_answer",
+    "team_note",
+    "team_control",
+    // A team's conversation.
+    "team_chat_history",
+    "team_chat_state",
+    "team_chat_open",
+    "team_chat_send",
+    "team_chat_cancel",
+    // Notes: read, write and pin — never delete.
+    "notes_phone_tree",
+    "notes_get_note",
+    "notes_search",
+    "notes_create_note",
+    "notes_save_note",
+    "notes_set_pinned",
+    // Containers on this machine: what is up, its log, and start / stop / restart.
+    "containers_phone_list",
+    "containers_phone_logs",
+    "containers_phone_act",
     // Services.
     "list_services",
     "services_runtime",
@@ -496,6 +543,74 @@ pub const ALLOWED: &[&str] = &[
 /// Whether a phone may name `cmd` at all. See [`ALLOWED`].
 pub fn is_allowed(cmd: &str) -> bool {
     ALLOWED.contains(&cmd)
+}
+
+/// The commands that change something — on this machine, on a host, or on somebody's bill.
+///
+/// The other half of [`Access::ReadOnly`]: a device that may only look is refused every one of
+/// these before it runs. It is also the list the mobile client keys its retries by
+/// (`MUTATING` in `src/mobile/transport.ts`, checked against this one by `transport.test.ts`), so a
+/// command added to the table and left out of here is caught on both sides rather than on neither.
+///
+/// What is *not* here is as deliberate as what is. `watch_project` registers a watcher and changes
+/// nothing anybody holds a copy of. `close_terminal` is teardown, which must always be permitted —
+/// see its arm: a device narrowed to read-only after opening a shell has to be able to end it.
+pub const MUTATING: &[&str] = &[
+    "stage_file",
+    "stage_all",
+    "unstage_file",
+    "unstage_all",
+    "commit",
+    "checkout_local_branch",
+    "checkout_remote_tracking",
+    "create_branch",
+    "git_fetch",
+    "git_pull",
+    "git_push",
+    "stash_apply",
+    "stash_pop",
+    "approve_chain_gate",
+    "skip_chain_step",
+    "retry_chain_step",
+    "resume_chain",
+    "abort_chain",
+    "set_agent_task_pinned",
+    "cancel_ai_run",
+    "analyze_working_changes",
+    "review_pull_request",
+    "act_on_pull_request",
+    "post_pr_review_comment",
+    "discard_pr_finding",
+    "resolve_pr_comment_thread",
+    "rerun_pipeline",
+    "cancel_pipeline",
+    "flows_decide_wait",
+    "flows_run_from_phone",
+    "team_start",
+    "team_decide",
+    "team_answer",
+    "team_note",
+    "team_control",
+    // Opening a conversation makes one when the team has none, so it is a write.
+    "team_chat_open",
+    "team_chat_send",
+    "team_chat_cancel",
+    "notes_create_note",
+    "notes_save_note",
+    "notes_set_pinned",
+    "containers_phone_act",
+    "services_start",
+    "services_stop",
+    "services_restart",
+    "send_chat_message",
+    "open_terminal",
+    "write_terminal",
+    "resize_terminal",
+];
+
+/// Whether `cmd` changes something. See [`MUTATING`].
+pub fn is_mutating(cmd: &str) -> bool {
+    MUTATING.contains(&cmd)
 }
 
 /// The engines a phone may name for a chat turn: the app's own seven, by the ids the routing uses.
@@ -531,6 +646,39 @@ fn plain_model_id(model: &str) -> bool {
             && model.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:@[]+".contains(c)))
 }
 
+/// What saving a note answers when it cannot: codes the client turns into its own sentences.
+/// `NOTE_MOVED` — it was edited elsewhere since the phone read it; `NOTE_LINKED` — it mirrors a file
+/// of a repository; `NOTE_GONE` — it was deleted. See the arm.
+pub const NOTE_MOVED: &str = "note_moved";
+pub const NOTE_LINKED: &str = "note_linked";
+pub const NOTE_GONE: &str = "note_gone";
+
+/// The engine and container a containers arm names, checked.
+///
+/// The engine against the ones a phone may name (`apps::phone_engine`), and the container to be
+/// what an id or a name is — it reaches a command line as an argument (`logs --tail 200 <id>`), so
+/// nothing that could be read as a flag or split into another word.
+fn phone_container(args: &Value) -> Result<(String, String), DispatchError> {
+    let runtime: String = arg(args, "runtime")?;
+    if !super::apps::phone_engine(&runtime) {
+        return Err(DispatchError::BadArgs(format!("unknown engine `{runtime}`")));
+    }
+    let id: String = arg(args, "id")?;
+    if !plain_container_ref(&id) {
+        return Err(DispatchError::BadArgs("argument `id`: not a container id".to_string()));
+    }
+    Ok((runtime, id))
+}
+
+/// A container's id or name, as the engines spell them: letters, digits, `_`, `.` and `-`, never
+/// starting with a dash.
+fn plain_container_ref(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.starts_with('-')
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
+}
+
 /// What a stash action answers when the list moved under the phone: a code the client turns into
 /// its own sentence, not a message for a person. See the stash arm.
 pub const STASH_MOVED: &str = "stash_moved";
@@ -542,17 +690,26 @@ pub const STASH_MOVED: &str = "stash_moved";
 /// handle per arm keeps the lock held for exactly as long as the command holds it.
 ///
 /// `device_id` is *who is asking*, and it is here for the arms whose effect is per-device rather
-/// than global — today that is `watch_project`, which registers a claim released when this device's
-/// socket closes. It is never used as an authorisation input: `auth.rs` has already decided that
-/// this is a device you paired, and the table below is the same table for every one of them.
+/// than global — `watch_project`, which registers a claim released when this device's socket
+/// closes, and the terminal arms, which act only on the caller's own sessions. It is never used as
+/// an authorisation input: `auth.rs` has already decided that this is a device you paired.
+///
+/// `access` is the one thing that differs between devices: the table is the same for every one of
+/// them, and a read-only device is refused the part of it that writes. See [`Access`].
 pub async fn dispatch(
     app: &AppHandle,
     device_id: &str,
+    access: Access,
     cmd: &str,
     args: &Value,
 ) -> Result<(Value, Invalidate), DispatchError> {
     if !is_allowed(cmd) {
         return Err(DispatchError::NotAllowed);
+    }
+    // After the allowlist, so a probe for a command that does not exist learns nothing about the
+    // device it is using; before the table, so nothing a read-only device names ever starts.
+    if access == Access::ReadOnly && is_mutating(cmd) {
+        return Err(DispatchError::ReadOnly);
     }
     match cmd {
         // ---------------------------------------------------------------
@@ -606,6 +763,7 @@ pub async fn dispatch(
                     "projectId": null,
                     "chains": [],
                     "allowTerminal": allow_terminal,
+                    "access": access.as_str(),
                 }));
             }
 
@@ -624,6 +782,9 @@ pub async fn dispatch(
                 "projectId": project_id,
                 "chains": chains,
                 "allowTerminal": allow_terminal,
+                // What this device may do, told for the same reason the shell grant is: so the
+                // client can say "solo lectura" up front instead of offering buttons that refuse.
+                "access": access.as_str(),
             }))
         }
 
@@ -1371,6 +1532,262 @@ pub async fn dispatch(
                 text.as_deref().unwrap_or_default(),
             )?)
         }
+        // ---------------------------------------------------------------
+        // Teams — a run's gate, its questions and its four verbs
+        // ---------------------------------------------------------------
+        //
+        // What chains were to this table when it was written, a team's run is now: work that parks
+        // itself on a person. It waits on a gate — the lead's plan, a task that needs a yes, the
+        // merge — or on a question a member asked, and it stays there until somebody answers.
+        // Answering from wherever you are is the point of the whole feature.
+        //
+        // Read through a view of its own (`teams.rs`): a run's real record carries every member's
+        // prompt and account, and megabytes of transcript. The writes are the same commands the
+        // desk's buttons call, so a decision from a phone takes the run's lock, is recorded and
+        // wakes the runner exactly as one made at the desk does.
+        //
+        // **Starting a run is here too** (user, 2026-11-26: «quiero que igual se pueda del
+        // teléfono»), and it is the one arm in this table that spends money on somebody's plans
+        // without a prompt at the desk. What keeps it bounded is what the phone *cannot* say: it
+        // names a team, a goal and repositories of the workspace, and nothing else. The members,
+        // their engines and accounts, the policy — approvals, budget, permissions — are the team's
+        // own, as the desk saved them; `policy` is always `None` here. A team set to ask before it
+        // merges still asks, and now it can be answered from the same phone.
+        //
+        // Deleting a run, editing its policy and editing teams stay at the desk.
+        //
+        // `Invalidate::None` throughout: the engine announces every change itself (`team:changed`),
+        // which the desk's windows listen to and `bridge.rs` forwards to the phones.
+        "team_phone_teams" => {
+            let workspace_id: String = arg(args, "workspaceId")?;
+            let db = app.state::<Db>();
+            let conn = db.0.lock().map_err(|e| DispatchError::from(e.to_string()))?;
+            ok(super::teams::teams(&conn, &workspace_id).map_err(|e| DispatchError::from(e.to_string()))?)
+        }
+        // `repos` are project ids of the workspace with an optional branch each — empty is the one
+        // checked out, which is what a phone sends. See the note above for what is *not* taken.
+        "team_start" => ok(super::teams::view(
+            &commands::team_cmd::team_start(
+                app.clone(),
+                app.state::<Db>(),
+                arg(args, "workspaceId")?,
+                arg(args, "teamId")?,
+                arg(args, "goal")?,
+                None,
+                arg(args, "repos")?,
+                None,
+                None,
+            )
+            .await?,
+        )),
+        // The changes behind a decision: one task's (`itemId`), or what a repository's integration
+        // would bring into its branch (`projectId`). Read from the run's own record — the phone
+        // names a run and one of its tasks or repositories, never a path or a ref.
+        "team_phone_diff" => {
+            let state = commands::team_cmd::team_run_state(app.state::<Db>(), arg(args, "runId")?)?;
+            ok(super::teams::diff(&state, opt::<String>(args, "itemId")?.as_deref(), opt::<String>(args, "projectId")?.as_deref())?)
+        }
+        "team_phone_runs" => {
+            let workspace_id: String = arg(args, "workspaceId")?;
+            let db = app.state::<Db>();
+            let conn = db.0.lock().map_err(|e| DispatchError::from(e.to_string()))?;
+            ok(super::teams::runs(&conn, &workspace_id).map_err(|e| DispatchError::from(e.to_string()))?)
+        }
+        "team_phone_run" => ok(super::teams::view(&commands::team_cmd::team_run_state(
+            app.state::<Db>(),
+            arg(args, "runId")?,
+        )?)),
+        // `expectedGate` is required, not optional: it names the gate the phone had on screen, and
+        // the engine refuses when the run has moved to another. A phone's copy can be minutes old,
+        // and "approve" must never land on a question it was not asked.
+        "team_decide" => ok(super::teams::view(
+            &commands::team_cmd::team_decide(
+                app.clone(),
+                app.state::<Db>(),
+                arg(args, "runId")?,
+                arg(args, "approve")?,
+                opt(args, "comment")?,
+                Some(arg::<String>(args, "expectedGate")?),
+            )
+            .await?,
+        )),
+        "team_answer" => {
+            let answer: String = arg(args, "answer")?;
+            if answer.trim().is_empty() {
+                return Err(DispatchError::BadArgs("argument `answer`: empty".to_string()));
+            }
+            ok(super::teams::view(
+                &commands::team_cmd::team_answer(app.clone(), app.state::<Db>(), arg(args, "messageId")?, answer).await?,
+            ))
+        }
+        // A note to a member, the lead (`lead`) or everybody (`all`), delivered with their next task.
+        "team_note" => ok(super::teams::view(&commands::team_cmd::team_note(
+            app.clone(),
+            app.state::<Db>(),
+            arg(args, "runId")?,
+            arg(args, "toId")?,
+            arg(args, "body")?,
+        )?)),
+        // `pause`, `resume`, `abort`, and `retry:<id>` / `skip:<id>` for one task — nothing else the
+        // engine understands (`teams::allowed_control`). Answers the run as it is afterwards.
+        "team_control" => {
+            let run_id: String = arg(args, "runId")?;
+            let action: String = arg(args, "action")?;
+            if !super::teams::allowed_control(&action) {
+                return Err(DispatchError::BadArgs(format!("argument `action`: `{action}` is not one a phone has")));
+            }
+            commands::team_cmd::team_control(app.clone(), run_id.clone(), action).await?;
+            ok(super::teams::view(&commands::team_cmd::team_run_state(app.state::<Db>(), run_id)?))
+        }
+
+        // ---------------------------------------------------------------
+        // A team's conversation
+        // ---------------------------------------------------------------
+        //
+        // The same conversation the desk's floating window holds, by the same commands: a message
+        // from a phone is appended to it, the lead answers or delegates, and each turn runs with the
+        // team's own permissions. The answer does not come back on this call — `team_chat_send`
+        // returns as soon as the message is filed, and the turn announces itself
+        // (`team-chat:changed`), which `bridge.rs` forwards.
+        //
+        // Read through `teams::chat_view`: a chat's record carries every member's prompt and account.
+        // No attachments from a phone, and deleting a conversation stays at the desk.
+        "team_chat_history" => ok(crate::team::chat::team_chat_history(app.state::<Db>(), arg(args, "teamId")?)?),
+        "team_chat_state" => ok(super::teams::chat_view(&crate::team::chat::team_chat_state(
+            app.state::<Db>(),
+            arg(args, "chatId")?,
+        )?)),
+        // The team's latest conversation, or a new one (`fresh`). `projectId` is only where the
+        // members prefer to work — the repository the phone is on.
+        "team_chat_open" => ok(super::teams::chat_view(&crate::team::chat::team_chat_open(
+            app.state::<Db>(),
+            arg(args, "teamId")?,
+            opt(args, "projectId")?,
+            opt(args, "fresh")?,
+        )?)),
+        "team_chat_send" => ok(super::teams::chat_view(&crate::team::chat::team_chat_send(
+            app.clone(),
+            app.state::<Db>(),
+            arg(args, "chatId")?,
+            arg(args, "message")?,
+            None,
+        )?)),
+        "team_chat_cancel" => {
+            crate::team::chat::team_chat_cancel(app.clone(), app.state::<Db>(), arg(args, "chatId")?)?;
+            ok(true)
+        }
+
+        // ---------------------------------------------------------------
+        // Notes — read, write, pin
+        // ---------------------------------------------------------------
+        //
+        // A note is the thing most worth reading away from the desk, and the thing most worth
+        // jotting. So: the tree (without bodies), one note's body, the search, and three writes —
+        // create, save, pin.
+        //
+        // What is absent is everything that loses something or reaches outside the table of notes:
+        // no delete and no trash, no moving between books or workspaces, no versions to purge, no
+        // templates, no export, no AI. A save from here is recorded as a version first, like every
+        // save, so even an overwrite is one step from undone at the desk.
+        //
+        // Every write tells the windows (`notes:changed`), the event the agents' own note writes
+        // already raise and `notesStore` already listens for.
+        "notes_phone_tree" => {
+            let workspace_id: String = arg(args, "workspaceId")?;
+            let db = app.state::<Db>();
+            let conn = db.0.lock().map_err(|e| DispatchError::from(e.to_string()))?;
+            let tree = crate::db::note_queries::load_tree(&conn, &workspace_id).map_err(|e| DispatchError::from(e.to_string()))?;
+            ok(json!({ "notes": tree.notes, "books": tree.books }))
+        }
+        "notes_get_note" => ok(commands::notes_cmd::notes_get_note(app.state::<Db>(), arg(args, "id")?)?),
+        "notes_search" => ok(commands::notes_cmd::notes_search(
+            app.state::<Db>(),
+            arg(args, "workspaceId")?,
+            arg(args, "query")?,
+        )?),
+        "notes_create_note" => {
+            let workspace_id: String = arg(args, "workspaceId")?;
+            let meta = commands::notes_cmd::notes_create_note(
+                app.state::<Db>(),
+                workspace_id.clone(),
+                arg(args, "bookId")?,
+                arg(args, "title")?,
+                opt::<String>(args, "content")?.unwrap_or_default(),
+                String::new(),
+            )?;
+            let _ = app.emit("notes:changed", json!({ "workspaceId": workspace_id, "noteId": meta.id }));
+            ok(meta)
+        }
+        // Two preconditions, both answered as codes the client words itself (like `STASH_MOVED`).
+        //
+        // `baseUpdatedAt` is the note as the phone read it: a note edited at the desk since is not
+        // overwritten by a screen that never saw the edit — the phone is told, keeps its draft, and
+        // reloads. And a note that **mirrors a file** in a repository is read-only from here: saving
+        // one writes the file too, checked against the version of it last read from disk, which a
+        // phone never has.
+        "notes_save_note" => {
+            let id: String = arg(args, "id")?;
+            let base: String = arg(args, "baseUpdatedAt")?;
+            let current = commands::notes_cmd::notes_get_note(app.state::<Db>(), id.clone())?
+                .ok_or_else(|| DispatchError::from(NOTE_GONE.to_string()))?;
+            if !current.origin_path.is_empty() {
+                return Err(DispatchError::from(NOTE_LINKED.to_string()));
+            }
+            if current.updated_at != base {
+                return Err(DispatchError::from(NOTE_MOVED.to_string()));
+            }
+            let saved = commands::notes_cmd::notes_save_note(
+                app.state::<Db>(),
+                id.clone(),
+                arg(args, "title")?,
+                arg(args, "content")?,
+                // The tags are the desk's to edit; a save from here keeps them as they are.
+                current.tags,
+                None,
+                None,
+            )?;
+            let _ = app.emit("notes:changed", json!({ "workspaceId": current.workspace_id, "noteId": id }));
+            ok(saved.meta)
+        }
+        "notes_set_pinned" => {
+            let id: String = arg(args, "id")?;
+            commands::notes_cmd::notes_set_pinned(app.state::<Db>(), id.clone(), arg(args, "pinned")?)?;
+            let _ = app.emit("notes:changed", json!({ "noteId": id }));
+            ok(true)
+        }
+
+        // ---------------------------------------------------------------
+        // Containers — what is up on this machine, and three verbs
+        // ---------------------------------------------------------------
+        //
+        // The Services arms' reasoning, one layer down: starting or stopping a container runs
+        // nothing the user did not define — the container already exists, with its image, command
+        // and volumes as it was made at the desk. The phone names an engine and a container;
+        // `apps.rs` holds the two lists that bound them (local engines only, and start / stop /
+        // restart only), and the id is checked to be an id before it reaches a command line.
+        //
+        // Absent: creating or running anything, removing anything, images, volumes, networks,
+        // files, shells, Kubernetes, and any engine context but the default one.
+        "containers_phone_list" => ok(super::apps::containers().await),
+        "containers_phone_logs" => {
+            let (runtime, id) = phone_container(args)?;
+            ok(commands::containers_cmd::containers_logs_tail(
+                runtime,
+                None,
+                id,
+                opt::<u32>(args, "lines")?.unwrap_or(200).clamp(1, 500),
+            )
+            .await?)
+        }
+        "containers_phone_act" => {
+            let (runtime, id) = phone_container(args)?;
+            let action: String = arg(args, "action")?;
+            if !super::apps::phone_container_action(&action) {
+                return Err(DispatchError::BadArgs(format!("argument `action`: `{action}` is not one a phone has")));
+            }
+            ok(commands::containers_cmd::containers_act(runtime, None, None, "container".into(), action, vec![id], None).await?)
+        }
+
         "list_services" => ok(commands::services_cmd::list_services(
             app.state::<Db>(),
             arg(args, "workspaceId")?,
@@ -1699,7 +2116,25 @@ mod tests {
         "remotectl_start_pairing",
         "remotectl_revoke_all",
         "remotectl_publish_notifications",
+        "remotectl_set_device_access",
+        "remotectl_clear_activity",
         "notify_state_change",
+        // A team's run is started, answered and steered from a phone — never reshaped or thrown
+        // away, and a team is never edited.
+        "team_save",
+        "team_delete",
+        "team_delete_run",
+        "team_run_policy",
+        "team_fork_run",
+        "team_proposal_accept",
+        "team_chat_delete",
+        // Notes are written from a phone and never lost from one.
+        "notes_delete_note",
+        "notes_empty_trash",
+        // A container is started and stopped from a phone; nothing is created, applied or removed.
+        "containers_run",
+        "containers_apply",
+        "containers_file_delete",
     ];
 
     /// The guarantee this file exists for, pinned: none of the above is reachable, whatever the table
@@ -1756,6 +2191,68 @@ mod tests {
         unique.sort_unstable();
         unique.dedup();
         assert_eq!(unique.len(), ALLOWED.len(), "a command is listed twice");
+    }
+
+    /// A read-only device is refused by this list, so the list has to be right in both directions:
+    /// everything in it is reachable (or it protects nothing that exists), and every command the
+    /// desk is *told about* changes something (or a device narrowed to looking could still do an
+    /// act worth a notification).
+    #[test]
+    fn the_mutating_list_covers_everything_that_acts() {
+        for cmd in MUTATING {
+            assert!(is_allowed(cmd), "`{cmd}` is listed as mutating but is not reachable");
+        }
+        let mut unique = MUTATING.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), MUTATING.len(), "a command is listed twice");
+
+        for cmd in ALLOWED {
+            // Teardown is always permitted — see `close_terminal`'s arm — and is the one announced
+            // command a read-only device keeps.
+            if announce_for(cmd).0.is_some() && *cmd != "close_terminal" {
+                assert!(is_mutating(cmd), "`{cmd}` is announced to the desk but a read-only device could run it");
+            }
+        }
+        // And the writes with nothing to announce — staging, typing into a shell — are in it too.
+        for cmd in ["stage_file", "unstage_all", "write_terminal", "resize_terminal", "set_agent_task_pinned"] {
+            assert!(is_mutating(cmd), "`{cmd}` writes and must be refused to a read-only device");
+        }
+        // A read is never in it, or a read-only device would be a device that can do nothing.
+        for cmd in ["remote_bootstrap", "get_status", "team_phone_runs", "team_phone_run", "team_phone_diff", "team_chat_state", "notes_get_note", "containers_phone_list", "containers_phone_logs", "watch_project", "list_notifications"] {
+            assert!(!is_mutating(cmd), "`{cmd}` only reads");
+        }
+        assert!(!is_mutating("close_terminal"), "teardown must stay open to every device");
+    }
+
+    /// A container's id reaches a command line; only what an id looks like gets there.
+    #[test]
+    fn a_container_reference_is_never_a_flag() {
+        for ok in ["3f2a9c1b7d", "shop-api-1", "postgres_15.2"] {
+            assert!(plain_container_ref(ok), "{ok}");
+        }
+        for no in ["", "--follow", "-f", "api; rm -rf /", "api --since 0", "a/b", &"x".repeat(200)] {
+            assert!(!plain_container_ref(no), "{no}");
+        }
+        let named = |runtime: &str, id: &str| phone_container(&json!({ "runtime": runtime, "id": id }));
+        assert!(named("docker", "shop-api-1").is_ok());
+        assert!(matches!(named("kubernetes", "shop-api-1"), Err(DispatchError::BadArgs(_))));
+        assert!(matches!(named("docker", "--follow"), Err(DispatchError::BadArgs(_))));
+    }
+
+    /// The arms that take a team's policy or a container's context from the phone would let it
+    /// choose what the desk decided. They pass `None`, and this reads the arms to say so.
+    #[test]
+    fn a_phone_never_names_a_policy_or_an_engine_context() {
+        let source = include_str!("dispatch.rs");
+        let start = arm_body(source, "team_start");
+        assert!(!start.contains("\"policy\"") && !start.contains("\"agentProjectId\""), "team_start must take the team's own policy");
+        for name in ["containers_phone_logs", "containers_phone_act"] {
+            let body = arm_body(source, name);
+            assert!(body.contains("phone_container(args)?"), "`{name}` must check the engine and the id");
+            assert!(!body.contains("\"context\"") && !body.contains("\"namespace\""), "`{name}` must not take a context");
+        }
+        assert!(!arm_body(source, "team_chat_send").contains("\"attachments\""));
     }
 
     /// A shell is only ever one switch away, and that switch is off by default

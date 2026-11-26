@@ -26,13 +26,15 @@ import type { CommitInfo, FileDiffInfo } from "../../types/domain";
  * already answers "what did this touch".
  */
 
-function pathOf(file: FileDiffInfo): string {
+export function pathOf(file: FileDiffInfo): string {
   // `new_path` for everything except a deletion, which only has the old one. Never both, because at
   // this width a rename's two paths wrap into four lines of chrome above one line of code.
   return file.new_path ?? file.old_path ?? "";
 }
 
-function FileSection({ file }: { file: FileDiffInfo }) {
+/** One changed file: its path and status, and — opened — its diff. Shared with a team run's changes,
+ *  so a file reads the same wherever its diff came from. */
+export function FileSection({ file }: { file: FileDiffInfo }) {
   const [open, setOpen] = useState(false);
   const path = pathOf(file);
   return (

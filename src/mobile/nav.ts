@@ -60,9 +60,9 @@ import { create } from "zustand";
 import { newId } from "./ids";
 import type { CommitInfo } from "../types/domain";
 
-export type Tab = "repo" | "prs" | "chat" | "agents" | "terminal";
+export type Tab = "repo" | "prs" | "chat" | "agents" | "notes" | "terminal";
 
-export const TAB_IDS: Tab[] = ["repo", "prs", "chat", "agents", "terminal"];
+export const TAB_IDS: Tab[] = ["repo", "prs", "chat", "agents", "notes", "terminal"];
 
 /**
  * One pushed screen.
@@ -82,6 +82,22 @@ export type Route =
   | { k: "commit"; repoPath: string; commit: CommitInfo }
   | { k: "branches"; repoPath: string }
   | { k: "chain"; workspaceId: string; chainId: string; title: string }
+  /** One team run: its gate, its questions, its tasks. */
+  | { k: "teamRun"; workspaceId: string; runId: string; title: string }
+  /** Giving a team a task. */
+  | { k: "teamStart"; workspaceId: string; teamId: string; teamName: string }
+  /** A conversation with a team. */
+  | { k: "teamChat"; workspaceId: string; teamId: string; teamName: string }
+  /** The changes behind a run's decision: one task's (`itemId`) or one repository's integration
+   *  (`projectOf`). Not `projectId`: that name is what scopes a route to the project the phone is
+   *  on, and a run's repository is not that. */
+  | { k: "teamDiff"; workspaceId: string; runId: string; itemId?: string; projectOf?: string; title: string }
+  /** One note. `id` empty is a new one, in `bookId`. */
+  | { k: "note"; workspaceId: string; id: string; bookId: string; title: string }
+  /** One container's log. Not scoped: a container is the machine's. */
+  | { k: "containerLogs"; runtime: string; id: string; name: string }
+  /** The plans' limits, as the providers publish them. Not scoped: an account is the machine's. */
+  | { k: "usage" }
   | { k: "review"; projectId: string; runId: string; prId: number; iter: number }
   | { k: "job"; projectId: string; id: string; label: string }
   /** One pipeline run and its jobs. The title is the run's name, for the first frame's app bar. */
@@ -223,6 +239,10 @@ interface NavStore extends NavState {
   select: (tab: Tab) => void;
   /** Opens a route on the stack. */
   push: (route: Route) => void;
+  /** Puts a route where the top one is — for a screen whose job ended by becoming another (a form
+   *  that started a run turns into that run). Back then leaves both, instead of returning to a form
+   *  that would start it again. A push when nothing is open. */
+  replace: (route: Route) => void;
   /** Closes the top route. A no-op at a tab root, so the phone's back button keeps its own
    *  meaning there — leaving the app — rather than being swallowed. */
   back: () => void;
@@ -280,6 +300,23 @@ export const useNav = create<NavStore>((set, get) => ({
       stack: [...state.stack, { ...route, navKey: newId() }],
     };
     write(next, "push");
+    set(next);
+  },
+
+  replace: (route) => {
+    if (navigating) return;
+    const state = get();
+    if (state.stack.length === 0) {
+      get().push(route);
+      return;
+    }
+    // The same history entry, rewritten: the invariant is `stack.length` entries above the tab
+    // root, and replacing one keeps the count.
+    const next: NavState = {
+      tab: state.tab,
+      stack: [...state.stack.slice(0, -1), { ...route, navKey: newId() }],
+    };
+    write(next, "replace");
     set(next);
   },
 

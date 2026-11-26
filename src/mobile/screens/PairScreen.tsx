@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { CheckCircle2, Info, Loader2, ShieldCheck, Smartphone, TriangleAlert } from "lucide-react";
 import { t } from "../i18n";
-import { hello, pair, storedName } from "../transport";
+import { hello, pair, scannedPairingCode, storedName } from "../transport";
 import { Button } from "../ui/Button";
 
 /**
@@ -58,9 +58,29 @@ function Fingerprint({ value }: { value: string }) {
   );
 }
 
+/**
+ * What to call this device when nobody has typed a name — the scan-to-pair path, where asking for
+ * one would put a form back between the camera and the app.
+ *
+ * Read off the user agent, which is the only thing a page knows about the device it runs on, and
+ * only as far as that string is honest: an iPad has reported itself as a Mac since iPadOS 13, so a
+ * "Mac" with a touch screen is taken for what it is. It can be renamed from this client's settings.
+ */
+function guessedName(): string {
+  const agent = navigator.userAgent;
+  if (/iPhone/.test(agent)) return "iPhone";
+  if (/iPad/.test(agent) || (/Macintosh/.test(agent) && navigator.maxTouchPoints > 1)) return "iPad";
+  if (/Android/.test(agent)) return /Mobile/.test(agent) ? "Android" : "Tablet Android";
+  if (/Macintosh/.test(agent)) return "Mac";
+  if (/Windows/.test(agent)) return "Windows";
+  return t("pair.deviceFallback");
+}
+
 export function PairScreen({ onPaired }: { onPaired: () => void }) {
-  const [code, setCode] = useState("");
-  const [name, setName] = useState(storedName);
+  /** The six digits a scanned QR brought with it, if this page was opened by one. Read once. */
+  const [scanned] = useState(scannedPairingCode);
+  const [code, setCode] = useState(scanned ?? "");
+  const [name, setName] = useState(() => storedName() || (scanned ? guessedName() : ""));
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /** `undefined` while the first probe is in flight, `null` when the desktop cannot be reached, and
@@ -89,11 +109,11 @@ export function PairScreen({ onPaired }: { onPaired: () => void }) {
     };
   }, []);
 
-  const submit = async () => {
+  const submit = async (withCode = code) => {
     setBusy(true);
     setError(null);
     try {
-      await pair(code, name.trim() || "Dispositivo");
+      await pair(withCode, name.trim() || guessedName());
       onPaired();
     } catch {
       setError(windowOpen === false ? t("pair.noWindow") : t("pair.rejected"));
@@ -102,6 +122,14 @@ export function PairScreen({ onPaired }: { onPaired: () => void }) {
       setBusy(false);
     }
   };
+
+  // A scanned code is redeemed without a tap: the person already did the deliberate thing — they
+  // pointed a camera at a code on their own screen. Once, on mount; a code that is refused (it
+  // expired while the certificate warning was being read) falls back to the form with the reason.
+  useEffect(() => {
+    if (scanned) void submit(scanned);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanned]);
 
   const probe =
     windowOpen === undefined

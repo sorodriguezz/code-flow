@@ -24,8 +24,6 @@ import { deleteLegacyData, getSetting, quitApp, resetAppData, revealInFileManage
 import { confirmAction } from "../../state/confirmStore";
 import { useDataDirsStore } from "../../state/dataDirsStore";
 import { useToastStore } from "../../state/toastStore";
-import { usePreferencesStore } from "../../state/preferencesStore";
-import { countedSatellites, useWindowStore } from "../../state/windowStore";
 import { useWorkspaceStore } from "../../state/workspaceStore";
 import { pipelinesAvailable, useVcsConnectionsStore } from "../../state/vcsConnectionsStore";
 // Shared with the backup panel, which formats the same kind of number for the same reason.
@@ -41,8 +39,6 @@ const OPTIONS: { value: Language; label: string }[] = [
   { value: "es", label: "Español" },
 ];
 
-/** The satellite-window limits on offer — see the note where they are drawn. */
-const WINDOW_LIMITS = [0, 1, 2, 3, 4, 5, 6, 8];
 
 /** A destructive action drawn as an outline: the danger text on a thin danger rule, filled only
  *  under the pointer. Quieter than a red slab for buttons that still ask for confirmation. */
@@ -269,11 +265,6 @@ export function GeneralSettings() {
   const layout = useDataDirsStore((s) => s.status);
   const loadLayout = useDataDirsStore((s) => s.load);
   const refreshLayout = useDataDirsStore((s) => s.refresh);
-  const satelliteLimit = usePreferencesStore((s) => s.satelliteLimit);
-  const setSatelliteLimit = usePreferencesStore((s) => s.setSatelliteLimit);
-  // Not the hotkey ask box: it is hidden between uses, never counted against the limit, and a
-  // number here that included it described a window nobody could see.
-  const openWindows = useWindowStore((s) => countedSatellites(s.satellites));
   const [deleting, setDeleting] = useState(false);
   const pushToast = useToastStore((s) => s.pushToast);
   const dataPath = layout?.stateDir ?? "…";
@@ -328,30 +319,6 @@ export function GeneralSettings() {
           )}
 
           {/* One block each, so the rail names them and the pane's hint explains them. */}
-          {tab === "windows" && (
-            <>
-              {/* Buttons rather than a number field: the useful range is 0–8 and every value in it is one
-                  press away, which is faster to set and impossible to mistype. Zero is a real choice —
-                  "never open a second window" — so it is offered rather than clamped away. One
-                  segmented track rather than eight loose buttons: it is one choice among peers. */}
-              <Segmented
-                options={WINDOW_LIMITS.map((n) => ({
-                  value: String(n),
-                  label: <span className="min-w-3 tabular-nums">{n}</span>,
-                }))}
-                value={String(satelliteLimit)}
-                onChange={(value) => void setSatelliteLimit(Number(value))}
-                layoutId="cf-set-window-limit"
-                ariaLabel={t("windows.limitLabel")}
-              />
-              {/* What is open right now, so raising or lowering the limit is a decision with the current
-                  state in front of it rather than an abstract number. */}
-              <p className="mt-2 text-[11px] tabular-nums text-[var(--cf-text-muted)]">
-                {t("windows.openNow", { count: String(openWindows) })}
-              </p>
-            </>
-          )}
-
           {tab === "tours" && (
             <>
               {/* Every tour there is, from one screen. The launcher in the chrome is contextual by

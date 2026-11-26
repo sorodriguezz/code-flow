@@ -355,6 +355,64 @@ pub fn remotectl_forget_all_revoked(
     devices(&app, &conn)
 }
 
+/// Narrows one device to looking, or gives it back everything the allowlist offers.
+///
+/// Per device, where the shell switch is deliberately global (see
+/// [`remotectl_set_allow_terminal`]): that one answers "may a phone run commands here", which is a
+/// question about the machine. This one answers "what is *this* device for" — the tablet that only
+/// shows whether the build passed, the phone lent for an afternoon — and that is a fact about the
+/// device.
+///
+/// Takes effect on the device's very next request: the level is read with the token on every call
+/// (`auth::device_identity`), so there is nothing to restart and no socket to cut. Two things are
+/// done here besides the write, both so the change is true at once rather than eventually:
+///
+/// * a device narrowed to read-only has its shells closed — a shell is the one thing it could have
+///   left *running* under the access it just lost;
+/// * the phone is told, on the channel it is already reading, so it stops offering buttons that
+///   would now refuse instead of finding out one failed tap at a time.
+#[tauri::command]
+pub fn remotectl_set_device_access(
+    app: AppHandle,
+    db: State<Db>,
+    id: String,
+    read_only: bool,
+) -> Result<Vec<auth::RemoteDevice>, String> {
+    let access = if read_only { auth::Access::ReadOnly } else { auth::Access::Full };
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    auth::set_device_access(&conn, &id, access)?;
+    if read_only {
+        crate::terminal::close_owned(&app.state::<crate::terminal::TerminalRegistry>(), &id);
+    }
+    // Every phone receives the frame and only the one it names acts on it — the same addressing a
+    // revocation uses, on the channel that needs no plumbing of its own (see
+    // `remotectl_set_allow_terminal`).
+    let _ = app.emit(
+        bridge::INVALIDATE_EVENT,
+        serde_json::json!({
+            "domain": "remote",
+            "origin": bridge::DESKTOP_ORIGIN,
+            "accessFor": id,
+            "access": access.as_str(),
+        }),
+    );
+    devices(&app, &conn)
+}
+
+/// What paired devices did on this machine, newest first. See [`remotectl::activity`].
+#[tauri::command]
+pub fn remotectl_list_activity(db: State<Db>, limit: Option<i64>) -> Result<Vec<remotectl::activity::Activity>, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    remotectl::activity::list(&conn, limit.unwrap_or(100))
+}
+
+/// Empties that log.
+#[tauri::command]
+pub fn remotectl_clear_activity(db: State<Db>) -> Result<(), String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    remotectl::activity::clear(&conn)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

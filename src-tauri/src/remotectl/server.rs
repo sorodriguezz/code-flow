@@ -287,7 +287,7 @@ async fn missing_bundle() -> impl IntoResponse {
 /// `axum` handler's future must be `Send`, a `std::sync::MutexGuard` is not, and holding one across
 /// the `.await` in [`rpc`] would fail to compile in a way whose error message points somewhere
 /// else entirely.
-fn device_from_bearer(ctx: &Ctx, token: &str) -> Result<(String, String), Response> {
+fn device_from_bearer(ctx: &Ctx, token: &str) -> Result<Device, Response> {
     let db = ctx.app.state::<Db>();
     let state = ctx.app.state::<RemoteCtl>();
     let conn = match db.0.lock() {
@@ -296,17 +296,27 @@ fn device_from_bearer(ctx: &Ctx, token: &str) -> Result<(String, String), Respon
     };
     match auth::verify(&conn, &state.pairing, token) {
         // The name travels with the id because the desktop's notification centre says *who* did
-        // something — "iPhone de Sebastián · commit" rather than a UUID. Read on the same
-        // connection the verification already holds, so it costs no extra lock.
+        // something — "iPhone de Sebastián · commit" rather than a UUID — and the access level
+        // because it decides what the call may be. Read on the same connection the verification
+        // already holds, so it costs no extra lock; and read per request, so narrowing a device to
+        // read-only takes effect on its very next call.
         Verdict::Device(id) => {
-            let name = auth::device_name(&conn, &id);
-            Ok((id, name))
+            let (name, access) = auth::device_identity(&conn, &id);
+            Ok(Device { id, name, access })
         }
         Verdict::Rejected => Err(refused()),
         // 503, never `refused()`: the database could not answer, which says nothing about the
         // token — and a 401 is what makes the phone delete it. The client retries a 503.
         Verdict::Unavailable => Err(unavailable()),
     }
+}
+
+/// Who a request is from, resolved once per request by [`device_from_bearer`].
+#[derive(Clone)]
+struct Device {
+    id: String,
+    name: String,
+    access: auth::Access,
 }
 
 /// "Ask again in a moment" — for a desktop that could not check the token, not one that refused it.
@@ -462,16 +472,16 @@ fn idempotency_key(headers: &HeaderMap) -> Option<&str> {
 ///
 /// A call without a key — a read, or a client older than keys — runs inline as it always has.
 async fn rpc(State(ctx): State<Ctx>, headers: HeaderMap, Json(body): Json<RpcRequest>) -> Response {
-    let (device_id, device_name) = match device_from_bearer(&ctx, bearer(&headers)) {
+    let device = match device_from_bearer(&ctx, bearer(&headers)) {
         Ok(device) => device,
         Err(response) => return response,
     };
     let Some(key) = idempotency_key(&headers) else {
-        return reply(execute(ctx, device_id, device_name, body).await);
+        return reply(execute(ctx, device, body).await);
     };
 
     let request = dispatch::request_fingerprint(&body.cmd, &body.args);
-    let claim = ctx.app.state::<RemoteCtl>().replays.claim(&device_id, key, &request, Instant::now());
+    let claim = ctx.app.state::<RemoteCtl>().replays.claim(&device.id, key, &request, Instant::now());
     let answer = match claim {
         dispatch::Claim::Mismatch => {
             return (
@@ -483,7 +493,7 @@ async fn rpc(State(ctx): State<Ctx>, headers: HeaderMap, Json(body): Json<RpcReq
         dispatch::Claim::Replay(answer) => answer,
         dispatch::Claim::Fresh(sender) => {
             let answer = sender.subscribe();
-            let job = execute(ctx.clone(), device_id, device_name, body);
+            let job = execute(ctx.clone(), device, body);
             tauri::async_runtime::spawn(async move {
                 let _ = sender.send(Some(job.await));
             });
@@ -501,7 +511,8 @@ fn reply(answer: dispatch::Answer) -> Response {
 /// Runs one command and announces what it did — everything [`rpc`] does after the bearer check.
 ///
 /// Owns its arguments so a keyed call can run on a task that outlives the request.
-async fn execute(ctx: Ctx, device_id: String, device_name: String, body: RpcRequest) -> dispatch::Answer {
+async fn execute(ctx: Ctx, device: Device, body: RpcRequest) -> dispatch::Answer {
+    let (device_id, device_name) = (device.id, device.name);
     // Read straight off the request rather than threaded back out of the dispatcher: the argument
     // is right here, every command that has a project takes it under this one name, and the
     // alternative is a third return value on twenty arms that do not care.
@@ -540,12 +551,35 @@ async fn execute(ctx: Ctx, device_id: String, device_name: String, body: RpcRequ
         )
     };
 
-    match dispatch::dispatch(&ctx.app, &device_id, &body.cmd, &body.args).await {
+    // What goes in the log of what devices did — the same acts the desk is notified about, by the
+    // same table, so the two can never disagree about what is worth recording.
+    let record = |outcome| {
+        let Some(action) = dispatch::announce_for(&body.cmd).0 else {
+            return;
+        };
+        let db = ctx.app.state::<Db>();
+        let conn = match db.0.lock() {
+            Ok(c) => c,
+            Err(e) => e.into_inner(),
+        };
+        super::activity::record(&conn, &device_id, &device_name, action, outcome, &super::activity::subject(&body.args));
+    };
+
+    match dispatch::dispatch(&ctx.app, &device_id, device.access, &body.cmd, &body.args).await {
         // After the command, never before: a failed commit must not tell the desktop to redraw as
         // though something changed — nor announce that it happened.
         Ok((value, inv)) => {
             announce(inv, false);
+            record(super::activity::Outcome::Done);
             dispatch::Answer::new(200, json!({ "ok": true, "value": value }))
+        }
+        // 403 like `NotAllowed`, and for the same reason it is not a 401: the token is fine. Named
+        // apart in the body so the client can say what is true — this device may only look —
+        // instead of the "your desktop is older than this app" it says for a missing command.
+        // Recorded: a write refused to a lent phone is exactly what its owner wants to read later.
+        Err(dispatch::DispatchError::ReadOnly) => {
+            record(super::activity::Outcome::Refused);
+            dispatch::Answer::new(403, json!({ "ok": false, "error": "read_only" }))
         }
         // **403, and emphatically not the 401 `refused()` gives.**
         //
@@ -575,6 +609,7 @@ async fn execute(ctx: Ctx, device_id: String, device_name: String, body: RpcRequ
             // nothing at all, which is indistinguishable from the request never having arrived.
             if !wrote_nothing(&message) {
                 announce(invalidate, true);
+                record(super::activity::Outcome::Failed);
             }
             dispatch::Answer::new(200, json!({ "ok": false, "error": message }))
         }
@@ -623,7 +658,7 @@ async fn events(
     // no identity is one that cannot be revoked, cannot be counted, and cannot be told apart from
     // the phone in the next room — every symptom in this handler's history comes from that line.
     let device_id = match device_from_bearer(&ctx, query.token.trim()) {
-        Ok((device_id, _)) => device_id,
+        Ok(device) => device.id,
         Err(response) => return response,
     };
 

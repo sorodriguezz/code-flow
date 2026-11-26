@@ -55,6 +55,20 @@ export class NotAllowed extends Error {
 }
 
 /**
+ * Raised when the desktop has narrowed this device to **looking** and it asked to change something.
+ *
+ * A kind of [`NotAllowed`] — the pairing stands and the call is refused — kept apart because there
+ * is something true to say about it. "Este dispositivo es de solo lectura" sends the user to the
+ * desk's device list; the generic refusal would send them looking for an update that does not exist.
+ */
+export class ReadOnly extends NotAllowed {
+  constructor() {
+    super();
+    this.message = "read_only";
+  }
+}
+
+/**
  * Raised when the desktop did not answer within `timeoutFor(cmd)`.
  *
  * The outcome is *unknown*, not failed: the desktop may well have done it and lost the answer on the
@@ -190,6 +204,40 @@ export function adoptHandoff(): void {
   }
 }
 
+/**
+ * The pairing code a scanned QR brought with it, taken out of the address.
+ *
+ * The desk's QR used to carry the address alone, so pairing was two acts on two devices: point the
+ * camera, then read six digits off one screen and type them into the other. While a pairing is open
+ * the QR now carries the code too, in the URL *fragment* — which a browser never sends to any
+ * server, so the code travels exactly as far as the screen it was shown on: from the desk's display
+ * to the camera pointed at it.
+ *
+ * Wiped from the history entry as it is read, like the handoff above, so the digits sit neither in
+ * the address bar nor behind the back button. Six digits or nothing: anything else in that fragment
+ * is not something this client wrote.
+ *
+ * Captured at startup (`main.tsx`) whether or not this device is already paired — a paired phone
+ * that scans the QR again must still not keep a code in its address — and handed to the pairing
+ * screen once, by [`scannedPairingCode`].
+ */
+let scannedCode: string | null = null;
+
+export function capturePairingCode(): void {
+  const marker = "#pair=";
+  if (!location.hash.startsWith(marker)) return;
+  const carried = location.hash.slice(marker.length);
+  history.replaceState(history.state, "", location.pathname + location.search);
+  if (/^\d{6}$/.test(carried)) scannedCode = carried;
+}
+
+/** The code a scan brought, once: a code redeems once, so a second reader has nothing to do with it. */
+export function scannedPairingCode(): string | null {
+  const code = scannedCode;
+  scannedCode = null;
+  return code;
+}
+
 /** Whether the desktop is reachable at all, and whether it is currently offering a pairing code. */
 export async function hello(): Promise<Hello | null> {
   try {
@@ -293,6 +341,22 @@ export const MUTATING = new Set([
   "resolve_pr_comment_thread",
   "rerun_pipeline",
   "cancel_pipeline",
+  // The two that were missing while the desktop had them: a flow decided or started twice by the
+  // press that follows a timeout is exactly what a key exists to prevent.
+  "flows_decide_wait",
+  "flows_run_from_phone",
+  "team_start",
+  "team_decide",
+  "team_answer",
+  "team_note",
+  "team_control",
+  "team_chat_open",
+  "team_chat_send",
+  "team_chat_cancel",
+  "notes_create_note",
+  "notes_save_note",
+  "notes_set_pinned",
+  "containers_phone_act",
   "services_start",
   "services_stop",
   "services_restart",
@@ -303,8 +367,10 @@ export const MUTATING = new Set([
 
 /** The three calls that run an engine, awaited inline for as long as a model takes. */
 const ENGINE = new Set(["analyze_working_changes", "review_pull_request", "send_chat_message"]);
-/** The three that wait on a git host at the other end of somebody's uplink. */
-const GIT_NETWORK = new Set(["git_fetch", "git_pull", "git_push"]);
+/** The ones that wait on a git host at the other end of somebody's uplink — the three git calls, a
+ *  team's decision, whose last gate merges, pushes or opens a pull request before it answers, and
+ *  starting a run, which makes a working folder per repository first. */
+const GIT_NETWORK = new Set(["git_fetch", "git_pull", "git_push", "team_decide", "team_start"]);
 
 /**
  * How long a call may go unanswered before this client stops waiting.
@@ -407,7 +473,10 @@ export async function rpc<T>(cmd: string, args: Record<string, unknown> = {}): P
   // 403 is "not this command" — the terminal switch being off, or a client newer than the desktop
   // asking for something the allowlist does not have yet. An ordinary failure; the pairing stands.
   if (res.status === 403) {
-    throw new NotAllowed();
+    // The body says which refusal it is. Read defensively: an older desktop answers the same status
+    // with no such field, and a body that will not parse is still a refusal.
+    const refusal = (await res.json().catch(() => null)) as { error?: string } | null;
+    throw refusal?.error === "read_only" ? new ReadOnly() : new NotAllowed();
   }
 
   const reply = (await res.json()) as { ok: boolean; value?: T; error?: string };

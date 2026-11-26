@@ -32,6 +32,12 @@ export interface Invalidation {
   project?: string;
   /** Which conversation, for `chat`. A project holds dozens. */
   conversation?: string;
+  /** Which team run, for `teams`. The open run re-reads only for its own. */
+  run?: string;
+  /** Which team conversation, for `teamChat`. */
+  chat?: string;
+  /** Which note, for `notes`. */
+  note?: string;
 }
 
 const EVENT = "codeflow:invalidate";
@@ -50,7 +56,7 @@ export function announceInvalidation(detail: Invalidation) {
  * change the emitter simply did not scope.
  */
 export function onInvalidate(
-  domain: "reviews" | "chat" | "chains" | "repo",
+  domain: "reviews" | "chat" | "chains" | "repo" | "teams" | "teamChat" | "notes",
   projectId: string | null,
   listener: (detail: Invalidation) => void,
 ): () => void {

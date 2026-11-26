@@ -11,7 +11,7 @@ a backlog, and let AI write your commits, find your bugs and resolve your confli
 native app. Then test the endpoint you just changed, query the database behind it and SSH into the
 box it runs on without leaving the window. **You decide which model does what.**
 
-![version](https://img.shields.io/badge/version-2.9.12-6C5CE7)
+![version](https://img.shields.io/badge/version-2.9.13-6C5CE7)
 ![platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-2D3436)
 ![providers](https://img.shields.io/badge/AI-7%20engines-00B894)
 ![languages](https://img.shields.io/badge/languages-EN%20%7C%20ES-0984E3)
@@ -650,12 +650,22 @@ desktop.
 
 ## 📱 Your phone, when you're not at the machine
 
-Turn on the remote-control server in Settings, put the six digits it shows into your phone's
-browser, and the app has a second screen — no app store, no account, nothing published to the
-internet.
+Turn on the remote-control server in Settings, point your phone's camera at the QR code it shows —
+or type the six digits — and the app has a second screen: no app store, no account, nothing
+published to the internet.
 
-- **Watch what's running**: agent tasks and chains, live, and answer the ones waiting at *Your turn*
-  from wherever you are.
+- **What is waiting for you, first**: a summary of everything that needs an answer — a team's plan,
+  a task that needs your yes, an agent's question, a chain's gate, a flow's approval, a service that
+  fell over — and a count on the tab that adds it all up.
+- **Your teams, start to finish**: give a team a task, chat with it, read the diff of what it asks
+  you to approve, approve or reject each decision, answer its agents' questions, retry or skip a
+  task, pause or stop the run.
+- **Your notes**: search them, read them rendered, write one and edit it — without overwriting what
+  changed on the desktop.
+- **Your containers**: which are up, the last lines of their log, and start, stop or restart each
+  one.
+- **Watch what's running**: agent tasks and chains, live, and how much of each AI plan is left and
+  when it resets.
 - **Review a pull request**, read the repository, and keep chatting to the assistant.
 - **More than watching**: pipelines (runs, jobs, re-run and cancel), services (start, stop,
   restart), stashes (apply and pop) and your notifications.
@@ -665,9 +675,12 @@ internet.
   one on the desktop, once. Phones paired before are moved over on their own.
 - **A flaky connection can't double an action**: every change the phone sends carries a key, so a
   retry after a timeout gets the first answer instead of doing it again.
-- **Every device is revocable** one by one from the desktop, and administering the feature is
-  something only the machine can do: a paired phone can't open a pairing window, move the port or
-  revoke the device beside it.
+- **Each device with its own access**: full or read-only — for the tablet that only shows how things
+  are going, or the phone you lend — and revocable one by one from the desktop.
+- **A record of what they did**: every commit, push, approval or refused attempt from a device is
+  logged on the desktop, and stays after the app closes.
+- **Administering the feature only happens at the machine**: a paired phone can't open a pairing
+  window, move the port, change its own access or revoke the device beside it.
 
 ## 🛟 Backups you can actually restore
 

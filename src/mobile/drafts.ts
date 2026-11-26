@@ -29,7 +29,17 @@
 
 const PREFIX = "codeflow.remote.draft.";
 
-export type DraftKind = "commit" | "chat" | "gate";
+export type DraftKind =
+  | "commit"
+  | "chat"
+  | "gate"
+  | "teamGate"
+  | "teamAnswer"
+  | "teamNote"
+  | "teamGoal"
+  | "teamChat"
+  | "noteTitle"
+  | "noteBody";
 
 function key(kind: DraftKind, owner: string): string {
   return `${PREFIX}${kind}.${owner}`;

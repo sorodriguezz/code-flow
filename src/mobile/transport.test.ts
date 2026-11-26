@@ -166,3 +166,66 @@ describe("adoptHandoff", () => {
     expect(untouched).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * The two lists of commands that change something — this client's, which decides what carries an
+ * idempotency key, and the desktop's, which decides what a read-only device is refused — say the
+ * same thing. They drifted once: two flow commands were mutating on the desktop and unkeyed here,
+ * so the press that followed a timeout could decide or start a flow a second time.
+ */
+describe("the mutating commands", () => {
+  it("are the ones the desktop lists, minus the per-keystroke shell writes", async () => {
+    const { readFileSync } = await import("node:fs");
+    const source = readFileSync("src-tauri/src/remotectl/dispatch.rs", "utf8");
+    const start = source.indexOf("pub const MUTATING: &[&str] = &[");
+    expect(start).toBeGreaterThan(0);
+    const desktop = new Set(
+      [...source.slice(start, source.indexOf("];", start)).matchAll(/"([a-z_]+)"/g)].map((match) => match[1]),
+    );
+    expect(desktop.size).toBeGreaterThan(30);
+
+    const { MUTATING } = await load();
+    // A key per keystroke would fill the desktop's replay cache with nothing worth replaying.
+    const unkeyed = ["write_terminal", "resize_terminal"];
+    for (const cmd of unkeyed) expect(desktop.has(cmd)).toBe(true);
+    // Teardown is always permitted, so the desktop does not count it as a write a read-only device
+    // is refused — and it is still keyed here, because closing twice must be one close.
+    const keyedOnly = ["close_terminal"];
+
+    expect([...MUTATING].filter((cmd) => !keyedOnly.includes(cmd)).sort()).toEqual(
+      [...desktop].filter((cmd) => !unkeyed.includes(cmd)).sort(),
+    );
+  });
+});
+
+describe("a refusal", () => {
+  it("is told apart: a read-only device from a command the desktop does not have", async () => {
+    const { rpc, ReadOnly, NotAllowed } = await load();
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error: "read_only" }), { status: 403 }));
+    await expect(rpc("commit", { repoPath: "/r", message: "m" })).rejects.toBeInstanceOf(ReadOnly);
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error: "not_allowed" }), { status: 403 }));
+    const refusal = await rpc("commit", { repoPath: "/r", message: "m" }).catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(NotAllowed);
+    expect(refusal).not.toBeInstanceOf(ReadOnly);
+    // Neither one touches the pairing: only a 401 does.
+    expect(storage.values.get("codeflow.remote.token")).toBe("device-token");
+  });
+});
+
+describe("a scanned pairing code", () => {
+  it("is taken out of the address, once, and only when it is six digits", async () => {
+    const replaceState = vi.fn();
+    vi.stubGlobal("history", { state: null, replaceState });
+    vi.stubGlobal("location", { hash: "#pair=482913", pathname: "/", search: "" });
+    const first = await load();
+    first.capturePairingCode();
+    expect(replaceState).toHaveBeenCalledWith(null, "", "/");
+    expect(first.scannedPairingCode()).toBe("482913");
+    expect(first.scannedPairingCode()).toBeNull();
+
+    vi.stubGlobal("location", { hash: "#pair=<script>", pathname: "/", search: "" });
+    const second = await load();
+    second.capturePairingCode();
+    expect(second.scannedPairingCode()).toBeNull();
+  });
+});

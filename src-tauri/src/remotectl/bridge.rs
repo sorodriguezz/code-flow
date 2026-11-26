@@ -77,6 +77,16 @@ const FORWARDED: &[&str] = &[
     // with it the phone triggers on offer). Both carry nothing — the phone re-reads its lists.
     crate::flows::waits::CHANGED_EVENT,
     "flows:triggers",
+    // A team's run moved: a task started or ended, a gate opened, a member asked something. One
+    // small frame naming the run — the phone re-reads its list and the run it has open, through the
+    // view that is cut for it (`teams.rs`). Emitted per change of state, never per line of output.
+    "team:changed",
+    // A team's conversation moved — a message filed, a member started or finished answering. Names
+    // the chat; the phone re-reads the one it has open.
+    "team-chat:changed",
+    // A note was written by something other than the window showing it: an agent, a flow, a phone.
+    // Names the note and its workspace.
+    "notes:changed",
 ];
 
 /// Events forwarded **only to the device whose shell they came from**.

@@ -8,7 +8,6 @@ import {
 } from "../lib/tauri/windows";
 import { WINDOW, type DetachableKind } from "../lib/windowIdentity";
 import { pushErrorToast } from "./toastStore";
-import { translate } from "./languageStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { islandOpened, islandReturned } from "../lib/islandSync";
 import { chatIslandOpened, chatIslandReturned, parseChatIslandRef } from "../lib/chatIslandSync";
@@ -52,42 +51,21 @@ interface WindowState {
   satellites: SatelliteInfo[];
   /** Islands that came back in the last couple of seconds. Main window only — see `init`. */
   returns: WindowReturn[];
-  /** How many are allowed, from settings. Mirrored here so the rail can say the number in the
-   *  message it shows when the answer is "no". */
-  limit: number;
   init: () => Promise<void>;
-  setLimit: (limit: number) => void;
   /**
    * Opens — or focuses — the window for one app, one repository or one file.
    *
-   * Returns `false` when it refused, so the caller can leave the app where it is rather than
-   * marking an icon for a window that was never built. `at` places a new window — see
+   * Returns `false` when the window could not be built, so the caller can leave the app where it is
+   * rather than marking an icon for a window that never appeared. `at` places a new window — see
    * `openSatellite`.
+
+   * There is no limit on how many: what a machine can hold open is a matter of its memory, which
+   * the status bar's panel shows window by window (`SystemMeter`).
    */
   detach: (kind: DetachableKind, refId: string, title: string, at?: { x: number; y: number }) => Promise<boolean>;
   focus: (label: string) => Promise<void>;
   /** Whether this app or repository is showing in a window of its own. */
   detachedLabel: (kind: DetachableKind, refId: string) => string | null;
-}
-
-/** What Settings offers, and what a fresh install gets. Four covers the case this feature was asked
- *  for — API client, database, frontend, backend — with nothing left over. */
-export const DEFAULT_SATELLITE_LIMIT = 4;
-
-/**
- * The windows the limit is about: every satellite but the hotkey ask box.
- *
- * The ask box is hidden, not closed, between uses — once summoned it is "open" for the rest of the
- * session — so counting it made a limit of four mean three, and the "open right now" line in
- * Settings counted a window nobody could see. `windows.rs` leaves it out of its own backstop too.
- */
-export function countedSatellites(satellites: readonly SatelliteInfo[]): number {
-  // Codi's window neither: one window of its own, summoned by its button, never a detached app.
-  // Nor chat islands: several conversations side by side is what they are for, and the user asked
-  // that they not spend the islands the limit allows (`windows.rs` gives them a backstop of their own).
-  // Nor the floating conversations and the call: they are not detached screens of the app, and a
-  // call that could not open because four islands were must not be a thing.
-  return satellites.filter((s) => s.kind !== "quick" && s.kind !== "codi" && s.kind !== "chat" && s.kind !== "float").length;
 }
 
 let nextReturnId = 0;
@@ -123,7 +101,6 @@ function whenVisible(play: () => void) {
 export const useWindowStore = create<WindowState>((set, get) => ({
   satellites: [],
   returns: [],
-  limit: DEFAULT_SATELLITE_LIMIT,
 
   init: async () => {
     const satellites = await listSatellites().catch(() => []);
@@ -168,16 +145,7 @@ export const useWindowStore = create<WindowState>((set, get) => ({
     });
   },
 
-  setLimit: (limit) => set({ limit: Math.max(0, Math.min(8, Math.round(limit))) }),
-
   detach: async (kind, refId, title, at) => {
-    const { satellites, limit } = get();
-    const already = satellites.some((s) => s.kind === kind && s.ref_id === refId);
-    // Focusing what is already open is never refused, however full the desk is — it opens nothing.
-    if (!already && kind !== "chat" && countedSatellites(satellites) >= limit) {
-      pushErrorToast(translate("windows.limitReached", { limit: String(limit) }));
-      return false;
-    }
     try {
       // Opened where it was asked for: an app detached while this window sits on "Tienda" shows
       // "Tienda", whatever that window was switched to the last time it was open.

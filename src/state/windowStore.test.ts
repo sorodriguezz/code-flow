@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
- * The satellite limit. The hotkey ask box is hidden, not closed, between uses — "open" all session —
- * so counting it made a limit of four windows mean three.
+ * Opening windows. There is no limit on how many: the machine's memory is the only ceiling, and the
+ * status bar shows what each window takes.
  */
 
 const opened: string[] = [];
@@ -23,13 +23,12 @@ vi.mock("../lib/tauri/windows", () => ({
   },
 }));
 vi.mock("./toastStore", () => ({ pushErrorToast: (message: string) => toasts.push(message) }));
-vi.mock("./languageStore", () => ({ translate: (key: string) => key }));
 vi.mock("./workspaceStore", () => ({ useWorkspaceStore: { getState: () => ({ activeWorkspaceId: "ws-1" }) } }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: async () => () => {} }));
 
-const { countedSatellites, useWindowStore } = await import("./windowStore");
+const { useWindowStore } = await import("./windowStore");
 
-const sat = (label: string, kind: "app" | "repo" | "quick" | "chat", ref_id: string) => ({ label, kind, ref_id, title: "" });
+const sat = (label: string, kind: "app" | "repo" | "quick" | "chat" | "float", ref_id: string) => ({ label, kind, ref_id, title: "" });
 
 beforeEach(() => {
   opened.length = 0;
@@ -37,46 +36,27 @@ beforeEach(() => {
   toasts.length = 0;
 });
 
-describe("the satellite limit", () => {
+describe("opening windows", () => {
   it("opens a workspace chat on its own workspace while the main window stays elsewhere", async () => {
     useWindowStore.setState({ satellites: [] });
     const openedChat = await useWindowStore.getState().detach(CHAT_WINDOW_KIND, FOREIGN_CHAT_REF, CHAT_TITLE);
     expect(openedChat).toBe(true);
     expect(openedWorkspaces).toEqual([FOREIGN_WORKSPACE]);
   });
-  it("does not count the hotkey ask box", async () => {
-    useWindowStore.setState({
-      satellites: [sat("sat-app-notes", "app", "notes"), sat("sat-quick-ask", "quick", "ask")],
-      limit: 2,
-    });
-    expect(countedSatellites(useWindowStore.getState().satellites)).toBe(1);
-    expect(await useWindowStore.getState().detach("app", "agents", "Agents")).toBe(true);
-    expect(opened).toEqual(["agents"]);
-    expect(toasts).toEqual([]);
-  });
 
-  it("does not count chat islands, and never refuses one for the limit", async () => {
-    useWindowStore.setState({
-      satellites: [sat("sat-app-notes", "app", "notes"), sat("sat-chat-1", "chat", "panel:p1:conv-a")],
-      limit: 1,
-    });
-    expect(countedSatellites(useWindowStore.getState().satellites)).toBe(1);
-    expect(await useWindowStore.getState().detach("chat", "ws:w1:b", "Chat")).toBe(true);
-    expect(opened).toEqual(["ws:w1:b"]);
-    expect(await useWindowStore.getState().detach("app", "agents", "Agents")).toBe(false);
-  });
-
-  it("still refuses once the real windows reach it", async () => {
+  it("opens one more however many are already open", async () => {
     useWindowStore.setState({
       satellites: [
-        sat("sat-app-notes", "app", "notes"),
+        ...Array.from({ length: 12 }, (_, i) => sat(`sat-app-${i}`, "app", `app-${i}`)),
         sat("sat-repo-p1", "repo", "p1"),
+        sat("sat-chat-1", "chat", "panel:p1:conv-a"),
+        sat("float-call", "float", "call:team-1"),
         sat("sat-quick-ask", "quick", "ask"),
       ],
-      limit: 2,
     });
-    expect(await useWindowStore.getState().detach("app", "agents", "Agents")).toBe(false);
-    expect(opened).toEqual([]);
-    expect(toasts).toEqual(["windows.limitReached"]);
+    expect(await useWindowStore.getState().detach("app", "agents", "Agents")).toBe(true);
+    expect(await useWindowStore.getState().detach("repo", "p2", "Backend")).toBe(true);
+    expect(opened).toEqual(["agents", "p2"]);
+    expect(toasts).toEqual([]);
   });
 });

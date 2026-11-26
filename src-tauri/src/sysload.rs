@@ -83,6 +83,11 @@ pub struct SystemLoad {
     /// How many processes that tree came to. It is the line that explains the two figures above
     /// it: "42%, across 9 processes" is an agent run, "1 process" is the app sitting idle.
     pub app_processes: usize,
+    /// What each open window's page takes, largest first — the answer to "which of these can I
+    /// close". Filled by the command (`system_load`), which has the windows to ask; empty from
+    /// [`read`] itself, on a poll that asked for no detail and where the platform cannot tell a
+    /// page's process from the others (see `windows::memory_by_window`).
+    pub windows: Vec<crate::windows::WindowMemory>,
 }
 
 /// Everything that has to survive between polls.
@@ -218,6 +223,7 @@ pub fn read(detail: bool) -> SystemLoad {
         app_mem,
         app_mem_percent: percent(app_mem, mem_total),
         app_processes,
+        windows: Vec::new(),
     }
 }
 

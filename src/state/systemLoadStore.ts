@@ -49,10 +49,15 @@ export const useSystemLoadStore = create<SystemLoadState>((set) => ({
   load: null,
 
   refresh: async () => {
-    const load = await systemLoad(detailWatchers > 0).catch(() => null);
+    const detail = detailWatchers > 0;
+    const load = await systemLoad(detail).catch(() => null);
     // Never cleared back to `null` on a failed read. A widget that blinks out and back because one
     // refresh lost a race is worse than a widget showing a figure two seconds old.
-    if (load) set({ load });
+    if (!load) return;
+    // The per-window rows come only with a detailed read. Kept across the plain ones, like the
+    // backend keeps the app's own share, so the panel opens on the last list instead of growing a
+    // section a moment after it appears.
+    set((s) => ({ load: detail ? load : { ...load, windows: s.load?.windows ?? [] } }));
   },
 
   watchDetail: () => {

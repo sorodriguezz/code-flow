@@ -3,8 +3,13 @@ import { createPortal } from "react-dom";
 import { Cpu, HardDrive, MemoryStick } from "lucide-react";
 import { useT } from "../../state/languageStore";
 import { formatBytes, loadSeverity, useSystemLoadStore } from "../../state/systemLoadStore";
+import type { WindowMemory } from "../../types/domain";
 
 const PANEL_WIDTH = 244;
+
+/** How many windows the panel names before it folds the rest into one line. The panel is a glance,
+ *  not a task manager: past this the answer to "which one is heavy" is already on screen. */
+const WINDOW_ROWS = 6;
 
 /** How long the pointer must rest on the group before the panel opens. Long enough that crossing
  *  the bar on the way to the notification bell doesn't flash it open. */
@@ -160,9 +165,54 @@ export function SystemMeter() {
             <p className="mt-1.5 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">
               {t("sysload.appIncludes", { n: load.app_processes })}
             </p>
+
+            <WindowRows windows={load.windows ?? []} />
           </div>,
           document.body,
         )}
+    </>
+  );
+}
+
+/**
+ * What each open window takes, largest first.
+ *
+ * Here because nothing limits how many windows are open any more: the machine's memory is the
+ * limit, so the panel that shows the memory is where the cost of each window is said. A size and a
+ * name per row, and no bar — these are parts of the figure above them, not shares of the machine.
+ *
+ * Absent when the backend sent no rows (a platform that cannot tell one page's process from
+ * another), rather than present and empty.
+ */
+function WindowRows({ windows }: { windows: WindowMemory[] }) {
+  const t = useT();
+  if (windows.length === 0) return null;
+  const shown = windows.slice(0, WINDOW_ROWS);
+  const rest = windows.slice(WINDOW_ROWS);
+  const restBytes = rest.reduce((sum, w) => sum + w.memory, 0);
+  return (
+    <>
+      <p className="mt-2 flex items-baseline justify-between border-t border-[var(--cf-border)] pt-2 text-[12px] font-semibold">
+        {t("sysload.windows")}
+        <span className="text-[10.5px] font-normal tabular-nums text-[var(--cf-text-muted)]">{windows.length}</span>
+      </p>
+      <ul className="mt-1.5 space-y-1">
+        {shown.map((w) => (
+          <li key={w.label} className="flex items-center gap-2 text-[11px]">
+            <span className="min-w-0 flex-1 truncate text-[var(--cf-text-muted)]">
+              {w.kind === "main" ? t("sysload.mainWindow") : w.title || t("sysload.untitledWindow")}
+            </span>
+            <span className="shrink-0 tabular-nums text-[var(--cf-text)]">{formatBytes(w.memory)}</span>
+          </li>
+        ))}
+        {rest.length > 0 && (
+          <li className="flex items-center gap-2 text-[11px] text-[var(--cf-text-muted)]">
+            <span className="min-w-0 flex-1 truncate">{t("sysload.moreWindows", { n: rest.length })}</span>
+            <span className="shrink-0 tabular-nums">{formatBytes(restBytes)}</span>
+          </li>
+        )}
+      </ul>
+      <p className="mt-1.5 text-[10.5px] leading-snug text-[var(--cf-text-muted)]">{t("sysload.windowsHint")}</p>
     </>
   );
 }

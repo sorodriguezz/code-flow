@@ -55,8 +55,6 @@ export const es = {
   "windows.openInWindow": "Abrir en su propia ventana",
   "windows.focusWindow": "Ya está abierto en otra ventana — traerla al frente",
   "tabbar.unsavedDrafts": "Un guardado no se completó: el borrador se conserva y se reintentará",
-  "windows.limitReached":
-    "Ya hay {limit} ventanas abiertas. Cierra una, o sube el límite en Ajustes → General.",
   "windows.reattach": "Devolverlo aquí",
   "windows.returned": "{name} volvió",
   "windows.reattachHint": "Cierra esta ventana y devuelve lo que hay dentro a la principal. No se pierde nada.",
@@ -67,11 +65,7 @@ export const es = {
   "windows.repoElsewhereTitle": "Este repositorio está en otro workspace",
   "windows.repoElsewhereBody":
     "La ventana principal se ha movido a otro sitio, y esta la sigue. Vuelve al workspace al que pertenece este repositorio y reaparecerá aquí: no se ha cerrado nada.",
-  "windows.limitLabel": "Ventanas a la vez",
-  "windows.limitHint":
-    "Cuántas apps, repositorios y editores flotantes pueden estar abiertos en ventanas propias, además de la principal. Cada una es un webview: unos 60 MB para una app, 140 MB para un repositorio con el editor abierto.",
   "windows.inOtherWindow": "En otra ventana",
-  "windows.openNow": "{count} abiertas ahora mismo.",
   "windows.minimize": "Minimizar",
   "windows.maximize": "Maximizar",
   "windows.restore": "Restaurar",
@@ -2542,10 +2536,24 @@ export const es = {
   "remote.pairingNeedsServer": "Enciende el servidor en «Servidor» para emparejar un teléfono.",
   "remote.groupTerminal": "Terminal",
   "remote.groupAccess": "Acceso",
+  "remote.groupActivity": "Actividad",
+  "remote.activityHint":
+    "Lo que hicieron los dispositivos emparejados en este equipo: commits, push, aprobaciones, lo que se les negó. Se conserva al cerrar la app.",
+  "remote.activityEmpty": "Ningún dispositivo ha hecho nada todavía.",
+  "remote.activityClear": "Vaciar el registro",
+  "remote.activityRefused": "Rechazado: solo lectura",
+  "remote.activityFailed": "Falló",
+  "remote.activityOther": "Otra acción",
+  "remote.accessFull": "Acceso completo",
+  "remote.accessRead": "Solo lectura",
+  "remote.accessHint":
+    "Con solo lectura el dispositivo puede mirar —repositorios, corridas, pull requests— pero no cambia nada: ni commits, ni aprobaciones, ni terminal. Vale desde su siguiente acción.",
+  "remote.scanPairHint":
+    "Escanea este código con la cámara del dispositivo y queda emparejado, sin escribir nada. También puedes abrir la dirección y escribir el código de abajo.",
   "remote.serverNote":
     "Esto abre un puerto en esta máquina y le da autoridad real sobre ella a los dispositivos emparejados. Apaga el servidor cuando no lo estés usando.",
   "remote.subtitle":
-    "Maneja esta instalación desde tu celular o tablet en la misma red — mira las corridas de agentes, responde el gate de una cadena, haz commit y push sin volver al escritorio.",
+    "Maneja esta instalación desde tu celular o tablet en la misma red — mira las corridas de agentes y equipos, aprueba lo que te espera, responde sus preguntas, haz commit y push sin volver al escritorio.",
   "remote.enable": "Activar el servidor",
   "remote.enableHint":
     "Apagado por defecto. Mientras esté encendido, este equipo acepta conexiones de dispositivos emparejados en tu red local — y solo de dispositivos emparejados.",
@@ -2587,7 +2595,7 @@ export const es = {
   "remote.neverSeen": "Nunca se conectó",
   "remote.safety": "Qué puede y qué no puede hacer un dispositivo emparejado",
   "remote.safetyAllowed":
-    "Puede leer tus repositorios y diffs, correr la revisión pre-commit, hacer stage y commit, push y pull, cambiar de rama, aplicar un stash, revisar pull requests, relanzar o cancelar un pipeline, iniciar o detener tus servicios, chatear con un motor, y responder o abortar una cadena.",
+    "Puede leer tus repositorios y diffs, correr la revisión pre-commit, hacer stage y commit, push y pull, cambiar de rama, aplicar un stash, revisar pull requests, relanzar o cancelar un pipeline, iniciar o detener tus servicios, chatear con un motor, responder o abortar una cadena; darle una tarea a un equipo, conversar con él y aprobar, responder, pausar o detener su corrida; leer, crear y editar notas; e iniciar, detener o reiniciar contenedores de este equipo. Un dispositivo en solo lectura solo puede mirar.",
   "remote.safetyDenied":
     "Nunca puede leer ni escribir tus credenciales, llegar a tus bases de datos o hosts SSH, borrar nada, ni descartar tu trabajo. Esa lista está fija en la app, no es un ajuste.",
   // Lo que hizo un dispositivo emparejado, anunciado en el centro de notificaciones. El nombre del
@@ -2622,6 +2630,15 @@ export const es = {
   "remote.action.flowStarted": "Flujo iniciado desde un dispositivo",
   "remote.action.servicesStopped": "Servicio detenido desde un dispositivo",
   "remote.action.servicesRestarted": "Servicio reiniciado desde un dispositivo",
+  "remote.action.teamDecided": "Decisión de un equipo respondida desde un dispositivo",
+  "remote.action.teamAnswered": "Pregunta de un equipo respondida desde un dispositivo",
+  "remote.action.teamNoted": "Nota enviada a un equipo desde un dispositivo",
+  "remote.action.teamControlled": "Corrida de un equipo pausada, reanudada o detenida desde un dispositivo",
+  "remote.action.teamStarted": "Corrida de un equipo iniciada desde un dispositivo",
+  "remote.action.teamChat": "Mensaje enviado a un equipo desde un dispositivo",
+  "remote.action.noteCreated": "Nota creada desde un dispositivo",
+  "remote.action.noteSaved": "Nota editada desde un dispositivo",
+  "remote.action.containerActed": "Contenedor iniciado, detenido o reiniciado desde un dispositivo",
   "remote.forget": "Quitar de la lista",
   "remote.forgetAllRevoked": "Limpiar revocados",
 
@@ -3573,7 +3590,12 @@ export const es = {
   "sysload.free": "{size} libres",
   "sysload.thisApp": "CodeFlow ahora mismo",
   "sysload.appIncludes":
-    "En {n} proceso(s) — la app, su ventana, y cada agente, terminal y motor que ha lanzado.",
+    "En {n} proceso(s) — la app, sus ventanas, y cada agente, terminal y motor que ha lanzado.",
+  "sysload.windows": "Ventanas abiertas",
+  "sysload.mainWindow": "Ventana principal",
+  "sysload.untitledWindow": "Ventana sin título",
+  "sysload.moreWindows": "y {n} más",
+  "sysload.windowsHint": "Lo que ocupa la página de cada ventana. Cerrar una libera esa memoria.",
   "quota.used": "{percent} usado",
   "quota.spendMovedHint": "Los tokens y el costo están en Motores de IA → Uso.",
   "quota.resetsIn": "Se reinicia en {time}",
@@ -3870,12 +3892,11 @@ export const es = {
   "settings.searchTermsCertificates": "certificado de cliente, mtls, pem, pfx",
   "settings.searchTermsCollab": "compartir, equipo, supabase, sincronizar",
   "settings.searchTermsRemote": "teléfono, móvil, ssh, control remoto, puerto, https, tls, certificado, huella",
-  "settings.generalHint": "Idioma, actualizaciones, ventanas, recorridos guiados y los archivos de la app.",
+  "settings.generalHint": "Idioma, actualizaciones, recorridos guiados y los archivos de la app.",
   "settings.tabLanguage": "Idioma",
   "settings.tabAppData": "Aplicación y datos",
   "settings.tabLanguageUpdates": "Idioma y actualizaciones",
   "settings.searchTermsLanguageUpdates": "idioma, lengua, traducción, inglés, español, actualizar, versión, novedades, donar, apoyar, ko-fi, café, sitio web",
-  "settings.searchTermsWindows": "ventanas, satélite, separar, límite",
   "settings.searchTermsTours": "tour, recorrido, tutorial, ayuda",
   "settings.tabModeColor": "Modo y color",
   "settings.searchTermsModeColor": "oscuro, claro, sistema, modo, acento, color, resaltado, transparencia, transparente, translúcido, vidrio, cristal, desenfoque, blur, opacidad, animación, animaciones, movimiento, transiciones, fluidez, fluido, densidad, compacta, cómoda, espaciado, compacto, denso",

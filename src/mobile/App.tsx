@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
+  BookText,
   GitBranch,
   GitPullRequest,
   Link2Off,
@@ -9,7 +10,7 @@ import {
 } from "lucide-react";
 import { t, type MobileKey } from "./i18n";
 import { connectEvents, onUnpaired, storedDeviceId, storedToken, type Frame } from "./transport";
-import { useMobileStore, useRepoPath } from "./store";
+import { attentionCount, useMobileStore, useRepoPath } from "./store";
 import { announceInvalidation, type Invalidation } from "./invalidate";
 import { toastInfo } from "./toast";
 import { tapped } from "./haptics";
@@ -33,6 +34,11 @@ import { SettingsScreen } from "./screens/SettingsScreen";
 import { PipelineRunScreen } from "./screens/PipelinesScreen";
 import { StashScreen } from "./screens/StashScreen";
 import { NotificationsScreen } from "./screens/NotificationsScreen";
+import { TeamRunScreen } from "./screens/TeamsScreen";
+import { TeamChatScreen, TeamDiffScreen, TeamStartScreen } from "./screens/TeamExtras";
+import { NoteScreen, NotesScreen } from "./screens/NotesScreen";
+import { ContainerLogsScreen } from "./screens/ContainersScreen";
+import { UsageScreen } from "./screens/UsageScreen";
 import type { ServiceRuntime } from "../types/services";
 import { ScopeSheet } from "./screens/ScopeSheet";
 import { EngineSheet } from "./screens/EngineSheet";
@@ -52,6 +58,7 @@ const TABS: { id: Tab; icon: typeof GitBranch; labelKey: MobileKey }[] = [
   { id: "prs", icon: GitPullRequest, labelKey: "nav.prs" },
   { id: "chat", icon: MessagesSquare, labelKey: "nav.chat" },
   { id: "agents", icon: Workflow, labelKey: "nav.agents" },
+  { id: "notes", icon: BookText, labelKey: "nav.notes" },
   { id: "terminal", icon: TerminalSquare, labelKey: "nav.terminal" },
 ];
 
@@ -66,12 +73,13 @@ const TABS: { id: Tab; icon: typeof GitBranch; labelKey: MobileKey }[] = [
  * desk, `ai:output-batch` for a run, `state:invalidate` for a chain that moved. The desktop did not
  * have to learn that a phone might be watching, and the phone does not poll for any of it.
  *
- * # Why five tabs and not seven
+ * # Why five tabs, and a sixth only when asked for
  *
- * A bottom bar stops being tappable past five on a phone-width screen. Chains and live runs share
- * the "Agents" tab behind a segmented control because they are two views of one thing — a chain
- * *is* what most runs belong to — and the terminal tab is hidden entirely unless the desktop has
- * granted it, which keeps the common case at four.
+ * A bottom bar stops being comfortable past five on a phone-width screen. So everything that runs
+ * and can stop to wait for somebody — teams, chains, engine runs, services, containers, flows —
+ * shares the "Agents" tab behind a row of chips, and Notes, which is none of those, has the fifth.
+ * The terminal tab is hidden entirely unless the desktop has granted it, which keeps the common
+ * case at five; with it the labels are still one short word each.
  *
  * # The layers, and why they stop short of the tab bar
  *
@@ -87,7 +95,10 @@ export function App() {
   const select = useNav((s) => s.select);
   const ready = useMobileStore((s) => s.ready);
   const unpaired = useMobileStore((s) => s.unpaired);
-  const terminalAllowed = useMobileStore((s) => s.terminalAllowed);
+  // A shell needs both: the desk's switch for shells, and a device that may do more than look. A
+  // read-only device is refused `open_terminal` like every other write, so the tab that could only
+  // refuse is not offered.
+  const terminalAllowed = useMobileStore((s) => s.terminalAllowed && !s.readOnly);
   /** How much is stacked over the tab body. Read here only to mark it inert — see below. */
   const depth = useNav((s) => s.stack.length);
   /** Whether the Shell tab has ever been opened. See the note where it is rendered — it decides
@@ -124,6 +135,15 @@ export function App() {
 
   useEffect(() => {
     if (!paired) return;
+
+    // A team's run announces every change of state, and a run with six agents working changes
+    // state in bursts. One re-read of the list per burst, on the trailing edge — the last frame is
+    // the one that describes how things ended up.
+    let teamsTimer: number | undefined;
+    const teamsMoved = () => {
+      window.clearTimeout(teamsTimer);
+      teamsTimer = window.setTimeout(() => void useMobileStore.getState().refreshTeams(), 400);
+    };
 
     const onFrame = (frame: Frame) => {
       const state = useMobileStore.getState();
@@ -196,6 +216,8 @@ export function App() {
           const payload = frame.payload as Invalidation & {
             origin?: string;
             allowTerminal?: boolean;
+            accessFor?: string;
+            access?: string;
           };
           // This device's own action, echoed back through the global emit that carries it to the
           // desktop. Refetching here would be the same read twice for every tap — which is exactly
@@ -227,6 +249,37 @@ export function App() {
           if (payload.domain === "remote" && typeof payload.allowTerminal === "boolean") {
             useMobileStore.setState({ terminalAllowed: payload.allowTerminal });
           }
+          // What *this* device may do, pushed for the same reason. The frame reaches every phone
+          // and names the one it is about; a device that does not know its own id cannot be the one
+          // named, and learns the same thing from its next bootstrap.
+          if (payload.domain === "remote" && payload.accessFor && payload.accessFor === storedDeviceId()) {
+            const readOnly = payload.access === "read";
+            if (readOnly !== useMobileStore.getState().readOnly) {
+              useMobileStore.setState({ readOnly });
+              toastInfo(t(readOnly ? "readOnly.nowOn" : "readOnly.nowOff"));
+            }
+          }
+          break;
+        }
+        // A team's run moved. The frame names the run and nothing else: the list is re-read (once
+        // per burst) and the run that is open re-reads itself, through the view cut for a phone.
+        case "team:changed": {
+          teamsMoved();
+          announceInvalidation({ domain: "teams", run: (frame.payload as { runId?: string } | null)?.runId });
+          break;
+        }
+        // A team's conversation moved: the open chat re-reads its transcript. This is how an answer
+        // arrives at all — sending a message returns before anybody has answered it.
+        case "team-chat:changed":
+          announceInvalidation({ domain: "teamChat", chat: (frame.payload as { chatId?: string } | null)?.chatId });
+          break;
+        // A note written by something other than the screen showing it — an agent, a flow, the
+        // desk's own tools. Only this workspace's: the list on screen is one workspace's notes.
+        case "notes:changed": {
+          const payload = frame.payload as { workspaceId?: string; noteId?: string } | null;
+          if (!payload?.workspaceId || payload.workspaceId === state.workspaceId) {
+            announceInvalidation({ domain: "notes", note: payload?.noteId });
+          }
           break;
         }
         case "git:done":
@@ -251,6 +304,9 @@ export function App() {
         case "state:resync":
           toastInfo(t("status.resync"));
           void state.resync();
+          announceInvalidation({ domain: "teams" });
+          announceInvalidation({ domain: "teamChat" });
+          announceInvalidation({ domain: "notes" });
           break;
         // The desktop's keepalive. Nothing to do with it here: its only job is to be *received*,
         // which is what tells the transport layer the flow is still alive. See `transport.ts`.
@@ -259,14 +315,24 @@ export function App() {
       }
     };
 
-    return connectEvents(
+    const disconnect = connectEvents(
       onFrame,
       (connected) => useMobileStore.getState().setConnected(connected),
       // A reconnection is a gap, and a gap is exactly what `state:resync` describes — the desktop
       // emitted into a socket nobody was holding. The difference is that nothing tells us about
       // this one, so the reopen has to assume the worst on its own.
-      () => void useMobileStore.getState().resync(),
+      () => {
+        void useMobileStore.getState().resync();
+        // …and whatever run, conversation or note is open missed its frames too.
+        announceInvalidation({ domain: "teams" });
+        announceInvalidation({ domain: "teamChat" });
+        announceInvalidation({ domain: "notes" });
+      },
     );
+    return () => {
+      window.clearTimeout(teamsTimer);
+      disconnect();
+    };
   }, [paired]);
 
   if (!paired) {
@@ -382,6 +448,8 @@ export function App() {
                     <PrScreen />
                   ) : tab === "chat" ? (
                     <ChatScreen />
+                  ) : tab === "notes" ? (
+                    <NotesScreen />
                   ) : (
                     <AgentsScreen />
                   )}
@@ -428,11 +496,10 @@ function TabButton({
 }) {
   const active = useNav((s) => s.tab === id);
   const select = useNav((s) => s.select);
-  // The count of chains asking for something, on the tab that holds them. This is the number the
-  // app exists to surface, so it is visible from every screen.
-  const waiting = useMobileStore((s) =>
-    id === "agents" ? s.chains.filter((c) => c.status === "gated").length : 0,
-  );
+  // Everything asking for somebody, on the tab that holds it: team gates and questions, chain
+  // gates, flow approvals, a service that fell over. This is the number the app exists to surface,
+  // so it is visible from every screen — and it used to count chains alone. See `attentionCount`.
+  const waiting = useMobileStore((s) => (id === "agents" ? attentionCount(s) : 0));
   const label = t(labelKey);
 
   return (
@@ -489,6 +556,7 @@ function TabButton({
  */
 function ConnectionBar() {
   const connected = useMobileStore((s) => s.connected);
+  const readOnly = useMobileStore((s) => s.readOnly);
   return (
     <div className="cf-safe-top cf-safe-x shrink-0 bg-[var(--cf-surface)]">
       {/* The live region is always mounted so an announcement fires the moment the sentence appears;
@@ -507,6 +575,15 @@ function ConnectionBar() {
           </p>
         )}
       </div>
+      {/* The desk narrowed this device to looking. Said here — above every screen, where the
+          connection is said — because it is the same kind of fact: it explains why a button that is
+          on screen will refuse, before anybody presses it. Not while reconnecting: one strip at a
+          time, and that one is the more urgent. */}
+      {readOnly && connected && (
+        <p className="border-b border-[var(--cf-border)] bg-[var(--cf-sunken)] py-0.5 text-center text-2xs font-medium text-[var(--cf-text-muted)]">
+          {t("readOnly.strip")}
+        </p>
+      )}
     </div>
   );
 }
@@ -522,6 +599,20 @@ function RouteView({ route }: { route: Route }) {
       return <BranchScreen repoPath={route.repoPath} />;
     case "chain":
       return <ChainScreen chainId={route.chainId} title={route.title} />;
+    case "teamRun":
+      return <TeamRunScreen runId={route.runId} title={route.title} />;
+    case "teamStart":
+      return <TeamStartScreen workspaceId={route.workspaceId} teamId={route.teamId} teamName={route.teamName} />;
+    case "teamChat":
+      return <TeamChatScreen teamId={route.teamId} teamName={route.teamName} />;
+    case "teamDiff":
+      return <TeamDiffScreen runId={route.runId} itemId={route.itemId} projectOf={route.projectOf} title={route.title} />;
+    case "note":
+      return <NoteScreen workspaceId={route.workspaceId} id={route.id} bookId={route.bookId} title={route.title} />;
+    case "containerLogs":
+      return <ContainerLogsScreen runtime={route.runtime} id={route.id} name={route.name} />;
+    case "usage":
+      return <UsageScreen />;
     case "review":
       return (
         <ReviewScreen

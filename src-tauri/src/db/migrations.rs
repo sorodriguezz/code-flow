@@ -1667,6 +1667,27 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_remote_devices_token
             ON remote_devices (token_hash);
 
+        -- What paired devices did on this machine: one row per act worth telling the person at the
+        -- desk about (`remotectl::dispatch::announce_for`) — a commit, a push, a gate answered —
+        -- and never a read or a keystroke. The notification centre says the same thing as it
+        -- happens, but it is session state; this is what is left to read the next morning.
+        --
+        -- The device's name is copied in rather than joined: a device forgotten since must still
+        -- be named by the rows it left. Trimmed to the newest few hundred on every insert
+        -- (`remotectl::activity`), so it is a log and never a growing table.
+        CREATE TABLE IF NOT EXISTS remote_activity (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id   TEXT NOT NULL,
+            device_name TEXT NOT NULL DEFAULT '',
+            -- The `remote.action.*` key, rendered by the desk in its own language.
+            action      TEXT NOT NULL,
+            -- `ok`, `error` (it ran and failed) or `refused` (a read-only device asked to write).
+            status      TEXT NOT NULL DEFAULT 'ok',
+            -- What it was about, when the call named something short enough to show: a repository.
+            detail      TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL
+        );
+
         -- ── Services ────────────────────────────────────────────────────────────────────────
         --
         -- A named runnable and a group of them, for the case one terminal cannot hold: two
@@ -2070,6 +2091,7 @@ pub fn run(conn: &Connection) -> rusqlite::Result<()> {
     add_on_demand_to_review_contexts(conn)?;
     add_api_mocks(conn)?;
     add_source_to_db_history(conn)?;
+    add_access_to_remote_devices(conn)?;
     add_notes_to_chat_messages(conn)?;
     add_usage_to_activity_log(conn)?;
     add_question_files_to_activity_log(conn)?;
@@ -2190,6 +2212,15 @@ pub(crate) fn add_identity_to_agents(conn: &Connection) -> rusqlite::Result<()> 
         if !has_column(conn, "workspace_agents", name)? {
             conn.execute_batch(&format!("ALTER TABLE workspace_agents ADD COLUMN {name} {definition};"))?;
         }
+    }
+    Ok(())
+}
+
+/// What a paired device may do: `full` (everything the allowlist offers) or `read` (look, never
+/// act — `remotectl::auth::Access`). Every device paired before this existed keeps what it had.
+pub(crate) fn add_access_to_remote_devices(conn: &Connection) -> rusqlite::Result<()> {
+    if table_exists(conn, "remote_devices")? && !has_column(conn, "remote_devices", "access")? {
+        conn.execute_batch("ALTER TABLE remote_devices ADD COLUMN access TEXT NOT NULL DEFAULT 'full';")?;
     }
     Ok(())
 }

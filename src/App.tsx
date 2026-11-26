@@ -1,4 +1,5 @@
 import { Suspense, lazy, memo, useEffect, useRef, useState, type ReactElement } from "react";
+import { isRemoteActionKey } from "./lib/remoteActions";
 import { SharedChatJoinHost } from "./components/ai/SharedChat";
 import { FolderGit2, GitBranchPlus, Loader2, Trash2, Unlink } from "lucide-react";
 import { useT } from "./state/languageStore";
@@ -94,7 +95,6 @@ import { useJobsStore } from "./state/jobsStore";
 import { useAiRunStore } from "./state/aiRunStore";
 import { useChatHistoryStore } from "./state/activityStore";
 import { useChatStore } from "./state/chatStore";
-import type { TranslationKey } from "./lib/i18n/translations";
 import { useGlobalShortcuts } from "./lib/useGlobalShortcuts";
 import { useExitPresence } from "./lib/useExitPresence";
 import { modalExitMs } from "./lib/motion";
@@ -220,52 +220,6 @@ const WARM_CHUNKS = [
  * the app showing a state that had never existed. A trailing edge can be late but it cannot be
  * wrong — the timer only ever fires after the last event, so what it reads is the final state.
  */
-/**
- * The `remote.action.*` keys the backend is allowed to name.
- *
- * A payload from `remotectl` is the one place a `TranslationKey` arrives from outside this
- * codebase, and a newer desktop paired with an older one — or the reverse — can send a key this
- * build has no string for. Checking against the list here means an unknown one is dropped rather
- * than rendered as its own raw key in the notification centre, which is what `translate` would do
- * with it.
- *
- * Kept in step with `announce_for` in `src-tauri/src/remotectl/dispatch.rs`.
- */
-const REMOTE_ACTION_KEYS = new Set<string>([
-  "remote.action.commit",
-  "remote.action.push",
-  "remote.action.pull",
-  "remote.action.fetch",
-  "remote.action.checkout",
-  "remote.action.branch",
-  "remote.action.gateApproved",
-  "remote.action.stepSkipped",
-  "remote.action.chainAborted",
-  "remote.action.chainResumed",
-  "remote.action.stepRetried",
-  "remote.action.runCancelled",
-  "remote.action.prReviewed",
-  "remote.action.prActed",
-  "remote.action.prCommented",
-  "remote.action.threadResolved",
-  "remote.action.findingDiscarded",
-  "remote.action.analyzed",
-  "remote.action.chat",
-  "remote.action.terminalOpened",
-  "remote.action.terminalClosed",
-  "remote.action.stashApplied",
-  "remote.action.stashPopped",
-  "remote.action.pipelineRerun",
-  "remote.action.pipelineCancelled",
-  "remote.action.servicesStarted",
-  "remote.action.servicesStopped",
-  "remote.action.servicesRestarted",
-]);
-
-function isRemoteActionKey(key: string): key is TranslationKey {
-  return REMOTE_ACTION_KEYS.has(key);
-}
-
 const FS_NEAR_WAIT_MS = 600;
 const FS_FAR_WAIT_MS = 3000;
 /**
