@@ -39,6 +39,8 @@ pub(crate) enum LinkedRepo {
     Bitbucket { workspace: String, repo: String },
 }
 
+pub(crate) const PR_HOST_NOT_LINKED: &str = "This project isn't linked to a pull-request host yet";
+
 pub(crate) fn linked_repo(project: &Project) -> Result<LinkedRepo, String> {
     if let (Some(owner), Some(repo)) = (project.github_owner.clone(), project.github_repo.clone()) {
         let host = project.github_host.clone().unwrap_or_else(|| github::GITHUB_COM.to_string());
@@ -60,7 +62,7 @@ pub(crate) fn linked_repo(project: &Project) -> Result<LinkedRepo, String> {
     {
         return Ok(LinkedRepo::Azure { org, project: ado_project, repo_id });
     }
-    Err("This project isn't linked to a pull-request host yet".to_string())
+    Err(PR_HOST_NOT_LINKED.to_string())
 }
 
 /// A stable name for the repository a review ran against, written into every run's memory.
@@ -283,25 +285,17 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
         let url = remote.url.as_str();
         if let Some(detected) = github::detect_from_remote_url(url, &known_github_hosts) {
             if connected_github_hosts.iter().any(|h| h.eq_ignore_ascii_case(&detected.host)) {
-                let conn = db.0.lock().map_err(|e| e.to_string())?;
-                queries::link_project_github(&conn, &project_id, &detected.owner, &detected.repo, &detected.host)
-                    .map_err(|e| e.to_string())?;
-                let linked = queries::get_project(&conn, &project_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "Project not found".to_string())?;
-                return Ok(AutoLinkResult::Linked { project: linked });
+                return link_if_unlinked(&db, &project_id, |conn| {
+                    queries::link_project_github(conn, &project_id, &detected.owner, &detected.repo, &detected.host)
+                });
             } else if needs_token.is_none() {
                 needs_token = Some(AutoLinkResult::NeedsToken { provider: "github".to_string(), identifier: detected.owner });
             }
         } else if let Some(detected) = gitlab::detect_from_remote_url(url, &known_gitlab_hosts) {
             if connected_gitlab_hosts.iter().any(|h| h.eq_ignore_ascii_case(&detected.host)) {
-                let conn = db.0.lock().map_err(|e| e.to_string())?;
-                queries::link_project_gitlab(&conn, &project_id, &detected.project, &detected.host)
-                    .map_err(|e| e.to_string())?;
-                let linked = queries::get_project(&conn, &project_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "Project not found".to_string())?;
-                return Ok(AutoLinkResult::Linked { project: linked });
+                return link_if_unlinked(&db, &project_id, |conn| {
+                    queries::link_project_gitlab(conn, &project_id, &detected.project, &detected.host)
+                });
             } else if needs_token.is_none() {
                 // The host, not the group: a GitLab token authenticates against the whole
                 // instance, so that is what the hint has to tell the user to connect.
@@ -311,13 +305,9 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
             // No allowlist to consult: bitbucket.org is recognisable on its own, and the workspace
             // decides whether there is a credential for it.
             if connected_bitbucket_workspaces.iter().any(|w| w.eq_ignore_ascii_case(&detected.workspace)) {
-                let conn = db.0.lock().map_err(|e| e.to_string())?;
-                queries::link_project_bitbucket(&conn, &project_id, &detected.workspace, &detected.repo)
-                    .map_err(|e| e.to_string())?;
-                let linked = queries::get_project(&conn, &project_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "Project not found".to_string())?;
-                return Ok(AutoLinkResult::Linked { project: linked });
+                return link_if_unlinked(&db, &project_id, |conn| {
+                    queries::link_project_bitbucket(conn, &project_id, &detected.workspace, &detected.repo)
+                });
             } else if needs_token.is_none() {
                 needs_token = Some(AutoLinkResult::NeedsToken {
                     provider: "bitbucket".to_string(),
@@ -333,13 +323,9 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
             if let Some(connected) =
                 connected_ado_orgs.iter().find(|o| o.eq_ignore_ascii_case(&detected.org))
             {
-                let conn = db.0.lock().map_err(|e| e.to_string())?;
-                queries::link_project_ado(&conn, &project_id, connected, &detected.project, &detected.repo)
-                    .map_err(|e| e.to_string())?;
-                let linked = queries::get_project(&conn, &project_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| "Project not found".to_string())?;
-                return Ok(AutoLinkResult::Linked { project: linked });
+                return link_if_unlinked(&db, &project_id, |conn| {
+                    queries::link_project_ado(conn, &project_id, connected, &detected.project, &detected.repo)
+                });
             } else if needs_token.is_none() {
                 needs_token = Some(AutoLinkResult::NeedsToken { provider: "azure".to_string(), identifier: detected.org });
             }
@@ -347,6 +333,24 @@ pub fn auto_link_project(db: State<Db>, project_id: String) -> Result<AutoLinkRe
     }
 
     Ok(needs_token.unwrap_or(AutoLinkResult::NotDetected))
+}
+
+fn link_if_unlinked(
+    db: &State<'_, Db>,
+    project_id: &str,
+    link: impl FnOnce(&rusqlite::Connection) -> rusqlite::Result<()>,
+) -> Result<AutoLinkResult, String> {
+    let conn = db.0.lock().map_err(|e| e.to_string())?;
+    let read = || queries::get_project(&conn, project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Project not found".to_string());
+    let mut project = read()?;
+    // A desktop or phone may have linked the project while detection read the Git remotes.
+    if linked_repo(&project).is_err() {
+        link(&conn).map_err(|e| e.to_string())?;
+        project = read()?;
+    }
+    Ok(AutoLinkResult::Linked { project })
 }
 
 pub(crate) fn pat_for_org(org: &str) -> Result<String, String> {

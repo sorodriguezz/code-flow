@@ -18,11 +18,11 @@ import { Markdown } from "../../common/Markdown";
 import { ExternalTag } from "./SharedRun";
 import { authorName } from "../../../lib/team/externalNotes";
 import { readableTeamText } from "../../../lib/team/teamText";
+import { QuestionReply } from "./QuestionReply";
 
 function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; compact?: boolean }) {
   const l = useL();
   const roster = useAgentsStore((s) => s.roster);
-  const [answer, setAnswer] = useState("");
   const [memoryRepo, setMemoryRepo] = useState("");
   const [saving, setSaving] = useState(false);
   const itemRepo = state.items.find((item) => item.id === m.item_id)?.project_id;
@@ -43,14 +43,10 @@ function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; c
   };
   const member = state.run.members.find((x) => x.id === m.from_id);
   const agent = roster.find((a) => a.id === member?.agent_id);
-  const asking = m.kind === "question" && m.to_id === "user" && !m.answered_at;
+  const question = m.kind === "question";
+  const asking = question && m.to_id === "user" && !m.answered_at;
   const fromUser = m.from_id === "user";
   const [kes, ken, tone] = MESSAGE_KIND[m.kind] ?? MESSAGE_KIND.note;
-  const send = (text: string) => {
-    if (!text.trim()) return;
-    void useTeamStore.getState().answer(m.run_id, m.id, text.trim());
-    setAnswer("");
-  };
 
   if (m.kind === "status") {
     return (
@@ -62,13 +58,13 @@ function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; c
   }
 
   return (
-    <motion.div layout="position" initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} className={`flex shrink-0 gap-2 ${fromUser ? "flex-row-reverse" : ""}`}>
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className={`flex shrink-0 items-start gap-2 ${fromUser ? "flex-row-reverse" : ""}`}>
       {member ? (
         <AgentAvatar agent={{ id: member.agent_id, icon: member.icon || agent?.icon, color: member.color || agent?.color }} size={28} />
       ) : (
         <span className={`grid h-7 w-7 shrink-0 place-items-center rounded-[9px] text-[10px] font-semibold ${fromUser ? "bg-[var(--cf-accent)] text-[var(--cf-on-accent)]" : "bg-[var(--cf-sunken)] text-[var(--cf-text-muted)]"}`}>{fromUser ? l("Tú", "You") : <GitMerge className="h-3.5 w-3.5" />}</span>
       )}
-      <div className={`min-w-0 max-w-[88%] rounded-[12px] border px-2.5 py-1.5 ${asking ? "cf-crew-waiting border-[var(--cf-warning)] bg-[color-mix(in_oklab,var(--cf-warning)_8%,var(--cf-surface))]" : fromUser ? "border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)]" : "border-[var(--cf-border)] bg-[var(--cf-surface-raised)]"}`} style={{ ["--cf-crew-c" as string]: "var(--cf-warning)" }}>
+      <div className={`flex min-w-0 flex-col gap-1.5 rounded-[12px] border px-2.5 py-2 ${question ? "flex-1" : "max-w-[88%]"} ${asking ? "border-[color-mix(in_oklab,var(--cf-warning)_60%,var(--cf-border))] bg-[color-mix(in_oklab,var(--cf-warning)_6%,var(--cf-surface))]" : fromUser ? "border-[var(--cf-accent-line)] bg-[var(--cf-accent-soft)]" : "border-[var(--cf-border)] bg-[var(--cf-surface-raised)]"}`}>
         <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
           <b>{fromUser ? l("Tú", "You") : authorName(m.from_name)}</b>
           <ArrowRight className="h-2.5 w-2.5 text-[var(--cf-text-faint)]" />
@@ -77,10 +73,14 @@ function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; c
           <ExternalTag fromName={m.from_name} />
           <span className="ml-auto text-[10px] text-[var(--cf-text-faint)]">{new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
         </div>
-        <Markdown source={readableTeamText(m.body)} className={`cf-markdown-chat cf-crew-msg mt-0.5 select-text break-words text-[12.5px] ${compact ? "line-clamp-6" : ""}`} />
-        {m.answer && <p className="m-0 mt-1 border-l-2 border-[var(--cf-accent)] pl-2 text-[12px] text-[var(--cf-text-muted)]">{l("Respondida", "Answered")}: {m.answer}</p>}
+        <Markdown source={readableTeamText(m.body)} className={`cf-markdown-chat cf-crew-msg min-w-0 select-text [overflow-wrap:anywhere] ${compact && !question && !canRemember ? "line-clamp-6" : ""}`} />
+        {m.answer && (
+          <p className="m-0 border-l-2 border-[var(--cf-accent)] pl-2 text-[12px] leading-relaxed text-[var(--cf-text-muted)] whitespace-pre-wrap [overflow-wrap:anywhere]">
+            <span className="font-medium text-[var(--cf-text)]">{l("Respondida", "Answered")}</span> · {m.answer}
+          </p>
+        )}
         {canRemember && (
-          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             {!itemRepo && state.repos.length > 1 && (
               <SelectBox value={memoryRepo} onChange={setMemoryRepo} ariaLabel={l("Repositorio de la memoria", "Memory repository")}>
                 <option value="">{l("Elige repositorio", "Choose repository")}</option>
@@ -92,23 +92,7 @@ function Message({ m, state, compact }: { m: TeamMessage; state: TeamRunState; c
             </Btn>
           </div>
         )}
-        {asking && (
-          <div className="mt-1.5 flex flex-col gap-1.5">
-            {m.options.length > 0 && (
-              <div className="flex flex-wrap gap-1.5">
-                {m.options.map((o) => (
-                  <button key={o} type="button" title={l("Responde con esta opción", "Answer with this option")} onClick={() => send(o)} className="h-[26px] rounded-full border border-[var(--cf-border-strong)] bg-[var(--cf-surface)] px-2.5 text-[12px] hover:border-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)]">
-                    {o}
-                  </button>
-                ))}
-              </div>
-            )}
-            <div className="flex gap-1.5">
-              <input value={answer} onChange={(e) => setAnswer(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send(answer)} placeholder={l("Tu respuesta…", "Your answer…")} className={`${field} h-[28px]`} />
-              <Btn small kind="primary" title={l("Envía tu respuesta a quien preguntó", "Sends your answer to whoever asked")} disabled={!answer.trim()} onClick={() => send(answer)}>{l("Responder", "Answer")}</Btn>
-            </div>
-          </div>
-        )}
+        {asking && <QuestionReply message={m} />}
       </div>
     </motion.div>
   );

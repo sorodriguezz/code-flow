@@ -112,7 +112,7 @@ export function CallWrapUp({ call, onClose }: { call: CallState; onClose: () => 
               <section>
                 <h3 className="mb-1 text-[12px] font-semibold">{l("Acuerdos", "Agreed")}</h3>
                 <ul className="space-y-1 text-[12.5px] leading-relaxed">
-                  {wrap.decisions.map((decision, index) => <li key={index} className="flex gap-2"><CheckCircle2 className="mt-[3px] h-3.5 w-3.5 shrink-0 text-[var(--cf-success)]" /><span>{decision}</span></li>)}
+                  {wrap.decisions.map((decision, index) => <li key={index} className="flex gap-2"><CheckCircle2 className="mt-[3px] h-3.5 w-3.5 shrink-0 text-[var(--cf-accent)]" /><span>{decision}</span></li>)}
                 </ul>
               </section>
             )}
@@ -155,7 +155,7 @@ export function CallWrapUp({ call, onClose }: { call: CallState; onClose: () => 
         )}
         {call.phase === "started" && (
           <>
-            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[color-mix(in_oklab,var(--cf-success)_14%,var(--cf-surface))] text-[var(--cf-success)]"><Rocket className="h-4 w-4" /></span>
+            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"><Rocket className="h-4 w-4" /></span>
             <span className="min-w-0 flex-1">
               <b className="block text-[13px]">{l("El equipo está trabajando", "The team is working")}</b>
               <span className="block text-[11.5px] text-[var(--cf-text-muted)]">{l("Lo acordado ya es una corrida: síguela en «En vivo».", "What was agreed is a run now: follow it under “Live”.")}</span>

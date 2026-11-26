@@ -192,14 +192,14 @@ impl QuotaEngine {
 
 /// Who asked for a reading, which governs two decisions the caller cannot make for itself.
 ///
-/// The distinction that matters is **may this start a process**. Reading Claude's, Codex's or
-/// opencode's quota is one HTTPS call and can happen on a timer without anyone noticing; reading
-/// Gemini's runs its CLI, which on Windows flashes a console window as it starts. A timer doing
-/// that every few minutes is the app interrupting the user to answer a question nobody asked.
+/// A full background poll uses the CLI cache. A targeted provider poll may start Gemini or Grok
+/// while the desktop is visible.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Trigger {
     /// The background poll. Serves cache, and never starts a CLI.
     Poll,
+    /// A short poll for one provider while the desktop is visible.
+    ProviderPoll,
     /// The panel was opened, or the settings screen shown. The user is looking, so a CLI may run.
     Open,
     /// The Refresh button. Same as [`Trigger::Open`] but bypasses the cache — without that, the
@@ -237,14 +237,13 @@ mod homes {
 /// shifts by a third of a percent a minute at full tilt. A minute of cache turns a panel left open,
 /// a settings screen and a status pill into one request between them.
 const FRESH_FOR: Duration = Duration::from_secs(60);
+const PROVIDER_POLL_FRESH_FOR: Duration = Duration::from_secs(30);
 
 /// How long a CLI-driven reading stays good, which is much longer and has to be.
 ///
 /// Every other provider costs one HTTPS call. Gemini costs a **process** — its CLI booting and
 /// reaching the back end, seconds of work for a weekly number that moves by fractions of a percent
-/// an hour. Half an hour, and only when the panel is open (see [`Trigger`]), is what keeps a
-/// Windows user from being shown a console window flashing over their work to re-read a bar that
-/// has not moved.
+/// an hour. Keep the cache for half an hour on ordinary reads. Targeted reads have their own timer.
 const CLI_FRESH_FOR: Duration = Duration::from_secs(1800);
 
 fn fresh_for(provider: &str) -> Duration {
@@ -319,12 +318,12 @@ fn remember(provider: &str, quota: ProviderQuota) {
 /// a minute ago depends on it holding the last **good** answer.
 static LAST_ATTEMPT: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
 
-fn attempted_recently(key: &str, provider: &str) -> bool {
+fn attempted_recently(key: &str, freshness: Duration) -> bool {
     let Ok(guard) = LAST_ATTEMPT.lock() else { return false };
     guard
         .as_ref()
         .and_then(|seen| seen.get(key))
-        .is_some_and(|at| at.elapsed() < fresh_for(provider))
+        .is_some_and(|at| at.elapsed() < freshness)
 }
 
 fn mark_attempt(provider: &str) {
@@ -396,47 +395,38 @@ pub async fn fetch(engine: QuotaEngine, trigger: Trigger) -> ProviderQuota {
     let provider = engine.provider.as_str();
     let key = engine.key();
     let key = key.as_str();
+    let default_freshness = fresh_for(provider);
+    let freshness = if trigger == Trigger::ProviderPoll {
+        PROVIDER_POLL_FRESH_FOR
+    } else {
+        default_freshness
+    };
     if trigger != Trigger::Refresh {
         if let Some((at, hit)) = cached(key) {
-            if at.elapsed() < fresh_for(provider) {
+            if at.elapsed() < freshness {
                 return hit;
             }
         }
     }
 
-    // Nothing that costs a process is started by a timer. The CLI-driven providers launch a real
-    // executable, and on Windows a console-mode child flashes a window on screen as it starts —
-    // once every five minutes, unprompted, at whatever the user was actually doing. Attaching that
-    // to the panel being open makes it something the user caused and is watching for, and cuts the
-    // spawns to the moments the answer is on screen. The background poll keeps serving the cache,
-    // so an already-read number stays visible and merely ages.
-    if trigger == Trigger::Poll && fresh_for(provider) > FRESH_FOR {
+    let uses_cli = default_freshness > FRESH_FOR;
+    if trigger == Trigger::Poll && uses_cli {
         return cached(key)
             .map(|(_, previous)| previous)
             .unwrap_or_else(|| pending(provider));
     }
 
-    // The slow one never makes the caller wait. Gemini's reading costs its CLI booting and
-    // reaching the back end — seconds during which every other provider's numbers are already
-    // sitting ready, with the panel still saying "reading". So it refreshes *behind* the answer:
-    // this call returns what is already known (usually nothing, the first time) and the next poll
-    // finds the fresh value waiting in the cache. Eventually consistent, which a weekly window can
-    // well afford.
-    //
-    // A forced refresh does not change that — waiting fifteen seconds on a button press is worse
-    // than updating a second later — but it does drop the cached copy first, so the detached read
-    // that follows genuinely re-runs instead of finding its own answer still fresh.
-    if fresh_for(provider) > FRESH_FOR {
+    if uses_cli {
         if trigger == Trigger::Refresh {
             forget(key);
         }
-        // The button always goes — it is the user saying "go and ask", and a button that does
-        // nothing is worse than a slow one. Everything else is floored on when the CLI was last
-        // *started* rather than on when it last succeeded, so a provider whose read keeps failing
-        // is retried on the same half-hour rhythm as one that works, instead of on every open.
-        if trigger == Trigger::Refresh || !attempted_recently(key, provider) {
-            mark_attempt(key);
-            refresh_detached(engine.clone());
+        let reading = refresh_cli(engine.clone(), freshness, trigger == Trigger::Refresh);
+        // The full list returns immediately. A targeted poll can wait for its own CLI result.
+        if let Some(mut reading) = reading.filter(|_| trigger == Trigger::ProviderPoll) {
+            let quota = reading.wait_for(Option::is_some).await.ok().and_then(|done| done.as_ref().cloned());
+            if let Some(quota) = quota {
+                return quota;
+            }
         }
         return cached(key)
             .map(|(_, previous)| previous)
@@ -479,29 +469,36 @@ fn pending(provider: &str) -> ProviderQuota {
     }
 }
 
-/// Starts a background read, unless one is already running.
-///
-/// The guard is the point: without it every poll while a multi-second read is in flight would
-/// start another, and a panel left open would have a queue of CLI processes behind it.
-fn refresh_detached(engine: QuotaEngine) {
-    static IN_FLIGHT: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
-
-    {
-        let Ok(mut guard) = IN_FLIGHT.lock() else { return };
-        let running = guard.get_or_insert_with(std::collections::HashSet::new);
-        if !running.insert(engine.key()) {
-            return;
-        }
+/// Starts or joins one CLI read per account.
+fn refresh_cli(
+    engine: QuotaEngine,
+    freshness: Duration,
+    force: bool,
+) -> Option<tokio::sync::watch::Receiver<Option<ProviderQuota>>> {
+    type Reading = tokio::sync::watch::Receiver<Option<ProviderQuota>>;
+    static IN_FLIGHT: Mutex<Option<HashMap<String, Reading>>> = Mutex::new(None);
+    let key = engine.key();
+    let mut guard = IN_FLIGHT.lock().ok()?;
+    let running = guard.get_or_insert_with(HashMap::new);
+    if let Some(reading) = running.get(&key).filter(|reading| reading.has_changed().is_ok()) {
+        return Some(reading.clone());
     }
+    if !force && attempted_recently(&key, freshness) {
+        return None;
+    }
+    mark_attempt(&key);
+    let (done, reading) = tokio::sync::watch::channel(None);
+    running.insert(key.clone(), reading.clone());
 
     tokio::spawn(async move {
-        let _ = read_now(&engine).await;
+        done.send_replace(Some(read_now(&engine).await));
         if let Ok(mut guard) = IN_FLIGHT.lock() {
             if let Some(running) = guard.as_mut() {
-                running.remove(&engine.key());
+                running.remove(&key);
             }
         }
     });
+    Some(reading)
 }
 
 /// Reads one provider for real and files the result.

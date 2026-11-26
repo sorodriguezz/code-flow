@@ -10,8 +10,8 @@
 //! provider's fast model — it starts in about a second, where the agent's own turn takes many. It
 //! is told who it is, what the call has said and the facts this computer knows (`stage::facts`);
 //! when that is not enough it says so and asks for a look at the code ([`line::Asks::look`]),
-//! which is the agent's real, read-only turn, run while the call goes on. The work itself is a run,
-//! with the team's own models and its own approvals.
+//! which is the agent's tool turn, run with the team's permissions while the call goes on.
+//! Pending work goes into a run with the team's own models and approvals.
 //!
 //! **One at a time.** One call (there is one microphone), one voice (whoever has the word), and the
 //! user over both: speaking, or the hand, stops whoever is talking.

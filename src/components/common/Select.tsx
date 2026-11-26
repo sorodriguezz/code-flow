@@ -93,6 +93,7 @@ export function Select({
   className = "",
   style,
   ariaLabel,
+  popupOwnerId,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -109,6 +110,8 @@ export function Select({
   className?: string;
   style?: CSSProperties;
   ariaLabel?: string;
+  /** Associates the portaled list with a parent popover for outside-click dismissal. */
+  popupOwnerId?: string;
 }) {
   const triggerRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -212,6 +215,8 @@ export function Select({
 
   const openMenu = () => {
     if (disabled) return;
+    // WebKit can leave focus on the parent popover after a pointer click.
+    if (popupOwnerId) triggerRef.current?.focus({ preventScroll: true });
     const current = flat.findIndex((o) => o.value === value);
     setActiveIndex(current >= 0 ? current : flat.findIndex((o) => !o.disabled));
     setOpen(true);
@@ -259,6 +264,7 @@ export function Select({
         break;
       case "Escape":
         e.preventDefault();
+        if (popupOwnerId) e.stopPropagation();
         setOpen(false);
         break;
       case "Tab":
@@ -366,6 +372,7 @@ export function Select({
           <div
             ref={listRef}
             role="listbox"
+            data-select-owner={popupOwnerId}
             style={{
               position: "fixed",
               left: pos.left,

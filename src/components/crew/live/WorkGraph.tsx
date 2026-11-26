@@ -15,7 +15,7 @@ import { useL } from "../state";
 import { ITEM_KIND, isWorking, itemColor, itemLook } from "./look";
 
 const W = 216;
-const H = 78;
+const H = 96;
 const GX = 58;
 const GY = 16;
 const PAD = 24;
@@ -82,14 +82,14 @@ export function WorkGraph({ state, selected, onSelect }: { state: TeamRunState; 
                 <motion.button
                   key={item.id}
                   type="button"
-                  title={l("Selecciona la tarea para ver su detalle", "Select the task to see its details")}
+                  title={item.title}
                   initial={{ opacity: 0, scale: 0.85, x, y }}
                   animate={{ opacity: dim ? 0.5 : 1, scale: 1, x, y }}
                   exit={{ opacity: 0, scale: 0.9 }}
                   transition={SPRING}
                   onClick={() => onSelect(item.id)}
                   style={{ width: W, height: H, ["--cf-crew-c" as string]: itemColor(item) }}
-                  className={`absolute left-0 top-0 flex flex-col justify-between rounded-[13px] border bg-[var(--cf-surface-raised)] px-2.5 py-2 text-left ${running ? "cf-crew-working" : ""} ${
+                  className={`absolute left-0 top-0 grid grid-rows-[20px_minmax(0,1fr)_14px] gap-1 rounded-[13px] border bg-[var(--cf-surface-raised)] px-2.5 py-2 text-left ${running ? "cf-crew-working" : ""} ${
                     selected === item.id ? "border-[var(--cf-accent)] shadow-[0_0_0_2px_var(--cf-accent-soft)]" : item.status === "waiting" || item.status === "gated" ? "cf-crew-waiting border-[color-mix(in_oklab,var(--cf-warning)_50%,var(--cf-surface))]" : "border-[var(--cf-border)] hover:border-[var(--cf-border-strong)]"
                   }`}
                 >
@@ -105,12 +105,12 @@ export function WorkGraph({ state, selected, onSelect }: { state: TeamRunState; 
                     {item.merged && <GitMerge className="h-3.5 w-3.5 text-[var(--cf-success)]" />}
                     {item.run_in === "terminal" && <SquareTerminal className="h-3.5 w-3.5 text-[var(--cf-text-faint)]" />}
                   </span>
-                  <span className="line-clamp-2 text-[12px] leading-snug">{item.title}</span>
-                  <span className="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[10.5px] text-[var(--cf-text-muted)]">
+                  <span className="line-clamp-2 min-w-0 self-start text-[12px] leading-4 [overflow-wrap:anywhere]">{item.title}</span>
+                  <span className="flex min-w-0 items-center gap-1.5 overflow-hidden whitespace-nowrap text-[10.5px] leading-[14px] text-[var(--cf-text-muted)]">
                     <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: itemColor(item) }} />
                     <span className="shrink-0">{l(es, en)} · {l(kes, ken)}</span>
                     {item.attempts > 1 && (
-                      <span className="inline-flex items-center gap-0.5" title={l("Intentos", "Attempts")}>
+                      <span className="inline-flex shrink-0 items-center gap-0.5" title={l("Intentos", "Attempts")}>
                         · <RotateCw className="h-2.5 w-2.5" />
                         {item.attempts}
                       </span>

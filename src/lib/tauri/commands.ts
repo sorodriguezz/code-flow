@@ -879,11 +879,13 @@ export const aiUsageStats = (windowHours: number, account?: string | null) =>
  *
  * Never rejects as a whole: each provider carries its own error, because one engine being signed
  * out is no reason to stop showing another's remaining week. */
-/** Who is asking. `"poll"` is the background timer and is the only one that may not start a
+/** Who is asking. `"poll"` is the background timer and may not start a
  * provider's CLI — on Windows that flashes a console window, and a timer doing it unprompted is the
  * app interrupting whatever the user was doing. `"open"` is the panel being shown, `"refresh"` the
- * button (which also bypasses the backend cache). */
-export type QuotaTrigger = "poll" | "open" | "refresh";
+ * button (which also bypasses the backend cache). A provider-specific poll returns only its readings. */
+export const BACKGROUND_QUOTA_PROVIDERS = ["gemini", "grok", "opencode"] as const;
+export type BackgroundQuotaProvider = (typeof BACKGROUND_QUOTA_PROVIDERS)[number];
+export type QuotaTrigger = "poll" | "open" | "refresh" | `${BackgroundQuotaProvider}_poll`;
 
 export const aiQuotaStatus = (trigger: QuotaTrigger = "poll") =>
   invoke<QuotaReport>("ai_quota_status", { trigger });

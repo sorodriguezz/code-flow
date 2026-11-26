@@ -1,14 +1,14 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Gauge } from "lucide-react";
 import { useT } from "../../state/languageStore";
-import { useDismissOnOutside } from "../../lib/useDismissOnOutside";
+import { useDismissOnOutside, type DismissReason } from "../../lib/useDismissOnOutside";
 import { formatUsed, pillLimit, severityOf, useQuotaStore } from "../../state/quotaStore";
 import { QuotaPanel } from "../ai/QuotaPanel";
 import { limitTitle, quotaAccountLabel } from "../ai/QuotaLimits";
 import { useAccountName, useAiAccountsStore } from "../../state/aiAccountsStore";
 
-const PANEL_WIDTH = 384;
+const PANEL_WIDTH = 432;
 
 /**
  * How far through each provider's plan you are, next to the bell.
@@ -18,8 +18,7 @@ const PANEL_WIDTH = 384;
  * small panel meant working out which was which on every glance, and only one of them can run out.
  * What is left here is a single question with a single direction: how much of the window is gone.
  *
- * The panel itself is `ai/QuotaPanel` — «Consumo y límites»: a summary that counts the accounts by
- * how available each is, and the accounts one by one. This is its trigger and where it is placed.
+ * The panel itself is `ai/QuotaPanel` — «Consumo y límites»: individual accounts and their limits.
  *
  * Nothing here is derived from what this app measured. The percentages come from the providers (see
  * `ai_quota.rs`); the moment a "% used" is computed from recorded tokens it becomes a guess wearing
@@ -35,10 +34,8 @@ const PANEL_WIDTH = 384;
  * (`wholeWindows`) — otherwise one model's share of a week outranks the week, and the pill reports
  * a plan the user is not spending. The picker lives in Settings → AI → Plan limits.
  *
- * **Quota is read on open, not on mount.** On macOS, reading Claude Code's token means reading
- * another application's keychain item, and that asks the user for permission the first time. That
- * prompt has to follow something they just did — which is also why the button renders before it has
- * a number to show.
+ * Opening the panel requests the full list. OpenCode, Grok and Gemini also update while the
+ * window is visible. The first Claude keychain prompt follows an explicit read.
  *
  * An engine that *can* publish a limit is listed whatever it answered — including nothing, which it
  * says in words. One that cannot publish a limit at all is not here, because a bar reading zero for
@@ -62,8 +59,10 @@ export function UsageMeter() {
 
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
+  const panelId = useId();
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ bottom: number; right: number; maxHeight: number } | null>(null);
+  const panelShown = open && pos !== null;
 
   useEffect(() => watchQuota(), [watchQuota]);
 
@@ -101,8 +100,17 @@ export function UsageMeter() {
   // The shared hook, for the reason `BatteryMeter` states beside it: a press on a canvas — the
   // diagram editor, the schema canvas — never reaches an ordinary document listener, and this panel
   // is one of the two the user most often has open over one.
-  const dismiss = useCallback(() => setOpen(false), []);
-  useDismissOnOutside(open, dismiss, [panelRef, triggerRef]);
+  const close = useCallback(() => setOpen(false), []);
+  const dismiss = useCallback((reason: DismissReason) => {
+    close();
+    if (reason === "escape") triggerRef.current?.focus({ preventScroll: true });
+  }, [close]);
+  const ownsFilterMenu = useCallback((target: Element) => target.closest("[data-select-owner]")?.getAttribute("data-select-owner") === panelId, [panelId]);
+  useDismissOnOutside(open, dismiss, [panelRef, triggerRef], ownsFilterMenu);
+
+  useLayoutEffect(() => {
+    if (panelShown) panelRef.current?.focus({ preventScroll: true });
+  }, [panelShown]);
 
   const shown = pillLimit(quotaProviders, quotaRouted, quotaPick);
   // Which window it is, for the tooltip only. It stays out of the pill itself: on the automatic
@@ -119,15 +127,15 @@ export function UsageMeter() {
         type="button"
         onClick={() => setOpen((wasOpen) => !wasOpen)}
         aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-controls={panelShown ? panelId : undefined}
+        aria-label={shown ? `${t("quota.panelTitle")} · ${t("quota.used", { percent: formatUsed(shown.limit.used_percent) })}` : t("quota.panelTitle")}
         title={shownLabel ? `${t("quota.panelTitle")} · ${shownLabel}` : t("quota.panelTitle")}
         className={`flex h-[22px] shrink-0 items-center gap-[5px] rounded-md px-1.5 text-[12px] tabular-nums hover:bg-[var(--cf-hover)] ${
           open ? "text-[var(--cf-accent)]" : "text-[var(--cf-text-muted)]"
         }`}
       >
-        {/* Always rendered, even before anything has been read — which is not the old behaviour and
-            has to be, now that the pill is quota and nothing else. Quota is only fetched once the
-            panel is opened (see above), so a button that waited for a number would be waiting on a
-            click it is the only way to make. The bare gauge is the invitation. */}
+        {/* The gauge opens the panel even before a reading arrives. */}
         <Gauge size={14} className="shrink-0" />
         {shown && (
           <span
@@ -148,11 +156,15 @@ export function UsageMeter() {
         pos &&
         createPortal(
           <div
+            id={panelId}
             ref={panelRef}
+            role="dialog"
+            aria-label={t("quota.panelTitle")}
+            tabIndex={-1}
             style={{ bottom: pos.bottom, right: pos.right, width: `min(${PANEL_WIDTH}px, calc(100vw - 16px))`, maxHeight: Math.min(pos.maxHeight, 720) }}
-            className="cf-fade-in fixed z-[60] flex flex-col overflow-hidden rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)]"
+            className="cf-fade-in @container fixed z-[60] flex flex-col overflow-hidden rounded-2xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] shadow-[var(--cf-shadow)] outline-none"
           >
-            <QuotaPanel />
+            <QuotaPanel onClose={close} popupId={panelId} />
           </div>,
           document.body,
         )}

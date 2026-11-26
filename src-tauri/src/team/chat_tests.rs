@@ -453,6 +453,10 @@ fn deleting_a_conversation_takes_its_turns_and_leaves_the_team_s_other_ones() {
     save(&conn, &mut busy).unwrap();
     assert!(delete(&conn, &gone.chat.id).unwrap_err().contains("Detén"));
     busy.status = "idle".into();
+    busy.active_run_id = "call-tool-turn".into();
+    save(&conn, &mut busy).unwrap();
+    assert!(delete(&conn, &gone.chat.id).unwrap_err().contains("Detén"));
+    busy.active_run_id.clear();
     save(&conn, &mut busy).unwrap();
 
     let mut conversations = delete(&conn, &gone.chat.id).unwrap();

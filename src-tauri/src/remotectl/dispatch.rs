@@ -467,6 +467,7 @@ pub const ALLOWED: &[&str] = &[
     "scan_staged_secrets",
     "analyze_working_changes",
     // Pull requests and acting on a review.
+    "auto_link_project",
     "list_pull_requests",
     "pr_review_decision",
     "list_pr_comment_threads",
@@ -577,6 +578,7 @@ pub const MUTATING: &[&str] = &[
     "set_agent_task_pinned",
     "cancel_ai_run",
     "analyze_working_changes",
+    "auto_link_project",
     "review_pull_request",
     "act_on_pull_request",
     "post_pr_review_comment",
@@ -1116,11 +1118,27 @@ pub async fn dispatch(
         // Reviewing costs money — it starts an engine — which is exactly why `review_pull_request`
         // is here and *creating* a pull request is not. Re-reviewing something that already exists
         // is a repeatable, bounded act; opening a PR is a public one.
-        "list_pull_requests" => ok(commands::ado_cmd::list_pull_requests(
-            app.state::<Db>(),
-            arg(args, "projectId")?,
-        )
-        .await?),
+        // The destination is derived from the checked-out repository and existing desktop
+        // connections. The device cannot supply a host or credentials.
+        "auto_link_project" => {
+            let result = commands::ado_cmd::auto_link_project(app.state::<Db>(), arg(args, "projectId")?)?;
+            let invalidate = if matches!(&result, commands::ado_cmd::AutoLinkResult::Linked { .. }) {
+                Invalidate::Workspaces
+            } else {
+                Invalidate::None
+            };
+            ok_with(result, invalidate)
+        }
+        "list_pull_requests" => {
+            let items = commands::ado_cmd::list_pull_requests(app.state::<Db>(), arg(args, "projectId")?)
+                .await
+                .map_err(|message| if message == commands::ado_cmd::PR_HOST_NOT_LINKED {
+                    "pr_not_linked".to_string()
+                } else {
+                    message
+                })?;
+            ok(items)
+        }
         "pr_review_decision" => ok(commands::ado_cmd::pr_review_decision(
             app.state::<Db>(),
             arg(args, "projectId")?,

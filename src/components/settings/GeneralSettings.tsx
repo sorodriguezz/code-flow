@@ -30,6 +30,7 @@ import { pipelinesAvailable, useVcsConnectionsStore } from "../../state/vcsConne
 import { formatBytes } from "../../lib/tauri/backupCommands";
 import { UpdateSection } from "./UpdateSection";
 import { StorageBlock } from "./StorageBlock";
+import { ChangelogPane } from "./ChangelogPane";
 import { PaneBlock, RailSection } from "./settingsNav";
 
 // Language names stay in their own language (endonyms) — "English"/"Español" don't change
@@ -317,6 +318,8 @@ export function GeneralSettings() {
               </PaneBlock>
             </>
           )}
+
+          {tab === "changelog" && <ChangelogPane />}
 
           {/* One block each, so the rail names them and the pane's hint explains them. */}
           {tab === "tours" && (

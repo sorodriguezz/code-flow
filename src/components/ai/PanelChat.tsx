@@ -703,9 +703,6 @@ export function PanelChat({
       <div role="status" aria-live="polite" aria-atomic="true" className="sr-only">
         {liveStatus}
       </div>
-      {/* Above the scroller, not in it: find, export and "move to the chat workspace" are needed
-          most in a long conversation, which is exactly the one that had scrolled them off the
-          top. Same strip, same place, as the workspace chat's. */}
       {/* A size container, like the workspace chat's: on a narrow panel the badge and the artifacts
           chip keep their icon and drop their words instead of crowding the repository's name. */}
       <div className="@container flex shrink-0 items-center gap-1.5 border-b border-[var(--cf-border)] px-3 py-1.5 text-[11px] text-[var(--cf-text-muted)]">
@@ -757,8 +754,6 @@ export function PanelChat({
             <Download size={12} />
           </button>
         )}
-        {/* No «Mover al Chat» here: taken off the chat's own header at the user's request
-            (2026-11-18). `moveChatToApp` stays — the Inbox row still offers it. */}
         <ChatLineageButtons
           scope={lineage}
           title={session.title}

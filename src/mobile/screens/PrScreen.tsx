@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Copy, ExternalLink, GitPullRequest, ScanText, Sparkles } from "lucide-react";
 import { t } from "../i18n";
-import { rpc } from "../transport";
+import { ReadOnly, rpc } from "../transport";
 import { newId } from "../ids";
 import { useBusy, useMobileStore } from "../store";
 import { useNav } from "../nav";
@@ -16,7 +16,7 @@ import { PipelinesView } from "./PipelinesScreen";
 import { Button, IconButton } from "../ui/Button";
 import { Card, Divider, Row, Section } from "../ui/List";
 import { Badge, EmptyState, ErrorState, SkeletonList } from "../ui/Feedback";
-import type { PullRequestSummary, ReviewRunSummary } from "../../types/domain";
+import type { AutoLinkResult, PullRequestSummary, ReviewRunSummary, VcsProvider } from "../../types/domain";
 
 /**
  * Pull requests, and the reviews already saved against them.
@@ -29,15 +29,48 @@ import type { PullRequestSummary, ReviewRunSummary } from "../../types/domain";
  * Re-reviewing is offered and *opening* a pull request is not — see the allowlist. Re-reading
  * something that exists is repeatable and bounded; publishing one is a public act, and a phone in a
  * pocket is the wrong place to take it.
- *
- * # Failures are not empty lists
- *
- * Both reads used to end in `.catch(() => [])`, so a dropped packet, a revoked token and a host that
- * refused authentication all rendered as the calm sentence *"No hay pull requests abiertos."* — the
- * exact lie `store.ts`'s own header says was eliminated everywhere else. A project with no linked
- * host genuinely has no pull requests and genuinely errors, so the two are still folded together
- * for the PR list; what is no longer folded in is everything else.
  */
+
+type PrList =
+  | { status: "ready"; items: PullRequestSummary[] }
+  | { status: "unlinked" }
+  | { status: "needsToken"; provider: VcsProvider; identifier: string }
+  | { status: "failed"; detail: string };
+
+const PROVIDERS: Record<VcsProvider, string> = {
+  azure: "Azure DevOps",
+  github: "GitHub",
+  gitlab: "GitLab",
+  bitbucket: "Bitbucket",
+};
+
+const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
+
+async function loadOpenPrs(projectId: string, readOnly: boolean): Promise<PrList> {
+  const args = { projectId };
+  const list = async (): Promise<PrList> => {
+    try {
+      return { status: "ready", items: await rpc<PullRequestSummary[]>("list_pull_requests", args) };
+    } catch (error) {
+      if (errorMessage(error) === "pr_not_linked") return { status: "unlinked" };
+      throw error;
+    }
+  };
+
+  const current = await list();
+  if (current.status !== "unlinked" || readOnly) return current;
+  try {
+    const link = await rpc<AutoLinkResult>("auto_link_project", args);
+    if (link.status === "Linked") return list();
+    if (link.status === "NeedsToken") {
+      return { status: "needsToken", provider: link.provider, identifier: link.identifier };
+    }
+    return current;
+  } catch (error) {
+    if (error instanceof ReadOnly) return current;
+    throw error;
+  }
+}
 
 const PR_STATUS: Record<PullRequestSummary["status"], { label: string; tone: "accent" | "neutral" | "success" | "warning" }> =
   {
@@ -82,16 +115,16 @@ async function copyUrl(url: string) {
 export function PrScreen() {
   const projectId = useMobileStore((s) => s.projectId);
   const workspaceId = useMobileStore((s) => s.workspaceId);
+  const readOnly = useMobileStore((s) => s.readOnly);
   const run = useMobileStore((s) => s.run);
   const push = useNav((s) => s.push);
   // `review` on its own: `review_pull_request` runs an engine and is awaited inline in the request,
   // so it holds its flag for as long as the model takes. Sharing one with the repository actions is
   // what used to freeze commit, push and every chain gate behind a review started from here.
   const busy = useBusy("review");
-  const [prs, setPrs] = useState<PullRequestSummary[]>([]);
+  const [prList, setPrList] = useState<PrList | null>(null);
   const [runs, setRuns] = useState<ReviewRunSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [failure, setFailure] = useState<string | null>(null);
   /** The saved-runs half's own failure. Its own slot, because the two halves fail independently and
    *  a repository can legitimately have pull requests and no reviews, or the other way round. */
   const [runsFailure, setRunsFailure] = useState<string | null>(null);
@@ -99,39 +132,27 @@ export function PrScreen() {
   /** Pull requests or pipelines: two views of one host, so one tab behind a segmented control — the
    *  Agents tab's arrangement, and for the same reason: five tabs is what a phone's bar can hold. */
   const [view, setView] = useState<"prs" | "pipelines">("prs");
+  const request = useRef(0);
 
   const reload = useCallback(async () => {
     if (!projectId) return;
+    const version = ++request.current;
     setLoading(true);
-    setFailure(null);
     setRunsFailure(null);
-    const [prList, runList] = await Promise.all([
-      // A project with no linked host answers an error rather than an empty list, and that is not
-      // a failure worth a red screen here — it just means this repository has no pull requests. The
-      // *reason* is kept, so a genuine failure can still be shown under the empty state.
-      rpc<PullRequestSummary[]>("list_pull_requests", { projectId }).catch((e: unknown) => {
-        setFailure(e instanceof Error ? e.message : String(e));
-        return [] as PullRequestSummary[];
-      }),
-      workspaceId
-        ? rpc<ReviewRunSummary[]>("list_review_runs", { workspaceId }).catch((e: unknown) => {
-            // Kept, where it used to be swallowed into `[]` — which rendered "Todavía no hay
-            // revisiones guardadas" next to a PR list that had loaded fine, so nothing on the screen
-            // suggested anything had failed.
-            setRunsFailure(e instanceof Error ? e.message : String(e));
-            return [] as ReviewRunSummary[];
-          })
-        : Promise.resolve([] as ReviewRunSummary[]),
+    const [prResult, runResult] = await Promise.allSettled([
+      loadOpenPrs(projectId, readOnly),
+      workspaceId ? rpc<ReviewRunSummary[]>("list_review_runs", { workspaceId }) : [],
     ]);
     // The scope may have moved while this was in flight — the guard every async load in this client
     // needs, and the one this screen did not have: two quick taps in the project picker used to
     // leave whichever request happened to land second describing the wrong repository.
     const state = useMobileStore.getState();
-    if (state.projectId !== projectId || state.workspaceId !== workspaceId) return;
-    setPrs(prList);
-    setRuns(runList.filter((entry) => entry.project_id === projectId));
+    if (version !== request.current || state.projectId !== projectId || state.workspaceId !== workspaceId) return;
+    setPrList(prResult.status === "fulfilled" ? prResult.value : { status: "failed", detail: errorMessage(prResult.reason) });
+    setRuns(runResult.status === "fulfilled" ? runResult.value.filter((entry) => entry.project_id === projectId) : []);
+    setRunsFailure(runResult.status === "rejected" ? errorMessage(runResult.reason) : null);
     setLoading(false);
-  }, [projectId, workspaceId]);
+  }, [projectId, workspaceId, readOnly]);
 
   useEffect(() => {
     void reload();
@@ -174,21 +195,25 @@ export function PrScreen() {
 
   if (view === "pipelines") return <PipelinesView bar={bar} projectId={projectId} />;
 
+  const prs = prList?.status === "ready" ? prList.items : [];
   return (
     <Screen bar={bar} onRefresh={reload}>
       <Section title={t("pr.open")}>
         {loading ? (
           <SkeletonList rows={2} />
+        ) : prList?.status === "failed" ? (
+          <ErrorState title={t("pr.failed")} detail={prList.detail} onRetry={() => void reload()} />
+        ) : prList?.status === "needsToken" || prList?.status === "unlinked" ? (
+          <EmptyState
+            icon={<GitPullRequest size={26} aria-hidden />}
+            title={t("pr.notLinked")}
+            hint={prList.status === "needsToken"
+              ? t("pr.connectHostHint", { provider: PROVIDERS[prList.provider], identifier: prList.identifier })
+              : t("pr.linkRepoHint")}
+            action={<Button onClick={() => void reload()}>{t("common.retry")}</Button>}
+          />
         ) : prs.length === 0 ? (
-          failure ? (
-            <ErrorState title={t("pr.failed")} detail={failure} onRetry={() => void reload()} />
-          ) : (
-            <EmptyState
-              icon={<GitPullRequest size={26} aria-hidden />}
-              title={t("pr.none")}
-              hint={t("pr.noneHint")}
-            />
-          )
+          <EmptyState icon={<GitPullRequest size={26} aria-hidden />} title={t("pr.none")} hint={t("pr.noneHint")} />
         ) : (
           <Card>
             {prs.map((pr, index) => {

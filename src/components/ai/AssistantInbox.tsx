@@ -15,7 +15,6 @@ import {
   Link2,
   Loader2,
   MessageSquare,
-  MessageSquareShare,
   Pencil,
   Search,
   ShieldCheck,
@@ -49,7 +48,6 @@ import {
 import { shortRepoNames } from "../../lib/repoShortNames";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { workspaceActivityKey } from "../../lib/prTarget";
-import { moveChatToApp } from "../../lib/moveChatToApp";
 import {
   openActivityEntry,
   openAnalysis,
@@ -1069,18 +1067,6 @@ function RecentRow({
         >
           <Pencil size={13} />
         </button>
-        {/* A repository conversation can move to the chat workspace, for good. A workspace chat has
-            no repository to move out of. */}
-        {entry.type === "chat" && !workspaceChat && (
-          <button
-            onClick={() => void moveChatToApp(bucket, entry.conv.session_id)}
-            title={t("assistant.moveToChat")}
-            aria-label={t("assistant.moveToChat")}
-            className={`${action} hover:text-[var(--cf-accent)]`}
-          >
-            <MessageSquareShare size={13} />
-          </button>
-        )}
         <button
           onClick={() => setMode("deleting")}
           title={t("chatHistory.delete")}

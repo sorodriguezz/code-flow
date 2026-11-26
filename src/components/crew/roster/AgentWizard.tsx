@@ -178,16 +178,17 @@ function IdentityStep({ draft, patch }: { draft: AgentDraft; patch: (p: Partial<
       </div>
       <div className="flex flex-col gap-1.5">
         <Label>{l("Color", "Colour")}</Label>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-2 p-1">
           {AGENT_COLORS.map((c) => (
             <motion.button
               key={c}
               type="button"
               transition={SPRING}
               aria-label={l(COLOR_NAMES[c][0], COLOR_NAMES[c][1])}
+              aria-pressed={draft.color === c}
               title={l(COLOR_NAMES[c][0], COLOR_NAMES[c][1])}
               onClick={() => patch({ color: c })}
-              className="grid h-7 w-7 place-items-center rounded-full"
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-full"
               style={{ background: `var(--cf-agent-${c})`, boxShadow: draft.color === c ? `0 0 0 2px var(--cf-surface), 0 0 0 4px var(--cf-agent-${c})` : undefined }}
             >
               {draft.color === c && <Check className="h-3.5 w-3.5 text-white" strokeWidth={3} />}

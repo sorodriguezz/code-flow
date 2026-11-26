@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { aiQuotaStatus, getSetting, setSetting, type QuotaTrigger } from "../lib/tauri/commands";
+import { aiQuotaStatus, BACKGROUND_QUOTA_PROVIDERS, getSetting, setSetting, type BackgroundQuotaProvider } from "../lib/tauri/commands";
 import { onTurnSettled } from "./agentEvents";
 import type { ProviderQuota, QuotaLimit } from "../types/domain";
 import { accountKey } from "../lib/aiAccounts";
@@ -22,6 +22,7 @@ const RAIL_HIDDEN_SETTING = "quota_rail_hidden";
  * behind each: that one reads a local SQLite aggregate, this one calls two companies' APIs. The
  * backend caches for the same minute, so a second surface opening does not double the requests. */
 const POLL_MS = 60_000;
+const PROVIDER_POLL_MS = 30_000;
 
 interface QuotaState {
   providers: ProviderQuota[];
@@ -38,12 +39,8 @@ interface QuotaState {
    * panel blanked for a second to announce that it is being re-checked is worse than a stale one,
    * so `QuotaLimits` only shows a loading state when `fetched` is still false. */
   loading: boolean;
-  /** Whether anything has ever been asked for in this session.
-   *
-   * This is the whole reason quota is pull and not push. On macOS, reading Claude Code's token
-   * means reading *another application's* keychain item, which asks the user for permission the
-   * first time. That prompt has to arrive attached to something they just did — opening the
-   * panel — and never out of a clear sky at startup. So nothing here fires until a surface asks. */
+  /** Whether the full provider list has been requested this session. Individual reads can
+   * populate OpenCode, Gemini and Grok while the panel is closed. */
   fetched: boolean;
   /** When the last read landed, as epoch ms — `0` before the first one. What the "updated N ago"
    * line counts from, and the only durable evidence a refresh happened at all: when every number
@@ -76,15 +73,29 @@ interface QuotaState {
    * the button re-reads a cache at most a minute old and hands back the same numbers, which looks
    * like a broken button and is in fact a working cache. `"poll"` additionally forbids starting a
    * provider's CLI, so the background timer never flashes a console window on Windows. */
-  refresh: (trigger?: QuotaTrigger) => Promise<void>;
-  /** Starts the poll and returns the stop. Reference-counted; only polls once something has
-   * already been fetched, so mounting the status bar alone never reaches the network. */
+  refresh: (trigger?: "poll" | "open" | "refresh") => Promise<void>;
+  refreshProvider: (provider: BackgroundQuotaProvider) => Promise<void>;
+  /** Watches the three background providers while visible, plus the general poll after its
+   * first read. Returns a reference-counted cleanup. */
   watch: () => () => void;
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
+let stopProviderWatches: (() => void) | null = null;
 let watchers = 0;
 let inFlight: Promise<void> | null = null;
+const providerInFlight = new Map<BackgroundQuotaProvider, Promise<void>>();
+
+/** A full poll can lag an individual read. Keep the latest result per account. */
+function latestReadings(current: ProviderQuota[], incoming: ProviderQuota[]): ProviderQuota[] {
+  const previous = new Map(current.map((quota) => [quotaKey(quota), quota]));
+  return incoming.map((quota) => {
+    const existing = previous.get(quotaKey(quota));
+    return existing?.fetched_at && (!quota.fetched_at || Date.parse(existing.fetched_at) > Date.parse(quota.fetched_at))
+      ? existing
+      : quota;
+  });
+}
 
 /** How long the spinner stays up at minimum.
  *
@@ -130,7 +141,10 @@ export const useQuotaStore = create<QuotaState>((set, get) => ({
     await setSetting(PICK_SETTING, key);
   },
 
-  refresh: async (trigger: QuotaTrigger = "poll") => {
+  refresh: async (trigger = "poll") => {
+    // OpenCode uses an HTTP request. Keep its full and individual reads from overlapping.
+    const openCode = providerInFlight.get("opencode");
+    if (openCode) await openCode;
     // Coalesced: the panel and the settings screen can both be open, and both ask on mount. A
     // forced read is *not* folded into a poll already in flight — that would return the cached
     // answer the button exists to bypass — so it waits for the poll to finish and then goes.
@@ -150,13 +164,13 @@ export const useQuotaStore = create<QuotaState>((set, get) => ({
     inFlight = aiQuotaStatus(trigger)
       .then(async (report) => {
         await settle();
-        set({
-          providers: report.providers,
+        set((state) => ({
+          providers: latestReadings(state.providers, report.providers),
           routed: report.routed,
           loading: false,
           fetched: true,
           lastReadAt: Date.now(),
-        });
+        }));
       })
       .catch(async () => {
         // Kept as it was: the backend already falls back to its last good reading per provider, so
@@ -172,14 +186,37 @@ export const useQuotaStore = create<QuotaState>((set, get) => ({
     return inFlight;
   },
 
+  refreshProvider: (provider) => {
+    const running = providerInFlight.get(provider);
+    if (running) return running;
+    const request = Promise.resolve(provider === "opencode" ? inFlight : null)
+      .then(() => aiQuotaStatus(`${provider}_poll`))
+      .then(({ providers, routed }) => {
+        set((state) => {
+          const first = state.providers.findIndex((quota) => quota.provider === provider);
+          const readings = latestReadings(state.providers, providers.filter((quota) => quota.provider === provider));
+          if (first < 0 && readings.length === 0) return state;
+          const rest = state.providers.filter((quota) => quota.provider !== provider);
+          const index = first < 0 ? rest.length : first;
+          return {
+            providers: [...rest.slice(0, index), ...readings, ...rest.slice(index)],
+            routed: state.fetched ? state.routed : routed,
+          };
+        });
+      })
+      .catch(() => {})
+      .finally(() => {
+        providerInFlight.delete(provider);
+      });
+    providerInFlight.set(provider, request);
+    return request;
+  },
+
   watch: () => {
     watchers += 1;
     if (watchers === 1) {
-      // The one read that is *not* quota: a settings row, which prompts nothing and costs nothing,
-      // so unlike the providers themselves it can happen the moment the status bar mounts. Without
-      // it the pill would show the automatic pick until something opened the panel, which on a
-      // machine that never opens it is for ever.
       void loadPrefs();
+      stopProviderWatches = watchProviders(get().refreshProvider);
       timer = setInterval(() => {
         if (document.visibilityState !== "visible") return;
         if (!get().fetched) return;
@@ -192,11 +229,51 @@ export const useQuotaStore = create<QuotaState>((set, get) => ({
       if (watchers === 0 && timer) {
         clearInterval(timer);
         timer = null;
+        stopProviderWatches?.();
+        stopProviderWatches = null;
         document.removeEventListener("visibilitychange", onVisibilityChange);
       }
     };
   },
 }));
+
+function watchProviders(refresh: QuotaState["refreshProvider"]): () => void {
+  const visible = () => document.visibilityState === "visible";
+  const stops = BACKGROUND_QUOTA_PROVIDERS.map((provider) => {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let running = false;
+    let stopped = false;
+
+    const clear = () => {
+      clearTimeout(timeout);
+      timeout = undefined;
+    };
+    const poll = async () => {
+      clear();
+      if (stopped || running || !visible()) return;
+      running = true;
+      try {
+        await refresh(provider);
+      } finally {
+        running = false;
+        // The cache ages from completion, independently for each provider.
+        if (!stopped && visible()) timeout = setTimeout(poll, PROVIDER_POLL_MS);
+      }
+    };
+    const onVisibility = () => {
+      if (visible()) void poll();
+      else clear();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    void poll();
+    return () => {
+      stopped = true;
+      clear();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  });
+  return () => stops.forEach((stop) => stop());
+}
 
 /** Reads the stored pick once per session. Idempotent by flag rather than by comparing values: a
  * user who picks "automatic" writes a blank, which is indistinguishable from "not read yet". */
@@ -378,8 +455,7 @@ export interface ResetAt {
   /** `today` and `tomorrow` are the two days worth naming in words; everything else carries its
    *  date in `text`. */
   day: "today" | "tomorrow" | "other";
-  /** `09:00` for today or tomorrow, `Mon 27 Oct, 09:00` for any other day — the clock reading, with
-   *  the date in front of it only where the word alone would not say which day. */
+  /** The clock reading, with a date for later days or when the caller requests it. */
   text: string;
 }
 
@@ -395,31 +471,37 @@ export interface ResetAt {
  * says the right thing without anything being recomputed. `null` on the same conditions as the
  * countdown — nothing to count to, or a window that has already rolled over.
  */
-export function formatResetAt(resetsAt: string, now: number = Date.now(), locale?: string): ResetAt | null {
+export function formatResetAt(
+  resetsAt: string,
+  now: number = Date.now(),
+  locale?: string,
+  display: "relative" | "calendar" = "relative",
+): ResetAt | null {
   if (!resetsAt) return null;
   const at = Date.parse(resetsAt);
   if (Number.isNaN(at) || at - now <= 0) return null;
 
   const when = new Date(at);
+  const today = new Date(now);
   const tomorrow = new Date(now);
   tomorrow.setDate(tomorrow.getDate() + 1);
   // `toDateString` compares calendar days in local time, which is the comparison the reader is
   // making. Arithmetic on the millisecond difference would call 23:00 → 01:00 "in a day".
   const day =
-    when.toDateString() === new Date(now).toDateString()
+    when.toDateString() === today.toDateString()
       ? "today"
       : when.toDateString() === tomorrow.toDateString()
         ? "tomorrow"
         : "other";
 
-  if (day !== "other") return { day, text: when.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }) };
-  // One call rather than a date and a time joined here: the order of the parts and the separator
-  // between them differ by locale, and `Intl` is the only thing that knows which. No year — every
-  // window any provider publishes rolls over inside a month, so a year would be noise.
+  if (display === "relative" && day !== "other") {
+    return { day, text: when.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" }) };
+  }
   const text = when.toLocaleString(locale, {
-    weekday: "short",
+    weekday: display === "relative" ? "short" : undefined,
     day: "numeric",
     month: "short",
+    year: display === "calendar" && when.getFullYear() !== today.getFullYear() ? "numeric" : undefined,
     hour: "2-digit",
     minute: "2-digit",
   });

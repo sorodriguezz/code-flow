@@ -6,7 +6,7 @@ use crate::db::{models::AgentTask, queries, Db};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 pub const BATCH_PREFIX: &str = "team-chat:";
@@ -608,6 +608,22 @@ pub fn recover(conn: &Connection) -> rusqlite::Result<()> {
 
 pub(in crate::team) type Control = Arc<tokio::sync::watch::Sender<bool>>;
 static RUNNING: LazyLock<Mutex<HashMap<String, Control>>> = LazyLock::new(Default::default);
+// The active member and its permissions are stored per chat. Calls can request several tool
+// turns while people keep talking, so serialize those turns within the same chat.
+static TURN_LOCKS: LazyLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
+    LazyLock::new(Default::default);
+
+fn turn_lock(chat_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = TURN_LOCKS.lock().unwrap_or_else(|e| e.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(chat_id).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(chat_id.to_string(), Arc::downgrade(&lock));
+    lock
+}
+
 struct Registration(String);
 impl Drop for Registration {
     fn drop(&mut self) {
@@ -639,17 +655,28 @@ fn cancelled(control: &Control) -> Result<(), String> {
     }
 }
 
+pub(in crate::team) enum TurnKind {
+    Chat { read_only: bool },
+    Call,
+}
+
 pub(in crate::team) async fn turn(
     app: &AppHandle,
     chat_id: &str,
     member: &MemberSnap,
     message: String,
     files: Option<Vec<String>>,
-    read_only: bool,
+    kind: TurnKind,
     control: &Control,
 ) -> Result<(String, i64, Option<String>), String> {
-    cancelled(control)?;
     let mut stop = control.subscribe();
+    cancelled(control)?;
+    let lock = turn_lock(chat_id);
+    let _turn = tokio::select! {
+        turn = lock.lock() => turn,
+        _ = stop.changed() => return Err(crate::ai_runs::CANCELLED_MARKER.into()),
+    };
+    cancelled(control)?;
     // The wait for a slot is called off through its own token rather than by dropping it: a wait
     // dropped half-way would stay counted as waiting, and every claim after it would see one slot
     // fewer than there are.
@@ -670,10 +697,20 @@ pub(in crate::team) async fn turn(
     let run_id = format!("team-chat-{}", uid());
     let (task, session, full_access) = with_conn(app, |conn| {
         let mut chat = get(conn, chat_id)?;
+        let read_only = match kind {
+            TurnKind::Chat { read_only } => read_only,
+            TurnKind::Call if matches!(chat.status.as_str(), "running" | "cancelling") => {
+                return Err("El equipo está respondiendo a este chat.".into());
+            }
+            // Call turns follow the same member and team permissions as a work request in chat.
+            TurnKind::Call => false,
+        };
         let task = task_for(conn, &chat, member)?;
         // The team's own choice, as it is now: «Completo» there is «Completo» in its chat too
         // (`Policy::permissions`). A turn that only reads stays one.
-        let full_access = !read_only && super::get_team(conn, &chat.team_id).ok().flatten().is_some_and(|team| team.policy.full_access());
+        let full_access = !read_only
+            && may_edit(&chat, member)
+            && super::get_team(conn, &chat.team_id).ok().flatten().is_some_and(|team| team.policy.full_access());
         chat.active_member_id = member.member.id.clone();
         chat.active_run_id = run_id.clone();
         conn.execute(
@@ -887,9 +924,9 @@ async fn drive(
             let app = run_app.clone();
             let id = chat_id.clone();
             let control = run_control.clone();
-            Box::pin(
-                async move { turn(&app, &id, &member, message, files, read_only, &control).await },
-            )
+            Box::pin(async move {
+                turn(&app, &id, &member, message, files, TurnKind::Chat { read_only }, &control).await
+            })
         },
     )
     .await
@@ -939,7 +976,7 @@ pub fn delete(conn: &Connection, id: &str) -> Result<Vec<String>, String> {
         return Ok(Vec::new());
     };
     let chat: Chat = serde_json::from_str(&raw).map_err(e2s)?;
-    if matches!(chat.status.as_str(), "running" | "cancelling") {
+    if matches!(chat.status.as_str(), "running" | "cancelling") || !chat.active_run_id.is_empty() {
         return Err("Detén la respuesta del equipo antes de eliminar la conversación.".into());
     }
     let batch = format!("{BATCH_PREFIX}{}:", chat.id);
@@ -1109,6 +1146,9 @@ pub fn team_chat_send(
     let (chat, files, answer) = {
         let conn = db.0.lock().map_err(e2s)?;
         let mut chat = get(&conn, &chat_id)?;
+        if !chat.active_run_id.is_empty() {
+            return Err("El equipo está respondiendo a este chat.".into());
+        }
         let task = queries::get_agent_task(&conn, &chat.task_id)
             .map_err(e2s)?
             .ok_or("La conversación ya no existe.")?;

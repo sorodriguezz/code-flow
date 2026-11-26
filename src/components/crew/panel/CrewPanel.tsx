@@ -52,15 +52,13 @@ function goToAgents(space: Space): void {
 }
 
 /** A row's button: an icon always, its word once the panel is wide enough to carry it. */
-function RowButton({ icon: Icon, label, title, tone, disabled, onClick }: {
+function RowButton({ icon: Icon, label, title, disabled, onClick }: {
   icon: typeof Phone;
   label: string;
   title: string;
-  tone: "accent" | "success";
   disabled?: boolean;
   onClick: () => void;
 }) {
-  const color = tone === "success" ? "var(--cf-success)" : "var(--cf-accent)";
   return (
     <button
       type="button"
@@ -70,7 +68,7 @@ function RowButton({ icon: Icon, label, title, tone, disabled, onClick }: {
       aria-label={title}
       className={buttonClass({ variant: "secondary", size: "sm", className: "shrink-0 gap-1 px-1.5 @[27rem]:px-2" })}
     >
-      <Icon className="h-3.5 w-3.5 shrink-0" style={disabled ? undefined : { color }} />
+      <Icon className={`h-3.5 w-3.5 shrink-0 ${disabled ? "" : "text-[var(--cf-accent)]"}`} />
       <span className="hidden @[27rem]:inline">{label}</span>
     </button>
   );
@@ -99,7 +97,7 @@ function CallCard({ call }: { call: CallState }) {
     : call.phase === "starting" ? l("Poniéndose en marcha…", "Getting started…")
     : call.phase === "started" ? l("El equipo está trabajando", "The team is working")
     : l("Llamada terminada", "Call ended");
-  const tone = live ? "var(--cf-success)" : call.phase === "ended" ? "var(--cf-text-muted)" : "var(--cf-accent)";
+  const tone = call.phase === "ended" ? "var(--cf-text-muted)" : "var(--cf-accent)";
   const { restore, hangUp, close } = useTeamCallStore.getState();
   return (
     <div
@@ -246,12 +244,11 @@ function TeamRow({ team, call }: { team: Team; call: CallState | null }) {
         <span className="min-w-0 flex-1">
           <b className="block truncate text-[12.5px] leading-tight" title={team.description || team.name}>{team.name}</b>
           {doing
-            ? <span role="status" className="block truncate text-[11px] font-medium leading-tight" style={{ color: onCall ? "var(--cf-success)" : "var(--cf-accent)" }}>{doing}</span>
+            ? <span role="status" className="block truncate text-[11px] font-medium leading-tight text-[var(--cf-accent)]">{doing}</span>
             : <span className="block truncate text-[11px] leading-tight text-[var(--cf-text-muted)]">{teamLine(team, l)}</span>}
         </span>
         <RowButton
           icon={MessageSquare}
-          tone="accent"
           label={l("Chat", "Chat")}
           disabled={noLead}
           title={noLead ? l("Elige un líder para conversar con el equipo", "Choose a lead to chat with the team") : l(`Chat con ${team.name}: se abre en una ventana flotante`, `Chat with ${team.name}: it opens in a floating window`)}
@@ -259,7 +256,6 @@ function TeamRow({ team, call }: { team: Team; call: CallState | null }) {
         />
         <RowButton
           icon={Phone}
-          tone="success"
           label={onCall ? l("Volver", "Back") : l("Llamar", "Call")}
           disabled={noLead || (starting && !onCall)}
           title={noLead ? l("Elige un líder para llamar al equipo", "Choose a lead to call the team")

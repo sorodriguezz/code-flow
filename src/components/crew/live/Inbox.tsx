@@ -7,9 +7,10 @@ import { motion } from "framer-motion";
 import { CheckCircle2, ExternalLink, Hand, MessageCircleQuestion, Workflow } from "lucide-react";
 import { useTeamStore } from "../../../state/teamStore";
 import { useChainStore } from "../../../state/chainStore";
-import { recoveryNeedsUser, runIsLive, type TeamMessage, type TeamRun } from "../../../types/team";
+import { recoveryNeedsUser, runIsLive, type TeamRun } from "../../../types/team";
 import { Btn, field } from "../kit/ui";
 import { useCrewStore, useL } from "../state";
+import { QuestionReply } from "./QuestionReply";
 
 function gateTitle(run: TeamRun, l: (es: string, en: string) => string): string {
   if (run.gate.split(":")[2]?.startsWith("tests-")) return l("Revisar pruebas debilitadas", "Review weakened tests");
@@ -21,28 +22,6 @@ function gateTitle(run: TeamRun, l: (es: string, en: string) => string): string 
   if (run.gate.startsWith("deps:")) return l("Depende de una tarea que no existe", "Depends on a task that does not exist");
   if (run.gate.startsWith("stuck:")) return l("Se atascó", "It got stuck");
   return l("Espera tu OK", "Needs your OK");
-}
-
-function Question({ m }: { m: TeamMessage }) {
-  const l = useL();
-  const [text, setText] = useState("");
-  const send = (answer: string) => answer.trim() && void useTeamStore.getState().answer(m.run_id, m.id, answer.trim());
-  return (
-    <div className="flex flex-col gap-1.5">
-      <p className="m-0 whitespace-pre-wrap text-[12.5px]">{m.body}</p>
-      {m.options.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {m.options.map((o) => (
-            <button key={o} type="button" onClick={() => send(o)} className="h-[26px] rounded-full border border-[var(--cf-border-strong)] px-2.5 text-[12px] hover:border-[var(--cf-accent)] hover:bg-[var(--cf-accent-soft)]">{o}</button>
-          ))}
-        </div>
-      )}
-      <div className="flex gap-1.5">
-        <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => e.key === "Enter" && send(text)} placeholder={l("Tu respuesta…", "Your answer…")} className={`${field} h-[28px]`} />
-        <Btn small kind="primary" disabled={!text.trim()} title={l("Envía tu respuesta", "Sends your answer")} onClick={() => send(text)}>{l("Responder", "Answer")}</Btn>
-      </div>
-    </div>
-  );
 }
 
 export function Inbox({ onClose }: { onClose: () => void }) {
@@ -128,7 +107,8 @@ export function Inbox({ onClose }: { onClose: () => void }) {
               <b className="text-[12.5px] text-[var(--cf-text)]">{m.from_name}</b>· <span className="min-w-0 flex-1 truncate">{run.title || run.goal}</span>
               <button type="button" title={l("Abre la corrida", "Opens the run")} onClick={() => open(run.id)} className="grid h-6 w-6 place-items-center rounded-md hover:bg-[var(--cf-hover)]"><ExternalLink className="h-3.5 w-3.5" /></button>
             </div>
-            <Question m={m} />
+            <p className="m-0 whitespace-pre-wrap text-[12.5px] leading-relaxed [overflow-wrap:anywhere]">{m.body}</p>
+            <QuestionReply message={m} />
           </section>
         ))}
         {recoveries.map(({ run, first, count }) => (

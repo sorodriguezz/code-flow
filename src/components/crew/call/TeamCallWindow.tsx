@@ -48,7 +48,7 @@ function Chip({ call, l }: { call: NonNullable<ReturnType<typeof useCallHere>>; 
     : call.phase === "starting" ? l("Poniéndose en marcha…", "Getting started…")
     : call.phase === "started" ? l("El equipo está trabajando", "The team is working")
     : l("Llamada terminada", "Call ended");
-  const tone = call.phase === "live" ? "var(--cf-success)" : call.phase === "ended" ? "var(--cf-text-muted)" : "var(--cf-accent)";
+  const tone = call.phase === "ended" ? "var(--cf-text-muted)" : "var(--cf-accent)";
   const { restore, hangUp, close } = useTeamCallStore.getState();
   return (
     <motion.div

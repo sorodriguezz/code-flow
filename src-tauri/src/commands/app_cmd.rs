@@ -116,8 +116,7 @@ pub fn ai_usage_stats(
 /// single number in the status bar, which must not go red over a plan nobody is spending.
 ///
 /// The price is honest and paid only while somebody is looking: an unrouted CLI-driven engine now
-/// costs its subprocess too, which is why that read still happens on `open`/`refresh` alone and
-/// caches for half an hour (see [`crate::ai_quota::Trigger`]).
+/// costs its subprocess too. The desktop's targeted polls ask for one provider at a time.
 #[tauri::command]
 pub async fn ai_quota_status(
     app: tauri::AppHandle,
@@ -125,10 +124,13 @@ pub async fn ai_quota_status(
     trigger: Option<String>,
 ) -> Result<crate::ai_quota::QuotaReport, String> {
     use crate::ai_quota::Trigger;
-    let trigger = match trigger.as_deref() {
-        Some("refresh") => Trigger::Refresh,
-        Some("open") => Trigger::Open,
-        _ => Trigger::Poll,
+    let (trigger, provider_filter) = match trigger.as_deref() {
+        Some("refresh") => (Trigger::Refresh, None),
+        Some("open") => (Trigger::Open, None),
+        Some("opencode_poll") => (Trigger::ProviderPoll, Some("opencode")),
+        Some("gemini_poll") => (Trigger::ProviderPoll, Some("gemini")),
+        Some("grok_poll") => (Trigger::ProviderPoll, Some("grok")),
+        _ => (Trigger::Poll, None),
     };
 
     let (engines, routed) = {
@@ -141,6 +143,7 @@ pub async fn ai_quota_status(
         let accounts = crate::ai_accounts::list(&conn).map_err(|e| e.to_string())?;
         let engines = crate::ai_quota::QUOTA_PROVIDERS
             .iter()
+            .filter(|&&provider| provider_filter.is_none_or(|requested| provider == requested))
             .filter_map(|provider| {
                 let configured = crate::db::queries::get_setting(&conn, &format!("{provider}_binary_path"))
                     .ok()

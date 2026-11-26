@@ -47,13 +47,14 @@ export function useDismissOnOutside(
   open: boolean,
   onDismiss: (reason: DismissReason) => void,
   refs: RefObject<HTMLElement | null>[],
+  ownsPortal?: (target: Element) => boolean,
 ): void {
   useEffect(() => {
     if (!open) return;
 
     const onPress = (e: MouseEvent) => {
       const target = e.target as Node;
-      if (refs.some((ref) => ref.current?.contains(target))) return;
+      if (refs.some((ref) => ref.current?.contains(target)) || (target instanceof Element && ownsPortal?.(target))) return;
       // Grabbing the title bar is moving the window, not clicking somewhere in the app.
       if (pressBelongsToWindow(e)) return;
       onDismiss("press");
@@ -78,5 +79,5 @@ export function useDismissOnOutside(
     // The ref objects are stable for the life of the component; spreading them into the dependency
     // list would re-subscribe on every render for an array literal that is new each time.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, onDismiss]);
+  }, [open, onDismiss, ownsPortal]);
 }

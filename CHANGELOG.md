@@ -7,13 +7,32 @@ qué mejoró, qué se arregló. Solo el impacto en la app: sin nombres de archiv
 sin referencias a una organización, sus paquetes o herramientas internas, y sin datos personales.
 
 Cómo usarlo:
-- Antes de subir la versión en package.json, agrega arriba una sección con ese número exacto:
+- Antes de subir la versión en package.json, pon ese número exacto en la sección «Sin publicar»
+  o agrega una sección nueva si no existe:
   `## 2.9.5` (también vale `## [2.9.5]` o `## v2.9.5`, con ` — fecha` opcional detrás).
 - Dentro, usa las secciones que apliquen y omite las vacías:
   ### ✨ Nuevo · ### 🚀 Mejorado · ### 🐛 Corregido · ### ⚠️ Importante
 - Si falta la sección de la versión, el release se publica igual con los mensajes de commit
   y el workflow deja un aviso.
 -->
+
+## 2.9.14
+
+### ✨ Nuevo
+- **Historial por versión.** En Ajustes › General › Novedades puedes elegir una versión y leer qué cambió.
+
+### 🚀 Mejorado
+- **Consumo y límites abre directamente en tus cuentas.** Los proveedores empiezan plegados. Cada límite alinea el nombre, el porcentaje, la barra y la cuenta regresiva, con la fecha y hora local de reinicio debajo. El buscador queda fijo al desplazarte y los filtros de proveedor, estado y orden usan los selectores de CodeFlow. Desde «Mostrar en barra lateral» puedes elegir qué cuentas aparecen allí.
+- **Cuotas más frecuentes en OpenCode Go, Gemini y Grok.** Cada proveedor se consulta aproximadamente cada 30 segundos mientras la ventana de CodeFlow está visible, aunque cierres «Consumo y límites». Las lecturas se pausan al ocultar la ventana y se reanudan cuando vuelves.
+- **Las llamadas usan el acento de la app.** El borde de quien habla, la onda de voz y los indicadores siguen el tema de CodeFlow en la sala, la bandeja y la barra de estado. La etiqueta «En vivo» conserva el verde.
+
+### 🐛 Corregido
+- **Herramientas durante una llamada.** Los agentes pueden usar Bash y otras herramientas según los permisos de su equipo y su rol. El acta distingue lo que se completó durante la llamada de las tareas pendientes.
+- **Pull requests en el teléfono.** Un dispositivo con acceso completo puede vincular automáticamente un repositorio a partir de su remoto de Git y la conexión guardada en el escritorio. Si falta completar la configuración, el teléfono indica dónde hacerlo.
+- **Bandeja del asistente.** Se quitó «Mover al Chat» de las acciones que aparecen al pasar el cursor por los chats en las listas del espacio de trabajo y del repositorio.
+- **Selección de color de los agentes.** El borde de selección se ve completo junto al borde del editor.
+- **Preguntas y acuerdos del equipo.** Las opciones largas se ajustan en varias líneas en el canal y en «Te necesitan». La respuesta libre tiene su propio campo y «Recordar acuerdo» queda dentro de la tarjeta.
+- **Actividad y tareas de las corridas.** El tiempo y «Detener» pasan a otra fila cuando falta espacio. En el tablero, cada tarea tiene dos líneas para el título y una fila propia para el estado. Pasa el cursor para leer completos los títulos largos y los nombres de las herramientas.
 
 ## 2.9.13
 

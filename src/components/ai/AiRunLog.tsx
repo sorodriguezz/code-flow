@@ -321,19 +321,19 @@ function LiveRun({
         />
       </div>
       <div className="min-w-0 space-y-2">
-        <div className={`flex items-center gap-2 ${reading ? "min-h-8" : "min-h-7"}`}>
+        <div className={`flex flex-wrap items-center gap-x-2 gap-y-1 ${reading ? "min-h-8" : "min-h-7"}`}>
           <button
             type="button"
             onClick={() => setFolded((v) => !v)}
             disabled={!hasFeed}
-            title={waiting ? t("ai.backgroundHint") : quiet ? (delegating ? t("ai.subagentsHint") : t("ai.quietHint")) : undefined}
+            title={waiting ? t("ai.backgroundHint") : quiet ? (delegating ? t("ai.subagentsHint") : t("ai.quietHint")) : headline.text}
             aria-expanded={hasFeed ? showFeed : undefined}
-            className="flex min-w-0 flex-1 items-center gap-2 text-left"
+            className="flex min-w-0 flex-auto items-center gap-1.5 text-left"
           >
             <SwapLabel id={headline.id} text={headline.text} tone={headline.tone} size={reading ? "text-[14px]" : "text-[13px]"} />
             {/* The lanes' count lives here, so the lanes need no title row of their own. */}
             {lanes.length > 0 && headline.id !== "subagents" && (
-              <span className={`shrink-0 text-[var(--cf-text-faint)] ${reading ? "text-[13px]" : "text-[12px]"}`}>
+              <span className={`min-w-0 truncate text-[var(--cf-text-faint)] ${reading ? "text-[13px]" : "text-[12px]"}`}>
                 · {laneCount(t, lanes.length)}
               </span>
             )}
@@ -345,21 +345,24 @@ function LiveRun({
               />
             )}
           </button>
-          <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--cf-text-faint)]">
-            {formatElapsed(elapsed)}
-            {reading && laneSpan.stepTotal > 0 && ` · ${stepCount(t, laneSpan.stepTotal)}`}
-          </span>
-          {runId && showStop && (
-            <button
-              onClick={() => void cancel(runId)}
-              disabled={cancelling}
-              title={t("ai.stopRun")}
-              className={buttonClass({ variant: "secondary", size: "sm" })}
-            >
-              <Square size={10} className="fill-current" />
-              {cancelling ? t("ai.stopping") : t("ai.stop")}
-            </button>
-          )}
+          <div className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-x-2 gap-y-1">
+            <span className="min-w-0 font-mono text-[11px] tabular-nums text-[var(--cf-text-faint)]">
+              {formatElapsed(elapsed)}
+              {reading && laneSpan.stepTotal > 0 && ` · ${stepCount(t, laneSpan.stepTotal)}`}
+            </span>
+            {runId && showStop && (
+              <button
+                type="button"
+                onClick={() => void cancel(runId)}
+                disabled={cancelling}
+                title={t("ai.stopRun")}
+                className={buttonClass({ variant: "secondary", size: "sm" })}
+              >
+                <Square size={10} className="fill-current" />
+                {cancelling ? t("ai.stopping") : t("ai.stop")}
+              </button>
+            )}
+          </div>
         </div>
 
         {((showFeed && hasStepFeed) || quietBar) && (
@@ -671,7 +674,7 @@ function StepRow({
           : status === "stop" || step.kind !== "tool"
             ? "bg-[var(--cf-border-strong)]"
             : "bg-[var(--cf-success)]";
-  const clip = wrap ? "whitespace-pre-wrap break-words" : "truncate";
+  const clip = wrap ? "whitespace-pre-wrap [overflow-wrap:anywhere]" : "truncate";
   // A CodeFlow script is one step that opens into its calls — drawn by the app's own records.
   if (step.script) {
     return (
@@ -685,12 +688,12 @@ function StepRow({
       <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dot} ${wrap ? "mt-[6px]" : ""}`} />
       {step.sub && <span className="shrink-0 font-mono text-[11px] text-[var(--cf-text-faint)]">↳</span>}
       {step.kind === "tool" ? (
-        <>
-          <span className="shrink-0 font-mono text-[11.5px] font-medium text-[var(--cf-text)]">{step.tool}</span>
-          <span title={step.arg} className={`min-w-0 flex-1 font-mono text-[11.5px] text-[var(--cf-text-muted)] ${clip}`}>
-            {step.arg}
+        <span className="flex min-w-0 flex-1 gap-2 font-mono text-[11.5px]">
+          <span title={step.tool} className={`min-w-0 font-medium text-[var(--cf-text)] ${step.arg ? "max-w-[60%]" : ""} ${clip}`}>
+            {step.tool}
           </span>
-        </>
+          {step.arg && <span title={step.arg} className={`min-w-0 flex-1 text-[var(--cf-text-muted)] ${clip}`}>{step.arg}</span>}
+        </span>
       ) : (
         <span
           className={`min-w-0 flex-1 text-[12px] ${clip} ${
@@ -746,13 +749,13 @@ function SwapLabel({ id, text, tone, size }: { id: string; text: string; tone: "
   const toneClass = (value: typeof tone) =>
     value === "live" ? "cf-text-shimmer" : value === "warn" ? "text-[var(--cf-warning)]" : "text-[var(--cf-text-muted)]";
   return (
-    <span className={`relative inline-grid min-w-0 shrink-0 font-semibold ${size}`}>
+    <span className={`relative inline-grid min-w-0 grid-cols-[minmax(0,1fr)] font-semibold ${size}`}>
       {leaving && (
-        <span key={`out-${leaving.n}`} aria-hidden className={`cf-run-label-out whitespace-nowrap [grid-area:1/1] ${toneClass(leaving.tone)}`}>
+        <span key={`out-${leaving.n}`} aria-hidden className={`cf-run-label-out truncate [grid-area:1/1] ${toneClass(leaving.tone)}`}>
           {leaving.text}
         </span>
       )}
-      <span key={`in-${shown.n}`} className={`whitespace-nowrap [grid-area:1/1] ${shown.n > 0 ? "cf-run-label-in" : ""} ${toneClass(shown.tone)}`}>
+      <span key={`in-${shown.n}`} className={`truncate [grid-area:1/1] ${shown.n > 0 ? "cf-run-label-in" : ""} ${toneClass(shown.tone)}`}>
         {shown.text}
       </span>
     </span>

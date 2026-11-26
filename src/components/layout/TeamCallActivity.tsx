@@ -39,7 +39,7 @@ export function TeamCallActivity() {
           void followTarget(call.workspaceId, {});
         }}
         aria-label={t("teamCall.barTooltip", { team: call.teamName })}
-        className="flex h-[22px] items-center gap-[6px] rounded-md px-1.5 text-[12px] font-medium text-[var(--cf-success)] hover:bg-[var(--cf-hover)]"
+        className="flex h-[22px] items-center gap-[6px] rounded-md px-1.5 text-[12px] font-medium text-[var(--cf-accent)] hover:bg-[var(--cf-hover)]"
       >
         <AudioLines size={13} className={speaker || call.hearing ? "animate-pulse" : ""} />
         <span className="tabular-nums">{call.phase === "live" ? `${t("teamCall.bar")} · ${time}` : t("teamCall.bar")}</span>

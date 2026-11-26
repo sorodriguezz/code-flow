@@ -169,6 +169,7 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     // `UpdateSection`), the tours on their own, and the app's own files.
     tabs: [
       { id: "language", labelKey: "settings.tabLanguageUpdates", icon: Languages, searchKey: "settings.searchTermsLanguageUpdates" },
+      { id: "changelog", labelKey: "settings.tabChangelog", icon: History, searchKey: "settings.searchTermsChangelog" },
       { id: "tours", labelKey: "tour.settingsTitle", hintKey: "tour.settingsHint", icon: GraduationCap, searchKey: "settings.searchTermsTours" },
       { id: "data", labelKey: "settings.tabAppData", icon: HardDrive, searchKey: "settings.searchTermsAppData" },
       // The version, the log folder and the way to report a problem — which were only ever in the

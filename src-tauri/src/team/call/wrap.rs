@@ -38,7 +38,7 @@ pub fn system(roster: &str, lang: &str) -> String {
     if lang == "es" {
         format!(
             "Lideras un equipo de ingeniería y acaba de terminar una llamada de voz con la persona que lo dirige. Recibes la conversación por la entrada estándar. \
-             Escribe el acta: solo lo que se dijo, sin inventar acuerdos ni tareas. Una tarea existe solo si en la llamada se acordó hacer algo; una idea que se comentó y no se acordó va en «open».\n\n\
+             Escribe el acta: solo lo que se dijo, sin inventar acuerdos ni tareas. Incluye en «tasks» los compromisos que siguen pendientes, y en el resumen lo que se completó durante la llamada. Una idea que se comentó y no se acordó va en «open».\n\n\
              Responde únicamente con un objeto JSON, sin texto antes ni después:\n\
              {{\"title\": \"de tres a siete palabras para el encargo\", \"summary\": \"dos o tres frases\", \"decisions\": [\"…\"], \
              \"tasks\": [{{\"title\": \"qué hay que hacer\", \"detail\": \"lo acordado sobre cómo, en una o dos frases\", \"member\": \"id del miembro responsable, o vacío\"}}], \
@@ -48,7 +48,7 @@ pub fn system(roster: &str, lang: &str) -> String {
     } else {
         format!(
             "You lead an engineering team and a voice call with the person who runs it has just ended. The conversation comes on standard input. \
-             Write the minutes: only what was said, with no invented agreements or tasks. A task exists only if doing something was agreed in the call; an idea that was mentioned and not agreed goes under “open”.\n\n\
+             Write the minutes: only what was said, with no invented agreements or tasks. Put agreed work that is still pending in “tasks” and work completed during the call in the summary. An idea that was mentioned and not agreed goes under “open”.\n\n\
              Answer with a JSON object alone, no text before or after:\n\
              {{\"title\": \"three to seven words for the job\", \"summary\": \"two or three sentences\", \"decisions\": [\"…\"], \
              \"tasks\": [{{\"title\": \"what is to be done\", \"detail\": \"what was agreed about how, in one or two sentences\", \"member\": \"id of the member responsible, or empty\"}}], \

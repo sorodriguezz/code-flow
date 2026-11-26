@@ -151,11 +151,11 @@ impl Stage for AppStage {
         async move {
             let control: chat::Control = Arc::new(tokio::sync::watch::channel(false).0);
             let message = if lang == "es" {
-                format!("Estás en una llamada con el equipo y dijiste que ibas a revisar el código.\n\n## Qué tienes que mirar\n{what}\n\n## Lo que se ha dicho en la llamada\n{talk}\n\nMíralo en el repositorio, solo lectura, y responde con lo que encontraste: lo esencial primero, con los archivos donde está.")
+                format!("Estás en una llamada con el equipo.\n\n## Qué te pidieron hacer\n{what}\n\n## Lo que se ha dicho en la llamada\n{talk}\n\nUsa las herramientas disponibles para resolver el pedido según tus permisos. Si te pidieron ejecutar o cambiar algo y tienes permiso, hazlo. Resume el resultado y lo que pudiste verificar.")
             } else {
-                format!("You are on a call with the team and said you would look at the code.\n\n## What to look at\n{what}\n\n## What has been said on the call\n{talk}\n\nLook at it in the repository, read-only, and answer with what you found: the gist first, with the files where it is.")
+                format!("You are on a call with the team.\n\n## What you were asked to do\n{what}\n\n## What has been said on the call\n{talk}\n\nUse the available tools to handle the request within your permissions. If asked to run something or make a change and you have permission, do it. Summarize the result and what you verified.")
             };
-            let turn = chat::turn(&app, &chat_id, &member, message, None, true, &control);
+            let turn = chat::turn(&app, &chat_id, &member, message, None, chat::TurnKind::Call, &control);
             tokio::pin!(turn);
             let found = tokio::select! {
                 found = &mut turn => found,

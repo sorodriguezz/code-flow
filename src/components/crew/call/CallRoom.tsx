@@ -4,9 +4,9 @@
  *
  * Laid out as a call is: whoever leads the team large on one side, everybody else — the user
  * first — in a mosaic beside it. Where a face would be, each agent shows the mark of the provider
- * it answers with, so whose model is speaking is seen at a glance; whoever speaks is framed in
- * green. A participant waiting for the word shows its hand, numbered by who asked first, and the
- * user gives the word by pressing it. Under them the conversation is written as it is said. When
+ * it answers with, and the app's accent frames whoever is speaking. A participant waiting for
+ * the word shows its hand, numbered by who asked first. The user gives the word by pressing it.
+ * Under them the conversation is written as it is said. When
  * the call ends the same room shows what was agreed and the team starting on it.
  */
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type HTMLAttributes, type ReactNode } from "react";
@@ -79,10 +79,11 @@ export { shortModel };
 
 /** What a participant's state is drawn with: the colour of its dot and of its words. */
 function stateTone(seat: CallSeat, working: boolean): string {
-  if (seat.state === "speaking") return "var(--cf-success)";
   if (seat.state === "hand") return "var(--cf-warning)";
-  if (seat.state === "thinking" || seat.state === "looking" || working) return "var(--cf-accent)";
-  return "color-mix(in oklab, var(--cf-success) 55%, var(--cf-text-faint))";
+  if (seat.state === "listening" && !working) {
+    return "color-mix(in oklab, var(--cf-accent) 55%, var(--cf-text-faint))";
+  }
+  return "var(--cf-accent)";
 }
 
 /** The line of a tile that says what its participant is doing: a dot and a word. */
@@ -186,7 +187,7 @@ function SeatName({ name, className = "" }: { name: string; className?: string }
 function VoiceOver({ speaking, level, size }: { speaking: boolean; level: () => number; size?: "md" | "lg" }) {
   return (
     <span aria-hidden className={`pointer-events-none absolute inset-0 grid place-items-center transition-opacity duration-200 ${speaking ? "opacity-100" : "opacity-0"}`}>
-      <VoiceBars level={level} active={speaking} color="var(--cf-success)" size={size} />
+      <VoiceBars level={level} active={speaking} color="var(--cf-accent)" size={size} />
     </span>
   );
 }
@@ -212,8 +213,8 @@ export function enteredSeats(before: readonly string[], seats: readonly CallSeat
   return entered;
 }
 
-/** The frame of whoever is speaking: the room's green, the one thing that says «this one» at a glance. */
-const speakingFrame = { borderColor: "var(--cf-success)", boxShadow: "0 0 0 1px var(--cf-success), 0 10px 26px -16px var(--cf-success)" };
+/** The accent marks the tile of whoever is speaking. */
+const speakingFrame = { borderColor: "var(--cf-accent)", boxShadow: "0 0 0 1px var(--cf-accent), 0 10px 26px -16px var(--cf-accent)" };
 
 /**
  * A participant, small: where a face would be, the mark of the provider it answers with — whose
@@ -279,7 +280,7 @@ function YouTile({ call, status, level, l }: { call: CallState; status: string; 
         </span>
         <span className="min-w-0 flex-1">
           <b className="block truncate text-[11.5px] leading-tight">{l("Tú", "You")}</b>
-          <StateLine label={status} tone={speaking ? "var(--cf-success)" : "var(--cf-text-faint)"} strong={speaking} pulse={false} />
+          <StateLine label={status} tone={speaking ? "var(--cf-accent)" : "var(--cf-text-faint)"} strong={speaking} pulse={false} />
         </span>
       </div>
     </div>
@@ -686,7 +687,7 @@ export function CallRoom({ call, grip, controls, shown = true, onClose }: {
     : call.phase === "countdown" || call.phase === "starting" ? l("Por empezar", "About to start")
     : call.phase === "started" ? l("Trabajando", "Working")
     : l("Terminada", "Ended");
-  const phaseTone = live ? "var(--cf-success)" : call.phase === "ended" ? "var(--cf-text-muted)" : "var(--cf-accent)";
+  const phaseTone = call.phase === "ended" ? "var(--cf-text-muted)" : "var(--cf-accent)";
   const copy = () => {
     void navigator.clipboard?.writeText(transcriptText(lines, l)).then(
       () => useToastStore.getState().pushToast(l("Transcripción copiada", "Transcript copied"), "success"),
@@ -700,7 +701,7 @@ export function CallRoom({ call, grip, controls, shown = true, onClose }: {
         {...grip}
         className={`@container flex shrink-0 items-center gap-2.5 border-b border-[var(--cf-border)] px-4 py-3 ${grip ? "cursor-default select-none" : ""}`}
       >
-        <span className="pointer-events-none grid h-8 w-8 shrink-0 place-items-center rounded-[10px] bg-[color-mix(in_oklab,var(--cf-success)_14%,var(--cf-surface))] text-[var(--cf-success)]">
+        <span className="pointer-events-none grid h-8 w-8 shrink-0 place-items-center rounded-[10px] bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]">
           <AudioLines className={`h-4 w-4 ${speaker ? "animate-pulse" : ""}`} />
         </span>
         <div className="pointer-events-none min-w-0 flex-1">

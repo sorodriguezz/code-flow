@@ -334,6 +334,7 @@ export const MUTATING = new Set([
   "set_agent_task_pinned",
   "cancel_ai_run",
   "analyze_working_changes",
+  "auto_link_project",
   "review_pull_request",
   "act_on_pull_request",
   "post_pr_review_comment",
