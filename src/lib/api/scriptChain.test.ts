@@ -160,6 +160,36 @@ describe("runScriptChain", () => {
     expect(order(post.scopes)).toBe("CF1F2Rcf1r");
   });
 
+  it("fills raw JSON holes from pre-request variables before the next script and send", async () => {
+    const sent = request();
+    sent.body = { kind: "text", contentType: "application/json", text: '{"contadores": {{contadores}}, "fechaHora": "{{fechaHora}}"}' };
+    const refs = chainScripts({
+      collection: collection('pm.variables.set("contadores", { paginas: 2 })', ""),
+      folders: [],
+      request: {
+        name: "Schedule",
+        preScript: 'pm.variables.set("fechaHora", "2026-11-27T12:00:00-03:00"); pm.expect(pm.request.body.raw).to.contain(\'"paginas":2\');',
+        postScript: "",
+      },
+    }, "pre");
+    const outcome = await runScriptChain(refs, { request: sent, scopes: EMPTY_SCOPES });
+    expect(outcome.errors).toEqual([]);
+    expect(JSON.parse(sent.body.text)).toEqual({ contadores: { paginas: 2 }, fechaHora: "2026-11-27T12:00:00-03:00" });
+  });
+
+  it("preserves an explicit body replacement by a pre-request script", async () => {
+    const sent = request();
+    sent.body = { kind: "text", contentType: "application/json", text: "{{data}}" };
+    const refs = chainScripts({
+      collection: collection('pm.request.body.raw = \'{"literal":"{{data}}"}\';', ""),
+      folders: [],
+      request: { name: "Literal", preScript: 'pm.variables.set("data", 2)', postScript: "" },
+    }, "pre");
+    const outcome = await runScriptChain(refs, { request: sent, scopes: EMPTY_SCOPES });
+    expect(outcome.errors).toEqual([]);
+    expect(sent.body.text).toBe('{"literal":"{{data}}"}');
+  });
+
   it("shares one request: a header the collection adds is on the wire and seen by the request's script", async () => {
     const sent = request();
     const refs = chainScripts(

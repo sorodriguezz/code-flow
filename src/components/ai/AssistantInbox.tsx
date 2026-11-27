@@ -1000,7 +1000,6 @@ function RecentRow({
           {pr && <span className="shrink-0 font-mono text-[11px] text-[var(--cf-text-muted)]">#{pr.id}</span>}
           <button
             onClick={() => void openActivityEntry(entry)}
-            title={title}
             // Stretched over the whole row: a click anywhere on it opens the activity.
             className="min-w-0 truncate text-left text-[13px] text-[var(--cf-text)] after:absolute after:inset-0 after:rounded-lg after:content-['']"
           >

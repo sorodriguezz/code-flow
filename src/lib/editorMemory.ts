@@ -58,8 +58,6 @@ export interface RememberedExplorer {
   expanded: string[];
   /** File rows whose nest is unfolded — `FileTree`'s `nestOpen`. */
   nestOpen: string[];
-  /** The clicked row, where a new file would land. */
-  focus: { path: string; isDir: boolean };
   scrollTop: number;
 }
 
@@ -187,13 +185,11 @@ function readEditor(value: unknown): RememberedEditor | null {
 }
 
 function readExplorer(value: unknown): RememberedExplorer | null {
-  if (!isRecord(value) || !isStringArray(value.expanded) || !isStringArray(value.nestOpen) || !isRecord(value.focus)) {
+  if (!isRecord(value) || !isStringArray(value.expanded) || !isStringArray(value.nestOpen)) {
     return null;
   }
-  const { path, isDir } = value.focus;
-  if (!isString(path) || typeof isDir !== "boolean") return null;
   const scrollTop = typeof value.scrollTop === "number" && Number.isFinite(value.scrollTop) ? Math.max(0, value.scrollTop) : 0;
-  return { expanded: value.expanded, nestOpen: value.nestOpen, focus: { path, isDir }, scrollTop };
+  return { expanded: value.expanded, nestOpen: value.nestOpen, scrollTop };
 }
 
 /** What was stored, entry by entry — anything that is not what this version writes is skipped, and

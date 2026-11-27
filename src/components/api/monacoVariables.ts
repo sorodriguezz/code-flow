@@ -15,6 +15,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { OnMount } from "@monaco-editor/react";
 import type { editor as MonacoEditorNS, IRange, languages as MonacoLanguages } from "monaco-editor";
 import { monaco } from "../../lib/monacoSetup";
+import { checkJsonTemplate } from "../../lib/api/jsonTemplate";
 import {
   DYNAMIC_VARIABLES,
   findUnresolved,
@@ -27,11 +28,36 @@ import { translate } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { VariableScope } from "../../types/api";
 
-/** Every language an API editor can be set to. `text` is the body's own id for plain text, which
- * Monaco does not know and loads as `plaintext` — both are listed so either name is covered. */
-const LANGUAGES = ["json", "xml", "html", "javascript", "plaintext", "text", "graphql"];
-
 const TOKEN_SCAN = /\{\{([^{}]*)\}\}/g;
+export const API_JSON_TEMPLATE_LANGUAGE = "cf-api-json-template";
+/** The body calls plain text `text`, and Monaco loads it as `plaintext`. */
+const LANGUAGES = ["json", API_JSON_TEMPLATE_LANGUAGE, "xml", "html", "javascript", "plaintext", "text", "graphql"];
+
+// Template models use their own diagnostics. Ordinary JSON and IDE files keep Monaco's service.
+monaco.languages.register({ id: API_JSON_TEMPLATE_LANGUAGE });
+monaco.languages.setLanguageConfiguration(API_JSON_TEMPLATE_LANGUAGE, {
+  brackets: [["{", "}"], ["[", "]"]],
+  autoClosingPairs: [
+    { open: "{", close: "}", notIn: ["string"] },
+    { open: "[", close: "]", notIn: ["string"] },
+    { open: '"', close: '"', notIn: ["string"] },
+  ],
+});
+monaco.languages.setMonarchTokensProvider(API_JSON_TEMPLATE_LANGUAGE, {
+  tokenPostfix: ".json",
+  tokenizer: {
+    root: [
+      [/\{\{[^{}]*\}\}/, "variable"],
+      [/"(?:[^"\\]|\\.)*"(?=\s*:)/, "string.key"],
+      [/"(?:[^"\\]|\\.)*"?/, "string.value"],
+      [/-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/, "number"],
+      [/\b(?:true|false|null)\b/, "keyword"],
+      [/[{}\[\]]/, "@brackets"],
+      [/:/, "delimiter.colon"],
+      [/,/, "delimiter.comma"],
+    ],
+  },
+});
 
 const SCOPE_LABELS: Record<VariableScope, TranslationKey> = {
   local: "api.scope.local",
@@ -229,6 +255,12 @@ export function useEditorVariables(ctx: VariableContext | null): OnMount {
     const decorations = editor.createDecorationsCollection();
     const getContext = () => ctxRef.current;
     let claimed: string | null = null;
+    let markerModel: MonacoEditorNS.ITextModel | null = null;
+
+    const clearTemplateMarkers = () => {
+      if (markerModel && !markerModel.isDisposed()) monaco.editor.setModelMarkers(markerModel, API_JSON_TEMPLATE_LANGUAGE, []);
+      markerModel = null;
+    };
 
     const release = () => {
       if (claimed && owners.get(claimed) === getContext) owners.delete(claimed);
@@ -242,6 +274,24 @@ export function useEditorVariables(ctx: VariableContext | null): OnMount {
     };
     const paint = () => {
       const model = editor.getModel();
+      if (markerModel && (model !== markerModel || model.getLanguageId() !== API_JSON_TEMPLATE_LANGUAGE)) {
+        clearTemplateMarkers();
+      }
+      if (model?.getLanguageId() === API_JSON_TEMPLATE_LANGUAGE) {
+        markerModel = model;
+        const value = model.getValue();
+        const { error, offset } = checkJsonTemplate(value);
+        const start = model.getPositionAt(offset);
+        const end = model.getPositionAt(offset + 1);
+        monaco.editor.setModelMarkers(model, API_JSON_TEMPLATE_LANGUAGE, error && value.trim() ? [{
+          severity: monaco.MarkerSeverity.Error,
+          message: error,
+          startLineNumber: start.lineNumber,
+          startColumn: start.column,
+          endLineNumber: end.lineNumber,
+          endColumn: end.column,
+        }] : []);
+      }
       const current = ctxRef.current;
       if (!model || !current) {
         decorations.clear();
@@ -258,11 +308,13 @@ export function useEditorVariables(ctx: VariableContext | null): OnMount {
         paint();
       }),
       editor.onDidChangeModelContent(paint),
+      editor.onDidChangeModelLanguage(paint),
     ];
     repaint.current = paint;
 
     const dispose = () => {
       subscriptions.forEach((subscription) => subscription.dispose());
+      clearTemplateMarkers();
       release();
       repaint.current = () => {};
       teardown.current = null;

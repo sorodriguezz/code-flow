@@ -40,23 +40,24 @@ const ANSI_NAMES = [
  */
 const SELECTION = { light: "#3b82f659", dark: "#60a5fa66" } as const;
 
+/** xterm halves the target for SGR dim text. Keep that target legible on glass as well. */
+export const GLASS_TERMINAL_CONTRAST = 8;
+
 /**
  * The terminal painted in the scheme on screen: its ground, its text and its sixteen colours.
  *
  * The ground is the editor's (`ui.bg`, what Monaco paints), so a shell reads as the same material as
- * code. In a see-through window it is cleared, as the editor's is, and the sheet's glass shows
- * through; `allowTransparency` must be on for xterm to honour that. The cursor's accent — the glyph
- * drawn inside a block cursor — stays the solid ground either way, or it would vanish into the glass.
+ * code. On glass, xterm uses the ground's RGB for contrast correction and the pane paints the tint
+ * underneath. Zero alpha keeps xterm's default cells transparent. The cursor's accent stays solid.
  *
  * The cleared ground relies on `patches/@xterm__addon-webgl@0.19.0.patch`: unpatched, the WebGL
- * renderer paints a dimmed cell's default background opaque, and `#00000000` at full alpha is the
- * black bars that showed behind restored sessions and dim output (Prisma's, `zsh`'s).
+ * renderer paints a dimmed cell's default background opaque, making bars behind dim output.
  */
 export function terminalTheme(scheme: CodeTheme, glass: boolean): ITheme {
   const ansi = scheme.ansi ?? VSCODE_ANSI[scheme.mode];
   const selection = SELECTION[scheme.mode];
   const theme: ITheme = {
-    background: glass ? "#00000000" : scheme.ui.bg,
+    background: glass ? `${scheme.ui.bg}00` : scheme.ui.bg,
     foreground: scheme.ui.text,
     cursor: scheme.ui.text,
     cursorAccent: scheme.ui.bg,

@@ -9,13 +9,14 @@ import { buttonClass, iconButtonClass } from "../common/Button";
 import { Tooltip } from "../common/Tooltip";
 import { KeyValueTable } from "./KeyValueTable";
 import { GraphqlPanel } from "./GraphqlPanel";
-import { useEditorVariables } from "./monacoVariables";
+import { API_JSON_TEMPLATE_LANGUAGE, useEditorVariables } from "./monacoVariables";
 import { useApiStore } from "../../state/apiStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useT } from "../../state/languageStore";
 import { pushErrorToast } from "../../state/toastStore";
 import { apiPickFile } from "../../lib/tauri/apiCommands";
 import { RAW_CONTENT_TYPES } from "../../lib/api/send";
+import { checkJsonTemplate, formatJsonTemplate } from "../../lib/api/jsonTemplate";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { ApiRequestSpec, BodyMode, RawLanguage, RequestBody } from "../../types/api";
 
@@ -165,15 +166,11 @@ function Body({
   const patchBody = (patch: Partial<RequestBody>) =>
     updateDraft(tabId, { body: { ...body, ...patch } });
 
-  const jsonError = useMemo(() => {
+  const jsonCheck = useMemo(() => {
     if (body.mode !== "raw" || body.rawLanguage !== "json" || body.raw.trim() === "") return null;
-    try {
-      JSON.parse(body.raw);
-      return null;
-    } catch (e) {
-      return messageOf(e);
-    }
+    return checkJsonTemplate(body.raw);
   }, [body.mode, body.rawLanguage, body.raw]);
+  const jsonError = jsonCheck?.error;
 
   const explicitContentType = useMemo(
     () => spec.headers.find((row) => row.enabled && row.key.trim().toLowerCase() === "content-type") ?? null,
@@ -207,8 +204,12 @@ function Body({
 
   const beautify = () => {
     if (body.rawLanguage === "json") {
+      if (jsonError) {
+        pushErrorToast(t("api.body.invalidJson", { error: jsonError }));
+        return;
+      }
       try {
-        patchBody({ raw: JSON.stringify(JSON.parse(body.raw), null, 2) });
+        patchBody({ raw: formatJsonTemplate(body.raw, jsonCheck?.hasVariables ?? false) });
       } catch (e) {
         pushErrorToast(t("api.body.invalidJson", { error: messageOf(e) }));
       }
@@ -299,7 +300,7 @@ function Body({
               rows={body.formdata}
               onChange={(rows) => patchBody({ formdata: rows })}
               fileRows
-              allowBulkEdit
+              bulkPlaceholder={t("api.bulkBodyExample")}
               variableContext={variableContext}
             />
           </div>
@@ -311,7 +312,7 @@ function Body({
               key={`${tabId}:urlencoded`}
               rows={body.urlencoded}
               onChange={(rows) => patchBody({ urlencoded: rows })}
-              allowBulkEdit
+              bulkPlaceholder={t("api.bulkBodyExample")}
               variableContext={variableContext}
             />
           </div>
@@ -326,7 +327,7 @@ function Body({
                 // and cursor. The scheme is this panel's own — `cf-editor` URIs are file models
                 // and would be offered to "go to definition".
                 path={`cf-api:/body/${tabId}`}
-                language={body.rawLanguage}
+                language={jsonCheck?.hasVariables ? API_JSON_TEMPLATE_LANGUAGE : body.rawLanguage}
                 value={body.raw}
                 theme={monacoTheme}
                 onMount={handleRawMount}
@@ -351,7 +352,9 @@ function Body({
                   // cuts off.
                   title={jsonError ? t("api.body.invalidJson", { error: jsonError }) : undefined}
                 >
-                  {jsonError ? t("api.body.invalidJson", { error: jsonError }) : t("api.body.validJson")}
+                  {jsonError
+                    ? t("api.body.invalidJson", { error: jsonError })
+                    : t(jsonCheck?.hasVariables ? "api.body.validJsonTemplate" : "api.body.validJson")}
                 </span>
               </div>
             )}

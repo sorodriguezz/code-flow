@@ -29,12 +29,13 @@ import { pushErrorToast } from "./toastStore";
 interface KnowledgeStore {
   workspaceId: string | null;
   overview: KnowledgeOverview | null;
+  loadFailed: boolean;
   reindexing: boolean;
   /** What the last «Actualizar índice» did, summed over every repository and folder — the pane says
    *  it, so an update that changed three files does not read as "it did nothing" or "it started over". */
   lastReindex: (ReindexSummary & { workspaceId: string }) | null;
   progress: Record<string, LocalAiDownloadEvent>;
-  load: (workspaceId: string) => Promise<void>;
+  load: (workspaceId: string, refresh?: boolean) => Promise<void>;
   reindex: () => Promise<void>;
   /** Empties the workspace's part of the index; the next search rebuilds it. */
   clear: () => Promise<void>;
@@ -68,10 +69,11 @@ export function sumRefreshed(list: readonly KnowledgeRefreshed[]): ReindexSummar
 let subscribed = false;
 
 export const useKnowledgeStore = create<KnowledgeStore>((set, get) => {
-  let latestLoad = 0;
+  const overviews = new Map<string, KnowledgeOverview>();
+  const pending = new Map<string, Promise<KnowledgeOverview>>();
   const again = async () => {
     const ws = get().workspaceId;
-    if (ws) await get().load(ws);
+    if (ws) await get().load(ws, true);
   };
   const guard = async (work: () => Promise<unknown>) => {
     try {
@@ -84,12 +86,12 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => {
   return {
     workspaceId: null,
     overview: null,
+    loadFailed: false,
     reindexing: false,
     lastReindex: null,
     progress: {},
 
-    load: async (workspaceId) => {
-      const request = ++latestLoad;
+    load: async (workspaceId, refresh = false) => {
       if (!subscribed) {
         subscribed = true;
         void onLocalAiDownload((event) => {
@@ -97,12 +99,27 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => {
           if (event.phase === "done" || event.phase === "failed") void again();
         });
       }
-      set((s) => (s.workspaceId === workspaceId ? {} : { workspaceId, overview: null }));
+      set((s) => ({
+        workspaceId,
+        overview: s.workspaceId === workspaceId ? s.overview : (overviews.get(workspaceId) ?? null),
+        loadFailed: false,
+      }));
+      const existing = pending.get(workspaceId);
+      if (existing && !refresh) {
+        await existing.catch(() => {});
+        return;
+      }
+      const request = knowledgeOverview(workspaceId);
+      pending.set(workspaceId, request);
       try {
-        const overview = await knowledgeOverview(workspaceId);
-        if (request === latestLoad && get().workspaceId === workspaceId) set({ overview });
-      } catch (e) {
-        if (request === latestLoad) pushErrorToast(String(e));
+        const overview = await request;
+        if (pending.get(workspaceId) !== request) return;
+        overviews.set(workspaceId, overview);
+        if (get().workspaceId === workspaceId) set({ overview });
+      } catch {
+        if (pending.get(workspaceId) === request && get().workspaceId === workspaceId) set({ loadFailed: true });
+      } finally {
+        if (pending.get(workspaceId) === request) pending.delete(workspaceId);
       }
     },
 

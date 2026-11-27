@@ -525,64 +525,66 @@ function TreeRowBase({
         </span>
       )}
 
-      {/* The one control here that stays lit when it's off-hover: a pin is state, not an action,
-          and it's the reason the row is where it is in the list. */}
-      {onTogglePin && (
-        <Tooltip label={pinned ? t("api.unpinCollection") : t("api.pinCollection")}>
-          <button
-            type="button"
-            aria-label={pinned ? t("api.unpinCollection") : t("api.pinCollection")}
-            aria-pressed={pinned}
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              onTogglePin(node);
-            }}
-            className={pinned ? iconButtonClass({ size: "xs" }) : ROW_ACTION}
-          >
-            <Star
-              size={13}
-              fill={pinned ? "currentColor" : "none"}
-              className={pinned ? "text-[var(--cf-accent)]" : undefined}
-            />
-          </button>
-        </Tooltip>
-      )}
+      <div className={`shrink-0 items-center gap-0.5 ${pinned && onTogglePin ? "flex" : "hidden group-hover:flex group-focus-within:flex"}`}>
+        {/* The one control here that stays lit when it's off-hover: a pin is state, not an action,
+            and it's the reason the row is where it is in the list. */}
+        {onTogglePin && (
+          <Tooltip label={pinned ? t("api.unpinCollection") : t("api.pinCollection")}>
+            <button
+              type="button"
+              aria-label={pinned ? t("api.unpinCollection") : t("api.pinCollection")}
+              aria-pressed={pinned}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onTogglePin(node);
+              }}
+              className={pinned ? iconButtonClass({ size: "xs" }) : ROW_ACTION}
+            >
+              <Star
+                size={13}
+                fill={pinned ? "currentColor" : "none"}
+                className={pinned ? "text-[var(--cf-accent)]" : undefined}
+              />
+            </button>
+          </Tooltip>
+        )}
 
-      {/* Creating a request is the overwhelmingly common thing to do to a collection, and it was
-          two clicks behind the menu. Sits left of the overflow, revealed on hover like it. */}
-      {onQuickAdd && (
-        <Tooltip label={t("api.newRequest")}>
+        {/* Creating a request is the overwhelmingly common thing to do to a collection, and it was
+            two clicks behind the menu. Sits left of the overflow, revealed on hover like it. */}
+        {onQuickAdd && (
+          <Tooltip label={t("api.newRequest")}>
+            <button
+              type="button"
+              aria-label={t("api.newRequest")}
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation();
+                onQuickAdd(node);
+              }}
+              className={ROW_ACTION}
+            >
+              <Plus size={14} />
+            </button>
+          </Tooltip>
+        )}
+
+        <Tooltip label={t("api.moreActions")}>
           <button
             type="button"
-            aria-label={t("api.newRequest")}
+            aria-label={t("api.moreActions")}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
-              onQuickAdd(node);
+              const rect = e.currentTarget.getBoundingClientRect();
+              onMenu(node, rect.left, rect.bottom + 2);
             }}
             className={ROW_ACTION}
           >
-            <Plus size={14} />
+            <MoreHorizontal size={14} />
           </button>
         </Tooltip>
-      )}
-
-      <Tooltip label={t("api.moreActions")}>
-        <button
-          type="button"
-          aria-label={t("api.moreActions")}
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => {
-            e.stopPropagation();
-            const rect = e.currentTarget.getBoundingClientRect();
-            onMenu(node, rect.left, rect.bottom + 2);
-          }}
-          className={ROW_ACTION}
-        >
-          <MoreHorizontal size={14} />
-        </button>
-      </Tooltip>
+      </div>
     </div>
   );
 }

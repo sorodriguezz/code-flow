@@ -485,6 +485,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     nonce: number;
     path?: string;
   } | null>(null);
+  const [tabSelectionVersion, setTabSelectionVersion] = useState(0);
   /** The folder a drag out of Finder/Explorer is currently hovering, or `null` when there is no
    * drop in flight over the editor. `""` is the project root. */
   const [dropDir, setDropDir] = useState<string | null>(null);
@@ -805,6 +806,36 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     [openWeb],
   );
 
+  /** Keep the group refs current when another operation can run before React renders. */
+  const commitGroups = useCallback((next: EditorGroup[], focusId = activeGroupIdRef.current) => {
+    groupsRef.current = next;
+    setGroups(next);
+    const id = next.find((group) => group.id === focusId)?.id ?? next[0].id;
+    if (id !== activeGroupIdRef.current) {
+      activeGroupIdRef.current = id;
+      setActiveGroupId(id);
+    }
+  }, []);
+
+  /** Let the Explorer follow explicit tab selections and closes. */
+  const commitTabSelection = useCallback((next: EditorGroup[], focusId?: string) => {
+    commitGroups(next, focusId);
+    setTabSelectionVersion((version) => version + 1);
+  }, [commitGroups]);
+
+  const setGroupActive = useCallback((groupId: string, path: string) => {
+    const current = groupsRef.current;
+    if (!current.some((group) => group.id === groupId && group.paths.includes(path))) return;
+    const next = current.map((group) => (
+      group.id === groupId && group.activePath !== path ? { ...group, activePath: path } : group
+    ));
+    commitTabSelection(next, groupId);
+  }, [commitTabSelection]);
+
+  const focusGroup = useCallback((groupId: string) => {
+    if (activeGroupIdRef.current !== groupId) commitTabSelection(groupsRef.current, groupId);
+  }, [commitTabSelection]);
+
   const closeTab = useCallback(async (groupId: string, path: string) => {
     const tab = tabsRef.current.find((item) => item.path === path);
     if (!tab) return;
@@ -830,8 +861,8 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     }
     // Re-read after the (awaited) confirm — groups can have moved on while the modal was up.
     const next = closeTabInGroups(groupsRef.current, groupId, path);
-    setGroups(next);
-    if (!next.some((g) => g.id === activeGroupIdRef.current)) setActiveGroupId(next[0].id);
+    if (next === groupsRef.current) return;
+    commitTabSelection(next);
     // Out of every group means out of the registry — which is also what disposes its model.
     if (!next.some((g) => g.paths.includes(path))) {
       setTabs((prev) => prev.filter((item) => item.path !== path));
@@ -839,7 +870,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
         closedRef.current[repoPath] = [...(closedRef.current[repoPath] ?? []).filter((p) => p !== path), path].slice(-30);
       }
     }
-  }, []);
+  }, [commitTabSelection]);
 
   /**
    * Where a dragged tab lands.
@@ -899,11 +930,11 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       if (!ok) return;
     }
     // Re-read after the (awaited) confirm, exactly as `closeTab` does.
+    if (!groupsRef.current.some((g) => g.id === groupId && g.paths.some((path) => !g.pinned.includes(path)))) return;
     const next = closeAllInGroups(groupsRef.current, groupId);
-    setGroups(next);
-    if (!next.some((g) => g.id === activeGroupIdRef.current)) setActiveGroupId(next[0].id);
+    commitTabSelection(next);
     setTabs((prev) => prev.filter((tab) => next.some((g) => g.paths.includes(tab.path))));
-  }, []);
+  }, [commitTabSelection]);
 
   /**
    * Closes some of one group's tabs — the strip's «Cerrar otras / a la derecha / guardadas». Pinned
@@ -921,11 +952,13 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       const ok = await confirmAction(tRef.current("editor.closeAllDirtyConfirm", { n: unsaved.length }), true);
       if (!ok) return;
     }
-    const next = closePathsInGroup(groupsRef.current, groupId, closing);
-    setGroups(next);
-    if (!next.some((g) => g.id === activeGroupIdRef.current)) setActiveGroupId(next[0].id);
+    const current = groupsRef.current.find((g) => g.id === groupId);
+    const stillClosing = closing.filter((path) => current?.paths.includes(path) && !current.pinned.includes(path));
+    if (stillClosing.length === 0) return;
+    const next = closePathsInGroup(groupsRef.current, groupId, stillClosing);
+    commitTabSelection(next);
     setTabs((prev) => prev.filter((tab) => next.some((g) => g.paths.includes(tab.path))));
-  }, []);
+  }, [commitTabSelection]);
 
   /** The absolute path, built the same way the file tree's own "Copy Path" builds it — the point
    * of copying one is to paste it outside this app, and two menus that disagree about what a path
@@ -1026,10 +1059,11 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       const ok = await confirmAction(tRef.current("editor.closeGroupDirtyConfirm", { n: unsaved.length }), true);
       if (!ok) return;
     }
-    setGroups(outcome.groups);
-    setActiveGroupId(outcome.focusId);
-    setTabs((prev) => prev.filter((tab) => outcome.groups.some((g) => g.paths.includes(tab.path))));
-  }, []);
+    const next = closeGroupInGroups(groupsRef.current, groupId);
+    if (!next) return;
+    commitTabSelection(next.groups, next.focusId);
+    setTabs((prev) => prev.filter((tab) => next.groups.some((g) => g.paths.includes(tab.path))));
+  }, [commitTabSelection]);
 
   /**
    * Save, on a scratch tab, is Save As: there is no file behind it to write back to, so the user picks
@@ -1076,16 +1110,6 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
   const commitTabs = useCallback((update: (prev: OpenTab[]) => OpenTab[]) => {
     tabsRef.current = update(tabsRef.current);
     setTabs(update);
-  }, []);
-
-  /** `setGroups` with `groupsRef` brought up to date at once — the same bargain as `commitTabs`. */
-  const commitGroups = useCallback((next: EditorGroup[]) => {
-    groupsRef.current = next;
-    setGroups(next);
-    if (!next.some((g) => g.id === activeGroupIdRef.current)) {
-      activeGroupIdRef.current = next[0].id;
-      setActiveGroupId(next[0].id);
-    }
   }, []);
 
   /**
@@ -1960,7 +1984,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     const index = group.paths.indexOf(group.activePath);
     const delta = command === "nextTab" ? 1 : -1;
     const target = group.paths[(index + delta + group.paths.length) % group.paths.length];
-    setGroups((prev) => prev.map((g) => (g.id === group.id ? { ...g, activePath: target } : g)));
+    setGroupActive(group.id, target);
   };
 
   // Otherwise switching projects leaves the previous repo's files open — everything else
@@ -2734,11 +2758,6 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
     changeNavRef.current = nav;
   }, []);
 
-  const setGroupActive = useCallback((groupId: string, path: string) => {
-    setGroups((prev) => prev.map((g) => (g.id === groupId ? { ...g, activePath: path } : g)));
-    setActiveGroupId(groupId);
-  }, []);
-
   const clearReveal = useCallback(() => setReveal(null), []);
 
   /** Tells the floating editors holding a path `match` accepts that the explorer moved it — `remap`
@@ -2910,7 +2929,7 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
       saving={saving}
       reveal={reveal?.groupId === group.id ? reveal.request : null}
       onRevealDone={clearReveal}
-      onFocus={() => setActiveGroupId(group.id)}
+      onFocus={() => focusGroup(group.id)}
       onSelect={(path) => setGroupActive(group.id, path)}
       onClose={(path) => void closeTab(group.id, path)}
       onPin={(path) => patchTab(path, { preview: false })}
@@ -3157,7 +3176,9 @@ export function EditorView({ island }: { island?: { path: string } } = {}) {
             <FileTree
               repoPath={project.local_path}
               projectId={project.id}
-              selectedPath={activePath}
+              activePath={activePath}
+              tabSelectionVersion={tabSelectionVersion}
+              visible={activeView === "editor" && !sideHidden}
               onSelectFile={selectFileInTree}
               onOpenFile={openFileInTree}
               onPathMoved={handlePathMoved}

@@ -100,18 +100,32 @@ export function AiKnowledgeSettings() {
   const t = useT();
   const ask = useConfirmStore((s) => s.ask);
   const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
-  const { workspaceId: loadedWorkspaceId, overview, reindexing, progress, load, reindex, clear, setCloud, setCodeVectors, addFolder, updateFolder, removeFolder, useModel, download, cancelDownload, removeModel } =
+  const { workspaceId: loadedWorkspaceId, overview, loadFailed, reindexing, progress, load, reindex, clear, setCloud, setCodeVectors, addFolder, updateFolder, removeFolder, useModel, download, cancelDownload, removeModel } =
     useKnowledgeStore();
 
   useEffect(() => {
     if (workspaceId) void load(workspaceId);
   }, [workspaceId, load]);
 
+  const failed = workspaceId === loadedWorkspaceId && loadFailed;
+  const loadError = workspaceId && failed && (
+    <div role="status" className="flex items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+      {t("knowledge.loadFailed")}
+      <button type="button" onClick={() => void load(workspaceId)} className={buttonClass({ variant: "secondary", size: "sm" })}>
+        {t("knowledge.retry")}
+      </button>
+    </div>
+  );
   if (!workspaceId || loadedWorkspaceId !== workspaceId || !overview) {
     return (
       <div className="flex flex-col gap-4">
         <ChatContextModePicker />
-        <span className="text-[12px] text-[var(--cf-text-muted)]">{t("knowledge.noWorkspace")}</span>
+        {loadError || (
+          <span role="status" className="flex items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+            {workspaceId && <Loader2 size={13} className="animate-spin" />}
+            {t(workspaceId ? "knowledge.loading" : "knowledge.noWorkspace")}
+          </span>
+        )}
       </div>
     );
   }
@@ -127,6 +141,7 @@ export function AiKnowledgeSettings() {
   return (
     <div className="flex flex-col gap-4">
       <ChatContextModePicker />
+      {loadError}
       <label className="flex items-start gap-2 text-[12px] text-[var(--cf-text)]">
         <Checkbox checked={overview.cloudAllowed} onChange={(value) => void setCloud(value)} className="mt-[1px]" />
         <span>
@@ -291,7 +306,7 @@ function KnowledgeSearch({ workspaceId }: { workspaceId: string }) {
     try {
       setResult(await knowledgeSearch(workspaceId, query.trim(), 8));
       const store = useKnowledgeStore.getState();
-      if (store.workspaceId === workspaceId) void store.load(workspaceId);
+      if (store.workspaceId === workspaceId) void store.load(workspaceId, true);
     } catch (e) {
       pushErrorToast(String(e));
     } finally {
@@ -380,7 +395,7 @@ function EmbeddingStatus({ workspaceId, overview }: { workspaceId: string; overv
   const wasRunning = useRef(false);
   useEffect(() => watch(), [watch]);
   useEffect(() => {
-    if (!running && wasRunning.current) void load(workspaceId);
+    if (!running && wasRunning.current) void load(workspaceId, true);
     wasRunning.current = running;
   }, [running, load, workspaceId]);
 

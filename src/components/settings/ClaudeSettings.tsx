@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { AiAccountsSettings } from "./AiAccountsSettings";
 import { AiCompletionSettings } from "./AiCompletionSettings";
 import { AiDiagnosticsSettings } from "./AiDiagnosticsSettings";
@@ -7,6 +7,8 @@ import { AiMemorySettings } from "./AiMemorySettings";
 import { AiLearningSettings } from "./AiLearningSettings";
 import { LocalModelSettings } from "./LocalModelSettings";
 import { useT } from "../../state/languageStore";
+import { useKnowledgeStore } from "../../state/knowledgeStore";
+import { useWorkspaceStore } from "../../state/workspaceStore";
 import { ProvidersSection } from "./ProvidersSection";
 import { QuotaSection } from "./QuotaSection";
 import { UsageStatsSection } from "./UsageStatsSection";
@@ -59,6 +61,12 @@ export function ClaudeSettings() {
   const tabs = tabsFor("claude");
   const [tab, setTab] = useSectionTab("claude", tabs, "providers");
   const active = tabs.find((entry) => entry.id === tab) ?? tabs[0];
+  const workspaceId = useWorkspaceStore((s) => s.activeWorkspaceId);
+  const loadKnowledge = useKnowledgeStore((s) => s.load);
+
+  useEffect(() => {
+    if (workspaceId) void loadKnowledge(workspaceId);
+  }, [workspaceId, loadKnowledge]);
 
   // The panes are nowhere near the same height — arriving at a short one while scrolled down
   // through the long provider list left it starting somewhere in the middle. Same fix, and same

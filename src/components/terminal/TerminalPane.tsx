@@ -45,7 +45,7 @@ import { formatDuration } from "./shellMarks";
 import { useThemeStore } from "../../state/themeStore";
 import { useGlassStore } from "../../state/glassStore";
 import { findTheme } from "../../lib/codeThemes";
-import { terminalTheme } from "../../lib/terminalTheme";
+import { GLASS_TERMINAL_CONTRAST, terminalTheme } from "../../lib/terminalTheme";
 import { TypedLineBuffer } from "../../lib/remote/typedLines";
 import { currentPlatform, isMac } from "../../lib/platform";
 import { pushErrorToast } from "../../state/toastStore";
@@ -580,6 +580,7 @@ export function TerminalPane({
       // An overview ruler beside the scrollbar, where the command marks show as ticks.
       overviewRuler: { width: 8 },
       theme: terminalTheme(scheme, glass),
+      minimumContrastRatio: glass ? GLASS_TERMINAL_CONTRAST : 1,
       // Read by the WebGL renderer when it builds its glyph atlas: a cleared ground is only honoured
       // with it on. Kept off outside the glass, where the ground is solid and it would cost for nothing.
       allowTransparency: glass,
@@ -895,6 +896,7 @@ export function TerminalPane({
     if (!term || !visible || themedAs.current === wanted) return;
     term.options.allowTransparency = glass;
     term.options.theme = terminalTheme(scheme, glass);
+    term.options.minimumContrastRatio = glass ? GLASS_TERMINAL_CONTRAST : 1;
     themedAs.current = wanted;
   }, [scheme, glass, visible]);
 
@@ -1242,9 +1244,11 @@ export function TerminalPane({
 
           Moving the padding out here keeps the visual inset identical and leaves `containerRef` a
           pure content box, so what FitAddon measures is what xterm actually gets. */}
-      {/* Painted with the terminal's own ground, so the inset reads as part of the shell rather
-          than as a frame of the dock around it — and cleared, like it, in a see-through window. */}
-      <div className="h-full w-full p-2" style={{ background: glass ? undefined : scheme.ui.bg }}>
+      {/* Let the glass show through a tint close to the ground xterm uses for contrast correction. */}
+      <div
+        className="h-full w-full p-2"
+        style={{ background: glass ? `color-mix(in srgb, ${scheme.ui.bg} 70%, transparent)` : scheme.ui.bg }}
+      >
         <div ref={containerRef} className="h-full w-full overflow-hidden" />
       </div>
 

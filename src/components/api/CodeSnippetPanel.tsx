@@ -16,6 +16,8 @@ import { useApiStore } from "../../state/apiStore";
 import { useLayoutStore } from "../../state/layoutStore";
 import { useThemeStore } from "../../state/themeStore";
 import { useT } from "../../state/languageStore";
+import { pushErrorToast } from "../../state/toastStore";
+import { writeClipboardText } from "../../lib/clipboard";
 import { getSetting, setSetting } from "../../lib/tauri/commands";
 import { resolveRequest } from "../../lib/api/send";
 import { SNIPPET_TARGETS, defaultSnippetOptions, generateSnippet } from "../../lib/api/codegen";
@@ -161,9 +163,14 @@ export function CodeSnippetPanel({ tabId }: { tabId: string }) {
     void setSetting(OPTIONS_KEY, JSON.stringify(next)).catch(() => {});
   };
 
-  const copy = () => {
+  const copy = async () => {
     if (!code) return;
-    void navigator.clipboard.writeText(code);
+    try {
+      await writeClipboardText(code);
+    } catch (error) {
+      pushErrorToast(String(error));
+      return;
+    }
     setCopied(true);
     if (copyTimer.current) clearTimeout(copyTimer.current);
     copyTimer.current = setTimeout(() => setCopied(false), 1500);
@@ -214,18 +221,18 @@ export function CodeSnippetPanel({ tabId }: { tabId: string }) {
 
         <div className="flex shrink-0 items-center gap-1.5 px-3 pb-2.5">
           <TargetPicker value={target.id} onChange={chooseTarget} />
-          <Tooltip label={copied ? t("api.snippet.copied") : t("api.snippet.copy")}>
+          <Tooltip label={t("api.snippet.copy")}>
             <button
               type="button"
               aria-label={t("api.snippet.copy")}
               disabled={!code}
-              onClick={copy}
+              onClick={() => void copy()}
               className={iconButtonClass({ size: "md" })}
             >
               {copied ? <Check size={15} className="text-[var(--cf-success)]" /> : <Copy size={15} />}
             </button>
           </Tooltip>
-          {copied && <span className="shrink-0 text-[12px] text-[var(--cf-success)]">{t("api.snippet.copied")}</span>}
+          <span className="sr-only" role="status">{copied ? t("api.snippet.copied") : ""}</span>
         </div>
 
         <div className="min-h-0 flex-1 border-t border-[var(--cf-border)]">

@@ -22,10 +22,10 @@ describe("terminalTheme", () => {
   });
 
   // The glyph inside a block cursor is drawn in `cursorAccent`: cleared with the ground, it would vanish.
-  it("clears the ground in a see-through window but keeps the cursor's glyph solid", () => {
-    const scheme = findTheme("codeflow-dark", "dark");
+  it.each(["light", "dark"] as const)("keeps the %s ground RGB for contrast on glass", (mode) => {
+    const scheme = findTheme(`codeflow-${mode}`, mode);
     const theme = terminalTheme(scheme, true);
-    expect(theme.background).toBe("#00000000");
+    expect(theme.background).toBe(`${scheme.ui.bg}00`);
     expect(theme.cursorAccent).toBe(scheme.ui.bg);
   });
 });

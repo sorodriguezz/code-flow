@@ -16,6 +16,21 @@ Cómo usarlo:
   y el workflow deja un aviso.
 -->
 
+## 2.9.15
+
+### 🚀 Mejorado
+
+- **Cliente de API.** La edición masiva muestra el formato y un ejemplo en parámetros, cabeceras y cuerpos de formulario. Los botones de las colecciones quedan más juntos y copiar un fragmento cambia el icono a un visto bueno sin mover el selector.
+- **Apariencia y terminal.** Se retiró el ajuste de densidad de la interfaz. La terminal mantiene el fondo translúcido y mejora el contraste de los colores y el texto atenuado, incluido el de Claude Code y Codex.
+- **Bandeja del asistente.** Los títulos de los chats se leen directamente en la lista. El botón de subchats conserva su ayuda para mostrar u ocultar conversaciones.
+
+### 🐛 Corregido
+
+- **Cuerpos JSON del cliente de API.** El editor valida las plantillas con variables como `{{contadores}}` y conserva los marcadores al formatear. Las variables nuevas definidas en el script previo se sustituyen antes de enviar el cuerpo.
+- **Conocimiento del espacio de trabajo.** La carga empieza al entrar en Motores de IA, recupera los datos de la última consulta al volver al espacio y puede leer el índice mientras se actualiza. Si ocurre un error de carga, puedes reintentar desde el panel.
+- **Explorador del editor.** Un clic marca una sola fila. Al cambiar o cerrar una pestaña, el Explorador despliega y marca el archivo activo. Si cierras la última, se limpia la selección. Las letras de estado de Git quedan visibles al desplazarte de lado y se muestran sin recuadro.
+- **Ramas y espacios de trabajo.** Puedes elegir una rama haciendo clic en su fila completa. Se retiraron los tooltips que repetían el nombre de la rama. «Renombrar» abre el campo de edición desde el menú contextual del espacio de trabajo.
+
 ## 2.9.14
 
 ### ✨ Nuevo

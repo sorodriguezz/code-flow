@@ -13,6 +13,7 @@
  */
 
 import { runPostResponseScript, runPreRequestScript, type SandboxScopes } from "./sandbox";
+import { resolve } from "./variables";
 import type { ScriptPhase, ScriptRef } from "./scriptTrust";
 import type {
   ApiCollection,
@@ -104,6 +105,10 @@ export async function runScriptChain(
   ctx: { request: ResolvedRequest; response?: ApiResponse; scopes: SandboxScopes },
   options: { stopOnError?: boolean } = {},
 ): Promise<ChainOutcome> {
+  const body = ctx.request.body;
+  const jsonBody = ctx.request.protocol === "http" && body.kind === "text" && body.contentType === "application/json"
+    ? body
+    : null;
   const outcome: ChainOutcome = {
     scopes: ctx.scopes,
     tests: [],
@@ -122,6 +127,11 @@ export async function runScriptChain(
             scopes: outcome.scopes,
           });
     outcome.scopes = result.scopes;
+    // Initial resolution leaves unknown tokens intact. A pre-request script may define them,
+    // while a script that explicitly replaced the body owns the new text.
+    if (ref.phase === "pre" && jsonBody && ctx.request.body === jsonBody) {
+      jsonBody.text = resolve(jsonBody.text, outcome.scopes);
+    }
     outcome.tests.push(...result.tests);
     outcome.console.push(...result.console);
     if (result.nextRequest !== null) outcome.nextRequest = result.nextRequest;

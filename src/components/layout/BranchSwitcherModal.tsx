@@ -171,8 +171,11 @@ export function BranchSwitcherModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-/** The row's two remote buttons, quiet until the row is under the pointer. Kept visible while
- * their own operation runs, so the spinner does not vanish the moment the mouse moves away. */
+/** The checkout button covers the row beneath its independent actions. */
+const BRANCH_PICK_BUTTON =
+  "flex min-w-0 flex-1 items-center gap-2 text-left after:absolute after:inset-0 after:rounded-md after:content-[''] focus-visible:outline-none focus-visible:after:ring-2 focus-visible:after:ring-inset focus-visible:after:ring-[var(--cf-accent)]";
+
+/** The remote actions appear on hover and stay visible while their operation runs. */
 function RowAction({
   icon,
   title,
@@ -192,7 +195,7 @@ function RowAction({
       aria-label={title}
       disabled={disabled}
       onClick={onClick}
-      className={`flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-opacity hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)] disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--cf-text-muted)] ${
+      className={`relative z-[1] flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-opacity hover:bg-[var(--cf-hover)] hover:text-[var(--cf-accent)] disabled:cursor-default disabled:group-hover:opacity-30 disabled:hover:bg-transparent disabled:hover:text-[var(--cf-text-muted)] ${
         running ? "opacity-100" : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
       }`}
     >
@@ -226,40 +229,34 @@ function LocalRow({
 
   return (
     <div
-      className={`group flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] ${
-        branch.is_head ? "font-semibold text-[var(--cf-accent)]" : "hover:bg-[var(--cf-hover)]"
+      className={`group relative flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] hover:bg-[var(--cf-hover)] ${
+        branch.is_head ? "font-semibold text-[var(--cf-accent)]" : ""
       }`}
     >
-      <button onClick={onChoose} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+      <button onClick={onChoose} aria-current={branch.is_head ? "true" : undefined} className={BRANCH_PICK_BUTTON}>
         <GitBranch size={13} className="shrink-0" />
-        {/* A list stays one row per branch, so this one still truncates — the `title`
-            is what makes the tail of an over-long name reachable. */}
-        <span className="min-w-0 flex-1 truncate" title={branch.name}>
+        <span className="min-w-0 flex-1 truncate">
           {branch.name}
         </span>
+
+        {branch.behind > 0 && (
+          <span
+            className="relative z-[1] shrink-0 text-[11px] font-normal text-[var(--cf-text-muted)]"
+            title={t("branchModal.behind", { n: String(branch.behind) })}
+          >
+            ↓{branch.behind}
+          </span>
+        )}
+
+        {branch.is_locked && (
+          <span
+            className="relative z-[1] shrink-0 text-[var(--cf-warning)]"
+            title={branch.locked_by_rule ? t("branch.lockedByRuleBadge") : t("branch.lockedBadge")}
+          >
+            <Lock size={11} />
+          </span>
+        )}
       </button>
-
-      {/* What the Pull button next to it is for, on the row rather than in a tooltip: the reason to
-          press it is that this number isn't zero. */}
-      {branch.behind > 0 && (
-        <span
-          className="shrink-0 text-[11px] font-normal text-[var(--cf-text-muted)]"
-          title={t("branchModal.behind", { n: String(branch.behind) })}
-        >
-          ↓{branch.behind}
-        </span>
-      )}
-
-      {/* A locked branch reads as locked wherever branches are listed, not only in
-          the sidebar row that owns the toggle. */}
-      {branch.is_locked && (
-        <span
-          className="shrink-0 text-[var(--cf-warning)]"
-          title={branch.locked_by_rule ? t("branch.lockedByRuleBadge") : t("branch.lockedBadge")}
-        >
-          <Lock size={11} />
-        </span>
-      )}
 
       <RowAction
         icon={running === "fetch" ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
@@ -302,12 +299,12 @@ function RemoteRow({
 }) {
   const t = useT();
   return (
-    <div className="group flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
-      <button onClick={onChoose} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+    <div className="group relative flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)]">
+      <button onClick={onChoose} className={BRANCH_PICK_BUTTON}>
         <Cloud size={13} className="shrink-0" />
         {/* `min-w-0 flex-1` as well as `truncate`: without the floor a flex item won't
             shrink below its content, so the name overflowed the row instead of eliding. */}
-        <span className="min-w-0 flex-1 truncate" title={branch.name}>
+        <span className="min-w-0 flex-1 truncate">
           {branch.name}
         </span>
       </button>

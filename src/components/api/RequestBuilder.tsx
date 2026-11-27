@@ -1335,7 +1335,7 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                       rows={spec.params}
                       onChange={onParamsChange}
                       variableContext={variableContext}
-                      allowBulkEdit
+                      bulkPlaceholder={t("api.bulkParamsExample")}
                     />
                   </section>
                   {spec.pathVars.length > 0 && (
@@ -1364,7 +1364,7 @@ export function RequestBuilder({ tabId }: { tabId: string }) {
                     rows={spec.headers}
                     onChange={(headers) => update({ headers })}
                     variableContext={variableContext}
-                    allowBulkEdit
+                    bulkPlaceholder={t("api.bulkHeadersExample")}
                   />
                   {implicitHeaders.length > 0 && (
                     <div className="flex flex-col gap-1.5">

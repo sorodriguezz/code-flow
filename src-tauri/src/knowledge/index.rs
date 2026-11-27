@@ -42,7 +42,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 
 use super::chunker::{self, Kind};
@@ -100,36 +100,48 @@ pub fn adopt_legacy(legacy: &Path, target: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-static CONN: OnceLock<Mutex<Connection>> = OnceLock::new();
+struct GlobalIndex {
+    path: PathBuf,
+    writer: Mutex<Connection>,
+}
 
-/// The app's index connection, opened (and created) on first use — after bringing over the one an
-/// older build left in the cache root. If that move fails, the old file is opened where it is:
-/// starting an empty index next to it would be the very loss the move exists to prevent.
-pub fn global() -> Result<MutexGuard<'static, Connection>, String> {
+fn global_index() -> Result<&'static GlobalIndex, String> {
+    static INDEX: OnceLock<GlobalIndex> = OnceLock::new();
     static OPENING: Mutex<()> = Mutex::new(());
-    if CONN.get().is_none() {
-        // Two first callers must not both copy the old file.
-        let _opening = OPENING.lock().map_err(|e| e.to_string())?;
-        if let Some(conn) = CONN.get() {
-            return conn.lock().map_err(|e| e.to_string());
-        }
-        let target = default_path();
-        let path = match adopt_legacy(&legacy_path(), &target) {
-            Ok(moved) => {
-                if moved {
-                    crate::applog::info(&format!("knowledge: the index moved out of the cache to {}", target.display()));
-                }
-                target
-            }
-            Err(error) => {
-                crate::applog::warn(&format!("knowledge: the index could not be moved out of the cache ({error}); using it where it is"));
-                legacy_path()
-            }
-        };
-        let conn = open_at(&path)?;
-        let _ = CONN.set(Mutex::new(conn));
+    if let Some(index) = INDEX.get() {
+        return Ok(index);
     }
-    CONN.get().ok_or("index unavailable")?.lock().map_err(|e| e.to_string())
+    // Two first callers must not both copy the old file.
+    let _opening = OPENING.lock().map_err(|e| e.to_string())?;
+    if let Some(index) = INDEX.get() {
+        return Ok(index);
+    }
+    let target = default_path();
+    let path = match adopt_legacy(&legacy_path(), &target) {
+        Ok(moved) => {
+            if moved {
+                crate::applog::info(&format!("knowledge: the index moved out of the cache to {}", target.display()));
+            }
+            target
+        }
+        Err(error) => {
+            crate::applog::warn(&format!("knowledge: the index could not be moved out of the cache ({error}); using it where it is"));
+            legacy_path()
+        }
+    };
+    let writer = Mutex::new(open_at(&path)?);
+    Ok(INDEX.get_or_init(|| GlobalIndex { path, writer }))
+}
+
+/// Opens or migrates the index on first use, and serializes access to its writer.
+pub fn global() -> Result<MutexGuard<'static, Connection>, String> {
+    global_index()?.writer.lock().map_err(|e| e.to_string())
+}
+
+/// Reads committed data from the WAL without waiting for the writer's current batch.
+pub fn open_reader() -> Result<Connection, String> {
+    Connection::open_with_flags(&global_index()?.path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| e.to_string())
 }
 
 pub fn open_at(path: &Path) -> Result<Connection, String> {

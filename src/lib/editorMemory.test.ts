@@ -62,7 +62,7 @@ describe("remembering", () => {
 
   it("keeps the explorer per repository, and drops the oldest past the limit", () => {
     for (let i = 0; i < 31; i++) {
-      rememberExplorer(`/repo/${i}`, { expanded: [`src${i}`], nestOpen: [], focus: { path: "", isDir: true }, scrollTop: i });
+      rememberExplorer(`/repo/${i}`, { expanded: [`src${i}`], nestOpen: [], scrollTop: i });
     }
     expect(recallExplorer("/repo/0")).toBeUndefined();
     expect(recallExplorer("/repo/30")?.expanded).toEqual(["src30"]);
@@ -70,7 +70,7 @@ describe("remembering", () => {
 });
 
 describe("across restarts", () => {
-  const explorer = (path: string) => ({ expanded: [path], nestOpen: [], focus: { path, isDir: false }, scrollTop: 40 });
+  const explorer = (path: string) => ({ expanded: [path], nestOpen: [], scrollTop: 40 });
 
   it("reads back exactly what it wrote", () => {
     const shape = editorShape({ tabs: [tab("x.ts")], groups: [group("a", ["x.ts"], "x.ts")], activeGroupId: "a" }, () => true);

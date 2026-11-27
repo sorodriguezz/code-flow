@@ -84,6 +84,7 @@ import { riseDelay } from "../../lib/rise";
 import { lockWheelAxis } from "../../lib/axisLockedWheel";
 import { useMinimumSpin } from "../../lib/useMinimumSpin";
 import { recallExplorer, rememberExplorer } from "../../lib/editorMemory";
+import { isScratchPath } from "../../lib/scratchTabs";
 import { useCompareStore } from "../../state/compareStore";
 
 /** Repo-relative path of the directory holding `path` ("" for a top-level entry). */
@@ -288,11 +289,8 @@ const EMPTY_SELECTION: ReadonlySet<string> = new Set<string>();
 const TreeNode = memo(function TreeNode({
   entry,
   depth,
-  selectedPath,
   marked,
   cutPaths,
-  focusedDir,
-  focusedFile,
   expanded,
   childrenByDir,
   hiddenCountByDir,
@@ -322,7 +320,6 @@ const TreeNode = memo(function TreeNode({
   depth: number;
   /** Place among its siblings, which is all the entry animation needs to stagger. */
   at: number;
-  selectedPath: string | null;
   /**
    * The rows a Cut has picked up and a Paste has not yet moved, drawn dimmed the way VS Code draws
    * them — the only sign that ⌘X did anything, since nothing moves until the paste. The rows
@@ -331,28 +328,8 @@ const TreeNode = memo(function TreeNode({
    * `marked` when nothing is cut, so the `memo` still holds.
    */
   cutPaths: ReadonlySet<string>;
-  /**
-   * Every row the user has picked out with ⌘/Ctrl or ⇧ — see `marked` in `FileTree`.
-   *
-   * A second reason for a row to read as selected, alongside the two below. It has to be, because
-   * those two are singular by construction: `selectedPath` is the *open file* and `focusedDir` the
-   * last folder clicked, and neither can describe four files chosen for deletion.
-   */
+  /** The rows explicitly selected in the explorer. */
   marked: ReadonlySet<string>;
-  /** The clicked directory, when the last click landed on one — null while a file holds the
-   * selection, so only ever one row reads as selected. */
-  focusedDir: string | null;
-  /**
-   * The file the explorer's own actions are aimed at — the last file row clicked, or the one a
-   * "Reveal in Explorer" just brought into view.
-   *
-   * A *second* mark, not a second selection: it draws a ring and only when the row is not already
-   * the selected one, which is what keeps "only ever one row reads as selected" true. It exists
-   * for the one case `selectedPath` structurally cannot cover — revealing a file from the context
-   * menu of a tab that is not the active one, where scrolling to a row and marking nothing leaves
-   * the user hunting the very row the action just found for them.
-   */
-  focusedFile: string | null;
   expanded: Set<string>;
   /** Cached `listDir` results with the hidden rows taken out *and* the nested rows lifted out of
    *  them, keyed by directory ("" = repo root). */
@@ -420,12 +397,7 @@ const TreeNode = memo(function TreeNode({
   const hoverKey = `tree:${entry.path}`;
   const isHovered = useRowHoverStore((s) => s.key === hoverKey);
 
-  const isSelected =
-    marked.has(entry.path) ||
-    (entry.is_dir ? focusedDir === entry.path : selectedPath === entry.path);
-  // See `focusedFile`: the ring stands in for the highlight when the revealed file is not the one
-  // open in the editor. Never both — a row that is already selected says so with its background.
-  const isRevealed = !entry.is_dir && !isSelected && focusedFile === entry.path;
+  const isSelected = marked.has(entry.path);
   const isCut = cutPaths.has(entry.path);
   const ownStatus = changedPaths.get(entry.path);
   // A directory doesn't have its own git status, but VS Code-style explorers still color
@@ -467,12 +439,9 @@ const TreeNode = memo(function TreeNode({
    * resulting props one by one, and every value in here is the same stable reference it was.
    */
   const inherited = {
-    selectedPath,
-    marked,
+      marked,
     cutPaths,
-    focusedDir,
-    focusedFile,
-    expanded,
+        expanded,
     childrenByDir,
     hiddenCountByDir,
     nestedByDir,
@@ -528,12 +497,12 @@ const TreeNode = memo(function TreeNode({
           else onSelectFile(entry.path);
         }}
         onDoubleClick={() => !entry.is_dir && onOpenFile?.(entry.path)}
-        style={{ paddingLeft: depth * 14 + 6, ...riseDelay(at) }}
+        style={riseDelay(at)}
         // The shared list row (`rowClass`) at the explorer's 26px, written out rather than imported
         // for one reason: its hover is CSS `:hover`, and this tree tracks hover in JavaScript — see
         // `rowHoverStore` for the WebKit drag bug that makes it. `cf-row-hover` is the same tint.
         // Selected is the accent wash with the name kept in full text, as every list selects.
-        className={`cf-rise flex h-[26px] w-full items-center gap-1.5 truncate rounded-md pr-2 text-left text-[13px] ${
+        className={`cf-rise flex h-[26px] w-full items-center gap-1.5 rounded-md pr-2 text-left text-[13px] ${
           isSelected
             ? "bg-[var(--cf-accent-soft)] text-[var(--cf-text)]"
             : // Nothing but the drop target is highlighted while a drag is in flight.
@@ -541,9 +510,10 @@ const TreeNode = memo(function TreeNode({
               ? "cf-row-hover"
               : ""
         } ${isSelected || color ? "" : "text-[var(--cf-text)]"} ${
-          isDropTarget || isRevealed ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
+          isDropTarget ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
         } ${isDragging ? "opacity-40" : isCut ? "opacity-50" : ""}`}
       >
+        <span aria-hidden="true" className="shrink-0" style={{ width: depth * 14 }} />
         {entry.is_dir ? (
           <>
             {isExpanded ? (
@@ -587,13 +557,14 @@ const TreeNode = memo(function TreeNode({
             />
           </>
         )}
-        <span className="truncate" style={!isSelected && color ? { color } : undefined}>
+        <span className="min-w-0 truncate" style={!isSelected && color ? { color } : undefined}>
           {entry.name}
         </span>
+        {/* Keep the status by the visible right edge while long names scroll beneath it. */}
         {ownStatus && (
           <span
             title={t(fileStatusLabelKey(ownStatus))}
-            className="ml-auto w-4 shrink-0 text-center font-mono text-[10.5px] font-bold uppercase"
+            className="sticky right-2 z-[1] ml-auto w-4 shrink-0 text-center font-mono text-[10.5px] font-bold uppercase"
             style={{ color }}
           >
             {ownStatus[0]}
@@ -642,7 +613,9 @@ const TreeNode = memo(function TreeNode({
 export function FileTree({
   repoPath,
   projectId,
-  selectedPath,
+  activePath,
+  tabSelectionVersion,
+  visible,
   onSelectFile,
   onOpenFile,
   onPathMoved,
@@ -663,7 +636,10 @@ export function FileTree({
    *  project store here: the tree is given its `repoPath` from outside too, and two sources for
    *  one project is how a shell ends up in the previous project's dock. */
   projectId?: string;
-  selectedPath: string | null;
+  activePath: string | null;
+  /** Changes when an editor tab is selected or closed, after updating `activePath`. */
+  tabSelectionVersion: number;
+  visible: boolean;
   /** Single click — opens the file as a reusable preview tab. */
   onSelectFile: (path: string) => void;
   /** Double click — opens the file for good, pinning its tab. */
@@ -757,20 +733,7 @@ export function FileTree({
   // The clicked row, which is what decides where a new file/folder lands, mirroring VS Code:
   // inside the clicked directory, or alongside the clicked file, or at the root.
   const [focus, setFocus] = useState<{ path: string; isDir: boolean }>({ path: "", isDir: true });
-  /**
-   * Every row that is selected, which on a plain click is exactly one and after ⌘/Ctrl or ⇧ is
-   * however many were picked.
-   *
-   * A set beside `focus` rather than in place of it, because the two answer different questions and
-   * always did. `focus` is *where the next thing happens* — the folder a new file lands in, the row
-   * a rename opens on — and those are singular no matter how many rows are highlighted. This is
-   * *what the next thing happens to*, and delete, move and copy-path all wanted it to be plural.
-   * `focus.path` is a member whenever it names a real row, so a single click leaves the two saying
-   * the same thing and every existing caller keeps working.
-   *
-   * Paths only, with no `isDir` alongside: the entries are looked up when they are used, and a set
-   * of strings is what makes `has` on every row cheap.
-   */
+  /** The explicit selection, independent of the editor tabs. */
   const [marked, setMarked] = useState<ReadonlySet<string>>(EMPTY_SELECTION);
   /**
    * Where a ⇧-click measures its range from — the last row picked *without* Shift.
@@ -832,8 +795,7 @@ export function FileTree({
   }, []);
   /** A remembered scroll position still owed to the tree, applied once its listings are drawn. */
   const pendingScrollRef = useRef<number | null>(null);
-  /** `nestOpen` for the cleanup that remembers it — see `expandedRef` for why a ref. (`focus` has
-   *  its own `focusRef` further down, assigned during render the same way.) */
+  /** The nest state used by the scroll listener and repository cleanup. */
   const nestOpenRef = useRef(nestOpen);
   nestOpenRef.current = nestOpen;
   /** The open set a restore has handed to `setExpanded` and not yet seen rendered — see below. */
@@ -852,7 +814,6 @@ export function FileTree({
     rememberExplorer(activeRepoRef.current, {
       expanded: [...expandedRef.current],
       nestOpen: [...nestOpenRef.current],
-      focus: focusRef.current,
       scrollTop: scrollTopRef.current,
     });
   });
@@ -922,7 +883,7 @@ export function FileTree({
     let cancelled = false;
     /**
      * The tree as this repository last left it (`lib/editorMemory`) — folders open, nests unfolded,
-     * the row clicked, the scroll — or a fresh one. A switch to another repository or workspace and
+     * the scroll — or a fresh one. A switch to another repository or workspace and
      * back used to close every folder (user report, 2026-11-12).
      */
     const memory = recallExplorer(repoPath);
@@ -931,11 +892,8 @@ export function FileTree({
     restoringRef.current = restoredExpanded;
     setExpanded(restoredExpanded);
     setNestOpen(new Set(memory?.nestOpen));
-    setFocus(memory?.focus ?? { path: "", isDir: true });
-    // A selection is a list of paths in the repository being left. Carrying it across would mark
-    // rows in the new tree purely because the two projects happen to share a filename. The row
-    // this repository had clicked is its own, and comes back.
-    setMarked(memory?.focus.path ? new Set([memory.focus.path]) : EMPTY_SELECTION);
+    setFocus({ path: "", isDir: true });
+    setMarked(EMPTY_SELECTION);
     pendingScrollRef.current = memory?.scrollTop ?? null;
     scrollTopRef.current = memory?.scrollTop ?? 0;
     anchorRef.current = null;
@@ -982,7 +940,7 @@ export function FileTree({
    */
   useEffect(() => {
     saveExplorerRef.current();
-  }, [expanded, nestOpen, focus]);
+  }, [expanded, nestOpen]);
 
   // The remembered scroll, once the listings it was measured against are drawn. Only while the
   // scroller is showing (a hidden one has no height to scroll), and only once.
@@ -994,21 +952,16 @@ export function FileTree({
     element.scrollTop = top;
   }, [childrenByDir]);
 
-  /**
-   * A file opened from *outside* this tree drops the multi-selection.
-   *
-   * A tab click, a go-to-definition, a reveal from the editor — each moves `selectedPath`, and each
-   * would otherwise leave four rows still highlighted from a ⌘-click a minute ago plus a fifth that
-   * is merely open. Two kinds of "selected" on screen at once, and a Delete aimed at the four the
-   * user has stopped thinking about.
-   *
-   * The size guard is what keeps a click *inside* the tree from being caught by this: those go
-   * through `handleSelectFile`, which has already replaced the selection with the single row, so a
-   * set still holding several means the change came from somewhere else.
-   */
-  useEffect(() => {
-    setMarked((prev) => (prev.size <= 1 ? prev : EMPTY_SELECTION));
-  }, [selectedPath]);
+  const clearSelection = useCallback(() => {
+    setFocus({ path: "", isDir: true });
+    setMarked(EMPTY_SELECTION);
+    anchorRef.current = null;
+    setRevealTarget(null);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!visible) clearSelection();
+  }, [visible, clearSelection]);
 
   const toggleDir = useCallback(
     (path: string) => {
@@ -1187,6 +1140,10 @@ export function FileTree({
         // And a Copy or Cut waiting on it follows the new name rather than failing on the old one.
         useExplorerClipboardStore.getState().moved(repoPath, from, to);
         setFocus({ path: to, isDir });
+        setMarked((prev) => new Set([...prev].map((path) =>
+          path === from || path.startsWith(`${from}/`) ? to + path.slice(from.length) : path,
+        )));
+        anchorRef.current = to;
       } catch (e) {
         // Left open on failure, the same as a new-file name that collided: the name is right there
         // to be corrected.
@@ -1198,21 +1155,11 @@ export function FileTree({
 
   const cancelRename = useCallback(() => setRenaming(null), []);
 
-  /**
-   * The rows an action applies to, oldest question in this file answered plurally.
-   *
-   * `focus.path` is included even when it is not in `marked` — a reveal moves the focus without
-   * touching the selection — and the empty path (the repo root, which `focus` uses to mean "no
-   * row") never is. Sorted deepest-first, which matters for exactly one caller: deleting a folder
-   * and something inside it in the same pass has to take the child before the parent, or the second
-   * delete is aimed at a path that no longer exists.
-   */
-  const selectedPaths = useCallback((): string[] => {
-    const paths = new Set(marked);
-    if (focus.path) paths.add(focus.path);
-    paths.delete("");
-    return [...paths].sort((a, b) => b.split("/").length - a.split("/").length || a.localeCompare(b));
-  }, [marked, focus.path]);
+  /** Deepest first so a batch can delete a child before deleting its parent. */
+  const selectedPaths = useCallback(
+    () => [...marked].sort((a, b) => b.split("/").length - a.split("/").length || a.localeCompare(b)),
+    [marked],
+  );
   const selectedPathsRef = useRef(selectedPaths);
   selectedPathsRef.current = selectedPaths;
 
@@ -1844,19 +1791,21 @@ export function FileTree({
    */
   const markRow = useCallback((entry: FileEntry, mode: "toggle" | "range") => {
     const path = entry.path;
-    setFocus({ path, isDir: entry.is_dir });
-
     if (mode === "toggle") {
-      setMarked((prev) => {
-        const next = new Set(prev);
-        if (next.has(path)) next.delete(path);
-        else next.add(path);
-        return next;
-      });
+      const next = new Set(marked);
+      if (next.delete(path)) {
+        const remaining = next.values().next().value ?? "";
+        setFocus({ path: remaining, isDir: !remaining || isDirPath(remaining) });
+      } else {
+        next.add(path);
+        setFocus({ path, isDir: entry.is_dir });
+      }
+      setMarked(next);
       anchorRef.current = path;
       return;
     }
 
+    setFocus({ path, isDir: entry.is_dir });
     const anchor = anchorRef.current;
     if (!anchor || anchor === path) {
       setMarked(new Set([path]));
@@ -1878,7 +1827,7 @@ export function FileTree({
     setMarked(new Set(order.slice(Math.min(from, to), Math.max(from, to) + 1)));
     // The anchor deliberately stays where it was: that is what lets a second ⇧-click re-aim the
     // same range from the same pivot instead of walking it along.
-  }, []);
+  }, [isDirPath, marked]);
 
   /**
    * Moving a file or folder by dragging it onto another folder.
@@ -2029,9 +1978,7 @@ export function FileTree({
       // while its path still resolves. A destination inside the selection is refused by
       // `canDropInto` for the dragged row already; the others are attempted and the ones that
       // cannot land report their own error.
-      const batch = selectedPathsRef
-        .current()
-        .filter((path) => path === dragged.path || markedRef.current.has(path));
+      const batch = selectedPathsRef.current();
       const moving = batch.includes(dragged.path) ? batch : [dragged.path];
       // Released over a dock terminal: its paths are typed at the prompt there (`TerminalPane`).
       const terminal = document.elementFromPoint(ev.clientX, ev.clientY)?.closest("[data-cf-terminal-drop]");
@@ -2059,10 +2006,6 @@ export function FileTree({
 
   const applyMovesRef = useRef(applyMoves);
   applyMovesRef.current = applyMoves;
-  /** `beginDrag` is a `useCallback` with no dependencies — registered once and holding its
-   *  closure for the life of the tree — so the selection has to reach it through a ref. */
-  const markedRef = useRef(marked);
-  markedRef.current = marked;
   const setMarkedRef = useRef(setMarked);
   setMarkedRef.current = setMarked;
 
@@ -2121,7 +2064,7 @@ export function FileTree({
    * row to scroll to before it lands.
    */
   const revealFile = useCallback(
-    async (file: string) => {
+    async (file: string, reason: "command" | "tab" = "command") => {
       if (!file) return;
       // A hidden ancestor — or the file itself — is a row that is never drawn, so there would be
       // nothing for the scroll to find and the action would read as broken. Hiding is a filter the
@@ -2131,7 +2074,7 @@ export function FileTree({
         .getState()
         .entries.find((entry) => entry.path === file || file.startsWith(`${entry.path}/`));
       if (hidden) {
-        useToastStore.getState().pushToast(tRef.current("editor.revealHidden", { name: hidden.path }), "info");
+        if (reason === "command") useToastStore.getState().pushToast(tRef.current("editor.revealHidden", { name: hidden.path }), "info");
         return;
       }
       const dir = parentDir(file);
@@ -2145,20 +2088,35 @@ export function FileTree({
           return next;
         });
       }
-      // Caught per level so one directory that has gone away since doesn't take the whole reveal
-      // with it — the same trade `refresh` makes.
-      await Promise.all(["", ...ancestors].map((each) => loadDir(each).catch(() => {})));
-      // The listings are async, so a project switch can have landed while they were in flight.
-      if (activeRepoRef.current !== repoPath) return;
-      // What a following "new file" or "rename" acts on, so revealing a file also puts the
-      // explorer's own keyboard actions on it — which is the state a click on the row would leave.
       setFocus({ path: file, isDir: false });
+      setMarked(new Set([file]));
+      anchorRef.current = file;
+      const directories = ["", ...ancestors];
+      // The watcher keeps cached listings up to date. On tab switches, read only levels
+      // whose listing doesn't yet contain the next folder or file.
+      const missing = reason === "command" ? directories : directories.filter((path, index) => {
+        const child = directories[index + 1] ?? file;
+        return !childrenRef.current.get(path)?.some((entry) => entry.path === child);
+      });
+      if (missing.length > 0) {
+        await Promise.all(missing.map((path) => loadDir(path).catch(() => {})));
+        if (activeRepoRef.current !== repoPath || focusRef.current.path !== file) return;
+      }
       setRevealTarget(file);
     },
     [loadDir, repoPath],
   );
   const revealFileRef = useRef(revealFile);
   revealFileRef.current = revealFile;
+
+  // Mount with a clear selection, including when tabs have been restored from the last session.
+  const handledTabSelection = useRef(tabSelectionVersion);
+  useLayoutEffect(() => {
+    if (handledTabSelection.current === tabSelectionVersion) return;
+    handledTabSelection.current = tabSelectionVersion;
+    clearSelection();
+    if (visible && activePath && !isScratchPath(activePath)) void revealFile(activePath, "tab");
+  }, [tabSelectionVersion, activePath, visible, clearSelection, revealFile]);
 
   // Guarded on the request object rather than its nonce: two callers now share this channel — the
   // keybinding store, which numbers its own requests, and the drop handler, which doesn't — and a
@@ -2284,7 +2242,7 @@ export function FileTree({
    * a new selection, or a file that becomes nested once its folder finishes loading — and stays out
    * of the way otherwise.
    */
-  const nestParent = (selectedPath ? nestParentOf.get(selectedPath) : undefined) ?? null;
+  const nestParent = (activePath ? nestParentOf.get(activePath) : undefined) ?? null;
   useEffect(() => {
     if (!nestParent) return;
     setNestOpen((prev) => (prev.has(nestParent) ? prev : new Set(prev).add(nestParent)));
@@ -2299,6 +2257,10 @@ export function FileTree({
    */
   useEffect(() => {
     if (!revealTarget) return;
+    if (!marked.has(revealTarget)) {
+      setRevealTarget(null);
+      return;
+    }
     // A derived file has no row of its own until its parent's nest is unfolded, and `nestParentOf`
     // only knows it is one once the directory has been listed — which is why this is here and not
     // in `revealFile`. Returning lets the render this causes re-enter with the row drawn.
@@ -2328,7 +2290,7 @@ export function FileTree({
     // still in the cache, so asking the filtered one would give up on exactly the files the nest
     // branch above exists to reach. `rowsByDir` and `nestedByDir` are both derived from these
     // three, so they are already covered and would only be dependencies that never fire alone.
-  }, [revealTarget, childrenByDir, nestParentOf, nestOpen]);
+  }, [revealTarget, marked, childrenByDir, nestParentOf, nestOpen]);
 
   // `?? null` is still what tells "not listed yet" from "listed and empty" — the skeleton depends
   // on it.
@@ -2401,11 +2363,7 @@ export function FileTree({
         // Clicking empty space below the tree targets the repo root, so a new file created
         // right after lands at the top level instead of inside a previously clicked folder.
         onClick={(e) => {
-          if (e.target !== e.currentTarget) return;
-          setFocus({ path: "", isDir: true });
-          // Clicking away is how you drop a selection, here as everywhere else.
-          setMarked(EMPTY_SELECTION);
-          anchorRef.current = null;
+          if (e.target === e.currentTarget) clearSelection();
         }}
         // Right-clicking the empty space below the tree is the root's menu — the only way to reach
         // "new file at the top level" once a folder deep in the tree has the focus.
@@ -2416,7 +2374,7 @@ export function FileTree({
         // Inset from the column's edges, so a row's rounded selection reads as a row rather than
         // as a band the width of the panel. The padding is still this element — a click or a drop
         // there is a click or a drop on the root, like the space below the last row.
-        className={`min-h-0 flex-1 overflow-auto px-2 pb-2.5 pt-1 outline-none ${
+        className={`min-h-0 flex-1 overflow-auto px-2 pb-2.5 pt-1 outline-none [scrollbar-gutter:stable] ${
           rootIsDropTarget ? "ring-1 ring-inset ring-[var(--cf-accent)]" : ""
         }`}
       >
@@ -2437,11 +2395,8 @@ export function FileTree({
                 entry={entry}
                 depth={0}
                 at={index}
-                selectedPath={selectedPath}
                 marked={marked}
                 cutPaths={cutPaths}
-                focusedDir={focus.isDir ? focus.path : null}
-                focusedFile={focus.isDir ? null : focus.path}
                 expanded={expanded}
                 childrenByDir={rowsByDir}
                 hiddenCountByDir={hiddenCountByDir}

@@ -101,13 +101,10 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
   }, []);
   // The menu is a portal, so it is not inside `rootRef` — without its own ref here every click on a
   // row would be an outside click, and the list would close before the row it landed on could act.
-  useDismissOnOutside(open, dismiss, [rootRef, menuRef]);
+  const ownsRowMenu = useCallback((target: Element) => rowMenu !== null && Boolean(target.closest('[role="menu"]')), [rowMenu]);
+  useDismissOnOutside(open, dismiss, [rootRef, menuRef], ownsRowMenu);
 
-  const toggle = () => {
-    if (open) {
-      dismiss();
-      return;
-    }
+  const openPicker = () => {
     const rect = rootRef.current?.getBoundingClientRect();
     if (!rect) return;
     // Left-aligned with the trigger, pulled back on itself only when that would run it off the
@@ -121,6 +118,11 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
     void Promise.all(
       workspaces.map(async (ws) => [ws.id, (await listProjects(ws.id).catch(() => [])).length] as const),
     ).then((pairs) => setCounts(Object.fromEntries(pairs)));
+  };
+
+  const toggle = () => {
+    if (open) dismiss();
+    else openPicker();
   };
 
   // Anything that moves the trigger takes its menu with it, and the coordinates above were read
@@ -182,7 +184,14 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
           });
         },
       },
-      { label: t("sidebar.wsRename"), icon: Pencil, onClick: () => setRenaming({ id, name: ws.name }) },
+      {
+        label: t("sidebar.wsRename"),
+        icon: Pencil,
+        onClick: () => {
+          if (!open) openPicker();
+          setRenaming({ id, name: ws.name });
+        },
+      },
       {
         label: t("sidebar.wsColor"),
         icon: Palette,
@@ -316,7 +325,10 @@ export function WorkspaceSwitcher({ collapsed = false }: { collapsed?: boolean }
                     onBlur={() => void commitRename()}
                     onKeyDown={(e) => {
                       if (e.key === "Enter") void commitRename();
-                      else if (e.key === "Escape") setRenaming(null);
+                      else if (e.key === "Escape") {
+                        e.stopPropagation();
+                        setRenaming(null);
+                      }
                     }}
                     aria-label={t("sidebar.wsRename")}
                     className={fieldClass({ size: "sm", className: "flex-1" })}

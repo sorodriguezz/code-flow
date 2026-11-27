@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { FileUp, Trash2 } from "lucide-react";
 import { Checkbox } from "../common/Checkbox";
 import { Select } from "../common/Select";
@@ -88,8 +88,8 @@ export interface KeyValueTableProps {
   valuePlaceholder?: string;
   /** Highlights {{vars}} that don't resolve in the current context. */
   variableContext?: VariableContext | null;
-  /** Shows the Bulk Edit toggle. */
-  allowBulkEdit?: boolean;
+  /** Enables bulk edit and gives an example specific to these rows. */
+  bulkPlaceholder?: string;
 }
 
 export function KeyValueTable({
@@ -100,9 +100,10 @@ export function KeyValueTable({
   keyPlaceholder,
   valuePlaceholder,
   variableContext = null,
-  allowBulkEdit = false,
+  bulkPlaceholder,
 }: KeyValueTableProps) {
   const t = useT();
+  const bulkHintId = useId();
   const [bulk, setBulk] = useState(false);
   const [bulkText, setBulkText] = useState("");
   /** The rows as they stood when bulk edit opened — the pool `fromBulkText` reuses ids from. */
@@ -145,13 +146,17 @@ export function KeyValueTable({
   if (bulk) {
     return (
       <div className="flex min-h-0 flex-col gap-1.5">
-        <div className="flex justify-end">
+        <div className="flex flex-wrap items-center justify-between gap-x-2">
+          <p id={bulkHintId} className="text-[12px] text-[var(--cf-text-muted)]">{t("api.bulkFormat")}</p>
           <button type="button" onClick={() => setBulk(false)} className={buttonClass({ variant: "ghost", size: "sm" })}>
             {t("api.keyValueEdit")}
           </button>
         </div>
         <textarea
           value={bulkText}
+          placeholder={bulkPlaceholder}
+          aria-label={t("api.bulkEdit")}
+          aria-describedby={bulkHintId}
           spellCheck={false}
           // Parsed on every keystroke rather than only on toggle, so a Send while bulk edit is
           // still open uses what is on screen instead of the rows it was opened with.
@@ -170,7 +175,7 @@ export function KeyValueTable({
 
   return (
     <div className="flex min-w-0 flex-col gap-1.5">
-      {allowBulkEdit && (
+      {bulkPlaceholder && (
         <div className="flex justify-end">
           <button type="button" onClick={openBulk} className={buttonClass({ variant: "ghost", size: "sm" })}>
             {t("api.bulkEdit")}

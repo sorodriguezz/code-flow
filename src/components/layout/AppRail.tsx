@@ -239,7 +239,7 @@ export function AppRail() {
         aria-orientation="vertical"
         aria-label={t("tabbar.workspaceTools")}
         onKeyDown={onListKeyDown}
-        className="cf-d-rail-gap relative flex flex-col items-center gap-1"
+        className="relative flex flex-col items-center gap-1"
       >
         <Tooltip side="left" label={scopeHint} description={t("tabbar.scopeWorkspaceReset")}>
           <button
@@ -277,7 +277,7 @@ export function AppRail() {
         {drag && (
           <span
             aria-hidden
-            className="cf-d-rail-ghost pointer-events-none absolute left-1/2 w-8 -translate-x-1/2 rounded-md border border-dashed border-[var(--cf-accent)] bg-[var(--cf-accent)]/12"
+            className="pointer-events-none absolute left-1/2 w-8 -translate-x-1/2 rounded-md border border-dashed border-[var(--cf-accent)] bg-[var(--cf-accent)]/12"
             style={{ top: drag.ghost.top, height: drag.ghost.height }}
           />
         )}
@@ -340,7 +340,7 @@ export function AppRail() {
                   ? { transform: `translateY(${offset}px)${lifted ? " scale(1.12)" : ""}` }
                   : undefined
               }
-              className={`cf-d-rail-slot relative h-9 w-9 shrink-0 ${
+              className={`relative h-9 w-9 shrink-0 ${
                 // The lifted icon is pinned to the pointer, so it must not ease anywhere; its
                 // neighbours are the ones sliding out of the way, so they must. Dropping the
                 // transform transition on the way out is what keeps the icons still in the frame
@@ -363,7 +363,7 @@ export function AppRail() {
               // The tooltip's description is drawn in a portal on hover and focus; a screen reader
               // gets the same sentence from the hidden node below.
               aria-describedby={`rail-desc-${descId(key)}`}
-              className={`cf-d-rail-slot relative flex h-9 w-9 shrink-0 select-none items-center justify-center rounded-lg ${
+              className={`relative flex h-9 w-9 shrink-0 select-none items-center justify-center rounded-lg ${
                 // Idle, the only thing that moves is colour.
                 lifted
                   ? "cursor-grabbing shadow-lg ring-1 ring-[var(--cf-accent)]"
@@ -388,7 +388,7 @@ export function AppRail() {
                   "you are here" bar on its edge, the projects panel's. The rail's edge is 6px out
                   from the 36px button in its 48px column. */}
               {isActive && !drag && (
-                <ActiveMarker layoutId="app-rail-active" color="var(--cf-accent-fill)" className="cf-d-rail-mark -left-1.5 inset-y-2" />
+                <ActiveMarker layoutId="app-rail-active" color="var(--cf-accent-fill)" className="-left-1.5 inset-y-2" />
               )}
               {/* Keyed by the return, so an app that comes back twice in a row drops in twice. */}
               <span key={returning?.id ?? "rest"} className={`flex ${returning ? "cf-return-land" : ""}`}>
@@ -556,7 +556,7 @@ function BrowserButton() {
         type="button"
         onClick={() => showBrowser()}
         aria-label={t("browser.railButton")}
-        className="cf-d-rail-slot flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[var(--cf-text-muted)] transition-colors hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
       >
         <Globe size={18} />
       </button>
@@ -629,7 +629,7 @@ function AssistantButton() {
         data-tour="toggle-ai-panel"
         aria-label={t("statusbar.aiPanel")}
         aria-expanded={open}
-        className={`cf-d-rail-slot relative flex h-9 w-9 shrink-0 select-none items-center justify-center rounded-lg transition-colors ${
+        className={`relative flex h-9 w-9 shrink-0 select-none items-center justify-center rounded-lg transition-colors ${
           open ? "bg-[var(--cf-accent)]/15 hover:bg-[var(--cf-accent)]/20" : "hover:bg-[var(--cf-hover)]"
         } ${arming && charges ? "cf-charging" : ""}`}
         style={arming && charges ? ({ "--cf-charge-ms": `${CODI_HOLD_MS - CHARGE_FROM_MS}ms` } as CSSProperties) : undefined}

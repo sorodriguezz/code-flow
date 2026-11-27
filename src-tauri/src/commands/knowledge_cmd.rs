@@ -127,7 +127,8 @@ pub async fn knowledge_overview(db: State<'_, Db>, workspace_id: String) -> Resu
     let space = embed::Space::resolve(embed_setting.as_deref(), &ollama_url).await;
     let space_name = space.as_ref().map(|s| s.name.clone());
     let (repos, folders, sources, pending_vectors) = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let index = index::global()?;
+        let mut reader = index::open_reader()?;
+        let index = reader.transaction().map_err(|e| e.to_string())?;
         let status_of = |key: &str| index::status(&index, key, space_name.as_deref()).unwrap_or_else(|_| index::CollectionStatus::empty(key));
         let repos: Vec<RepoKnowledge> =
             scope.repos.iter().map(|(id, name, _)| RepoKnowledge { project_id: id.clone(), name: name.clone(), status: status_of(&knowledge::repo_key(id)) }).collect();
