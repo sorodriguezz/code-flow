@@ -16,7 +16,7 @@ Cómo usarlo:
   y el workflow deja un aviso.
 -->
 
-## 2.9.16
+## 2.9.17
 
 ### ✨ Nuevo
 
