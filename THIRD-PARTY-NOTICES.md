@@ -1813,4 +1813,5 @@ under copyleft that no dual-licence election disarms, re-reads the licence of ev
 compiled into the binary from that library's own source, and warns when a licence identifier or
 a crate that links native code turns up that has never been reviewed for this project.
 
+
 What is still open is listed under *Open items* above — one item, each waiting on a decision rather than on this file.
