@@ -30,6 +30,7 @@ Cómo usarlo:
 
 ### 🐛 Corregido
 
+- **Codi y la sección Instalaciones.** Ahora entiende «instalaciones» o «herramientas instaladas» para abrir esa sección de Configuración en español.
 - **Conexiones del grafo de datos.** Las líneas entre nodos siguen visibles al alternar entre la vista de código y la vista de grafo.
 
 ## 2.9.15

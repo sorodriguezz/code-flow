@@ -134,6 +134,7 @@ const SECTION_EXTRA: Record<string, Partial<Spoken>> = {
   vault: { es: ["llavero", "contrasenas"], en: ["keyring", "vault", "passwords"] },
   reviewer: { es: ["revisor", "sonarqube", "sonar"], en: ["reviewer", "sonarqube", "sonar"] },
   remote: { es: ["control remoto", "movil", "telefono", "celular"], en: ["remote control", "mobile", "phone"] },
+  installations: { es: ["instalaciones", "herramientas instaladas", "instalar herramientas"], en: ["installations", "installed tools", "install tools"] },
 };
 
 export function sectionVocabulary(): Vocabulary {
