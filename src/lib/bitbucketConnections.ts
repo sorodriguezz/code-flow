@@ -24,6 +24,7 @@ export async function loadBitbucketConnections(): Promise<BitbucketConnection[]>
       .filter((c): c is BitbucketConnection => c && typeof c.workspace === "string" && c.workspace.trim() !== "")
       .map((c) => ({
         workspace: c.workspace,
+        ...(typeof c.credentialRevision === "string" ? { credentialRevision: c.credentialRevision } : {}),
         kind: c.kind === "access_token" ? "access_token" : "api_token",
         email: typeof c.email === "string" ? c.email : null,
         user: typeof c.user === "string" ? c.user : "",

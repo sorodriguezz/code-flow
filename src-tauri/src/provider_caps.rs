@@ -66,9 +66,8 @@ const INSTALLS: [Install; 8] = [
 ///
 /// Each line is the vendor's own documented one-liner, checked 2026-10-29: Claude Code's native
 /// installer, opencode's and Grok's install scripts, and the npm packages the vendors publish where
-/// there is no native installer (or none for Windows). Antigravity (`agy`) documents no command-line
-/// install, so it has none and the setup links to its page instead. Unlike updating — which the CLI
-/// does by itself, see [`Install::update_args`] — a first install has no CLI yet to ask.
+/// there is no native installer (or none for Windows). A first install runs the vendor's bootstrap
+/// command or installs its package. Updates have their own routes in [`Install::update_args`].
 pub struct Setup {
     pub id: &'static str,
     /// macOS and Linux, run by `bash -c`.
@@ -92,12 +91,17 @@ pub const SETUPS: [Setup; 8] = [
         windows: Some("npm install -g @openai/codex"),
         url: "https://developers.openai.com/codex/",
     },
-    Setup { id: "gemini", unix: None, windows: None, url: "https://antigravity.google" },
+    Setup {
+        id: "gemini",
+        unix: Some("curl -fsSL https://antigravity.google/cli/install.sh | bash"),
+        windows: Some("irm https://antigravity.google/cli/install.ps1 | iex"),
+        url: "https://antigravity.google/docs/getting-started?tab=cli",
+    },
     Setup {
         id: "grok",
         unix: Some("curl -fsSL https://x.ai/cli/install.sh | bash"),
-        windows: Some("npm install -g @xai-official/grok"),
-        url: "https://x.ai/cli",
+        windows: Some("irm https://x.ai/cli/install.ps1 | iex"),
+        url: "https://docs.x.ai/build/overview#install",
     },
     Setup {
         id: "opencode",
@@ -105,7 +109,7 @@ pub const SETUPS: [Setup; 8] = [
         windows: Some("npm install -g opencode-ai"),
         url: "https://opencode.ai/docs/",
     },
-    Setup { id: "cline", unix: Some("npm install -g cline"), windows: Some("npm install -g cline"), url: "https://cline.bot" },
+    Setup { id: "cline", unix: Some("npm install -g cline"), windows: Some("npm install -g cline"), url: "https://docs.cline.bot/getting-started/installing-cline#cli" },
     // Nothing to install: the in-process engine and the user's own command.
     Setup { id: crate::local_agent::PROVIDER_ID, unix: None, windows: None, url: "" },
     Setup { id: crate::custom::PROVIDER_ID, unix: None, windows: None, url: "" },
@@ -313,7 +317,7 @@ mod tests {
                 }
             }
         }
-        assert!(setup_of("gemini").unwrap().unix.is_none(), "agy documents no command-line install");
+        assert_eq!(setup_of("gemini").unwrap().unix, Some("curl -fsSL https://antigravity.google/cli/install.sh | bash"));
         assert_eq!(setup_of("claude").unwrap().unix, Some("curl -fsSL https://claude.ai/install.sh | bash"));
     }
 

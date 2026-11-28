@@ -13,6 +13,7 @@ import { getSetting, setSetting } from "./tauri/commands";
  * link is built from.
  */
 export interface MondayConnection {
+  credentialRevision?: string;
   /** The account subdomain — `acme` for `acme.monday.com`. Read from the host, never typed. */
   slug: string;
   /** The account's display name, for the list. Not an identifier. */

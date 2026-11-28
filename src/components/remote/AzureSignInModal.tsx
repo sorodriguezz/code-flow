@@ -6,6 +6,7 @@ import { pushErrorToast, useToastStore } from "../../state/toastStore";
 import { remoteDiscoverAzure } from "../../lib/tauri/remoteCommands";
 import type { DiscoveredHost } from "../../types/remote";
 import { buttonClass } from "../common/Button";
+import { ToolInstallationLink } from "../common/ToolInstallationLink";
 import { fieldClass } from "../common/recipes";
 
 /**
@@ -117,9 +118,10 @@ export function AzureSignInModal({ onClose }: { onClose: () => void }) {
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-2">
           {failure ? (
-            <p className="whitespace-pre-wrap py-4 text-[12px] leading-relaxed text-[var(--cf-danger)]">
-              {failure}
-            </p>
+            <div className="space-y-1 py-4">
+              <p className="whitespace-pre-wrap text-[12px] leading-relaxed text-[var(--cf-danger)]">{failure}</p>
+              <ToolInstallationLink tool="az" onOpen={onClose} />
+            </div>
           ) : found === null ? (
             <div className="flex items-center justify-center gap-2 py-8 text-[12px] text-[var(--cf-text-muted)]">
               <Loader2 size={14} className="animate-spin" />

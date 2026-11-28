@@ -1,19 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, Copy, Loader2, Play, Plus, RefreshCw, Square, Trash2, TriangleAlert } from "lucide-react";
-import { Button, iconButtonClass } from "../common/Button";
+import { ArrowRight, Loader2, Play, Plus, RefreshCw, Square, Trash2, TriangleAlert } from "lucide-react";
+import { Button } from "../common/Button";
+import { ToolInstallationLink } from "../common/ToolInstallationLink";
 import { Segmented } from "../common/Segmented";
 import { chipClass, fieldClass, sectionLabelClass } from "../common/recipes";
 import { RowAction, StateDot } from "./containerBits";
 import { Field } from "./ui";
-import { LOCAL_TOOLS, MAX_WORKERS, freeClusterName, installCommandFor, localContextOf, localTone, validClusterName } from "./localModel";
+import { LOCAL_TOOLS, MAX_WORKERS, freeClusterName, localContextOf, localTone, validClusterName } from "./localModel";
 import { containersLocalPreview } from "../../lib/tauri/containersLocalCommands";
-import { currentPlatform } from "../../lib/platform";
 import { confirmAction } from "../../state/confirmStore";
 import { useContainersJobsStore } from "../../state/containersJobsStore";
 import { useContainersStore } from "../../state/containersStore";
 import { useLocalClustersStore } from "../../state/localClustersStore";
 import { useT, type Translate } from "../../state/languageStore";
-import { pushSuccessToast } from "../../state/toastStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import type { LocalAction, LocalCluster, LocalClusterSpec, LocalTool } from "../../types/containersLocal";
 
@@ -32,25 +31,13 @@ const TOOL_HINT: Record<LocalTool, TranslationKey> = {
 
 const VERSION_PLACEHOLDER: Record<LocalTool, string> = { kind: "v1.31.0", k3d: "v1.31.4-k3s1", minikube: "v1.31.0" };
 
-function copy(command: string, t: Translate) {
-  void navigator.clipboard.writeText(command).catch(() => {});
-  pushSuccessToast(t("containers.kube.add.cli.copied"));
-}
-
-/** A tool that is not installed: its name and the one command that installs it here. */
-export function InstallHint({ tool }: { tool: LocalTool | "helm" }) {
+export function InstallHint({ tool, onOpen }: { tool: LocalTool | "helm"; onOpen?: () => void }) {
   const t = useT();
-  const command = installCommandFor(tool, currentPlatform());
   return (
-    <div className="flex items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+    <div className="flex flex-wrap items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
       <TriangleAlert size={13} className="shrink-0 text-[var(--cf-warning)]" />
-      <span className="min-w-0 flex-1">
-        {t("containers.local.install", { tool })}{" "}
-        <code className="rounded-[4px] bg-[var(--cf-hover)] px-1 py-px font-mono text-[11px] text-[var(--cf-text)]">{command}</code>
-      </span>
-      <button type="button" onClick={() => copy(command, t)} className={iconButtonClass({ size: "xs" })} aria-label={t("containers.kube.add.cli.copy")} title={t("containers.kube.add.cli.copy")}>
-        <Copy size={12} />
-      </button>
+      {t("installations.missingTool", { tool })}
+      <ToolInstallationLink tool={tool} onOpen={onOpen} />
     </div>
   );
 }
@@ -65,7 +52,7 @@ function jobTitle(t: Translate, action: LocalAction, tool: LocalTool, name: stri
 }
 
 /** The «Local» source of «Agregar clúster»: which tool, the cluster's name and shape, the command. */
-export function LocalClusterPane({ onStarted }: { onStarted: () => void }) {
+export function LocalClusterPane({ onClose }: { onClose: () => void }) {
   const t = useT();
   const tools = useLocalClustersStore((s) => s.tools);
   const list = useLocalClustersStore((s) => s.list);
@@ -124,7 +111,7 @@ export function LocalClusterPane({ onStarted }: { onStarted: () => void }) {
     setStarting(true);
     try {
       await run(jobTitle(t, "create", tool, spec.name), spec);
-      onStarted();
+      onClose();
     } finally {
       setStarting(false);
     }
@@ -146,7 +133,7 @@ export function LocalClusterPane({ onStarted }: { onStarted: () => void }) {
         <div className="flex flex-col gap-1.5">
           <p className="text-[12px] text-[var(--cf-text)]">{t("containers.local.noneInstalled")}</p>
           {LOCAL_TOOLS.map((tool) => (
-            <InstallHint key={tool} tool={tool} />
+            <InstallHint key={tool} tool={tool} onOpen={onClose} />
           ))}
         </div>
       )}
@@ -164,7 +151,7 @@ export function LocalClusterPane({ onStarted }: { onStarted: () => void }) {
             ariaLabel={t("containers.local.tool")}
           />
           <p className="text-[11.5px] leading-snug text-[var(--cf-text-faint)]">{t(TOOL_HINT[tool])}</p>
-          {!available && <InstallHint tool={tool} />}
+          {!available && <InstallHint tool={tool} onOpen={onClose} />}
           {available && tool !== "minikube" && !tools.docker && (
             <p className="flex items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
               <TriangleAlert size={13} className="shrink-0 text-[var(--cf-warning)]" />
@@ -204,7 +191,7 @@ export function LocalClusterPane({ onStarted }: { onStarted: () => void }) {
       {(list?.clusters.length ?? 0) > 0 && (
         <div className="flex flex-col gap-1 border-t border-[var(--cf-border)] pt-3">
           <div className={sectionLabelClass}>{t("containers.local.title")}</div>
-          <LocalClusterList onOpen={onStarted} />
+          <LocalClusterList onOpen={onClose} />
         </div>
       )}
     </div>

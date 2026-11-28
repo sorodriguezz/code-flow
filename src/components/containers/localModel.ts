@@ -11,21 +11,6 @@ export const LOCAL_TOOLS: LocalTool[] = ["kind", "k3d", "minikube"];
 /** Nodes besides the control plane, at most — `local::MAX_WORKERS`. */
 export const MAX_WORKERS = 9;
 
-type Platform = "macos" | "windows" | "linux";
-
-/** One command that installs each tool here — what the hints offer to copy. */
-const INSTALL: Record<LocalTool | "helm", Record<Platform, string>> = {
-  kind: { macos: "brew install kind", windows: "winget install -e --id Kubernetes.kind", linux: "go install sigs.k8s.io/kind@latest" },
-  k3d: { macos: "brew install k3d", windows: "choco install k3d", linux: "curl -s https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | bash" },
-  minikube: { macos: "brew install minikube", windows: "winget install -e --id Kubernetes.minikube", linux: "curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64 && sudo install minikube-linux-amd64 /usr/local/bin/minikube" },
-  helm: { macos: "brew install helm", windows: "winget install -e --id Helm.Helm", linux: "sudo snap install helm --classic" },
-};
-
-export function installCommandFor(tool: LocalTool | "helm", platform: string): string {
-  const key: Platform = platform === "macos" || platform === "windows" ? platform : "linux";
-  return INSTALL[tool][key];
-}
-
 /** A cluster name every tool takes: lowercase letters, digits and inner dashes, up to 32. */
 export function validClusterName(name: string): boolean {
   return name.length <= 32 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(name);

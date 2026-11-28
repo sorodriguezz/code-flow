@@ -89,6 +89,7 @@ export type SettingsSectionId =
   | "azure"
   | "claude"
   | "backup"
+  | "installations"
   | "remote"
   /** The password manager's own settings — auto-lock, clipboard, generator defaults. They used to
    *  live in a modal inside the vault, which is the one place a setting is looked for last. */
@@ -96,7 +97,7 @@ export type SettingsSectionId =
   /** What the app tells you about, and how loudly. Split out of the notification bell's popover,
    *  where a global preference had no business hiding. */
   | "notifications"
-  /** The Revisor's switch, its SonarQube download, the rules and the connected servers. */
+  /** The Revisor's switch, the local SonarQube server, the rules and the connected servers. */
   | "reviewer"
   | "review"
   /** What listens and what speaks: microphone, speaker, Whisper models and voices, dictation,

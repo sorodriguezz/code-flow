@@ -277,7 +277,7 @@ pub fn check_requirements() -> Vec<crate::requirements::Requirement> {
     crate::requirements::check()
 }
 
-/// `git` and every AI CLI, and whether each is installed here. See `tool_setup`.
+/// Lists CodeFlow’s external tools, their presence and how to install them. See `tool_setup`.
 #[tauri::command(async)]
 pub fn tool_setup_status() -> Vec<crate::tool_setup::ToolStatus> {
     crate::tool_setup::status()

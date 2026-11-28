@@ -31,14 +31,14 @@ pub fn link_project_gitlab(
     queries::link_project_gitlab(&conn, &id, path, &host).map_err(|e| e.to_string())
 }
 
-/// Validates the saved token for a host and returns the username it belongs to.
-///
-/// Settings calls this the moment a token is pasted, so a wrong or expired one is reported there
-/// and then — rather than as a confusing failure the next time a merge request list is opened.
+/// Validates a candidate or saved GitLab token and returns its username.
 #[tauri::command]
-pub async fn gitlab_authenticated_user(host: String) -> Result<String, String> {
+pub async fn gitlab_authenticated_user(host: String, candidate: Option<String>) -> Result<String, String> {
     let host = host.trim().to_ascii_lowercase();
-    let token = secrets::get_secret(&secrets::gitlab_token_key(&host))?
-        .ok_or_else(|| format!("No GitLab token saved for \"{host}\""))?;
+    let token = match candidate {
+        Some(token) => token,
+        None => secrets::get_secret(&secrets::gitlab_token_key(&host))?
+            .ok_or_else(|| format!("No GitLab token saved for \"{host}\""))?,
+    };
     gitlab::get_authenticated_user(&host, &token).await
 }

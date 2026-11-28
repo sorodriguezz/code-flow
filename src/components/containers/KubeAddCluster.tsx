@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { Check, ChevronDown, ChevronRight, CircleAlert, Copy, Eye, EyeOff, FolderOpen, Loader2, Plug, RefreshCw, Search, TriangleAlert } from "lucide-react";
+import { Check, ChevronDown, ChevronRight, CircleAlert, Eye, EyeOff, FolderOpen, Loader2, Plug, RefreshCw, Search, TriangleAlert } from "lucide-react";
 import { Button, iconButtonClass } from "../common/Button";
 import { Checkbox } from "../common/Checkbox";
+import { ToolInstallationLink, openToolInstallations } from "../common/ToolInstallationLink";
 import { Segmented } from "../common/Segmented";
 import { Select } from "../common/Select";
 import { chipClass, fieldClass, rowClass } from "../common/recipes";
 import { Dialog, Field } from "./ui";
 import { LocalClusterPane } from "./KubeLocalClusters";
 import { containersKubeAccounts, containersKubeAdd, containersKubeClouds, containersKubeTest, containersKubeTools } from "../../lib/tauri/containersCommands";
-import { currentPlatform } from "../../lib/platform";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { useT, type Translate } from "../../state/languageStore";
 import { pushSuccessToast } from "../../state/toastStore";
@@ -54,23 +54,15 @@ const TOOL_NAMES: Record<Tool, string> = {
   gkeAuthPlugin: "gke-gcloud-auth-plugin",
 };
 
-/** One command that installs each tool here — what the hints and the missing-tool lines offer. */
-const INSTALL: Record<Tool, { macos: string; windows: string; linux: string }> = {
-  kubectl: { macos: "brew install kubectl", windows: "winget install -e --id Kubernetes.kubectl", linux: "sudo snap install kubectl --classic" },
-  az: { macos: "brew install azure-cli", windows: "winget install -e --id Microsoft.AzureCLI", linux: "curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash" },
-  aws: { macos: "brew install awscli", windows: "winget install -e --id Amazon.AWSCLI", linux: "sudo snap install aws-cli --classic" },
-  gcloud: { macos: "brew install --cask google-cloud-sdk", windows: "winget install -e --id Google.CloudSDK", linux: "sudo snap install google-cloud-cli --classic" },
-  kubelogin: { macos: "brew install Azure/kubelogin/kubelogin", windows: "az aks install-cli", linux: "az aks install-cli" },
-  gkeAuthPlugin: {
-    macos: "gcloud components install gke-gcloud-auth-plugin",
-    windows: "gcloud components install gke-gcloud-auth-plugin",
-    linux: "gcloud components install gke-gcloud-auth-plugin",
-  },
+const TEST_TOOL: Record<string, string> = {
+  kubectl: "kubectl",
+  kubelogin: "kubelogin",
+  gkePlugin: "gke-auth-plugin",
+  awsCli: "aws",
 };
 
-function installCommand(tool: Tool): string {
-  const platform = currentPlatform();
-  return INSTALL[tool][platform === "unknown" ? "linux" : platform];
+function installationId(tool: Tool) {
+  return tool === "gkeAuthPlugin" ? "gke-auth-plugin" : tool;
 }
 
 /** EKS lists one region at a time: the regions offered as the field is typed in. */
@@ -147,11 +139,6 @@ function Coded({ text }: { text: string }) {
   );
 }
 
-function copyCommand(command: string, t: Translate) {
-  void navigator.clipboard.writeText(command).catch(() => {});
-  pushSuccessToast(t("containers.kube.add.cli.copied"));
-}
-
 /**
  * The words for a `KubeTest.hint` (`kubeconfig::hint_for` in Rust): a key, with `awsLogin` carrying
  * the profile after a colon. An unknown one is shown as it came.
@@ -163,13 +150,13 @@ export function kubeHintText(t: Translate, hint: string | null | undefined): str
   const arg = at === -1 ? "" : hint.slice(at + 1);
   switch (key) {
     case "kubectl":
-      return t("containers.kube.add.hint.kubectl", { command: installCommand("kubectl") });
+      return t("containers.kube.add.hint.kubectl");
     case "kubelogin":
-      return t("containers.kube.add.hint.kubelogin", { command: installCommand("kubelogin") });
+      return t("containers.kube.add.hint.kubelogin");
     case "gkePlugin":
-      return t("containers.kube.add.hint.gkePlugin", { command: installCommand("gkeAuthPlugin") });
+      return t("containers.kube.add.hint.gkePlugin");
     case "awsCli":
-      return t("containers.kube.add.hint.awsCli", { command: installCommand("aws") });
+      return t("containers.kube.add.hint.awsCli");
     case "awsLogin":
       return t("containers.kube.add.hint.awsLogin", { profile: arg ? ` --profile ${arg}` : "" });
     case "azLogin":
@@ -198,7 +185,7 @@ export function kubeHintText(t: Translate, hint: string | null | undefined): str
 }
 
 /** A connection test's outcome: the server's version, or kubectl's error and what to do about it. */
-export function KubeTestLine({ test }: { test: KubeTest }) {
+export function KubeTestLine({ test, onOpenInstallations }: { test: KubeTest; onOpenInstallations?: () => void }) {
   const t = useT();
   if (test.ok) {
     return (
@@ -209,6 +196,7 @@ export function KubeTestLine({ test }: { test: KubeTest }) {
     );
   }
   const hint = kubeHintText(t, test.hint);
+  const tool = TEST_TOOL[test.hint?.split(":")[0] ?? ""];
   return (
     <div className="flex min-w-0 flex-col gap-1">
       {hint && (
@@ -216,34 +204,35 @@ export function KubeTestLine({ test }: { test: KubeTest }) {
           <Coded text={hint} />
         </p>
       )}
+      {tool && <ToolInstallationLink tool={tool} onOpen={onOpenInstallations} />}
       {test.error && <p className="whitespace-pre-wrap break-words font-mono text-[11px] leading-snug text-[var(--cf-danger)]">{test.error}</p>}
     </div>
   );
 }
 
-/** A tool this source cannot work without: its name and the one command that installs it. */
-function MissingTool({ tool }: { tool: Tool }) {
+function MissingTool({ tool, onOpen }: { tool: Tool; onOpen: () => void }) {
   const t = useT();
-  const command = installCommand(tool);
   return (
-    <div className="flex items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
+    <div className="flex flex-wrap items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
       <TriangleAlert size={13} className="shrink-0 text-[var(--cf-warning)]" />
-      <span className="min-w-0 flex-1">
-        <Coded text={t("containers.kube.add.cli.missing", { tool: TOOL_NAMES[tool], command })} />
-      </span>
-      <button type="button" onClick={() => copyCommand(command, t)} className={iconButtonClass({ size: "xs" })} aria-label={t("containers.kube.add.cli.copy")} title={t("containers.kube.add.cli.copy")}>
-        <Copy size={12} />
-      </button>
+      {t("installations.missingTool", { tool: TOOL_NAMES[tool] })}
+      <ToolInstallationLink tool={installationId(tool)} onOpen={onOpen} />
     </div>
   );
 }
 
-/** A plugin a cluster may need but the form can go on without: a chip that copies its install. */
-function PluginChip({ tool, hint }: { tool: Tool; hint: string }) {
+function PluginChip({ tool, hint, onOpen }: { tool: Tool; hint: string; onOpen: () => void }) {
   const t = useT();
-  const command = installCommand(tool);
   return (
-    <button type="button" onClick={() => copyCommand(command, t)} title={`${hint}\n${command}`} className={chipClass("warn", "cursor-pointer")}>
+    <button
+      type="button"
+      onClick={() => {
+        onOpen();
+        openToolInstallations(installationId(tool));
+      }}
+      title={hint}
+      className={chipClass("warn", "cursor-pointer")}
+    >
       <TriangleAlert size={11} />
       {t("containers.kube.add.plugin.missing", { tool: TOOL_NAMES[tool] })}
     </button>
@@ -273,6 +262,7 @@ function CloudPane({
   onPatch,
   onLoadAccounts,
   onSearch,
+  onOpenInstallations,
 }: {
   source: CloudSource;
   tools: KubeTools | null;
@@ -280,9 +270,10 @@ function CloudPane({
   onPatch: (patch: Partial<CloudState>) => void;
   onLoadAccounts: () => void;
   onSearch: () => void;
+  onOpenInstallations: () => void;
 }) {
   const t = useT();
-  if (tools && !tools[CLI[source]]) return <MissingTool tool={CLI[source]} />;
+  if (tools && !tools[CLI[source]]) return <MissingTool tool={CLI[source]} onOpen={onOpenInstallations} />;
   const accounts = state.accounts ?? [];
   // EKS can list with the AWS CLI's own default credentials when no profile is configured.
   const options =
@@ -299,12 +290,12 @@ function CloudPane({
     <div className="flex flex-col gap-3">
       {tools && source === "aks" && !tools.kubelogin && (
         <div>
-          <PluginChip tool="kubelogin" hint={t("containers.kube.add.plugin.kubeloginHint")} />
+          <PluginChip tool="kubelogin" hint={t("containers.kube.add.plugin.kubeloginHint")} onOpen={onOpenInstallations} />
         </div>
       )}
       {tools && source === "gke" && !tools.gkeAuthPlugin && (
         <div>
-          <PluginChip tool="gkeAuthPlugin" hint={t("containers.kube.add.plugin.gkeHint")} />
+          <PluginChip tool="gkeAuthPlugin" hint={t("containers.kube.add.plugin.gkeHint")} onOpen={onOpenInstallations} />
         </div>
       )}
       <div className="flex items-end gap-2">
@@ -689,7 +680,7 @@ export function KubeAddCluster({ onClose, onAdded }: { onClose: () => void; onAd
             </Button>
             {test && (
               <div className="min-w-0 flex-1 pt-1">
-                <KubeTestLine test={test} />
+                <KubeTestLine test={test} onOpenInstallations={onClose} />
               </div>
             )}
           </div>
@@ -705,7 +696,7 @@ export function KubeAddCluster({ onClose, onAdded }: { onClose: () => void; onAd
           }}
         >
           <Segmented<Source> options={sourceOptions} value={source} onChange={setSource} layoutId="cf-kube-add-source" full ariaLabel={t("containers.kube.add.title")} />
-          {tools && !tools.kubectl && <MissingTool tool="kubectl" />}
+          {tools && !tools.kubectl && <MissingTool tool="kubectl" onOpen={onClose} />}
           {source === "file" && (
             <Field label={t("containers.kube.add.file.label")} hint={t("containers.kube.add.file.hint")}>
               <div className="flex gap-1.5">
@@ -738,10 +729,11 @@ export function KubeAddCluster({ onClose, onAdded }: { onClose: () => void; onAd
               onPatch={(patch) => patchCloud(cloud, patch)}
               onLoadAccounts={() => void loadAccounts(cloud)}
               onSearch={() => void search(cloud)}
+              onOpenInstallations={onClose}
             />
           )}
           {source === "manual" && <ManualPane state={manual} onPatch={(patch) => setManual((m) => ({ ...m, ...patch }))} onSubmit={() => void submit()} />}
-          {source === "local" && <LocalClusterPane onStarted={onClose} />}
+          {source === "local" && <LocalClusterPane onClose={onClose} />}
           {problem && <ErrorLine text={problem} />}
         </div>
       )}

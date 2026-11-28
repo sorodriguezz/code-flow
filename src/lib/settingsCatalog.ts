@@ -314,6 +314,23 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
     ],
   },
 
+  {
+    id: "installations",
+    labelKey: "installations.title",
+    icon: Download,
+    group: "app",
+    color: "#0d9488",
+    searchKey: "installations.searchTerms",
+    tabs: [
+      { id: "system", labelKey: "installations.system", icon: Wrench, searchKey: "installations.searchSystem" },
+      { id: "agent", labelKey: "installations.agents", icon: TerminalSquare, searchKey: "installations.searchAgents" },
+      { id: "model", labelKey: "installations.models", icon: Cpu, searchKey: "installations.searchModels" },
+      { id: "cloud", labelKey: "installations.cloud", icon: Cloud, searchKey: "installations.searchCloud" },
+      { id: "container", labelKey: "installations.containers", icon: Blocks, searchKey: "installations.searchContainers" },
+      { id: "analysis", labelKey: "installations.analysis", icon: ScanSearch, searchKey: "installations.searchAnalysis" },
+    ],
+  },
+
   // ------------------------------------------------------------------ code
   {
     id: "projects",
@@ -418,8 +435,6 @@ export const SETTINGS_SECTIONS: SettingsSectionDef[] = [
       { id: "secrets", labelKey: "settings.tabSecretScan", hintKey: "settings.secretScanDescription", icon: ShieldAlert, searchKey: "settings.searchTermsSecretScan" },
       { id: "blame", labelKey: "settings.tabBlame", hintKey: "settings.blameDescription", icon: History, searchKey: "settings.searchTermsBlame" },
       { id: "locked", labelKey: "settings.tabLockedBranches", hintKey: "settings.lockedBranchesDescription", icon: Lock, searchKey: "settings.searchTermsLockedBranches" },
-      // Whether `git` is on this machine, with the one-click install the first-launch setup uses.
-      { id: "install", labelKey: "toolSetup.gitPane", hintKey: "toolSetup.gitPaneHint", icon: Download, searchKey: "toolSetup.searchTerms" },
     ],
   },
   {
@@ -737,6 +752,7 @@ export const SELF_SCROLLING_SECTIONS = new Set<SettingsSectionId>([
   "voice",
   "codi",
   "backup",
+  "installations",
   "projects",
   "editor",
   "terminal",

@@ -1400,10 +1400,13 @@ pub async fn authenticated_identity(org: &str, pat: &str) -> Result<String, Stri
     }
 }
 
-async fn connection_data(org: &str, pat: &str) -> Result<ConnectionData, String> {
+pub(crate) fn connection_data_url(org: &str) -> String {
     let org = encode_segment(&normalize_org(org));
-    let url = format!("https://dev.azure.com/{org}/_apis/connectionData?api-version={PREVIEW_API_VERSION}");
-    get_json(&url, pat).await
+    format!("https://dev.azure.com/{org}/_apis/connectionData?api-version={PREVIEW_API_VERSION}")
+}
+
+async fn connection_data(org: &str, pat: &str) -> Result<ConnectionData, String> {
+    get_json(&connection_data_url(org), pat).await
 }
 
 /// Casts the current user's review vote on a PR. Azure's reviewer vote: `10` = approve,

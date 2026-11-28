@@ -19,6 +19,13 @@ export type XmlNode =
 
 const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
 
+// XML 1.0 §2.3 allows Unicode names in both elements and attributes.
+const NAME_START = String.raw`:A-Z_a-z\u00C0-\u00D6\u00D8-\u00F6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF`
+  + String.raw`\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD\u{10000}-\u{EFFFF}`;
+const NAME = String.raw`[${NAME_START}][${NAME_START}\-.0-9\u00B7\u0300-\u036F\u203F-\u2040]*`;
+const ELEMENT_NAME = new RegExp(`^<(${NAME})`, "u");
+const ATTRIBUTE = new RegExp(String.raw`^(${NAME})\s*=\s*("([^"]*)"|'([^']*)')`, "u");
+
 function decodeEntities(text: string): string {
   return text.replace(/&(#x[0-9a-fA-F]+|#\d+|\w+);/g, (whole, body: string) => {
     if (body[0] === "#") return String.fromCodePoint(body[1] === "x" ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10));
@@ -89,7 +96,7 @@ export function parseXml(text: string): XmlNode[] {
       if (open!.name !== m![1]) fail(`Expected </${open!.name}> but found </${m![1]}>`);
       i += m![0].length;
     } else {
-      const m = /^<([A-Za-z_][\w.:-]*)/.exec(text.slice(i));
+      const m = ELEMENT_NAME.exec(text.slice(i));
       if (!m) fail("Malformed tag");
       const name = m![1];
       i += m![0].length;
@@ -109,7 +116,7 @@ export function parseXml(text: string): XmlNode[] {
           i++;
           break;
         }
-        const a = /^([A-Za-z_][\w.:-]*)\s*=\s*("([^"]*)"|'([^']*)')/.exec(text.slice(i));
+        const a = ATTRIBUTE.exec(text.slice(i));
         if (!a || !ws) fail(`Malformed attribute in <${name}>`);
         if (attrs.some(([k]) => k === a![1])) fail(`Duplicate attribute ${a![1]}`);
         attrs.push([a![1], decodeEntities(a![3] ?? a![4] ?? "")]);

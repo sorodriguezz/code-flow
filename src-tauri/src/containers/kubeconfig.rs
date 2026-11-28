@@ -678,7 +678,7 @@ fn beside(tool: &Path, name: &str) -> Option<PathBuf> {
     extensions.iter().map(|ext| dir.join(format!("{name}{ext}"))).find(|p| p.is_file())
 }
 
-fn gke_plugin(gcloud: Option<&Path>) -> Option<PathBuf> {
+pub(crate) fn gke_plugin(gcloud: Option<&Path>) -> Option<PathBuf> {
     cli::find("gke-gcloud-auth-plugin").or_else(|| gcloud.and_then(|g| beside(g, "gke-gcloud-auth-plugin")))
 }
 

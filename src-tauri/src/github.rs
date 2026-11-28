@@ -60,7 +60,7 @@ pub(crate) fn bearer(token: &str) -> String {
 }
 
 /// A request with the four headers every REST call here carries.
-fn rest(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
+pub(crate) fn rest(request: reqwest::RequestBuilder, token: &str) -> reqwest::RequestBuilder {
     request
         .header("Authorization", bearer(token))
         .header("Accept", "application/vnd.github+json")

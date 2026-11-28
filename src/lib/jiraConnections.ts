@@ -13,6 +13,7 @@ import { getSetting, setSetting } from "./tauri/commands";
  * with a work Jira and a personal one is in the same position as one with two Azure organisations.
  */
 export interface JiraConnection {
+  credentialRevision?: string;
   /** As the user typed it. Normalised to an origin before any request; see `normalizeJiraSite`. */
   site: string;
   email: string;

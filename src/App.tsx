@@ -45,6 +45,7 @@ import { DialogSkeleton, PaletteSkeleton, SettingsSkeleton, ViewSkeleton } from 
 import { useThemeStore } from "./state/themeStore";
 import { useUiStore, type MainView } from "./state/uiStore";
 import { pipelinesAvailable, useVcsConnectionsStore } from "./state/vcsConnectionsStore";
+import { startIntegrationCredentialMonitor } from "./state/integrationCredentialStore";
 import { useWorkspaceStore } from "./state/workspaceStore";
 import { useMissingProjectsStore, useProjectNotARepo } from "./state/missingProjectsStore";
 import { useWindowStore } from "./state/windowStore";
@@ -786,6 +787,7 @@ export default function App() {
       // first-launch opening. Deliberately *after* the batch: the tour rearranges panels, and it
       // must not start before the layout and language it rearranges have loaded.
       void initTour({ autoOpen: clearToTour });
+      startIntegrationCredentialMonitor();
       // Last, and only once there is nothing left to do: pull in the chunks that open from a
       // keystroke, so the first Ctrl+K of the session doesn't have to wait for one. Idle rather
       // than immediate — this must never be what the first frame is waiting on.

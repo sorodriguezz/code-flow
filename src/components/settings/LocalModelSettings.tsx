@@ -1,3 +1,4 @@
+import { ToolInstallationLink } from "../common/ToolInstallationLink";
 import { useEffect, useState, type ReactNode } from "react";
 import { CircleStop, Download, FolderOpen, Gauge, HardDrive, Loader2, ShieldCheck, X } from "lucide-react";
 import { buttonClass } from "../common/Button";
@@ -732,6 +733,7 @@ export function LocalModelSettings() {
               {state.backend !== "bundled" && !state.reachable && detectedNames.length === 0 && (
                 <span className="text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("localexec.noServer")}</span>
               )}
+              {state.backend === "ollama" && !state.reachable && !state.remote && <ToolInstallationLink tool="ollama" />}
               {state.backend !== "bundled" && state.remote && <Note tone="warning">{t("localexec.remote", { host })}</Note>}
               {!state.backend_chosen && detectedNames.length > 0 && (
                 <span className="text-[11px] text-[var(--cf-text-muted)]">

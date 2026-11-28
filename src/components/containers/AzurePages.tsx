@@ -1,6 +1,7 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, ArrowLeft, ExternalLink, Loader2, Play, RefreshCw, X } from "lucide-react";
 import { Button } from "../common/Button";
+import { ToolInstallationLink } from "../common/ToolInstallationLink";
 import { Select } from "../common/Select";
 import { SessionPane } from "./SessionPane";
 import { LogAnalysisPanel, LogTools } from "./LogTools";
@@ -71,7 +72,12 @@ export function AzurePane({ section }: { section: string }) {
   const subscriptions = useAzureStore((s) => s.subscriptions);
   const subscription = useAzureStore((s) => s.prefs.subscription);
   const selected = useAzureStore((s) => s.selected);
-  if (found === false) return <EmptyLine>{t("azure.notInstalled")}</EmptyLine>;
+  if (found === false) return (
+    <EmptyLine>
+      {t("azure.notInstalled")}{" "}
+      <ToolInstallationLink tool="az" />
+    </EmptyLine>
+  );
   if (subscriptions.error) return <EmptyLine>{t("azure.signIn", { reason: subscriptions.error })}</EmptyLine>;
   if (!subscription) return subscriptions.at === 0 || subscriptions.loading ? <LoadingLine /> : <EmptyLine>{t("azure.noSubscriptions")}</EmptyLine>;
   if (selected) return <AzureResourceDetail resource={selected} />;

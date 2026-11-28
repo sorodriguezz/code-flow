@@ -78,7 +78,7 @@ struct JiraConnection {
 /// with the rest of the connection in `app_settings` rather than in the keychain, which is the same
 /// split the Azure DevOps organisation list already uses. Matched case-insensitively and against the
 /// normalised site, so a connection saved as `https://acme.atlassian.net/` still answers for `acme`.
-fn jira_email(db: &State<Db>, site: &str) -> Result<String, String> {
+pub(super) fn jira_email(db: &State<Db>, site: &str) -> Result<String, String> {
     let raw = {
         let conn = db.0.lock().map_err(|e| e.to_string())?;
         queries::get_setting(&conn, "jira_connections").map_err(|e| e.to_string())?

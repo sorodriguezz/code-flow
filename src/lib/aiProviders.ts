@@ -75,8 +75,6 @@ export interface AiProviderOption {
   setup?: {
     /** Official install / setup page. */
     url: string;
-    /** Canonical one-line install command, when the provider has one. */
-    command?: string;
     /** Command to run once installed, e.g. signing in. */
     postCommand?: string;
   };
@@ -104,7 +102,6 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     acceptsImages: true,
     setup: {
       url: "https://docs.claude.com/en/docs/claude-code/setup",
-      command: "npm install -g @anthropic-ai/claude-code",
     },
   },
   // Gemini now runs through Google's Antigravity CLI (`agy`), the successor to the retired
@@ -128,7 +125,7 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     // in `-p` mode.
     headlessSlashCommands: true,
     acceptsImages: false,
-    setup: { url: "https://antigravity.google" },
+    setup: { url: "https://antigravity.google/docs/getting-started?tab=cli" },
   },
   // OpenAI's CLI, logged in with a **ChatGPT subscription** (`codex login`) rather than metered
   // API credits — which is what makes it its own entry rather than "OpenAI". A metered key against
@@ -145,7 +142,6 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     acceptsImages: true,
     setup: {
       url: "https://developers.openai.com/codex/",
-      command: "winget install OpenAI.Codex",
       postCommand: "codex login",
     },
   },
@@ -168,8 +164,7 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     headlessSlashCommands: false,
     acceptsImages: false,
     setup: {
-      url: "https://x.ai/cli",
-      command: "curl -fsSL https://x.ai/cli/install.sh | bash",
+      url: "https://docs.x.ai/build/overview#install",
       postCommand: "grok login",
     },
   },
@@ -212,7 +207,6 @@ export const AI_PROVIDERS: AiProviderOption[] = [
     acceptsImages: false,
     setup: {
       url: "https://cline.bot",
-      command: "npm install -g cline",
       postCommand: "cline auth ollama",
     },
   },

@@ -11,6 +11,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { ToolInstallationLink } from "../common/ToolInstallationLink";
 import {
   Ban,
   Bug,
@@ -338,13 +339,7 @@ export function ReviewerView() {
         {status && !ready && (
           <div className="flex items-center gap-2 border-b border-[var(--cf-border)] px-3 py-2 text-[12px] text-[var(--cf-text-muted)]">
             {t("reviewer.notInstalled")}
-            <button
-              type="button"
-              onClick={() => useUiStore.getState().openSettingsAt("reviewer", "sonarqube")}
-              className="text-[var(--cf-accent)] hover:underline"
-            >
-              {t("reviewer.goDownload")}
-            </button>
+            <ToolInstallationLink tool="sonarqube" />
           </div>
         )}
         {configOpen && <ProjectConfigPanel projectId={project.id} config={projectConfig} suggestion={suggestion} />}

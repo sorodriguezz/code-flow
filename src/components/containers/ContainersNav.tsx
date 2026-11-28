@@ -31,6 +31,7 @@ import { runtimeLabel } from "./containerActions";
 import { firstRead } from "./pageModel";
 import { disconnectCluster } from "./KubePage";
 import { AiVisibilityToggle } from "./AiVisibility";
+import { useToolSetupStore } from "../../state/toolSetupStore";
 import { useAzureStore } from "../../state/azureStore";
 import { listKey, useContainersStore, type EngineSection } from "../../state/containersStore";
 import { useT } from "../../state/languageStore";
@@ -140,13 +141,17 @@ export function ContainersNav({ onAddCluster, onAddEngine }: { onAddCluster: () 
 /** Azure's detection and its subscriptions, read whether or not its pages are open: its row above
  *  shows only once `az` is found, and says which subscription the pages read. */
 function useAzureDetection() {
+  const azInstalled = useToolSetupStore((s) => s.tools?.find((tool) => tool.id === "az")?.installed);
   const found = useAzureStore((s) => s.found);
   const detect = useAzureStore((s) => s.detect);
   const loadPrefs = useAzureStore((s) => s.loadPrefs);
   const loadSubscriptions = useAzureStore((s) => s.loadSubscriptions);
   useEffect(() => {
-    void loadPrefs().then(() => (useAzureStore.getState().found === null ? detect() : undefined));
-  }, [loadPrefs, detect]);
+    void loadPrefs().then(() => {
+      const found = useAzureStore.getState().found;
+      if (found === null || (azInstalled !== undefined && azInstalled !== found)) return detect();
+    });
+  }, [loadPrefs, detect, azInstalled]);
   // `az account list` reads az's own profile; the groups ask Azure — only once the pages are open.
   useEffect(() => {
     if (found) void loadSubscriptions();

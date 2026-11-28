@@ -1887,6 +1887,7 @@ sharded_invoke_handler! {
         commands::checkpoint_cmd::delete_ai_checkpoint,
         commands::ado_cmd::ado_verify_pat,
         commands::ado_cmd::ado_check_org,
+        commands::integration_credentials_cmd::integration_check_credential,
         commands::ado_cmd::ado_list_projects,
         commands::ado_cmd::ado_list_repos,
         commands::ado_cmd::auto_link_project,

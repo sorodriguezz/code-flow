@@ -3,6 +3,7 @@ import { checkRequirements, getSetting, setSetting } from "../lib/tauri/commands
 import type { Requirement } from "../types/domain";
 import { useToolSetupStore } from "./toolSetupStore";
 import { useTourStore } from "./tourStore";
+import { useUiStore } from "./uiStore";
 
 /**
  * Where "this installation has already been checked" is recorded.
@@ -22,25 +23,7 @@ import { useTourStore } from "./tourStore";
  */
 const SEEN_KEY = "requirements_checked";
 
-/**
- * The first-launch check: is `git` there, and can the data directory be written — and, since
- * 2026-10-29, the «Preparar CodeFlow» screen that offers to install `git` and the AI CLIs.
- *
- * **Silent when there is nothing to say or offer.** On a machine that already has `git`, every CLI
- * and writable directories, a screen saying so would train people to dismiss screens, and it would
- * land on top of the guided tour — so a clean result shows nothing, writes the flag and gets out of
- * the way.
- *
- * **Two checks, and a choice.** `git` and the data directories are checked because failing them is
- * the app looking fine and being wrong (see `requirements.rs`). The AI CLIs are not requirements —
- * the user asked (2026-10-29) to pick which to install when the app is first opened, rather than
- * from an installer that cannot ask (a DMG has no pages; NSIS would need its own template). Nothing
- * is ticked but a missing `git`; the same one-click install is in Settings for later.
- *
- * **Checked at most once per installation.** After the flag is set nothing is probed at all — the
- * store's `init` is one settings read and returns. That is what makes putting it on the startup
- * path affordable.
- */
+/** First launch checks Git, AI CLIs and writable directories before the tour. */
 interface RequirementsState {
   /** What failed. Empty when nothing did, which is also the state on every launch after the first. */
   problems: Requirement[];
@@ -82,7 +65,7 @@ export const useRequirementsStore = create<RequirementsState>((set, get) => ({
     const problems = found.filter((requirement) => !requirement.ok);
     const tools = useToolSetupStore.getState().tools ?? [];
     // Something to offer: a tool that is missing and has a way to be installed or a page to go to.
-    const missing = tools.some((tool) => !tool.installed);
+    const missing = tools.some((tool) => (tool.id === "git" || tool.group === "agent") && !tool.installed);
     if (problems.length === 0 && !missing) {
       // Nothing to say or offer. Recorded as done all the same — the question has been answered for
       // this installation, and answering it again on every launch is a subprocess nobody asked for.
@@ -102,6 +85,16 @@ export const useRequirementsStore = create<RequirementsState>((set, get) => ({
     set({ open: false });
     // The tour held back for this screen. Not over a data directory that cannot be written: that
     // launch's tour would walk an app that is about to lose what it shows.
-    if (!blocking) void useTourStore.getState().init({ autoOpen: true });
+    if (blocking) return;
+    const startTour = () => void useTourStore.getState().init({ autoOpen: true });
+    if (useUiStore.getState().settingsOpen) {
+      const unsubscribe = useUiStore.subscribe((state) => {
+        if (state.settingsOpen) return;
+        unsubscribe();
+        startTour();
+      });
+    } else {
+      startTour();
+    }
   },
 }));

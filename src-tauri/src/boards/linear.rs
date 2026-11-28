@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use super::{text_to_html, BoardAuth, ExistingItem, ItemRef, NewChildItem, NewWorkItem, WorkItem, WorkItemChild, WorkItemEdit, WorkItemType};
 
 const ENDPOINT: &str = "https://api.linear.app/graphql";
+pub(crate) const IDENTITY_QUERY: &str = "query { viewer { organization { urlKey name } } }";
 /// Issues a duplicate check reads — Linear pages at most 250 at a time.
 const RECENT: usize = 250;
 
@@ -25,13 +26,17 @@ fn client() -> reqwest::Client {
 
 /// One query or mutation's `data`. GraphQL reports a failure as HTTP 200 with `errors`, so those
 /// are read first — see `monday::run` for the same rule.
-pub(super) async fn run(query: &str, variables: Value, auth: &BoardAuth) -> Result<Value, String> {
-    let res = client()
+pub(crate) fn request(client: reqwest::Client, query: &str, variables: Value, auth: &BoardAuth) -> reqwest::RequestBuilder {
+    client
         .post(ENDPOINT)
         // Linear's personal API keys go in bare, with no scheme word.
         .header("Authorization", auth.secret.trim())
         .header("Content-Type", "application/json")
         .json(&json!({ "query": query, "variables": variables }))
+}
+
+pub(super) async fn run(query: &str, variables: Value, auth: &BoardAuth) -> Result<Value, String> {
+    let res = request(client(), query, variables, auth)
         .send()
         .await
         .map_err(|e| format!("no se pudo conectar con Linear: {e}"))?;
@@ -53,7 +58,7 @@ pub struct LinearAccount {
 }
 
 pub async fn whoami(auth: &BoardAuth) -> Result<LinearAccount, String> {
-    let data = run("query { viewer { organization { urlKey name } } }", json!({}), auth).await?;
+    let data = run(IDENTITY_QUERY, json!({}), auth).await?;
     let org = &data["viewer"]["organization"];
     let key = org["urlKey"].as_str().unwrap_or_default().to_string();
     if key.is_empty() {

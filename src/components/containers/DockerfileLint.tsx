@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { CheckCircle2, ClipboardCheck, Loader2 } from "lucide-react";
 import { containersDockerfileLint, containersHadolint } from "../../lib/tauri/containersCommands";
 import { useT } from "../../state/languageStore";
+import { useToolSetupStore } from "../../state/toolSetupStore";
+import { ToolInstallationLink } from "../common/ToolInstallationLink";
 import type { LintFinding } from "../../types/containers";
 
 /**
@@ -9,12 +11,6 @@ import type { LintFinding } from "../../types/containers";
  * when the path settles. Informative only — a build never waits for it, and without hadolint the
  * section says how to install it instead.
  */
-
-let hadolintAsked: Promise<string | null> | null = null;
-function detectHadolint(): Promise<string | null> {
-  hadolintAsked ??= containersHadolint().catch(() => null);
-  return hadolintAsked;
-}
 
 /** The Dockerfile's full path: as written when absolute, else inside the build folder. */
 export function dockerfilePath(folder: string, dockerfile: string): string {
@@ -40,14 +36,15 @@ export function DockerfileLint({ folder, dockerfile }: { folder: string; dockerf
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const path = dockerfilePath(folder, dockerfile);
+  const detectedHadolint = useToolSetupStore((state) => state.tools?.find((tool) => tool.id === "hadolint")?.installed);
 
   useEffect(() => {
     let alive = true;
-    void detectHadolint().then((found) => alive && setHadolint(found));
+    void containersHadolint().catch(() => null).then((found) => alive && setHadolint(found));
     return () => {
       alive = false;
     };
-  }, []);
+  }, [detectedHadolint]);
   useEffect(() => {
     setFindings(null);
     setError(null);
@@ -76,7 +73,10 @@ export function DockerfileLint({ folder, dockerfile }: { folder: string; dockerf
         {loading && <Loader2 size={11} className="animate-spin" />}
       </div>
       {hadolint === null ? (
-        <p className="text-[11.5px] leading-relaxed text-[var(--cf-text-faint)]">{t("containers.m.build.lintNone")}</p>
+        <p className="text-[11.5px] leading-relaxed text-[var(--cf-text-faint)]">
+          {t("containers.m.build.lintNone")}{" "}
+          <ToolInstallationLink tool="hadolint" />
+        </p>
       ) : error ? (
         <p className="text-[11.5px] text-[var(--cf-text-faint)]">{error}</p>
       ) : findings && findings.length === 0 ? (

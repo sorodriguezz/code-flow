@@ -1,3 +1,4 @@
+import { ToolInstallationLink } from "../common/ToolInstallationLink";
 import { useEffect, type ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 import { ContainersNav, useNav } from "./ContainersNav";
@@ -135,7 +136,12 @@ export function ContainersPane() {
       </div>
     );
   } else if (!runtime) {
-    page = <EmptyLine>{t("containers.noRuntimes")}</EmptyLine>;
+    page = (
+      <EmptyLine>
+        {t("containers.noRuntimes")}{" "}
+        <ToolInstallationLink tool="docker" />
+      </EmptyLine>
+    );
   } else if (selection && selection.runtime === runtime.id) {
     page = <ContainersDetail selection={selection} />;
   } else if (runtime.id === "kubernetes") {

@@ -104,7 +104,6 @@ export function GitHostingSettings() {
                   disabled={!available}
                   onClick={() => setTab(entry.id)}
                   aria-current={selected ? "page" : undefined}
-                  title={hosting?.label ?? t(entry.labelKey)}
                   // Row for row `SettingsRail`'s look, which this rail can't be (brand marks,
                   // untranslated names, a "coming soon" chip): the pill carries the selection, the
                   // label turns full text and only the glyph takes the accent; no weight change.

@@ -9,6 +9,7 @@ import { getSetting, setSetting } from "./tauri/commands";
  * saved rather than typed.
  */
 export interface LinearConnection {
+  credentialRevision?: string;
   /** The organisation's url key — `acme` for `linear.app/acme`. Read from Linear, never typed. */
   key: string;
   name: string;

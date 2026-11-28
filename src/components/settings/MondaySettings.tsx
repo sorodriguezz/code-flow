@@ -1,8 +1,9 @@
 import { useEffect, useId, useState } from "react";
-import { Check, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { KeyRound, Loader2, Trash2 } from "lucide-react";
+import { IntegrationCredentialStatus } from "./IntegrationCredentialStatus";
 import { TokenHowTo } from "./TokenHowTo";
 import { buttonClass } from "../common/Button";
-import { chipClass, fieldClass } from "../common/recipes";
+import { fieldClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
 import { deleteMondayToken, mondayWhoami, setMondayToken } from "../../lib/tauri/commands";
 import {
@@ -11,6 +12,7 @@ import {
   type MondayConnection,
 } from "../../lib/mondayConnections";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
+import { uuidV4 } from "../../lib/toolbox/ids";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -53,7 +55,7 @@ export function MondaySettings() {
       await setMondayToken(account.slug, token.trim());
       const next = [
         ...connections.filter((c) => c.slug !== account.slug),
-        { slug: account.slug, name: account.name },
+        { slug: account.slug, name: account.name, credentialRevision: uuidV4() },
       ];
       await saveMondayConnections(next);
       setConnections(next);
@@ -69,6 +71,7 @@ export function MondaySettings() {
   };
 
   const handleRemove = async (slug: string) => {
+    setSaving(true);
     try {
       await deleteMondayToken(slug);
       const next = connections.filter((c) => c.slug !== slug);
@@ -77,6 +80,8 @@ export function MondaySettings() {
       useToastStore.getState().pushToast(t("toast.mondayRemoved"), "info");
     } catch (e) {
       pushErrorToast(t("toast.mondayRemoveFailed", { error: String(e) }));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -104,13 +109,12 @@ export function MondaySettings() {
                   {conn.slug}.monday.com
                 </p>
               </div>
-              <span className={chipClass("ok")}>
-                <Check size={12} /> {t("settings.connected")}
-              </span>
+              <IntegrationCredentialStatus provider="monday" account={conn.slug} revision={conn.credentialRevision} />
               <Tooltip label={t("settings.remove")}>
                 <button
                   type="button"
                   aria-label={t("settings.remove")}
+                  disabled={saving}
                   onClick={() => handleRemove(conn.slug)}
                   className="inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40"
                 >

@@ -4,6 +4,7 @@ import { usePreferencesStore } from "./preferencesStore";
 import { sendNativeNotification } from "../lib/nativeNotify";
 import { remotectlPublishNotifications } from "../lib/tauri/commands";
 import { isMainWindow } from "../lib/windowIdentity";
+import type { HostingProvider } from "../lib/vcsProviders";
 import { useUiStore, type MainView, type StoriesMode } from "./uiStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import type { TranslationKey } from "../lib/i18n/translations";
@@ -51,7 +52,8 @@ export type NotificationSource =
   | "flows"
   /** A command in a dock terminal that ran a long while and finished out of sight — needs the
    *  shell integration's marks to know a command ended at all. */
-  | "terminal";
+  | "terminal"
+  | "integrations";
 
 /**
  * The menu each source is called in the rest of the app.
@@ -77,6 +79,7 @@ export const NOTIFICATION_SOURCE_LABEL: Record<NotificationSource, TranslationKe
   reviewer: "tabbar.reviewer",
   flows: "tabbar.flows",
   terminal: "terminal.title",
+  integrations: "settings.integrationsTitle",
 };
 
 /**
@@ -88,6 +91,8 @@ export const NOTIFICATION_SOURCE_LABEL: Record<NotificationSource, TranslationKe
  * selecting, because only it knows how to load a row it may not be holding yet.
  */
 export interface NotificationTarget {
+  /** Opens the credential's provider in Settings. */
+  integration?: HostingProvider;
   /**
    * The view to bring up — when the thing has one.
    *
@@ -475,6 +480,10 @@ export async function followTarget(
   workspaceId: string | null,
   target: NotificationTarget,
 ): Promise<void> {
+  if (target.integration) {
+    useUiStore.getState().openSettingsAt("azure", target.integration);
+    return;
+  }
   await enterWorkspace(workspaceId, target);
 
   const ui = useUiStore.getState();

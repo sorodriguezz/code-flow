@@ -9,7 +9,6 @@ import { fieldClass } from "../common/recipes";
 import { LockedBranchRules } from "./LockedBranchRules";
 import { WorkspaceIdentities } from "./WorkspaceIdentities";
 import { RailSection } from "./settingsNav";
-import { ToolInstallFor } from "../common/ToolInstallRow";
 
 export function GitSettings() {
   const t = useT();
@@ -135,7 +134,6 @@ export function GitSettings() {
           )}
 
           {tab === "locked" && <LockedBranchRules bare />}
-          {tab === "install" && <ToolInstallFor id="git" />}
         </>
       )}
     </RailSection>

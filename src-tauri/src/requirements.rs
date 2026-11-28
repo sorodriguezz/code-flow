@@ -2,7 +2,7 @@
 //!
 //! **Only the two things that are not optional.** Nearly everything CodeFlow shells out to is
 //! feature-scoped and already reports itself where it is used: the AI engines have a
-//! "found / not found" badge in Settings with an install command beside it, `ssh` explains itself
+//! "found / not found" badge in Settings with a link to Installations, `ssh` explains itself
 //! when a Remote host or a tunnelled connection fails, `npx` when a skill install does. A launch
 //! screen listing all of them would be a wall of things nobody has tried to use yet.
 //!

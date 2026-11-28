@@ -17,7 +17,7 @@ export function CollapsedPanelBar({
 }: {
   /** The panel's name, written down the bar. */
   label: string;
-  /** Tooltip and accessible name of the button. */
+  /** Accessible name of the button. */
   title: string;
   onExpand: () => void;
   /** The panel's `data-tour` anchor, kept on the bar so a tour step still finds it. */
@@ -32,7 +32,6 @@ export function CollapsedPanelBar({
       type="button"
       data-tour={tour}
       onClick={onExpand}
-      title={title}
       aria-label={title}
       aria-expanded={false}
       className={`${explorerClass} ${side === "right" ? "border-l border-r-0" : ""} group flex h-full w-[28px] shrink-0 select-none flex-col items-center gap-3 overflow-hidden py-3 text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]`}

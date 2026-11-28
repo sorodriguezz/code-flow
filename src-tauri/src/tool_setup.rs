@@ -1,8 +1,7 @@
-//! Installing what the app shells out to — `git` and the AI CLIs — from inside the app.
+//! Detects and installs the external tools used by CodeFlow.
 //!
-//! Two callers: the first-launch «Preparar CodeFlow» screen, where the person ticks what they want,
-//! and the one-click «Instalar» beside a tool Settings reports as not found. Both run the same
-//! command from the same table, so there is one answer to "how does CodeFlow install X".
+//! Settings lists the tools, their detected locations, and the platform's install route.
+//! The first-launch check uses the same inventory for Git and the AI CLIs.
 //!
 //! # Where the commands come from
 //!
@@ -38,13 +37,23 @@ const KEEP_LINES: usize = 80;
 /// The page for installing git by hand.
 const GIT_URL: &str = "https://git-scm.com/downloads";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolGroup {
+    System,
+    Agent,
+    Model,
+    Cloud,
+    Container,
+}
+
 /// One tool the setup can offer.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolStatus {
-    /// `git`, or a provider id.
     pub id: String,
     pub label: String,
+    pub group: ToolGroup,
     pub installed: bool,
     /// The version line when installed, the resolved path when only that is known, else empty.
     pub detail: String,
@@ -99,33 +108,167 @@ fn cli_providers() -> Vec<ProviderCaps> {
     provider_caps::all().into_iter().filter(|caps| !caps.in_process && caps.id != crate::custom::PROVIDER_ID).collect()
 }
 
-/// The install line for `id` on this platform. `has` answers "is this program on the machine",
-/// which only decides git's route on a Mac.
-fn command_for(id: &str, windows: bool, has: &dyn Fn(&str) -> bool) -> Option<String> {
-    if id == "git" {
-        let line = if windows {
-            "winget install -e --id Git.Git --accept-package-agreements --accept-source-agreements"
-        } else if has("brew") {
-            "brew install git"
-        } else if cfg!(target_os = "macos") {
-            "xcode-select --install"
-        } else {
-            // Linux: the distribution's package manager wants root; that is the person's to run.
-            return None;
-        };
-        return Some(line.to_string());
-    }
-    let row = provider_caps::setup_of(id)?;
-    (if windows { row.windows } else { row.unix }).map(str::to_string)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Platform {
+    MacAppleSilicon,
+    MacIntel,
+    WindowsX64,
+    Linux,
+    Other,
 }
 
-/// The program a command needs before it can run, when that is something people often lack.
-fn prerequisite(command: &str) -> Option<&'static str> {
+impl Platform {
+    fn current() -> Self {
+        Self::for_target(std::env::consts::OS, std::env::consts::ARCH)
+    }
+
+    fn for_target(os: &str, arch: &str) -> Self {
+        match (os, arch) {
+            ("macos", "aarch64") => Self::MacAppleSilicon,
+            ("macos", "x86_64") => Self::MacIntel,
+            ("windows", "x86_64") => Self::WindowsX64,
+            ("linux", _) => Self::Linux,
+            _ => Self::Other,
+        }
+    }
+
+    fn mac_brew_paths(self) -> Option<(&'static str, &'static str)> {
+        const APPLE_SILICON: &str = "/opt/homebrew/bin/brew";
+        const INTEL: &str = "/usr/local/bin/brew";
+        match self {
+            Self::MacAppleSilicon => Some((APPLE_SILICON, INTEL)),
+            Self::MacIntel => Some((INTEL, APPLE_SILICON)),
+            _ => None,
+        }
+    }
+}
+
+struct ExternalTool {
+    id: &'static str,
+    label: &'static str,
+    binary: &'static str,
+    group: ToolGroup,
+    url: &'static str,
+    mac: Option<&'static str>,
+    winget: Option<&'static str>,
+}
+
+use ToolGroup::{Agent, Cloud, Container, Model, System};
+
+const EXTERNAL_TOOLS: &[ExternalTool] = &[
+    ExternalTool {
+        id: "node", label: "Node.js + npm", binary: "node", group: System,
+        url: "https://nodejs.org/download",
+        mac: Some("brew install node"), winget: Some("OpenJS.NodeJS.LTS"),
+    },
+    ExternalTool {
+        id: "python", label: "Python", binary: "python3", group: System,
+        url: "https://www.python.org/downloads/",
+        mac: Some("brew install python"), winget: Some("Python.Python.3.14"),
+    },
+    ExternalTool {
+        id: "ollama", label: "Ollama", binary: "ollama", group: Model,
+        url: "https://ollama.com/download",
+        mac: Some("brew install --cask ollama-app"), winget: Some("Ollama.Ollama"),
+    },
+    ExternalTool {
+        id: "az", label: "Azure CLI", binary: "az", group: Cloud,
+        url: "https://learn.microsoft.com/cli/azure/install-azure-cli",
+        mac: Some("brew install azure-cli"), winget: Some("Microsoft.AzureCLI"),
+    },
+    ExternalTool {
+        id: "aws", label: "AWS CLI", binary: "aws", group: Cloud,
+        url: "https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html",
+        mac: Some("brew install awscli"), winget: Some("Amazon.AWSCLI"),
+    },
+    ExternalTool {
+        id: "gcloud", label: "Google Cloud CLI", binary: "gcloud", group: Cloud,
+        url: "https://docs.cloud.google.com/sdk/docs/install",
+        mac: Some("brew install --cask gcloud-cli"), winget: Some("Google.CloudSDK"),
+    },
+    ExternalTool {
+        id: "kubelogin", label: "Azure Kubelogin", binary: "kubelogin", group: Cloud,
+        url: "https://azure.github.io/kubelogin/install.html",
+        mac: Some("brew install Azure/kubelogin/kubelogin"), winget: Some("Microsoft.Azure.Kubelogin"),
+    },
+    ExternalTool {
+        id: "gke-auth-plugin", label: "GKE Authentication Plugin", binary: "gke-gcloud-auth-plugin", group: Cloud,
+        url: "https://docs.cloud.google.com/kubernetes-engine/docs/how-to/cluster-access-for-kubectl#install_plugin",
+        mac: None, winget: None,
+    },
+    ExternalTool {
+        id: "docker", label: "Docker", binary: "docker", group: Container,
+        url: "https://docs.docker.com/get-started/get-docker/",
+        mac: Some("brew install --cask docker-desktop"), winget: Some("Docker.DockerDesktop"),
+    },
+    ExternalTool {
+        id: "hadolint", label: "Hadolint", binary: "hadolint", group: Container,
+        url: "https://github.com/hadolint/hadolint#install",
+        mac: Some("brew install hadolint"), winget: None,
+    },
+    ExternalTool {
+        id: "kubectl", label: "kubectl", binary: "kubectl", group: Container,
+        url: "https://kubernetes.io/docs/tasks/tools/",
+        mac: Some("brew install kubectl"), winget: Some("Kubernetes.kubectl"),
+    },
+    ExternalTool {
+        id: "helm", label: "Helm", binary: "helm", group: Container,
+        url: "https://helm.sh/docs/intro/install/",
+        mac: Some("brew install helm"), winget: Some("Helm.Helm"),
+    },
+    ExternalTool {
+        id: "kind", label: "kind", binary: "kind", group: Container,
+        url: "https://kind.sigs.k8s.io/docs/user/quick-start/#installation",
+        mac: Some("brew install kind"), winget: Some("Kubernetes.kind"),
+    },
+    ExternalTool {
+        id: "k3d", label: "k3d", binary: "k3d", group: Container,
+        url: "https://k3d.io/stable/#installation",
+        mac: Some("brew install k3d"), winget: None,
+    },
+    ExternalTool {
+        id: "minikube", label: "minikube", binary: "minikube", group: Container,
+        url: "https://minikube.sigs.k8s.io/docs/start/",
+        mac: Some("brew install minikube"), winget: Some("Kubernetes.minikube"),
+    },
+];
+
+fn winget(package: &str) -> String {
+    format!("winget install -e --id {package} --accept-package-agreements --accept-source-agreements")
+}
+
+/// Only preselected installers are executable. Use the official guide for platform-specific manual routes.
+fn command_for(id: &str, platform: Platform, has: &dyn Fn(&str) -> bool) -> Option<String> {
+    if id == "git" {
+        return match platform {
+            Platform::WindowsX64 => Some(winget("Git.Git")),
+            Platform::MacAppleSilicon | Platform::MacIntel if !has("brew") => Some("xcode-select --install".into()),
+            Platform::MacAppleSilicon | Platform::MacIntel | Platform::Linux if has("brew") => Some("brew install git".into()),
+            _ => None,
+        };
+    }
+    if let Some(tool) = EXTERNAL_TOOLS.iter().find(|tool| tool.id == id) {
+        return match platform {
+            Platform::Other => None,
+            _ if id == "gke-auth-plugin" => Some("gcloud components install gke-gcloud-auth-plugin --quiet".into()),
+            Platform::MacAppleSilicon | Platform::MacIntel => tool.mac.map(str::to_string),
+            Platform::WindowsX64 => tool.winget.map(winget).or_else(|| (id == "k3d").then(|| "choco install k3d -y".into())),
+            Platform::Linux => None,
+        };
+    }
+
+    let row = provider_caps::setup_of(id)?;
+    match platform {
+        Platform::WindowsX64 => row.windows,
+        Platform::MacAppleSilicon | Platform::MacIntel | Platform::Linux => row.unix,
+        Platform::Other => None,
+    }.map(str::to_string)
+}
+
+fn prerequisite(command: &str) -> Option<&str> {
     let first = command.split_whitespace().next()?;
     match first {
-        "npm" => Some("npm"),
-        "winget" => Some("winget"),
-        "brew" => Some("brew"),
+        "npm" | "winget" | "brew" | "choco" | "curl" | "gcloud" => Some(first),
         _ => None,
     }
 }
@@ -151,9 +294,28 @@ fn locate(binary: &str, fresh: Option<&str>) -> Option<std::path::PathBuf> {
     })
 }
 
+fn resolve_program(binary: &str, fresh: Option<&str>, platform: Platform) -> Option<std::path::PathBuf> {
+    if binary == "brew" {
+        if let Some((native, alternate)) = platform.mac_brew_paths() {
+            if let Some(found) = locate(native, None) {
+                return Some(found);
+            }
+            // A second Homebrew installation may be on PATH for Rosetta. Keep its recipes out
+            // of the native installer while still allowing a custom Homebrew prefix.
+            let alternate = std::path::Path::new(alternate);
+            let resolved_alternate = alternate.canonicalize().ok();
+            return locate(binary, fresh).filter(|path| {
+                path != alternate && !resolved_alternate.as_ref().is_some_and(|other| path.canonicalize().ok().as_ref() == Some(other))
+            });
+        }
+    }
+    locate(binary, fresh)
+}
+
 /// `git --version` with the given `PATH` — running it, for the reason `requirements::git` gives.
 fn git_version(path: Option<&str>) -> Option<String> {
-    let mut command = crate::proc::std_command("git");
+    let git = locate("git", path).unwrap_or_else(|| "git".into());
+    let mut command = crate::proc::std_command(git);
     command.arg("--version").stdin(std::process::Stdio::null());
     if let Some(path) = path {
         command.env("PATH", path);
@@ -164,30 +326,63 @@ fn git_version(path: Option<&str>) -> Option<String> {
 
 /// Every tool and whether it is here. `fresh` is a login shell's `PATH` when the caller has one.
 fn status_with(fresh: Option<&str>) -> Vec<ToolStatus> {
-    let windows = cfg!(target_os = "windows");
-    let has = |program: &str| locate(program, fresh).is_some();
-    let entry = |id: &str, label: String, installed: bool, detail: String, url: &str| {
-        let command = command_for(id, windows, &has);
+    let platform = Platform::current();
+    let find = |program: &str| resolve_program(program, fresh, platform);
+    let has = |program: &str| find(program).is_some() || (program == "gcloud" && crate::containers::cli::find(program).is_some());
+    let entry = |id: &str, label: &str, group, installed, detail, url: &str| {
+        let command = command_for(id, platform, &has);
         let missing_prerequisite = command
             .as_deref()
             .and_then(prerequisite)
             .filter(|program| !has(program))
             .map(str::to_string);
-        ToolStatus { id: id.to_string(), label, installed, detail, command, missing_prerequisite, url: url.to_string() }
+        ToolStatus { id: id.to_string(), label: label.to_string(), group, installed, detail, command, missing_prerequisite, url: url.to_string() }
+    };
+    let from_path = |id: &str, label: &str, group, found: Option<std::path::PathBuf>, url: &str| {
+        entry(id, label, group, found.is_some(), found.map(|path| path.to_string_lossy().into_owned()).unwrap_or_default(), url)
     };
 
     let git = git_version(fresh).or_else(|| git_version(None));
-    let mut tools = vec![entry("git", "Git".into(), git.is_some(), git.unwrap_or_default(), GIT_URL)];
+    let mut tools = vec![entry("git", "Git", System, git.is_some(), git.unwrap_or_default(), GIT_URL)];
     for caps in cli_providers() {
-        let found = locate(&binary_of(&caps), fresh);
         let url = provider_caps::setup_of(&caps.id).map(|row| row.url).unwrap_or_default();
-        tools.push(entry(
-            &caps.id,
-            caps.label.clone(),
-            found.is_some(),
-            found.map(|path| path.to_string_lossy().into_owned()).unwrap_or_default(),
-            url,
-        ));
+        let label = if caps.id == "gemini" {
+            "Antigravity CLI (agy)".to_string()
+        } else {
+            format!("{} CLI", caps.label)
+        };
+        tools.push(from_path(&caps.id, &label, Agent, find(&binary_of(&caps)), url));
+    }
+    for tool in EXTERNAL_TOOLS {
+        let found = match tool.id {
+            "node" if !has("npm") => None,
+            "ollama" if platform.mac_brew_paths().is_some() => find(tool.binary).or_else(|| {
+                let app_binary = "Ollama.app/Contents/Resources/ollama";
+                let system = std::path::Path::new("/Applications").join(app_binary);
+                if system.is_file() {
+                    return Some(system);
+                }
+                let user = dirs::home_dir()?.join("Applications").join(app_binary);
+                user.is_file().then_some(user)
+            }),
+            "python" if platform == Platform::WindowsX64 => find("python").or_else(|| find("py")),
+            "gke-auth-plugin" => find(tool.binary).or_else(|| {
+                crate::containers::kubeconfig::gke_plugin(find("gcloud").or_else(|| crate::containers::cli::find("gcloud")).as_deref())
+            }),
+            "az" | "aws" | "gcloud" | "docker" | "hadolint" | "kubectl" | "kubelogin" | "helm" | "kind" | "k3d" | "minikube" => {
+                find(tool.binary).or_else(|| crate::containers::cli::find(tool.binary))
+            }
+            _ => find(tool.binary),
+        };
+        tools.push(from_path(tool.id, tool.label, tool.group, found, tool.url));
+    }
+    match platform {
+        Platform::MacAppleSilicon | Platform::MacIntel => tools.push(from_path("brew", "Homebrew", System, find("brew"), "https://brew.sh/")),
+        Platform::WindowsX64 => {
+            tools.push(from_path("winget", "WinGet", System, find("winget"), "https://learn.microsoft.com/windows/package-manager/winget/"));
+            tools.push(from_path("choco", "Chocolatey", System, find("choco"), "https://chocolatey.org/install"));
+        }
+        _ => {}
     }
     tools
 }
@@ -222,10 +417,24 @@ fn shell(line: &str, path: Option<&str>) -> tokio::process::Command {
         command
     } else {
         let mut command = crate::proc::command("/bin/bash");
-        command.args(["-c", line]);
+        command.args(["-o", "pipefail", "-c", line]);
         command
     };
+    let mut dirs = crate::ai::search_dirs();
     if let Some(path) = path {
+        dirs.extend(std::env::split_paths(path));
+    }
+    if let Some(program) = prerequisite(line) {
+        let prerequisite = if program == "gcloud" {
+            locate(program, path).or_else(|| crate::containers::cli::find(program))
+        } else {
+            resolve_program(program, path, Platform::current())
+        };
+        if let Some(dir) = prerequisite.as_deref().and_then(std::path::Path::parent) {
+            dirs.insert(0, dir.to_path_buf());
+        }
+    }
+    if let Ok(path) = std::env::join_paths(dirs) {
         command.env("PATH", path);
     }
     // Package managers that would otherwise stop to ask.
@@ -235,14 +444,6 @@ fn shell(line: &str, path: Option<&str>) -> tokio::process::Command {
 
 /// Installs `id` with its command from the table, streaming its output as `tool-setup:progress`.
 pub async fn install(app: &AppHandle, id: &str) -> Result<InstallResult, String> {
-    let fresh = tokio::task::spawn_blocking(crate::shell_env::fresh_path).await.ok().flatten();
-    let tools = status_with(fresh.as_deref());
-    let tool = tools.iter().find(|tool| tool.id == id).ok_or_else(|| format!("{id} is not something the setup installs"))?;
-    let line = tool.command.clone().ok_or_else(|| format!("{id} has no install command on this platform"))?;
-    if let Some(missing) = &tool.missing_prerequisite {
-        let tail = vec![format!("{missing} is not installed; it is needed to run: {line}")];
-        return Ok(result(id, Outcome::Failed, String::new(), &tail, true));
-    }
     if crate::ai_runs::live_processes() > 0 {
         return Ok(result(id, Outcome::Busy, String::new(), &[], false));
     }
@@ -251,6 +452,24 @@ pub async fn install(app: &AppHandle, id: &str) -> Result<InstallResult, String>
         return Ok(result(id, Outcome::Busy, String::new(), &[], false));
     };
 
+    let (fresh, tools) = tokio::task::spawn_blocking(|| {
+        let fresh = crate::shell_env::fresh_path();
+        let tools = status_with(fresh.as_deref());
+        (fresh, tools)
+    }).await.map_err(|error| error.to_string())?;
+    let tool = tools.into_iter().find(|tool| tool.id == id).ok_or_else(|| format!("{id} is not something the setup installs"))?;
+    if tool.installed {
+        return Ok(result(id, Outcome::Done, tool.detail, &[], false));
+    }
+    let line = tool.command.ok_or_else(|| format!("{id} has no install command on this platform"))?;
+    if let Some(missing) = &tool.missing_prerequisite {
+        let tail = vec![format!("{missing} is not installed; it is needed to run: {line}")];
+        return Ok(result(id, Outcome::Failed, String::new(), &tail, true));
+    }
+
+    if crate::ai_runs::live_processes() > 0 {
+        return Ok(result(id, Outcome::Busy, String::new(), &[], false));
+    }
     let mut lines = vec![format!("$ {line}")];
     let _ = app.emit("tool-setup:progress", Progress { id, line: lines[0].clone() });
     let mut command = shell(&line, fresh.as_deref());
@@ -274,7 +493,7 @@ pub async fn install(app: &AppHandle, id: &str) -> Result<InstallResult, String>
     // A stream that has ended is not polled again: `next_line` answers `None` at once from then on,
     // and a branch that is always ready turned the wait for the process into a busy loop.
     let (mut out_open, mut err_open) = (true, true);
-    let status = loop {
+    let exit_status = loop {
         tokio::select! {
             line = out.next_line(), if out_open => match line {
                 Ok(Some(line)) => keep(app, id, &mut lines, line),
@@ -311,7 +530,7 @@ pub async fn install(app: &AppHandle, id: &str) -> Result<InstallResult, String>
         }
     })
     .await;
-    if !status.is_some_and(|status| status.success()) {
+    if !exit_status.is_some_and(|status| status.success()) {
         return Ok(result(id, Outcome::Failed, String::new(), &lines, true));
     }
     if line.starts_with("xcode-select") {
@@ -320,8 +539,7 @@ pub async fn install(app: &AppHandle, id: &str) -> Result<InstallResult, String>
 
     // Asked again with a `PATH` read after the install: an installer that edited a profile is only
     // visible to a shell started now.
-    let fresh = tokio::task::spawn_blocking(crate::shell_env::fresh_path).await.ok().flatten();
-    let after = status_with(fresh.as_deref());
+    let after = tokio::task::spawn_blocking(status).await.map_err(|error| error.to_string())?;
     let now = after.into_iter().find(|tool| tool.id == id);
     if let Some(caps) = provider_caps::caps_of(id) {
         crate::ai::forget_engine_version(&binary_of(&caps));
@@ -350,11 +568,11 @@ mod tests {
 
     #[test]
     fn git_takes_homebrew_when_there_is_one_and_apples_tools_when_not() {
-        if cfg!(target_os = "macos") {
-            assert_eq!(command_for("git", false, &|p| p == "brew").as_deref(), Some("brew install git"));
-            assert_eq!(command_for("git", false, &|_| false).as_deref(), Some("xcode-select --install"));
+        for mac in [Platform::MacAppleSilicon, Platform::MacIntel] {
+            assert_eq!(command_for("git", mac, &|p| p == "brew").as_deref(), Some("brew install git"));
+            assert_eq!(command_for("git", mac, &|_| false).as_deref(), Some("xcode-select --install"));
         }
-        let windows = command_for("git", true, &|_| false).unwrap();
+        let windows = command_for("git", Platform::WindowsX64, &|_| false).unwrap();
         assert!(windows.starts_with("winget install -e --id Git.Git"), "{windows}");
     }
 
@@ -362,18 +580,40 @@ mod tests {
     fn every_cli_provider_is_offered_with_its_own_command() {
         for caps in cli_providers() {
             let row = provider_caps::setup_of(&caps.id).unwrap();
-            assert_eq!(command_for(&caps.id, true, &|_| true).as_deref(), row.windows, "{}", caps.id);
-            assert_eq!(command_for(&caps.id, false, &|_| true).as_deref(), row.unix, "{}", caps.id);
+            assert_eq!(command_for(&caps.id, Platform::WindowsX64, &|_| true).as_deref(), row.windows, "{}", caps.id);
+            assert_eq!(command_for(&caps.id, Platform::Linux, &|_| true).as_deref(), row.unix, "{}", caps.id);
         }
-        assert!(command_for("codeflow", false, &|_| true).is_none());
-        assert!(command_for("not-a-tool", false, &|_| true).is_none());
+        assert!(command_for("codeflow", Platform::Linux, &|_| true).is_none());
+        assert!(command_for("not-a-tool", Platform::Linux, &|_| true).is_none());
+    }
+
+    #[test]
+    fn release_targets_use_native_install_routes() {
+        let silicon = Platform::for_target("macos", "aarch64");
+        let intel = Platform::for_target("macos", "x86_64");
+        let windows = Platform::for_target("windows", "x86_64");
+        assert_eq!(silicon.mac_brew_paths().map(|paths| paths.0), Some("/opt/homebrew/bin/brew"));
+        assert_eq!(intel.mac_brew_paths().map(|paths| paths.0), Some("/usr/local/bin/brew"));
+        let available = |_: &str| true;
+        for mac in [silicon, intel] {
+            assert_eq!(command_for("ollama", mac, &available).as_deref(), Some("brew install --cask ollama-app"));
+            assert_eq!(command_for("az", mac, &available).as_deref(), Some("brew install azure-cli"));
+            assert!(command_for("gemini", mac, &available).unwrap().contains("install.sh"));
+        }
+        let azure = command_for("az", windows, &available).unwrap();
+        assert!(azure.contains("Microsoft.AzureCLI"));
+        assert_eq!(prerequisite(&azure), Some("winget"));
+        assert!(command_for("gemini", windows, &available).unwrap().contains("install.ps1"));
+        assert!(command_for("grok", windows, &available).unwrap().contains("install.ps1"));
+        let plugin = command_for("gke-auth-plugin", Platform::Linux, &available).unwrap();
+        assert_eq!(prerequisite(&plugin), Some("gcloud"));
     }
 
     #[test]
     fn a_command_names_the_program_it_needs() {
         assert_eq!(prerequisite("npm install -g cline"), Some("npm"));
         assert_eq!(prerequisite("winget install -e --id Git.Git"), Some("winget"));
-        assert_eq!(prerequisite("curl -fsSL https://claude.ai/install.sh | bash"), None);
+        assert_eq!(prerequisite("curl -fsSL https://claude.ai/install.sh | bash"), Some("curl"));
     }
 
     #[test]
@@ -381,7 +621,8 @@ mod tests {
         let tools = status_with(None);
         assert_eq!(tools[0].id, "git");
         assert!(tools[0].installed, "the suite runs where git is installed");
-        assert_eq!(tools.len(), 1 + cli_providers().len());
+        assert_eq!(tools.iter().filter(|tool| tool.group == Agent).count(), cli_providers().len());
+        assert!(EXTERNAL_TOOLS.iter().all(|expected| tools.iter().any(|tool| tool.id == expected.id)));
         assert!(tools.iter().all(|tool| !tool.url.is_empty()));
     }
 }

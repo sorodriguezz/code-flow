@@ -19,12 +19,13 @@ pub fn link_project_github(
     queries::link_project_github(&conn, &id, &github_owner, &github_repo, &github_host).map_err(|e| e.to_string())
 }
 
-/// Validates the token saved for `host` and returns the login it belongs to — Settings calls
-/// this right after saving so a bad token (or wrong Enterprise host) surfaces immediately, and
-/// the connected account can be shown, instead of only failing later when PRs are listed.
+/// Validates a candidate or saved GitHub token and returns its login.
 #[tauri::command]
-pub async fn github_authenticated_user(host: String) -> Result<String, String> {
-    let token = secrets::get_secret(&secrets::github_token_key(&host))?
-        .ok_or_else(|| "No GitHub token saved for this host".to_string())?;
+pub async fn github_authenticated_user(host: String, candidate: Option<String>) -> Result<String, String> {
+    let token = match candidate {
+        Some(token) => token,
+        None => secrets::get_secret(&secrets::github_token_key(&host))?
+            .ok_or_else(|| "No GitHub token saved for this host".to_string())?,
+    };
     github::get_authenticated_user(&host, &token).await
 }

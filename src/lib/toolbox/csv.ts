@@ -25,6 +25,7 @@ export function parseCsv(text: string, delimiter = ","): string[][] {
   let row: string[] = [];
   let field = "";
   let quoted = false;
+  let openedQuote = false;
   let i = 0;
   // A BOM at the start is Excel's, not data.
   if (text.charCodeAt(0) === 0xfeff) i = 1;
@@ -39,7 +40,10 @@ export function parseCsv(text: string, delimiter = ","): string[][] {
       } else field += c;
       continue;
     }
-    if (c === '"' && field === "") quoted = true;
+    if (c === '"' && field === "") {
+      quoted = true;
+      openedQuote = true;
+    }
     else if (c === delimiter) {
       row.push(field);
       field = "";
@@ -49,10 +53,11 @@ export function parseCsv(text: string, delimiter = ","): string[][] {
       rows.push(row);
       row = [];
       field = "";
+      openedQuote = false;
     } else field += c;
   }
   if (quoted) throw new Error("Unclosed quote");
-  if (field !== "" || row.length) {
+  if (field !== "" || row.length || openedQuote) {
     row.push(field);
     rows.push(row);
   }

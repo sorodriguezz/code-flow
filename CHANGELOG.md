@@ -16,6 +16,22 @@ Cómo usarlo:
   y el workflow deja un aviso.
 -->
 
+## 2.9.16
+
+### ✨ Nuevo
+
+- **Instalaciones en Configuración › Aplicación.** Detecta qué herramientas tienes y permite instalar Git, los CLI de IA, Ollama, Azure CLI, Docker y otras dependencias. La lista se divide en seis submenús y puedes buscar en todos. Si una función necesita una herramienta, su aviso te lleva a la entrada correspondiente. La instalación de Git se trasladó desde Comportamiento Git.
+- **Estado de las credenciales en Integraciones.** CodeFlow comprueba periódicamente si el proveedor sigue aceptando el token o la clave. Cuando conoce la fecha de vencimiento, te avisa desde tres días antes. Al vencer, la cuenta se marca como vencida y dejan de enviarse esos recordatorios. Si el proveedor rechaza la credencial, Integraciones lo muestra. Puedes registrar la fecha y hora en un calendario si el proveedor no la informa.
+- **Grafo de datos en el editor.** Abre archivos CSV, JSON, XML y YAML como un grafo en toda el área del editor o al lado del código. Puedes plegar ramas, buscar claves o valores, inspeccionar nodos y ajustar el zoom mientras editas.
+
+### 🚀 Mejorado
+
+- **Ayudas al pasar el cursor.** Se quitaron los tooltips que repetían los nombres del menú de Integraciones y el que aparecía sobre los paneles plegados.
+
+### 🐛 Corregido
+
+- **Conexiones del grafo de datos.** Las líneas entre nodos siguen visibles al alternar entre la vista de código y la vista de grafo.
+
 ## 2.9.15
 
 ### 🚀 Mejorado

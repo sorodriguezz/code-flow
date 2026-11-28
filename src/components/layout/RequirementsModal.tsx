@@ -1,64 +1,30 @@
-import { useEffect, useState } from "react";
-import { Download, Loader2, Sparkles, TriangleAlert, X } from "lucide-react";
+import { useEffect } from "react";
+import { Download, Sparkles, TriangleAlert, X } from "lucide-react";
 import { useRequirementsStore } from "../../state/requirementsStore";
 import { useToolSetupStore } from "../../state/toolSetupStore";
 import { useT } from "../../state/languageStore";
 import type { TranslationKey } from "../../lib/i18n/translations";
 import { buttonClass } from "../common/Button";
-import { ToolInstallRow } from "../common/ToolInstallRow";
+import { openToolInstallations } from "../common/ToolInstallationLink";
 
-/**
- * «Preparar CodeFlow» — the first-launch screen: what is wrong, if anything, and which of `git` and
- * the AI CLIs to install, ticked and installed in one go.
- *
- * **At most once per installation, and only with something to say.** A machine with everything
- * already there sees nothing — see `requirementsStore`. The guided tour waits for this to close.
- *
- * **Dismissable, not blocking.** Nothing here stops the app from starting, and one problem — a data
- * directory that cannot be written — will already have taken the app down before this could be
- * drawn. So it says what is wrong, offers what can be installed, and lets go; everything it offers
- * is in Settings too (Motores de IA › Proveedores, Comportamiento Git › Instalación).
- *
- * **It quotes the machine.** A problem row carries the exact output — `git version 2.51.0`, or the
- * OS error verbatim — and a tool row the exact command it will run.
- */
 export function RequirementsModal() {
   const t = useT();
   const open = useRequirementsStore((s) => s.open);
   const problems = useRequirementsStore((s) => s.problems);
   const dismiss = useRequirementsStore((s) => s.dismiss);
   const tools = useToolSetupStore((s) => s.tools);
-  const installing = useToolSetupStore((s) => s.installing);
-  const installMany = useToolSetupStore((s) => s.installMany);
-  const [picked, setPicked] = useState<Set<string> | null>(null);
-
-  // Nothing ticked but a missing git: the CLIs are the person's choice.
-  useEffect(() => {
-    if (!open || picked || !tools) return;
-    setPicked(new Set(tools.filter((tool) => tool.id === "git" && !tool.installed && tool.command).map((tool) => tool.id)));
-  }, [open, picked, tools]);
-
   useEffect(() => {
     if (!open) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !installing) dismiss();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") dismiss();
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, dismiss, installing]);
+  }, [open, dismiss]);
 
   if (!open) return null;
-
-  // `git` is offered in the tool list, so its problem row would say the same thing twice.
-  const shownProblems = problems.filter((problem) => !(problem.id === "git" && tools?.some((tool) => tool.id === "git")));
-  const chosen = (tools ?? []).filter((tool) => picked?.has(tool.id) && !tool.installed);
-  const toggle = (id: string, on: boolean) =>
-    setPicked((current) => {
-      const next = new Set(current ?? []);
-      if (on) next.add(id);
-      else next.delete(id);
-      return next;
-    });
+  const gitProblem = problems.some((problem) => problem.id === "git");
+  const missing = (tools ?? []).filter((tool) => !tool.installed && (tool.group === "agent" || (tool.id === "git" && !gitProblem)));
 
   return (
     // `z-[60]`: above the tour's own overlay. The tour is held back while this is up (see `App`),
@@ -79,8 +45,8 @@ export function RequirementsModal() {
             <p className="mt-1 text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("toolSetup.subtitle")}</p>
           </div>
           <button
+            type="button"
             onClick={dismiss}
-            disabled={!!installing}
             aria-label={t("requirements.dismiss")}
             className="shrink-0 text-[var(--cf-text-muted)] hover:text-[var(--cf-text)] disabled:opacity-40"
           >
@@ -89,7 +55,7 @@ export function RequirementsModal() {
         </div>
 
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
-          {shownProblems.map((problem) => (
+          {problems.map((problem) => (
             <div key={problem.id} className="rounded-lg border border-[var(--cf-border)] p-3">
               <p className="flex items-center gap-1.5 text-[13px] font-medium text-[var(--cf-text)]">
                 <TriangleAlert size={13} className="shrink-0 text-[var(--cf-warning)]" />
@@ -107,30 +73,31 @@ export function RequirementsModal() {
             </div>
           ))}
 
-          {!tools ? (
-            <p className="flex items-center gap-2 text-[12px] text-[var(--cf-text-muted)]">
-              <Loader2 size={13} className="animate-spin" />
-              {t("toolSetup.checking")}
-            </p>
-          ) : (
-            tools.map((tool) => (
-              <ToolInstallRow key={tool.id} tool={tool} selected={picked?.has(tool.id) ?? false} onSelect={(on) => toggle(tool.id, on)} />
-            ))
+          {missing.length > 0 && (
+            <ul className="flex flex-wrap gap-1.5" aria-label={t("toolSetup.missing")}>
+              {missing.map((tool) => (
+                <li key={tool.id} className="rounded-md border border-[var(--cf-border)] px-2 py-1 text-[12px] text-[var(--cf-text-muted)]">
+                  {tool.label}
+                </li>
+              ))}
+            </ul>
           )}
-          <p className="text-[11px] leading-snug text-[var(--cf-text-muted)]">{t("toolSetup.later")}</p>
         </div>
 
         <div className="flex shrink-0 items-center justify-end gap-2 border-t border-[var(--cf-border)] p-3">
-          <button onClick={dismiss} disabled={!!installing} className={buttonClass({ variant: "ghost" })}>
-            {t(chosen.length > 0 ? "toolSetup.skip" : "toolSetup.continue")}
+          <button type="button" onClick={dismiss} className={buttonClass({ variant: "ghost" })}>
+            {t("toolSetup.continue")}
           </button>
           <button
-            onClick={() => void installMany(chosen.map((tool) => tool.id))}
-            disabled={chosen.length === 0 || !!installing}
+            type="button"
+            onClick={() => {
+              openToolInstallations(gitProblem ? "git" : undefined);
+              dismiss();
+            }}
             className={buttonClass({ variant: "primary" })}
           >
-            {installing ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
-            {t(installing ? "toolSetup.installing" : "toolSetup.installSelected", { n: chosen.length })}
+            <Download size={13} />
+            {t("installations.open")}
           </button>
         </div>
       </div>

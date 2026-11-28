@@ -5,7 +5,7 @@
  * (user, 2026-10-24: «parece web de los 90s»). The value keeps the native input's string shape —
  * `YYYY-MM-DD`, or `YYYY-MM-DDTHH:mm:ss` with `withTime` — so callers swap one for the other.
  */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { Calendar, ChevronLeft, ChevronRight } from "lucide-react";
 import { useLanguageStore, useT } from "../../state/languageStore";
@@ -15,6 +15,7 @@ const EDGE = 8;
 const pad = (n: number) => String(n).padStart(2, "0");
 const ymd = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const hms = (d: Date) => `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+type TimePart = 0 | 1 | 2;
 
 /** The value as a local Date, or null when it does not read as one. */
 function parse(value: string): Date | null {
@@ -43,6 +44,7 @@ export function DateField({
   size = "md",
   placeholder,
   clearable = false,
+  inline = false,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -59,12 +61,15 @@ export function DateField({
   placeholder?: string;
   /** For optional dates: a «Quitar» in the panel sets the value to "". */
   clearable?: boolean;
+  /** Show the calendar directly inside a dialog with its own focus trap. */
+  inline?: boolean;
 }) {
   const t = useT();
   const language = useLanguageStore((s) => s.language);
   const current = parse(value);
   const [open, setOpen] = useState(false);
   const [month, setMonth] = useState(() => current ?? new Date());
+  const [editingTime, setEditingTime] = useState<{ part: TimePart; value: string } | null>(null);
   const [pos, setPos] = useState<{ left: number; top?: number; bottom?: number } | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -110,7 +115,10 @@ export function DateField({
   }, [open]);
 
   const toggle = () => {
-    if (!open) setMonth(current ?? new Date());
+    if (!open) {
+      setMonth(current ?? new Date());
+      setEditingTime(null);
+    }
     setOpen(!open);
   };
   const onKeyDown = (e: KeyboardEvent) => {
@@ -134,13 +142,131 @@ export function DateField({
   const selected = current ? ymd(current) : "";
   const shift = (months: number) => setMonth(new Date(month.getFullYear(), month.getMonth() + months, 1));
 
-  const setTimePart = (part: 0 | 1 | 2, raw: string) => {
+  const timeParts = current ? [current.getHours(), current.getMinutes(), current.getSeconds()] : [0, 0, 0];
+  const setTimePart = (part: TimePart, raw: string) => {
+    const value = raw.replace(/\D/g, "");
+    if (raw && !value) return;
+    setEditingTime({ part, value });
     const base = current ?? new Date();
-    const parts = [base.getHours(), base.getMinutes(), base.getSeconds()];
-    const n = Math.max(0, Math.min(part === 0 ? 23 : 59, Number(raw.replace(/\D/g, "")) || 0));
-    parts[part] = n;
+    if (!current) setMonth(base);
+    const parts = [...timeParts];
+    parts[part] = Math.min(part === 0 ? 23 : 59, Number(value));
     emit(base, new Date(0, 0, 1, parts[0], parts[1], parts[2]));
   };
+
+  const dayLabel = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "full" }), [locale]);
+  const calendar = (inline || open) && (
+    <>
+      <div className="mb-2 flex items-center justify-between">
+        <span className="pl-1 text-[13px] font-semibold text-[var(--cf-text)]">{title}</span>
+        <div className="flex items-center gap-0.5">
+          <button type="button" className={iconButtonClass({ size: "xs" })} aria-label={t("dateField.prevMonth")} onClick={() => shift(-1)}>
+            <ChevronLeft size={14} />
+          </button>
+          <button type="button" className={iconButtonClass({ size: "xs" })} aria-label={t("dateField.nextMonth")} onClick={() => shift(1)}>
+            <ChevronRight size={14} />
+          </button>
+        </div>
+      </div>
+      <div className="grid grid-cols-7 gap-0.5 text-center">
+        {weekdays.map((w, i) => (
+          <span key={i} className="pb-1 text-[10.5px] font-medium uppercase text-[var(--cf-text-faint)]">
+            {w}
+          </span>
+        ))}
+        {monthGrid(month).map((d) => {
+          const key = ymd(d);
+          const inMonth = d.getMonth() === month.getMonth();
+          const disabled = (min && key < min) || (max && key > max);
+          const isSelected = key === selected;
+          return (
+            <button
+              key={key}
+              type="button"
+              disabled={!!disabled}
+              aria-label={dayLabel.format(d)}
+              aria-pressed={isSelected}
+              onClick={() => {
+                emit(d);
+                if (!inline && !withTime) {
+                  setOpen(false);
+                  triggerRef.current?.focus();
+                }
+              }}
+              className={`h-8 rounded-md text-[12.5px] tabular-nums transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${
+                isSelected
+                  ? "bg-[var(--cf-accent)] font-semibold text-[var(--cf-on-accent,#fff)]"
+                  : `${inMonth ? "text-[var(--cf-text)]" : "text-[var(--cf-text-faint)]"} hover:bg-[var(--cf-hover)] ${
+                      key === today ? "font-semibold text-[var(--cf-accent)] ring-1 ring-inset ring-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)]" : ""
+                    }`
+              }`}
+            >
+              {d.getDate()}
+            </button>
+          );
+        })}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--cf-border)] pt-2">
+        {withTime ? (
+          <div className="flex items-center gap-0.5 font-mono text-[12.5px] text-[var(--cf-text-muted)]">
+            {inline && <span className="mr-2 font-sans text-[12px] font-medium">{t("dateField.localTime")}</span>}
+            {([0, 1, 2] as const).map((part) => (
+              <span key={part} className="flex items-center">
+                {part ? ":" : null}
+                <input
+                  aria-label={t(part === 0 ? "dateField.hours" : part === 1 ? "dateField.minutes" : "dateField.seconds")}
+                  inputMode="numeric"
+                  maxLength={2}
+                  className="h-7 w-8 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] text-center text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)] disabled:opacity-50"
+                  value={editingTime?.part === part ? editingTime.value : pad(timeParts[part])}
+                  onFocus={(e) => e.currentTarget.select()}
+                  onBlur={() => setEditingTime(null)}
+                  onChange={(e) => setTimePart(part, e.target.value)}
+                />
+              </span>
+            ))}
+          </div>
+        ) : clearable && current ? (
+          <button
+            type="button"
+            className="rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
+            onClick={() => {
+              onChange("");
+              setOpen(false);
+            }}
+          >
+            {t("dateField.clear")}
+          </button>
+        ) : (
+          <span />
+        )}
+        <button
+          type="button"
+          className="rounded-md px-2 py-1 text-[12px] font-medium text-[var(--cf-accent)] hover:bg-[var(--cf-hover)]"
+          onClick={() => {
+            const now = new Date();
+            setMonth(now);
+            emit(now, now);
+            if (!inline && !withTime) setOpen(false);
+          }}
+        >
+          {t(withTime ? "dateField.now" : "dateField.today")}
+        </button>
+      </div>
+    </>
+  );
+
+  if (inline) {
+    return (
+      <div
+        role="group"
+        aria-label={ariaLabel}
+        className={`select-none rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 ${className}`}
+      >
+        {calendar}
+      </div>
+    );
+  }
 
   return (
     <>
@@ -174,98 +300,7 @@ export function DateField({
               style={{ position: "fixed", left: pos.left, top: pos.top, bottom: pos.bottom }}
               className="z-[9999] w-[264px] select-none rounded-xl border border-[var(--cf-border)] bg-[var(--cf-surface-raised)] p-3 shadow-[var(--cf-shadow)]"
             >
-              <div className="mb-2 flex items-center justify-between">
-                <span className="pl-1 text-[13px] font-semibold text-[var(--cf-text)]">{title}</span>
-                <div className="flex items-center gap-0.5">
-                  <button type="button" className={iconButtonClass({ size: "xs" })} aria-label={t("dateField.prevMonth")} onClick={() => shift(-1)}>
-                    <ChevronLeft size={14} />
-                  </button>
-                  <button type="button" className={iconButtonClass({ size: "xs" })} aria-label={t("dateField.nextMonth")} onClick={() => shift(1)}>
-                    <ChevronRight size={14} />
-                  </button>
-                </div>
-              </div>
-              <div className="grid grid-cols-7 gap-0.5 text-center">
-                {weekdays.map((w, i) => (
-                  <span key={i} className="pb-1 text-[10.5px] font-medium uppercase text-[var(--cf-text-faint)]">
-                    {w}
-                  </span>
-                ))}
-                {monthGrid(month).map((d) => {
-                  const key = ymd(d);
-                  const inMonth = d.getMonth() === month.getMonth();
-                  const disabled = (min && key < min) || (max && key > max);
-                  const isSelected = key === selected;
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      disabled={!!disabled}
-                      onClick={() => {
-                        emit(d);
-                        if (!withTime) {
-                          setOpen(false);
-                          triggerRef.current?.focus();
-                        }
-                      }}
-                      className={`h-8 rounded-md text-[12.5px] tabular-nums transition-colors disabled:cursor-not-allowed disabled:opacity-30 ${
-                        isSelected
-                          ? "bg-[var(--cf-accent)] font-semibold text-[var(--cf-on-accent,#fff)]"
-                          : `${inMonth ? "text-[var(--cf-text)]" : "text-[var(--cf-text-faint)]"} hover:bg-[var(--cf-hover)] ${
-                              key === today ? "font-semibold text-[var(--cf-accent)] ring-1 ring-inset ring-[color-mix(in_oklab,var(--cf-accent)_45%,transparent)]" : ""
-                            }`
-                      }`}
-                    >
-                      {d.getDate()}
-                    </button>
-                  );
-                })}
-              </div>
-              <div className="mt-2 flex items-center justify-between gap-2 border-t border-[var(--cf-border)] pt-2">
-                {withTime ? (
-                  <div className="flex items-center gap-0.5 font-mono text-[12.5px] text-[var(--cf-text-muted)]">
-                    {([0, 1, 2] as const).map((part) => (
-                      <span key={part} className="flex items-center">
-                        {part ? ":" : null}
-                        <input
-                          aria-label={t(part === 0 ? "dateField.hours" : part === 1 ? "dateField.minutes" : "dateField.seconds")}
-                          inputMode="numeric"
-                          maxLength={2}
-                          className="h-7 w-8 rounded-md border border-[var(--cf-field-border)] bg-[var(--cf-field)] text-center text-[var(--cf-text)] outline-none focus:border-[var(--cf-accent)]"
-                          value={current ? pad([current.getHours(), current.getMinutes(), current.getSeconds()][part]) : "00"}
-                          onFocus={(e) => e.currentTarget.select()}
-                          onChange={(e) => setTimePart(part, e.target.value.slice(-2))}
-                        />
-                      </span>
-                    ))}
-                  </div>
-                ) : clearable && current ? (
-                  <button
-                    type="button"
-                    className="rounded-md px-2 py-1 text-[12px] text-[var(--cf-text-muted)] hover:bg-[var(--cf-hover)] hover:text-[var(--cf-text)]"
-                    onClick={() => {
-                      onChange("");
-                      setOpen(false);
-                    }}
-                  >
-                    {t("dateField.clear")}
-                  </button>
-                ) : (
-                  <span />
-                )}
-                <button
-                  type="button"
-                  className="rounded-md px-2 py-1 text-[12px] font-medium text-[var(--cf-accent)] hover:bg-[var(--cf-hover)]"
-                  onClick={() => {
-                    const now = new Date();
-                    setMonth(now);
-                    emit(now, now);
-                    if (!withTime) setOpen(false);
-                  }}
-                >
-                  {t(withTime ? "dateField.now" : "dateField.today")}
-                </button>
-              </div>
+              {calendar}
             </div>,
             document.body,
           )

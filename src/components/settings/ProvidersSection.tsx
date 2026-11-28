@@ -1,5 +1,5 @@
 import { isMac } from "../../lib/platform";
-import { ToolInstallFor } from "../common/ToolInstallRow";
+import { ToolInstallationLink } from "../common/ToolInstallationLink";
 import { useEffect, useState, type ReactNode } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -144,12 +144,11 @@ function CommandLine({ command }: { command: string }) {
 function SetupHelp({ provider, missing = false }: { provider: AiProviderOption; missing?: boolean }) {
   const t = useT();
   if (!provider.setup) return null;
-  const { url, command, postCommand } = provider.setup;
+  const { url, postCommand } = provider.setup;
   return (
     <div className="space-y-1.5 rounded-lg border border-[var(--cf-border)] p-3">
       <p className="text-[13px] font-medium text-[var(--cf-text)]">{t("settings.setupTitle")}</p>
-      {/* Not found: this platform's installer with a one-click «Instalar» (`tool_setup.rs`). */}
-      {missing ? <ToolInstallFor id={provider.id} compact /> : command && <CommandLine command={command} />}
+      {missing && <ToolInstallationLink tool={provider.id} />}
       {postCommand && <CommandLine command={postCommand} />}
       <button
         onClick={() => void openExternalUrl(url)}
@@ -158,7 +157,6 @@ function SetupHelp({ provider, missing = false }: { provider: AiProviderOption; 
         <ExternalLink size={12} />
         {t("settings.setupDocs")}
       </button>
-      {command && <p className="text-[11px] text-[var(--cf-text-muted)]">{t("settings.setupRestartHint")}</p>}
     </div>
   );
 }

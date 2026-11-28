@@ -77,6 +77,7 @@ export interface NewProject {
 /** A saved GitHub connection — one per host (github.com or an Enterprise Server). Persisted as
  * the `github_connections` app-setting (JSON); the token itself lives in the OS keychain. */
 export interface GithubConnection {
+  credentialRevision?: string;
   host: string;
   username: string;
 }
@@ -88,6 +89,7 @@ export interface GithubConnection {
  * GitLab project path has no fixed number of segments, so an unlisted host is indistinguishable
  * from any other self-hosted git server. */
 export interface GitlabConnection {
+  credentialRevision?: string;
   host: string;
   username: string;
 }
@@ -102,6 +104,7 @@ export type BitbucketCredential =
 /** A saved Bitbucket connection — one per workspace. Persisted as the `bitbucket_connections`
  * app-setting (JSON); the credential itself lives in the OS keychain, keyed by the workspace. */
 export interface BitbucketConnection {
+  credentialRevision?: string;
   workspace: string;
   kind: BitbucketCredential["kind"];
   /** The API token's account e-mail — shown, not a secret. `null` for an access token. */
@@ -125,6 +128,7 @@ export interface BitbucketCheck {
 /** A saved Azure DevOps connection — one per organization. Persisted as the `ado_connections`
  * app-setting (JSON); the PAT itself lives in the OS keychain, keyed per org. */
 export interface AdoConnection {
+  credentialRevision?: string;
   org: string;
 }
 
@@ -1368,10 +1372,11 @@ export interface Requirement {
   detail: string;
 }
 
-/** `git` or an AI CLI, as the first-launch setup and Settings' «Instalar» see it. See `tool_setup.rs`. */
+/** A system tool listed in Settings → Installations. See `tool_setup.rs`. */
 export interface ToolStatus {
   id: string;
   label: string;
+  group: "system" | "agent" | "model" | "cloud" | "container";
   installed: boolean;
   detail: string;
   /** What «Instalar» runs here; `null` when there is no command for this platform. */

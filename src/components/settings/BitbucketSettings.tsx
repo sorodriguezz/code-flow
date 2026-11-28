@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from "react";
-import { AlertTriangle, Check, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { AlertTriangle, KeyRound, Loader2, ShieldCheck, Trash2 } from "lucide-react";
+import { IntegrationCredentialStatus } from "./IntegrationCredentialStatus";
 import { TokenHowTo } from "./TokenHowTo";
 import { buttonClass } from "../common/Button";
 import { chipClass, fieldClass } from "../common/recipes";
@@ -18,6 +19,7 @@ import {
   saveBitbucketConnections,
 } from "../../lib/bitbucketConnections";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
+import { uuidV4 } from "../../lib/toolbox/ids";
 import { useT } from "../../state/languageStore";
 import type { BitbucketCheck, BitbucketConnection, BitbucketCredential } from "../../types/domain";
 
@@ -89,6 +91,7 @@ export function BitbucketSettings() {
       await setBitbucketCredential(cleanWorkspace, credential);
       const entry: BitbucketConnection = {
         workspace: cleanWorkspace,
+        credentialRevision: uuidV4(),
         kind,
         email: credential.kind === "api_token" ? credential.email : null,
         user: check.user,
@@ -119,6 +122,7 @@ export function BitbucketSettings() {
   };
 
   const handleRemove = async (removed: string) => {
+    setSaving(true);
     try {
       await deleteBitbucketCredential(removed);
       const next = connections.filter((c) => c.workspace !== removed);
@@ -127,6 +131,8 @@ export function BitbucketSettings() {
       useToastStore.getState().pushToast(t("toast.bitbucketRemoved"), "info");
     } catch (e) {
       pushErrorToast(t("toast.bitbucketRemoveFailed", { error: String(e) }));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -174,69 +180,31 @@ export function BitbucketSettings() {
                     </p>
                   )}
                 </div>
-                {state === undefined || state === null ? (
-                  <span className={chipClass("neutral")}>
-                    <Loader2 size={12} className="animate-spin" /> {t("settings.adoChecking")}
-                  </span>
-                ) : failed ? (
-                  <Tooltip label={t("settings.adoRecheck")}>
-                    <button
-                      type="button"
-                      onClick={() => checkWorkspace(conn.workspace)}
-                      aria-description={t("settings.adoRecheck")}
-                      className={chipClass(
-                        "bad",
-                        "h-[22px] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_22%,transparent)]",
-                      )}
-                    >
-                      <AlertTriangle size={12} /> {t("settings.adoNotWorking")}
-                    </button>
-                  </Tooltip>
-                ) : check && check.missing.length > 0 ? (
-                  // Pressable for the same reason the failed chip is: after recreating a token with
-                  // the missing scopes, checking again is the next thing anyone does.
-                  <Tooltip
-                    label={t("settings.bitbucketMissingScopesList", { scopes: check.missing.join(", ") })}
-                    description={
-                      check.unverified.length > 0
-                        ? t("settings.bitbucketUnverifiedScopes", { scopes: check.unverified.join(", ") })
-                        : undefined
-                    }
+                <Tooltip
+                  label={check?.missing.length
+                    ? t("settings.bitbucketMissingScopesList", { scopes: check.missing.join(", ") })
+                    : t("integrations.credential.checkPermissions")}
+                  description={check?.unverified.length
+                    ? t("settings.bitbucketUnverifiedScopes", { scopes: check.unverified.join(", ") })
+                    : undefined}
+                >
+                  <button
+                    type="button"
+                    disabled={state === null}
+                    onClick={() => checkWorkspace(conn.workspace)}
+                    aria-label={t("integrations.credential.checkPermissions")}
+                    className={chipClass(check?.missing.length ? "warn" : "neutral", "h-[22px]")}
                   >
-                    <button
-                      type="button"
-                      onClick={() => checkWorkspace(conn.workspace)}
-                      aria-description={t("settings.adoRecheck")}
-                      className={chipClass("warn", "h-[22px]")}
-                    >
-                      <AlertTriangle size={12} /> {t("settings.bitbucketMissingScopes")}
-                    </button>
-                  </Tooltip>
-                ) : (
-                  // The test, on demand: every chip here re-runs the check, so a token recreated with
-                  // more scopes, or one about to expire, can be asked about without a restart.
-                  <Tooltip
-                    label={t("settings.adoRecheck")}
-                    description={
-                      check && check.unverified.length > 0
-                        ? t("settings.bitbucketUnverifiedScopes", { scopes: check.unverified.join(", ") })
-                        : undefined
-                    }
-                  >
-                    <button
-                      type="button"
-                      onClick={() => checkWorkspace(conn.workspace)}
-                      aria-description={t("settings.adoRecheck")}
-                      className={chipClass("ok", "h-[22px]")}
-                    >
-                      <Check size={12} /> {t("settings.connected")}
-                    </button>
-                  </Tooltip>
-                )}
+                    {state === null ? <Loader2 size={12} className="animate-spin" /> : <ShieldCheck size={12} />}
+                    {!!check?.missing.length && t("settings.bitbucketMissingScopes")}
+                  </button>
+                </Tooltip>
+                <IntegrationCredentialStatus provider="bitbucket" account={conn.workspace} revision={conn.credentialRevision} />
                 <Tooltip label={t("settings.remove")}>
                   <button
                     type="button"
                     aria-label={t("settings.remove")}
+                    disabled={saving}
                     onClick={() => void handleRemove(conn.workspace)}
                     className="inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40"
                   >

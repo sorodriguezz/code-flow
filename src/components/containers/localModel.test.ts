@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   freeClusterName,
   helmTone,
-  installCommandFor,
   localClusterOf,
   localContextOf,
   localTone,
@@ -55,11 +54,6 @@ describe("local clusters", () => {
     expect(localTone("")).toBe("idle");
   });
 
-  it("has an install command for every platform", () => {
-    expect(installCommandFor("kind", "macos")).toBe("brew install kind");
-    expect(installCommandFor("helm", "windows")).toContain("Helm.Helm");
-    expect(installCommandFor("k3d", "unknown")).toContain("install.sh");
-  });
 });
 
 describe("helm", () => {

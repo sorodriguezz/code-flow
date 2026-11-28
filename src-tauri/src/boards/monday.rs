@@ -37,6 +37,7 @@ use super::{
 };
 
 const ENDPOINT: &str = "https://api.monday.com/v2";
+pub(crate) const IDENTITY_QUERY: &str = "query { me { account { name slug } } }";
 
 /// The API version this client is written against.
 ///
@@ -85,18 +86,26 @@ struct GraphQlError {
 /// GraphQL answers a *failed* request with HTTP 200 and an `errors` array, so a status check alone
 /// would read every failure as a success and then fail to deserialise, reporting a parse problem for
 /// what was actually a permissions one. Both are checked, errors first.
+pub(crate) fn request(
+    client: reqwest::Client,
+    query: &str,
+    variables: serde_json::Value,
+    auth: &BoardAuth,
+) -> reqwest::RequestBuilder {
+    client
+        .post(ENDPOINT)
+        .header("Authorization", auth.header())
+        .header("Content-Type", "application/json")
+        .header("API-Version", API_VERSION)
+        .json(&serde_json::json!({ "query": query, "variables": variables }))
+}
+
 pub(super) async fn run<T: for<'de> Deserialize<'de>>(
     query: &str,
     variables: serde_json::Value,
     auth: &BoardAuth,
 ) -> Result<T, String> {
-    let body = serde_json::json!({ "query": query, "variables": variables });
-    let res = client()
-        .post(ENDPOINT)
-        .header("Authorization", auth.header())
-        .header("Content-Type", "application/json")
-        .header("API-Version", API_VERSION)
-        .body(serde_json::to_string(&body).map_err(|e| e.to_string())?)
+    let res = request(client(), query, variables, auth)
         .send()
         .await
         .map_err(|e| format!("no se pudo conectar con monday.com: {e}"))?;
@@ -153,7 +162,7 @@ pub struct MondayAccount {
 
 pub async fn whoami(auth: &BoardAuth) -> Result<MondayAccount, String> {
     let data: MeData = run(
-        "query { me { account { name slug } } }",
+        IDENTITY_QUERY,
         serde_json::json!({}),
         auth,
     )

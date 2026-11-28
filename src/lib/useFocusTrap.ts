@@ -97,7 +97,7 @@ function focusable(container: HTMLElement): HTMLElement[] {
   );
 }
 
-export function useFocusTrap(ref: RefObject<HTMLElement | null>, active = true): void {
+export function useFocusTrap(ref: RefObject<HTMLElement | null>, active = true, autoFocus = true): void {
   useEffect(() => {
     if (!active) return;
     const container = ref.current;
@@ -116,7 +116,7 @@ export function useFocusTrap(ref: RefObject<HTMLElement | null>, active = true):
     // `data-no-initial-focus` takes a control out of the running for this one move (Tab still
     // reaches it): the settings window's search box sits before its close button, and a field that
     // took focus on every opening would wear its focus ring every time.
-    if (!container.contains(document.activeElement)) {
+    if (autoFocus && !container.contains(document.activeElement)) {
       const first = focusable(container).filter((element) => !element.hasAttribute("data-no-initial-focus"));
       // The container itself as a last resort, so a dialog with no controls at all (a spinner, a
       // read-only report) still takes focus off whatever is behind it.
@@ -164,7 +164,7 @@ export function useFocusTrap(ref: RefObject<HTMLElement | null>, active = true):
       // silently does nothing while `isConnected` says so honestly.
       if (previous?.isConnected) previous.focus();
     };
-  }, [ref, active]);
+  }, [ref, active, autoFocus]);
 }
 
 /**

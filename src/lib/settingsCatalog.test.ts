@@ -182,6 +182,22 @@ describe("searchSettings", () => {
     }
   });
 
+  it("opens the matching Installation submenu for tool searches", () => {
+    const es = (key: TranslationKey) => spanish[key] ?? translations.en[key] ?? key;
+    for (const [query, tab] of [
+      ["instalar git", "system"],
+      ["agy", "agent"],
+      ["Ollama", "model"],
+      ["Azure CLI", "cloud"],
+      ["Docker", "container"],
+      ["SonarQube", "analysis"],
+    ]) {
+      const hits = searchSettings(query, es).filter((hit) => hit.section.id === "installations" && hit.section.group === "app");
+      expect(hits.map((hit) => hit.tab?.id), query).toEqual([tab]);
+    }
+    expect(tabsFor("git").some((tab) => tab.id === "install")).toBe(false);
+  });
+
   it("finds what moved by its old name and by what people call it", () => {
     // Pipelines is a pane of Integrations now; the speaker and the reading voice are under Voice & sound.
     expect(searchSettings("pipelines", t).some((hit) => hit.section.id === "azure" && hit.tab?.id === "pipelines")).toBe(true);

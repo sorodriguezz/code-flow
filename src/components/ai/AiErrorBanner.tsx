@@ -1,5 +1,6 @@
 import { Check, Copy, ExternalLink, TerminalSquare } from "lucide-react";
 import { useState } from "react";
+import { ToolInstallationLink } from "../common/ToolInstallationLink";
 import { quotaRetryNote, type ClaudeErrorInfo, type SetupProblem } from "../../lib/claudeError";
 import { AI_PROVIDERS } from "../../lib/aiProviders";
 import { openExternalUrl } from "../../lib/tauri/commands";
@@ -143,16 +144,7 @@ function SetupRemedy({
     return (
       <div className="mt-2">
         <p className={`${subSize} text-[var(--cf-text-muted)]`}>{t("ai.setupBinaryMissing", { binary: name })}</p>
-        {option?.setup?.command && <CommandRow command={option.setup.command} subSize={subSize} />}
-        {option?.setup?.url && (
-          <button
-            onClick={() => void openExternalUrl(option.setup!.url)}
-            className={`mt-1.5 flex items-center gap-1 ${subSize} font-medium text-[var(--cf-accent)] hover:underline`}
-          >
-            <ExternalLink size={11} />
-            {t("ai.setupOpenDocs")}
-          </button>
-        )}
+        {option?.setup && <ToolInstallationLink tool={option.id} />}
       </div>
     );
   }

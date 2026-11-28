@@ -1,12 +1,14 @@
 import { useEffect, useId, useState } from "react";
-import { Check, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { KeyRound, Loader2, Trash2 } from "lucide-react";
+import { IntegrationCredentialStatus } from "./IntegrationCredentialStatus";
 import { TokenHowTo } from "./TokenHowTo";
 import { buttonClass } from "../common/Button";
-import { chipClass, fieldClass } from "../common/recipes";
+import { fieldClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
 import { deleteLinearToken, linearWhoami, setLinearToken } from "../../lib/tauri/commands";
 import { loadLinearConnections, saveLinearConnections, type LinearConnection } from "../../lib/linearConnections";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
+import { uuidV4 } from "../../lib/toolbox/ids";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -39,7 +41,10 @@ export function LinearSettings() {
       // filed under, so there is nothing to save until this succeeds.
       const account = await linearWhoami(token.trim());
       await setLinearToken(account.key, token.trim());
-      const next = [...connections.filter((c) => c.key !== account.key), { key: account.key, name: account.name }];
+      const next = [
+        ...connections.filter((c) => c.key !== account.key),
+        { key: account.key, name: account.name, credentialRevision: uuidV4() },
+      ];
       await saveLinearConnections(next);
       setConnections(next);
       setToken("");
@@ -52,6 +57,7 @@ export function LinearSettings() {
   };
 
   const handleRemove = async (key: string) => {
+    setSaving(true);
     try {
       await deleteLinearToken(key);
       const next = connections.filter((c) => c.key !== key);
@@ -60,6 +66,8 @@ export function LinearSettings() {
       useToastStore.getState().pushToast(t("toast.linearRemoved"), "info");
     } catch (e) {
       pushErrorToast(t("toast.linearRemoveFailed", { error: String(e) }));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -83,13 +91,12 @@ export function LinearSettings() {
                 <p className="truncate text-[13px] font-medium">{conn.name || conn.key}</p>
                 <p className="truncate text-[12px] text-[var(--cf-text-muted)]">linear.app/{conn.key}</p>
               </div>
-              <span className={chipClass("ok")}>
-                <Check size={12} /> {t("settings.connected")}
-              </span>
+              <IntegrationCredentialStatus provider="linear" account={conn.key} revision={conn.credentialRevision} />
               <Tooltip label={t("settings.remove")}>
                 <button
                   type="button"
                   aria-label={t("settings.remove")}
+                  disabled={saving}
                   onClick={() => handleRemove(conn.key)}
                   className="inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40"
                 >

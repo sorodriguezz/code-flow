@@ -57,6 +57,7 @@ export function ApiModal({
   dismissOnEscape = true,
   raised = false,
   overDrawers = false,
+  autoFocus = true,
   maxHeight = DEFAULT_MAX_HEIGHT_CLASS,
   tourAnchor,
   onClose,
@@ -80,6 +81,8 @@ export function ApiModal({
    * above it instead of behind it. See the layer ladder above. */
   raised?: boolean;
   overDrawers?: boolean;
+  /** Move keyboard focus into the dialog when it opens. Tab still enters it when false. */
+  autoFocus?: boolean;
   maxHeight?: string;
   /** `data-tour` for the panel, for the dialogs a guided tour spotlights. On the panel rather than
    * the backdrop: the backdrop is the whole window, and a spotlight cut to it is no spotlight. */
@@ -112,7 +115,7 @@ export function ApiModal({
 
   const layerClass = overDrawers ? OVER_DRAWERS_LAYER_CLASS : raised ? RAISED_LAYER_CLASS : DEFAULT_LAYER_CLASS;
 
-  useFocusTrap(panelRef);
+  useFocusTrap(panelRef, true, autoFocus);
 
   return createPortal(
     <div
@@ -144,7 +147,7 @@ export function ApiModal({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        tabIndex={-1}
+        tabIndex={autoFocus ? -1 : undefined}
         className={`cf-fade-in flex ${maxHeight} w-full min-w-0 flex-col overflow-hidden rounded-[14px] border border-[var(--cf-border)] bg-[var(--cf-surface)] shadow-[var(--cf-shadow-modal)] ${width} ${height ?? ""}`}
       >
         <div className="flex min-h-[52px] shrink-0 items-center gap-2.5 border-b border-[var(--cf-border)] py-2 pl-4 pr-3">

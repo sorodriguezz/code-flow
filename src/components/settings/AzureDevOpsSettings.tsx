@@ -1,12 +1,15 @@
 import { useEffect, useId, useState } from "react";
-import { AlertTriangle, Check, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { AlertTriangle, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { IntegrationCredentialStatus } from "./IntegrationCredentialStatus";
 import { TokenHowTo } from "./TokenHowTo";
 import { buttonClass } from "../common/Button";
-import { chipClass, fieldClass } from "../common/recipes";
+import { fieldClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
-import { adoCheckOrg, adoVerifyPat, deleteAdoPat, setAdoPat } from "../../lib/tauri/commands";
-import { loadAdoConnections, normalizeAdoOrg, saveAdoConnections } from "../../lib/adoConnections";
+import { adoVerifyPat, deleteAdoPat, setAdoPat } from "../../lib/tauri/commands";
+import { loadAdoConnectionsFromSettings, normalizeAdoOrg, saveAdoConnections } from "../../lib/adoConnections";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
+import { integrationCredentialKey, useIntegrationCredentialStore } from "../../state/integrationCredentialStore";
+import { uuidV4 } from "../../lib/toolbox/ids";
 import { useT } from "../../state/languageStore";
 import type { AdoConnection } from "../../types/domain";
 
@@ -33,32 +36,12 @@ export function AzureDevOpsSettings() {
    * already faded is no help while you're doing it. */
   const [error, setError] = useState<string | null>(null);
 
-  /**
-   * Live state of each saved connection, keyed by org: the account it reached, or why it didn't.
-   *
-   * A saved row used to be labelled "Connected" purely because it existed in the list, which is a
-   * claim the app was in no position to make — the token behind it may have been wrong from the
-   * start (saved before this screen verified anything) or have expired since. Checked on open,
-   * so the badge reports the connection rather than the record of one.
-   */
-  const [health, setHealth] = useState<Record<string, { account: string } | { error: string } | null>>({});
-
-  const checkOrg = (checkedOrg: string) => {
-    setHealth((prev) => ({ ...prev, [checkedOrg]: null }));
-    adoCheckOrg(checkedOrg)
-      .then((account) => setHealth((prev) => ({ ...prev, [checkedOrg]: { account } })))
-      .catch((e: unknown) => setHealth((prev) => ({ ...prev, [checkedOrg]: { error: String(e) } })));
-  };
-
+  const credentialHealth = useIntegrationCredentialStore((s) => s.entries);
   useEffect(() => {
-    (async () => {
-      const saved = await loadAdoConnections();
+    void loadAdoConnectionsFromSettings().then((saved) => {
       setConnections(saved);
       setLoaded(true);
-      // Concurrently and without awaiting: the form is usable while these land, and one org being
-      // slow or unreachable must not hold up the others.
-      for (const conn of saved) checkOrg(conn.org);
-    })();
+    });
   }, []);
 
   /**
@@ -79,12 +62,12 @@ export function AzureDevOpsSettings() {
     try {
       const account = await adoVerifyPat(cleanOrg, pat.trim());
       await setAdoPat(cleanOrg, pat.trim());
-      const next = [...connections.filter((c) => c.org.toLowerCase() !== cleanOrg.toLowerCase()), { org: cleanOrg }];
+      const next = [
+        ...connections.filter((c) => normalizeAdoOrg(c.org).toLowerCase() !== cleanOrg.toLowerCase()),
+        { org: cleanOrg, credentialRevision: uuidV4() },
+      ];
       await saveAdoConnections(next);
       setConnections(next);
-      // Seeded from the verification that just ran rather than re-checked: same answer, one
-      // fewer round trip, and the new row is never briefly labelled as still checking.
-      setHealth((prev) => ({ ...prev, [cleanOrg]: { account } }));
       setOrg("");
       setPat("");
       // Naming the account is the receipt: it's a fact only the server could have supplied.
@@ -97,6 +80,7 @@ export function AzureDevOpsSettings() {
   };
 
   const handleRemove = async (removeOrg: string) => {
+    setSaving(true);
     try {
       await deleteAdoPat(removeOrg);
       const next = connections.filter((c) => c.org.toLowerCase() !== removeOrg.toLowerCase());
@@ -105,6 +89,8 @@ export function AzureDevOpsSettings() {
       useToastStore.getState().pushToast(t("toast.adoRemoved"), "info");
     } catch (e) {
       pushErrorToast(t("toast.adoRemoveFailed", { error: String(e) }));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -117,71 +103,24 @@ export function AzureDevOpsSettings() {
       {connections.length > 0 && (
         <div className="mb-3 space-y-2">
           {connections.map((conn) => {
-            const state = health[conn.org];
-            const failed = state && "error" in state;
+            const credential = { provider: "azure" as const, account: conn.org, revision: conn.credentialRevision };
+            const health = credentialHealth[integrationCredentialKey(credential)];
+            const accountName = health?.revision === (credential.revision ?? "") ? health.accountName : undefined;
             return (
-              <div
-                key={conn.org}
-                className={`flex items-center gap-3 rounded-lg border p-3 ${
-                  failed ? "border-[var(--cf-danger)]/40" : "border-[var(--cf-border)]"
-                }`}
-              >
-                <span
-                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${
-                    failed
-                      ? "bg-[color-mix(in_oklab,var(--cf-danger)_16%,transparent)] text-[var(--cf-danger)]"
-                      : "bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]"
-                  }`}
-                >
+              <div key={conn.org} className="flex items-center gap-3 rounded-lg border border-[var(--cf-border)] p-3">
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[var(--cf-accent-soft)] text-[var(--cf-accent)]">
                   <KeyRound size={15} />
                 </span>
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-[13px] font-medium">{conn.org}</p>
-                  {/* The second line carries the evidence: who Azure says the token is, or what it
-                      said instead. The row of dots it replaces only ever restated that a token was
-                      stored — which was never the thing in doubt. */}
-                  {state && "account" in state ? (
-                    <p className="truncate text-[12px] text-[var(--cf-text-muted)]">{state.account}</p>
-                  ) : failed ? (
-                    <p
-                      title={state.error}
-                      className="line-clamp-3 select-text break-words text-[12px] leading-snug text-[var(--cf-danger)]"
-                    >
-                      {adoErrorText(state.error, t)}
-                    </p>
-                  ) : (
-                    <p className="font-mono text-[12px] tracking-widest text-[var(--cf-text-muted)]">••••••••••••</p>
-                  )}
+                  {accountName && <p className="truncate text-[12px] text-[var(--cf-text-muted)]">{accountName}</p>}
                 </div>
-                {state === undefined || state === null ? (
-                  <span className={chipClass("neutral")}>
-                    <Loader2 size={12} className="animate-spin" /> {t("settings.adoChecking")}
-                  </span>
-                ) : failed ? (
-                  // Still the chip that says what is wrong, but pressable — at 22px, a target
-                  // rather than a label — and the tooltip names what pressing it does.
-                  <Tooltip label={t("settings.adoRecheck")}>
-                    <button
-                      type="button"
-                      onClick={() => checkOrg(conn.org)}
-                      aria-description={t("settings.adoRecheck")}
-                      className={chipClass(
-                        "bad",
-                        "h-[22px] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_22%,transparent)]",
-                      )}
-                    >
-                      <AlertTriangle size={12} /> {t("settings.adoNotWorking")}
-                    </button>
-                  </Tooltip>
-                ) : (
-                  <span className={chipClass("ok")}>
-                    <Check size={12} /> {t("settings.connected")}
-                  </span>
-                )}
+                <IntegrationCredentialStatus {...credential} />
                 <Tooltip label={t("settings.remove")}>
                   <button
                     type="button"
                     aria-label={t("settings.remove")}
+                    disabled={saving}
                     onClick={() => handleRemove(conn.org)}
                     className="inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40"
                   >

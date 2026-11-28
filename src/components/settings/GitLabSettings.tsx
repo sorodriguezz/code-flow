@@ -1,8 +1,9 @@
 import { useEffect, useId, useState } from "react";
-import { Check, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { KeyRound, Loader2, Trash2 } from "lucide-react";
+import { IntegrationCredentialStatus } from "./IntegrationCredentialStatus";
 import { TokenHowTo } from "./TokenHowTo";
 import { buttonClass } from "../common/Button";
-import { chipClass, fieldClass } from "../common/recipes";
+import { fieldClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
 import { deleteGitlabToken, gitlabAuthenticatedUser, setGitlabToken } from "../../lib/tauri/commands";
 import {
@@ -13,6 +14,7 @@ import {
   saveGitlabConnections,
 } from "../../lib/gitlabConnections";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
+import { uuidV4 } from "../../lib/toolbox/ids";
 import { useT } from "../../state/languageStore";
 import type { GitlabConnection } from "../../types/domain";
 
@@ -53,13 +55,11 @@ export function GitLabSettings() {
     if (!cleanHost || !token.trim()) return;
     setSaving(true);
     try {
+      const username = await gitlabAuthenticatedUser(cleanHost, token.trim());
       await setGitlabToken(cleanHost, token.trim());
-      // Validates against this host and surfaces a bad token — or a hostname that isn't a GitLab
-      // instance at all — immediately, rather than saving something that only fails later.
-      const username = await gitlabAuthenticatedUser(cleanHost);
       const next = [
         ...connections.filter((c) => c.host.toLowerCase() !== cleanHost),
-        { host: cleanHost, username },
+        { host: cleanHost, username, credentialRevision: uuidV4() },
       ];
       // The list is written *after* the token, and both together: auto-detection reads only this
       // list, so a token saved without it would leave GitLab remotes invisible to the linker.
@@ -69,9 +69,6 @@ export function GitLabSettings() {
       setToken("");
       useToastStore.getState().pushToast(t("toast.gitlabConnected", { user: username }), "success");
     } catch (e) {
-      // Roll back the token we just wrote so a failed validation doesn't leave a broken
-      // connection behind.
-      await deleteGitlabToken(cleanHost).catch(() => {});
       pushErrorToast(t("toast.gitlabSaveFailed", { error: String(e) }));
     } finally {
       setSaving(false);
@@ -79,6 +76,7 @@ export function GitLabSettings() {
   };
 
   const handleRemove = async (removeHost: string) => {
+    setSaving(true);
     try {
       await deleteGitlabToken(removeHost);
       const next = connections.filter((c) => c.host.toLowerCase() !== removeHost.toLowerCase());
@@ -87,6 +85,8 @@ export function GitLabSettings() {
       useToastStore.getState().pushToast(t("toast.gitlabRemoved"), "info");
     } catch (e) {
       pushErrorToast(t("toast.gitlabRemoveFailed", { error: String(e) }));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -109,13 +109,12 @@ export function GitLabSettings() {
                   {conn.username ? `@${conn.username}` : "••••••••••••"}
                 </p>
               </div>
-              <span className={chipClass("ok")}>
-                <Check size={12} /> {t("settings.connected")}
-              </span>
+              <IntegrationCredentialStatus provider="gitlab" account={conn.host} revision={conn.credentialRevision} />
               <Tooltip label={t("settings.remove")}>
                 <button
                   type="button"
                   aria-label={t("settings.remove")}
+                  disabled={saving}
                   onClick={() => handleRemove(conn.host)}
                   className="inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40"
                 >

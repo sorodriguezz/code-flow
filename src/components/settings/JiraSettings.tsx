@@ -1,8 +1,9 @@
 import { useEffect, useId, useState } from "react";
-import { Check, KeyRound, Loader2, Trash2 } from "lucide-react";
+import { KeyRound, Loader2, Trash2 } from "lucide-react";
+import { IntegrationCredentialStatus } from "./IntegrationCredentialStatus";
 import { TokenHowTo } from "./TokenHowTo";
 import { buttonClass } from "../common/Button";
-import { chipClass, fieldClass } from "../common/recipes";
+import { fieldClass } from "../common/recipes";
 import { Tooltip } from "../common/Tooltip";
 import { deleteJiraToken, setJiraToken } from "../../lib/tauri/commands";
 import {
@@ -12,6 +13,7 @@ import {
   type JiraConnection,
 } from "../../lib/jiraConnections";
 import { pushErrorToast, useToastStore } from "../../state/toastStore";
+import { uuidV4 } from "../../lib/toolbox/ids";
 import { useT } from "../../state/languageStore";
 
 /**
@@ -55,7 +57,7 @@ export function JiraSettings() {
       await setJiraToken(cleanSite, token.trim());
       const next = [
         ...connections.filter((c) => normalizeJiraSite(c.site) !== cleanSite),
-        { site: cleanSite, email: email.trim() },
+        { site: cleanSite, email: email.trim(), credentialRevision: uuidV4() },
       ];
       await saveJiraConnections(next);
       setConnections(next);
@@ -72,6 +74,7 @@ export function JiraSettings() {
 
   const handleRemove = async (removeSite: string) => {
     const clean = normalizeJiraSite(removeSite);
+    setSaving(true);
     try {
       await deleteJiraToken(clean);
       const next = connections.filter((c) => normalizeJiraSite(c.site) !== clean);
@@ -80,6 +83,8 @@ export function JiraSettings() {
       useToastStore.getState().pushToast(t("toast.jiraRemoved"), "info");
     } catch (e) {
       pushErrorToast(t("toast.jiraRemoveFailed", { error: String(e) }));
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -105,13 +110,12 @@ export function JiraSettings() {
                     accounts see different projects, and that is the difference worth showing. */}
                 <p className="truncate text-[12px] text-[var(--cf-text-muted)]">{conn.email}</p>
               </div>
-              <span className={chipClass("ok")}>
-                <Check size={12} /> {t("settings.connected")}
-              </span>
+              <IntegrationCredentialStatus provider="jira" account={normalizeJiraSite(conn.site)} revision={conn.credentialRevision} />
               <Tooltip label={t("settings.remove")}>
                 <button
                   type="button"
                   aria-label={t("settings.remove")}
+                  disabled={saving}
                   onClick={() => handleRemove(conn.site)}
                   className="inline-flex h-[22px] w-[22px] shrink-0 items-center justify-center rounded-md text-[var(--cf-text-muted)] transition-colors duration-100 hover:bg-[color-mix(in_oklab,var(--cf-danger)_10%,transparent)] hover:text-[var(--cf-danger)] disabled:pointer-events-none disabled:opacity-40"
                 >

@@ -139,7 +139,7 @@ export const resetAppData = () => invoke<void>("reset_app_data");
  *  once per installation — see `requirementsStore` for the flag that keeps it that way. */
 export const checkRequirements = () => invoke<Requirement[]>("check_requirements");
 
-/** `git` and every AI CLI, installed or not (may run a login shell, so it takes a moment). */
+/** External tools and install routes. The check may read a login shell. */
 export const toolSetupStatus = () => invoke<ToolStatus[]>("tool_setup_status");
 /** Installs one with the command from `tool_setup.rs`; output streams as `tool-setup:progress`. */
 export const toolSetupInstall = (id: string) => invoke<ToolInstallResult>("tool_setup_install", { id });
@@ -1619,10 +1619,9 @@ export const setGitlabToken = (host: string, token: string) =>
 
 export const deleteGitlabToken = (host: string) => invoke<void>("delete_gitlab_token", { host });
 
-/** Validates the saved token and returns the username it belongs to, so a wrong or expired one is
- * reported the moment it is pasted rather than the next time a merge request list is opened. */
-export const gitlabAuthenticatedUser = (host: string) =>
-  invoke<string>("gitlab_authenticated_user", { host });
+/** Validates a candidate or saved GitLab token and returns its username. */
+export const gitlabAuthenticatedUser = (host: string, candidate?: string) =>
+  invoke<string>("gitlab_authenticated_user", { host, candidate });
 
 /** Checks a Bitbucket credential against a workspace **before** it is saved: who it acts as, and
  * which scopes it is missing. Rejects when it doesn't authenticate at all — nothing is stored. */
@@ -1645,9 +1644,9 @@ export const setBitbucketCredential = (
 export const deleteBitbucketCredential = (workspace: string) =>
   invoke<void>("delete_bitbucket_credential", { workspace });
 
-/** Validates the token saved for `host`, returning the login it authenticates as. */
-export const githubAuthenticatedUser = (host: string) =>
-  invoke<string>("github_authenticated_user", { host });
+/** Validates a candidate or saved GitHub token and returns its login. */
+export const githubAuthenticatedUser = (host: string, candidate?: string) =>
+  invoke<string>("github_authenticated_user", { host, candidate });
 
 // ---------- claude ----------
 

@@ -2306,6 +2306,7 @@ fn install_dirs() -> Vec<std::path::PathBuf> {
         dirs.push(home.join(".local/bin"));
         dirs.push(home.join(".claude/local"));
         dirs.push(home.join(".opencode/bin"));
+        dirs.push(home.join(".grok/bin"));
         dirs.push(home.join(".bun/bin"));
         dirs.push(home.join("Library/pnpm"));
         dirs.push(home.join(".npm-global/bin"));
@@ -2335,6 +2336,7 @@ fn install_dirs() -> Vec<std::path::PathBuf> {
         dirs.push(home.join(".local").join("bin")); // native installer (Claude)
         dirs.push(home.join(".claude").join("local"));
         dirs.push(home.join(".opencode").join("bin")); // opencode install script
+        dirs.push(home.join(".grok").join("bin")); // Grok install script
     }
     // Windows carries more of the weight than its Unix counterpart, and it is worth saying why.
     //
@@ -2374,7 +2376,7 @@ fn install_dirs() -> Vec<std::path::PathBuf> {
 
 /// The install dirs followed by the process's current `PATH` — the ordered search space for both
 /// setting the child's `PATH` and resolving the program name.
-fn search_dirs() -> Vec<std::path::PathBuf> {
+pub(crate) fn search_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = install_dirs();
     if let Some(current) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&current));

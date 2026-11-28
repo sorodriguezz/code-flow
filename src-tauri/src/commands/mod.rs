@@ -1,6 +1,7 @@
 pub mod activity_cmd;
 pub mod tickets_cmd;
 pub mod ado_cmd;
+pub mod integration_credentials_cmd;
 pub mod ai_accounts_cmd;
 pub mod ci_cmd;
 pub mod agents_cmd;

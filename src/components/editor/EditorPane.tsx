@@ -25,6 +25,7 @@ import {
   HardDrive,
   Loader2,
   Lock,
+  Network,
   Play,
   Save,
   SplitSquareHorizontal,
@@ -123,12 +124,14 @@ import { hierarchyRoot, type HierarchyMode } from "../../lib/hierarchy";
 import { useEditorPanelStore } from "../../state/editorPanelStore";
 import { isNotebookPath, notebookKey } from "../../lib/notebook/host";
 import { notebookActions, useNotebookStore } from "../../state/notebookStore";
+import { structuredDataFormat, type StructuredDataFormat } from "../../lib/structuredDataFormat";
 
 /**
  * The notebook view for `.ipynb` files — its own chunk, fetched the first time a notebook is opened,
  * the way the DBML parser below is: the cells, outputs and kernel UI are nothing most sessions use.
  */
 const NotebookView = lazy(() => import("./notebook/NotebookView"));
+const StructuredDataPreview = lazy(() => import("./StructuredDataPreview"));
 
 /**
  * The DBML parser, once any pane has pulled it in.
@@ -255,7 +258,7 @@ async function loadFullFileDiff(
   return file;
 }
 
-export type PreviewKind = "markdown" | "dbml" | "svg" | "html" | null;
+export type PreviewKind = "markdown" | "dbml" | "svg" | "html" | StructuredDataFormat | null;
 /** `preview`/`split` are the rendered-output modes, and only mean anything for a file with a
  * `PreviewKind`. `diff` is orthogonal to both: any file with uncommitted changes can be shown as
  * before-vs-after, so it's offered on its own toggle rather than as a fourth button in that group. */
@@ -373,7 +376,7 @@ export function previewKindFor(path: string | null): PreviewKind {
   // A page: the preview is the page as a browser draws it, served from the repository so its
   // stylesheets, scripts and images load (`preview_server.rs`).
   if (isPagePath(lower)) return "html";
-  return null;
+  return structuredDataFormat(path);
 }
 
 /** A file's version on disk as a string that changes when its bytes do — what a served preview is
@@ -1031,6 +1034,8 @@ export function EditorPane({
   const notice = activeTab?.notice ?? null;
   // A file with nothing readable in it has nothing to preview either.
   const previewKind = notice ? null : previewKindFor(activePath);
+  const dataFormat = previewKind === "csv" || previewKind === "json" || previewKind === "xml" || previewKind === "yaml"
+    ? previewKind : null;
   /** The parser, held in state so its arrival re-renders. `useState`'s initialiser form is what
    * stores a *function* rather than calling it — same for `setParseDbml` below. */
   const [parseDbml, setParseDbml] = useState<((source: string) => DbmlSchema) | null>(() => dbmlParser);
@@ -1097,10 +1102,12 @@ export function EditorPane({
   // A disk comparison is exempt for the same reason: it is the buffer against the file as it is on
   // disk now, which has nothing to do with whether git sees a change.
   const diskText = activeTab?.diskText ?? null;
-  const viewMode: ViewMode =
-    activeTab?.viewMode === "diff" && !activeDiff && !compare && diskText === null
-      ? "code"
-      : (activeTab?.viewMode ?? "code");
+  const savedView = activeTab?.viewMode ?? "code";
+  const viewMode: ViewMode = (
+    (savedView === "diff" && !activeDiff && !compare && diskText === null)
+    || ((savedView === "preview" || savedView === "split") && !previewKind)
+  ) ? "code" : savedView;
+  const dataContent = useDebouncedText(dataFormat && (viewMode === "preview" || viewMode === "split") ? content : "", 240, activePath);
 
   /** A `.ipynb` the notebook view can edit: a readable, writable file of the project. Anything else
    *  with that extension — read-only text, a notice — stays what the editor would show for it. */
@@ -3086,6 +3093,24 @@ export function EditorPane({
       />
     ) : null;
 
+  const renderPreview = () => {
+    if (!activeTab) return null;
+    const scrollRef = viewMode === "split" ? previewScrollRef : undefined;
+    if (dataFormat) {
+      return (
+        <Suspense fallback={<div className="flex h-full items-center justify-center"><BouncingDots /></div>}>
+          <StructuredDataPreview key={activeTab.path} format={dataFormat} content={dataContent}
+            originalContent={activeTab.originalContent} path={activeTab.path} fileKey={activeModelPath}
+          />
+        </Suspense>
+      );
+    }
+    if (previewKind === "markdown") return <MarkdownPreview content={content} ref={scrollRef} />;
+    if (previewKind === "html") return <RepoFilePreview repoPath={project.local_path} path={activeTab.path} reloadKey={diskKey(activeTab.version)} />;
+    if (previewKind === "svg") return <SvgPreview source={content} name={activeTab.path} />;
+    return <DbmlDiagram schema={dbmlSchema} loading={dbmlLoading} ref={scrollRef} />;
+  };
+
   return (
     <div
       // Capture-phase, so clicking anywhere in the group — a tab, the breadcrumb, the code —
@@ -3149,8 +3174,8 @@ export function EditorPane({
                     onChange={(mode) => onViewMode(activeTab.path, mode)}
                     options={[
                       { value: "code", icon: Code2, title: t("editor.viewCode") },
-                      { value: "split", icon: Columns2, title: t("editor.viewSplit") },
-                      { value: "preview", icon: Eye, title: t("editor.viewPreview") },
+                      { value: "split", icon: Columns2, title: t(dataFormat ? "editor.viewDataSplit" : "editor.viewSplit") },
+                      { value: "preview", icon: dataFormat ? Network : Eye, title: t(dataFormat ? "editor.viewDataGraph" : "editor.viewPreview") },
                     ]}
                     className="mr-1"
                   />
@@ -3364,31 +3389,11 @@ export function EditorPane({
                 />
               </Suspense>
             ) : viewMode === "preview" ? (
-              previewKind === "markdown" ? (
-                <MarkdownPreview content={content} />
-              ) : previewKind === "html" ? (
-                <RepoFilePreview repoPath={project.local_path} path={activeTab.path} reloadKey={diskKey(activeTab.version)} />
-              ) : previewKind === "svg" ? (
-                <SvgPreview source={content} name={activeTab.path} />
-              ) : (
-                <DbmlDiagram schema={dbmlSchema} loading={dbmlLoading} />
-              )
+              renderPreview()
             ) : viewMode === "split" ? (
               <div className="flex h-full">
                 <div className="min-w-0 flex-1 border-r border-[var(--cf-border)]">{editorPane}</div>
-                <div className="min-w-0 flex-1">
-                  {/* No scroll sync for an image: its height has nothing to do with the source's. */}
-                  {previewKind === "markdown" ? (
-                    <MarkdownPreview content={content} ref={previewScrollRef} />
-                  ) : previewKind === "html" ? (
-                    // The page as saved: it is served from disk, so it follows ⌘S, not each keystroke.
-                    <RepoFilePreview repoPath={project.local_path} path={activeTab.path} reloadKey={diskKey(activeTab.version)} />
-                  ) : previewKind === "svg" ? (
-                    <SvgPreview source={content} name={activeTab.path} />
-                  ) : (
-                    <DbmlDiagram schema={dbmlSchema} loading={dbmlLoading} ref={previewScrollRef} />
-                  )}
-                </div>
+                <div className="min-w-0 flex-1">{renderPreview()}</div>
               </div>
             ) : (
               editorPane
